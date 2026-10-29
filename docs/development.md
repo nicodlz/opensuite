@@ -51,6 +51,9 @@ healthy and applies idempotent settings through the Stalwart management API:
 - logs go to standard output (`docker compose logs stalwart`);
 - the client address is taken from `X-Forwarded-For`, which Caddy sets
   (exactly one proxy hop). Caddy replaces any value a client sends.
+- blobs remain local by default. For S3-compatible storage, follow
+  [object storage operations](operations/object-storage.md), including the
+  explicit switch guard, restart, probe and migration precautions.
 
 Published mail ports: 25 (SMTP), 465 (submission, implicit TLS), 993 (IMAP,
 implicit TLS) and 4190 (ManageSieve). STARTTLS ports 587 and 143 are not
@@ -123,6 +126,18 @@ OpenTofu module in Docker without AWS credentials or a backend. Only provider
 download uses networking. See [AWS deployment](deployment/aws.md) for operator
 setup and the limits of offline validation. The ingestion worker and SES relay
 remain unimplemented.
+
+For the pinned Stalwart and disposable MinIO S3 integration test:
+
+```sh
+pnpm exec vitest run --project stalwart
+```
+
+This uses a separate Compose project, a pinned MinIO server, LocalStack's local
+CLI, and a random loopback port. It exercises a
+message with an attachment, a storage outage and a stopped-store restore,
+then removes its containers and volumes. The local substitute does not verify
+real object-storage providers. Docker is required.
 
 ## Known limitations
 

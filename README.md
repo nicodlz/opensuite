@@ -19,6 +19,10 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   status page. Mail, calendar, contacts, drive, search, accounts and compose
   are placeholders. See [apps/web/README.md](apps/web/README.md).
 - **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
+- **Mail blob storage:** local by default, with an optional S3-compatible
+  backend for new or migrated installations. The
+  [object storage guide](docs/operations/object-storage.md) covers restart,
+  migration, backup and recovery requirements.
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.

@@ -23,7 +23,12 @@ export default defineConfig({
       ...suites.map((suite) => ({
         test: {
           name: suite,
-          include: roots.map((root) => `${root}/**/*.${suite}.test.ts`),
+          include: [
+            ...roots.map((root) => `${root}/**/*.${suite}.test.ts`),
+            ...(suite === "stalwart"
+              ? ["test-support/**/*.stalwart.test.ts"]
+              : []),
+          ],
         },
       })),
     ],
