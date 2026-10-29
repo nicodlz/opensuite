@@ -116,6 +116,14 @@ existing names; serialize provisioning for the same domain, account or alias
 and reconcile ambiguous failures before retrying. Reusing an account does not
 change or verify its password. See [JMAP behaviour](architecture/jmap-behaviour.md).
 
+## AWS infrastructure validation
+
+Run `node scripts/iac-validate.mjs` to check formatting and validate the pinned
+OpenTofu module in Docker without AWS credentials or a backend. Only provider
+download uses networking. See [AWS deployment](deployment/aws.md) for operator
+setup and the limits of offline validation. The ingestion worker and SES relay
+remain unimplemented.
+
 ## Known limitations
 
 - **TLS for mail protocols:** the mail server has no certificate yet, so TLS

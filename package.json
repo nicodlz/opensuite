@@ -16,7 +16,8 @@
     "knip": "knip",
     "test": "vitest run --project unit",
     "build": "pnpm --filter @opensuite/web build",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "iac:validate": "node scripts/iac-validate.mjs"
   },
   "devDependencies": {
     "@opensuite/core": "workspace:*",
