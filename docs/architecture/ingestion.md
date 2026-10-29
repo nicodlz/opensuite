@@ -1,12 +1,12 @@
-# Candidate SES inbound ingestion
+# Planned SES inbound ingestion
 
-Date: 2026-10-29. **Status: design only.** No SES, S3, SNS, SQS or Stalwart integration has been exercised for this document. Local substitutes and fixtures must not be presented as provider proof. The go/no-go proof and direct-SMTP fallback are described in [ADR 0001](../adr/0001-architecture.md).
+Date: 2026-10-29. **Status: design only.** The SES-to-Stalwart integration has not been exercised. Local substitutes and fixtures must not be presented as provider proof. The target and preservation gate are described in [ADR 0002](../adr/0002-production-target.md); the go/no-go proof and direct-SMTP fallback are in [ADR 0001](../adr/0001-architecture.md).
 
 ## Notification contract
 
 The proposed route is an SES receipt rule with an S3 action, its optional SNS notification, and an SQS subscription to that SNS topic. This is an SES **action notification**, not an S3 `ObjectCreated` event. The authoritative format is [AWS: Contents of notifications for Amazon SES email receiving](https://docs.aws.amazon.com/ses/latest/dg/receiving-email-notifications-contents.html) and [AWS notification examples](https://docs.aws.amazon.com/ses/latest/dg/receiving-email-notifications-examples.html), accessed 2026-10-29. AWS describes `receipt.recipients` as “the envelope RCPT TO addresses” matched by the active rule. Use this field, not `To`, `Cc` or `mail.destination`, for routing; it can include Bcc and can differ from header recipients. A rule only reports its matched recipients, so rules and aliases must be designed and tested for complete intended coverage.
 
-The following is an illustrative subset with the documented field names and types; optional fields and headers are omitted. It is not a captured AWS event. AWS's example encodes `processingTimeMillis` as a number while its field description calls it a string; accept and validate the documented possibilities until real events settle the contract.
+The following is an illustrative subset of the AWS-documented JSON format with documented field names and types; resource identifiers are redacted and optional fields and headers are omitted. It is not a captured AWS event. AWS's example encodes `processingTimeMillis` as a number while its field description calls it a string; accept and validate the documented possibilities until real events settle the contract.
 
 ```json
 {
@@ -22,15 +22,15 @@ The following is an illustrative subset with the documented field names and type
     "dmarcVerdict": { "status": "PASS" },
     "action": {
       "type": "S3",
-      "topicArn": "arn:aws:sns:us-east-1:111122223333:inbound",
-      "bucketName": "example-inbound",
-      "objectKey": "example-ses-message-id"
+      "topicArn": "<redacted>",
+      "bucketName": "<redacted>",
+      "objectKey": "<redacted>"
     }
   },
   "mail": {
     "timestamp": "2026-10-29T12:00:00.000Z",
     "source": "sender@example.net",
-    "messageId": "example-ses-message-id",
+    "messageId": "<redacted>",
     "destination": ["alice@example.org"],
     "headersTruncated": false,
     "headers": [],
@@ -53,7 +53,9 @@ The [SES S3 action documentation](https://docs.aws.amazon.com/ses/latest/dg/rece
 
 ## Required processing and recovery design
 
-The intended state progression is `observed → metadata durable → object verified → recipients resolved → quarantined or import pending → imported → reconciled`. States are per delivery and, where needed, per destination account. Persist the SES message identity, bucket/key, rule-matched envelope recipients, verdicts, destination mapping, byte integrity information, attempts and outcomes before acknowledging the queue message. Store the original S3 object until every destination is confirmed and retention/backup policy permits deletion. Restrict object access and encrypt data and backups.
+Independently archive the notification and its envelope recipients outside the VPS through the separate managed consumer in [ADR 0002](../adr/0002-production-target.md). Retain the raw MIME independently as well; the S3 object must not be deleted merely because the SQS delivery was acknowledged. That archive and its recovery from notification delivery failures are unverified gates. SQS retention is at most 14 days ([AWS queue parameters](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-configure-queue-parameters.html), accessed 2026-10-29).
+
+The intended state progression is `observed → metadata durable → object verified → recipients resolved → quarantined or import pending → imported → reconciled`. States are per delivery and, where needed, per destination account. Persist the SES message identity, bucket/key, rule-matched envelope recipients, verdicts, destination mapping, byte integrity information, attempts and outcomes before acknowledging the queue message. Store the original S3 object until every destination is confirmed and independent archival and retention/backup policy permit deletion. Restrict object access and encrypt data and backups.
 
 - Validate the event, source and object locator; retain the notification and alert on missing, unknown or inconsistent metadata. Alias expansion and Bcc routing must use the envelope list. Resolve multiple aliases to the same account deliberately so each account receives one logical delivery, while different accounts each receive theirs. Unknown recipients and ambiguous mappings are retained for operator action; a worker cannot retroactively reject an SMTP transaction already accepted by SES.
 - A candidate idempotency key combines provider/account/region, SES message identity or actual bucket/key, and resolved destination account; do not use header `Message-ID` as a global unique key. Persist a unique durable delivery record and claim work with a lease. Repeated notifications and retries must converge on that record. Cross-rule duplicates, multiple prefixes and aliases require proof.
