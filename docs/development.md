@@ -94,13 +94,32 @@ certificate authority:
 It writes a JUnit report and always removes the containers and volumes,
 including on failure. Pass `--keep` to leave the stack running for inspection.
 
+## JMAP integration tests
+
+`pnpm exec vitest run --project stalwart` starts the pinned Stalwart image in a
+separate Compose project, publishes a random loopback port, and removes its
+container, network and volume after the suite, including setup and test failures.
+Docker and the Compose plugin are required. The direct-listener fixture maps
+Stalwart's advertised internal endpoint paths to the published loopback port;
+production clients use the advertised URLs and require the same origin as the
+discovery endpoint. The fixture tests mail submission and delivery locally,
+not external DNS, SMTP relays, TLS or the production proxy.
+
+The regular `@opensuite/jmap` entry point accepts an authorization header from
+its caller. `@opensuite/jmap/admin` is a Node-only entry point: instantiate it
+only in trusted server code and never expose management credentials to browsers,
+logs or application clients. Provisioning is sequential and idempotent for
+existing names; serialize provisioning for the same domain, account or alias
+and reconcile ambiguous failures before retrying. Reusing an account does not
+change or verify its password. See [JMAP behaviour](architecture/jmap-behaviour.md).
+
 ## Known limitations
 
 - **TLS for mail protocols:** the mail server has no certificate yet, so TLS
   handshakes on 465 and 993 do not succeed. Certificate provisioning for mail
   is planned with domain onboarding. HTTPS through Caddy works.
-- **Mail delivery:** no domain or mailbox is provisioned by default, and
-  sending or receiving real mail has not been tested.
+- **Mail delivery:** no domain or mailbox is provisioned by default. Local
+  JMAP submission and delivery are tested; external delivery is not.
 - **Outbound access:** the mail server downloads public network data
   (ASN/geolocation) from GitHub at startup.
 

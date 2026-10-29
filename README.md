@@ -3,7 +3,7 @@
 A self-hostable suite for mail, calendar, contacts and file storage.
 
 > **Status: early development.** Only the pieces listed below exist. Mail
-> provisioning, calendar and contacts features, drive, the web client and the
+> application-level mail provisioning, calendar and contacts features, drive, the web client and the
 > setup wizard are planned and not implemented yet.
 
 ## What works today
@@ -15,6 +15,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   `.env` or Git. See [docs/development.md](docs/development.md), including its
   known limitations (no mail TLS certificate yet).
 - **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
+- **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -52,6 +53,7 @@ pnpm lint          # oxlint, type-aware
 pnpm format:check  # Prettier
 pnpm knip          # unused files, exports and dependencies
 pnpm test          # Vitest unit project
+pnpm exec vitest run --project stalwart  # real server; Docker required
 CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
@@ -70,7 +72,7 @@ corresponding infrastructure.
 | `apps/drive`                 | File storage service (placeholder)                     |
 | `packages/contracts`         | Shared API schemas and procedure contracts             |
 | `packages/core`              | Services (currently readiness evaluation)              |
-| `packages/jmap`              | JMAP client (protocol constants only)                  |
+| `packages/jmap`              | JMAP and server-side provisioning clients              |
 | `packages/db`                | PostgreSQL schema, migration job, and provider storage |
 | `packages/design-tokens`     | Design tokens (placeholder)                            |
 | `packages/typescript-config` | Shared strict TypeScript configuration                 |

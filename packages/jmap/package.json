@@ -5,12 +5,19 @@
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./admin": {
+      "node": "./src/admin.ts",
+      "default": null
+    }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"
   },
-  "dependencies": {},
+  "dependencies": {
+    "neverthrow": "catalog:",
+    "zod": "catalog:"
+  },
   "devDependencies": {
     "@opensuite/typescript-config": "workspace:*",
     "@types/node": "catalog:",
