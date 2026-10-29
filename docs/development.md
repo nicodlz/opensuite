@@ -47,6 +47,9 @@ healthy and applies idempotent settings through the Stalwart management API:
 - logs go to standard output (`docker compose logs stalwart`);
 - the client address is taken from `X-Forwarded-For`, which Caddy sets
   (exactly one proxy hop). Caddy replaces any value a client sends.
+- blobs remain local by default. For S3-compatible storage, follow
+  [object storage operations](operations/object-storage.md), including the
+  explicit switch guard, restart, probe and migration precautions.
 
 Published mail ports: 25 (SMTP), 465 (submission, implicit TLS), 993 (IMAP,
 implicit TLS) and 4190 (ManageSieve). STARTTLS ports 587 and 143 are not
@@ -90,6 +93,18 @@ certificate authority:
 It writes a JUnit report and always removes the containers and volumes,
 including on failure. Pass `--keep` to leave the stack running for inspection.
 
+For the pinned Stalwart and disposable MinIO S3 integration test:
+
+```sh
+pnpm exec vitest run --project stalwart
+```
+
+This uses a separate Compose project, a pinned MinIO server, LocalStack's local
+CLI, and a random loopback port. It exercises a
+message with an attachment, a storage outage and a stopped-store restore,
+then removes its containers and volumes. The local substitute does not verify
+real object-storage providers. Docker is required.
+
 ## Known limitations
 
 - **TLS for mail protocols:** the mail server has no certificate yet, so TLS
@@ -104,4 +119,4 @@ including on failure. Pass `--keep` to leave the stack running for inspection.
 
 The web client, the application schema and migrations, authentication, SES
 ingestion, outbound relays, the file storage service, the setup wizard and
-backups.
+automated backups.

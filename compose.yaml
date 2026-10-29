@@ -122,6 +122,7 @@ services:
     environment:
       STALWART_HOSTNAME: ${MAIL_HOSTNAME:-localhost}
       STALWART_PUBLIC_URL: https://${OPENSUITE_PUBLIC_HOST:-localhost}
+      MAIL_S3_KEY_ID: ${MAIL_S3_KEY_ID:-}
     ports:
       - "${SMTP_PORT:-25}:25"
       - "${SUBMISSIONS_PORT:-465}:465"
@@ -131,6 +132,10 @@ services:
       # Only the data store location; every other setting lives in the store.
       - ./deploy/stalwart/config.json:/etc/stalwart/config.json:ro
       - stalwart-data:/var/lib/stalwart
+      - type: bind
+        source: ${MAIL_S3_SECRET_FILE:-/dev/null}
+        target: /run/opensuite/mail-s3-secret
+        read_only: true
       - type: volume
         source: secrets
         target: /run/opensuite/stalwart-admin
@@ -158,8 +163,20 @@ services:
   stalwart-setup:
     image: stalwartlabs/stalwart:v1.0.1@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b
     entrypoint: ["/bin/sh", "/opt/opensuite/setup.sh"]
+    environment:
+      MAIL_BLOB_STORE: ${MAIL_BLOB_STORE:-local}
+      MAIL_S3_ENDPOINT: ${MAIL_S3_ENDPOINT:-}
+      MAIL_S3_REGION: ${MAIL_S3_REGION:-}
+      MAIL_S3_BUCKET: ${MAIL_S3_BUCKET:-}
+      MAIL_S3_PREFIX: ${MAIL_S3_PREFIX:-}
+      MAIL_S3_KEY_ID: ${MAIL_S3_KEY_ID:-}
+      MAIL_S3_ALLOW_SWITCH: ${MAIL_S3_ALLOW_SWITCH:-0}
     volumes:
       - ./deploy/stalwart/setup.sh:/opt/opensuite/setup.sh:ro
+      - type: bind
+        source: ${MAIL_S3_SECRET_FILE:-/dev/null}
+        target: /run/opensuite/mail-s3-secret
+        read_only: true
       - type: volume
         source: secrets
         target: /run/opensuite/stalwart-admin

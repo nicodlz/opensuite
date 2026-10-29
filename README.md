@@ -14,6 +14,10 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   substitutes. Passwords are generated on first start and never stored in
   `.env` or Git. See [docs/development.md](docs/development.md), including its
   known limitations (no mail TLS certificate yet).
+- **Mail blob storage:** local by default, with an optional S3-compatible
+  backend for new or migrated installations. The
+  [object storage guide](docs/operations/object-storage.md) covers restart,
+  migration, backup and recovery requirements.
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -51,6 +55,7 @@ pnpm lint          # oxlint, type-aware
 pnpm format:check  # Prettier
 pnpm knip          # unused files, exports and dependencies
 pnpm test          # Vitest unit project
+pnpm exec vitest run --project stalwart  # disposable Docker integration test
 CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
