@@ -13,3 +13,8 @@
 !packages/db/prisma/**
 !packages/db/src/**
 packages/db/src/generated/
+!apps/drive/package.json
+!apps/drive/prisma.config.ts
+!apps/drive/prisma/**
+!apps/drive/src/**
+apps/drive/src/db/generated/
