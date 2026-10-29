@@ -1,0 +1,32 @@
+{
+  "name": "opensuite",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "typecheck": "turbo run typecheck && tsc -p tsconfig.tools.json",
+    "lint": "oxlint -c packages/oxlint-config/oxlintrc.json --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "knip": "knip",
+    "test": "vitest run --project unit"
+  },
+  "devDependencies": {
+    "@opensuite/core": "workspace:*",
+    "@opensuite/typescript-config": "workspace:*",
+    "@types/node": "catalog:",
+    "knip": "catalog:",
+    "neverthrow": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "prettier": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

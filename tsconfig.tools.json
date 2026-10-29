@@ -1,0 +1,4 @@
+{
+  "extends": "@opensuite/typescript-config/base.json",
+  "include": ["vitest.config.ts", "test-support/**/*.ts"]
+}

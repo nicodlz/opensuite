@@ -1,0 +1,9 @@
+{
+  "extends": "@opensuite/typescript-config/base.json",
+  "compilerOptions": {
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "types": [],
+    "jsx": "react-jsx"
+  },
+  "include": ["src", "test"]
+}
