@@ -5,6 +5,9 @@
       "entry": ["test-support/**/*.ts", "scripts/*.mjs"]
     },
     "apps/*": {},
-    "packages/*": {}
+    "packages/*": {},
+    "apps/drive": {
+      "ignoreDependencies": ["@prisma/client"]
+    }
   }
 }

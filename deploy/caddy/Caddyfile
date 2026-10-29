@@ -12,6 +12,11 @@
 		-Server
 	}
 
+	# Drive is independently routed and is not a startup dependency.
+	handle_path /drive/api/* {
+		reverse_proxy drive:3001
+	}
+
 	# Application API.
 	handle_path /api/* {
 		reverse_proxy api:3000

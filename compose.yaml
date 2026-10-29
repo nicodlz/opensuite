@@ -87,6 +87,74 @@ services:
       retries: 6
       start_period: 10s
 
+  # Drive has its own process and migration; mail does not depend on it.
+  drive:
+    <<: *restart
+    build:
+      context: .
+      dockerfile: apps/drive/Dockerfile
+    image: opensuite-drive:local
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opensuite}
+      POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
+      POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
+      DRIVE_SESSION_API: ${DRIVE_SESSION_API:-http://api:3000}
+      DRIVE_S3_ENDPOINT: ${DRIVE_S3_ENDPOINT:-http://localstack:4566}
+      DRIVE_S3_PUBLIC_ENDPOINT: ${DRIVE_S3_PUBLIC_ENDPOINT:-http://localhost:4566}
+      DRIVE_S3_BUCKET: ${DRIVE_S3_BUCKET:-opensuite-drive}
+      DRIVE_S3_PREFIX: ${DRIVE_S3_PREFIX:-drive/}
+      DRIVE_S3_REGION: ${DRIVE_S3_REGION:-us-east-1}
+      DRIVE_S3_ACCESS_KEY: ${DRIVE_S3_ACCESS_KEY:-test}
+      DRIVE_S3_SECRET_KEY: ${DRIVE_S3_SECRET_KEY:-test}
+      DRIVE_S3_PATH_STYLE: ${DRIVE_S3_PATH_STYLE:-true}
+      DRIVE_QUOTA_BYTES: ${DRIVE_QUOTA_BYTES:-10000000000}
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/postgres
+        read_only: true
+        volume:
+          subpath: postgres
+    depends_on:
+      drive-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  drive-migrate:
+    build:
+      context: .
+      dockerfile: apps/drive/Dockerfile
+    image: opensuite-drive:local
+    user: "999:999"
+    working_dir: /app/apps/drive
+    command: ["node", "src/db/migrate.ts"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opensuite}
+      POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/postgres
+        read_only: true
+        volume:
+          subpath: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     <<: *restart
     image: postgres:18.6@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
@@ -204,6 +272,9 @@ services:
       LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
       INBOUND_BUCKET: ${INBOUND_BUCKET:-opensuite-inbound}
       INBOUND_QUEUE: ${INBOUND_QUEUE:-opensuite-inbound}
+      DRIVE_S3_BUCKET: ${DRIVE_S3_BUCKET:-opensuite-drive}
+    ports:
+      - "127.0.0.1:${LOCALSTACK_PORT:-4566}:4566"
     volumes:
       - ./deploy/localstack/init/ready.d:/etc/localstack/init/ready.d:ro
       - localstack-data:/var/lib/localstack
@@ -211,7 +282,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          'curl -fsS http://127.0.0.1:4566/_localstack/init/ready | grep -q ''"completed": true''',
+          'curl -fsS http://127.0.0.1:4566/_localstack/init/ready | grep -q ''"completed": true'' && ! curl -fsS http://127.0.0.1:4566/_localstack/init/ready | grep -q ''"state": "ERROR"''',
         ]
       interval: 10s
       timeout: 5s

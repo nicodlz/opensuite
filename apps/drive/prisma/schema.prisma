@@ -1,0 +1,51 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/db/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Entry {
+  id          String   @id
+  ownerId     String
+  parentId    String?
+  name        String
+  kind        String
+  state       String
+  size        BigInt   @default(0)
+  checksum    String?
+  contentType String?
+  objectKey   String?
+  uploadId    String?
+  expiresAt   DateTime?
+  trashedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  shares      Share[]
+  links       PublicLink[]
+  @@index([ownerId, parentId])
+  @@index([ownerId, state])
+}
+
+model Share {
+  id      String @id
+  entryId String
+  entry   Entry  @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  userId  String
+  access  String
+  @@unique([entryId, userId])
+  @@index([userId])
+}
+
+model PublicLink {
+  id        String   @id
+  tokenHash String   @unique
+  entryId   String
+  entry     Entry    @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  @@index([entryId])
+}

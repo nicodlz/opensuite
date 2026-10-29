@@ -2,6 +2,12 @@
 # (one Compose project each) never collide. Used by scripts/compose-smoke.mjs.
 services:
   postgres:
+    # Disposable fixtures do not test crash durability.
+    command: ["postgres", "-c", "fsync=off"]
+    environment:
+      POSTGRES_INITDB_ARGS: --no-sync
+    healthcheck:
+      start_period: 180s
     ports:
       - "127.0.0.1::5432"
   caddy:
@@ -12,3 +18,6 @@ services:
       - "127.0.0.1::25"
       - "127.0.0.1::465"
       - "127.0.0.1::993"
+  localstack:
+    ports: !override
+      - "127.0.0.1::4566"

@@ -27,6 +27,8 @@ const runId = (process.env["CLEITO_RUN_ID"] ?? `local-${String(Date.now())}`)
 const project = `opensuite-smoke-${runId}`;
 const composeArgs = [
   "compose",
+  "--profile",
+  "dev",
   "--project-name",
   project,
   "--env-file",
@@ -200,6 +202,14 @@ const cleanup = async () => {
   }
   try {
     await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+    const filter = `label=com.docker.compose.project=${project}`;
+    const leftovers = await Promise.all([
+      run("docker", ["ps", "-aq", "--filter", filter]),
+      run("docker", ["volume", "ls", "-q", "--filter", filter]),
+      run("docker", ["network", "ls", "-q", "--filter", filter]),
+    ]);
+    if (leftovers.some((result) => result.stdout.trim().length > 0))
+      throw new Error(`resources remain for ${project}`);
     return 0;
   } catch (error) {
     process.stderr.write(`cleanup failed: ${String(error)}\n`);
@@ -213,7 +223,14 @@ try {
   await test("stack starts and every service reports healthy", async () => {
     // `--wait` treats finished one-shot jobs as failures, so wait for the
     // long-running services first, then run the settings job to completion.
-    const longRunning = ["caddy", "api", "postgres", "stalwart"];
+    const longRunning = [
+      "caddy",
+      "api",
+      "postgres",
+      "stalwart",
+      "drive",
+      "localstack",
+    ];
     await compose(
       "up",
       "--detach",
@@ -237,8 +254,8 @@ try {
       .map((line) => parseJson(line));
     const unhealthy = services.filter((s) => field(s, "Health") !== "healthy");
     assert(
-      services.length >= 4,
-      `expected 4 running services, got ${String(services.length)}`,
+      services.length >= 6,
+      `expected 6 running services, got ${String(services.length)}`,
     );
     assert(
       unhealthy.length === 0,
@@ -370,6 +387,37 @@ try {
     davDiscovery("carddav"));
 
   await test("SMTP listener greets on the published port", async () => {
+    const banner = await smtpBanner(await hostPort("stalwart", "25"));
+    assert(banner.startsWith("220 "), `banner ${banner.trim()}`);
+  });
+
+  await test("Drive liveness is proxied independently", async () => {
+    const res = await request(httpsPort, ca, "/drive/api/health");
+    assert(res.status === 200, `status ${String(res.status)}`);
+  });
+
+  await test("mail remains available when Drive and its storage are stopped", async () => {
+    await compose("stop", "drive", "localstack");
+    const discovery = await request(httpsPort, ca, "/.well-known/jmap");
+    assert(
+      redirects.has(discovery.status),
+      `discovery status ${String(discovery.status)}`,
+    );
+    const location = new URL(
+      String(discovery.headers.location),
+      "https://localhost",
+    );
+    const session = await request(httpsPort, ca, location.pathname, {
+      authorization: adminAuth,
+    });
+    assert(
+      session.status === 200,
+      `JMAP session status ${String(session.status)}`,
+    );
+    assert(
+      field(parseJson(session.body), "username") === "admin",
+      "authenticated session missing",
+    );
     const banner = await smtpBanner(await hostPort("stalwart", "25"));
     assert(banner.startsWith("220 "), `banner ${banner.trim()}`);
   });

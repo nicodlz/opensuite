@@ -3,7 +3,7 @@
 A self-hostable suite for mail, calendar, contacts and file storage.
 
 > **Status: early development.** Only the pieces listed below exist. Mail
-> application-level mail provisioning, calendar and contacts features, drive, the web client and the
+> application-level mail provisioning, calendar and contacts features, the web client and the
 > setup wizard are planned and not implemented yet.
 
 ## What works today
@@ -16,6 +16,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   known limitations (no mail TLS certificate yet).
 - **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
 - **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
+- **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. Authentication integration is pending; see [development](docs/development.md#drive).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -54,6 +55,7 @@ pnpm format:check  # Prettier
 pnpm knip          # unused files, exports and dependencies
 pnpm test          # Vitest unit project
 pnpm exec vitest run --project stalwart  # real server; Docker required
+pnpm exec vitest run --project drive     # disposable PostgreSQL and LocalStack
 CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
@@ -69,7 +71,7 @@ corresponding infrastructure.
 | `apps/api`                   | HTTP API server                                        |
 | `apps/web`                   | Web client (placeholder)                               |
 | `apps/ingest`                | Inbound mail ingestion worker (placeholder)            |
-| `apps/drive`                 | File storage service (placeholder)                     |
+| `apps/drive`                 | Independent file storage service                       |
 | `packages/contracts`         | Shared API schemas and procedure contracts             |
 | `packages/core`              | Services (currently readiness evaluation)              |
 | `packages/jmap`              | JMAP and server-side provisioning clients              |
