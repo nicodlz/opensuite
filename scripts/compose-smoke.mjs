@@ -120,6 +120,28 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
+/**
+ * Parse a JSON object, rejecting non-object responses.
+ * @param {string} text
+ * @returns {Record<string, unknown>}
+ */
+const jsonObject = (text) => {
+  /** @type {unknown} */
+  const value = JSON.parse(text);
+  assert(
+    typeof value === "object" && value !== null && !Array.isArray(value),
+    "expected a JSON object",
+  );
+  return Object.fromEntries(Object.entries(value));
+};
+
+/** @param {unknown} value */
+const objectKeys = (value) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return [];
+  return Object.keys(value);
+};
+
 /** @type {{ name: string, seconds: number, failure?: string }[]} */
 const cases = [];
 /**
@@ -212,15 +234,15 @@ try {
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    const unhealthy = services.filter((s) => s.Health !== "healthy");
+      .map(jsonObject);
+    const unhealthy = services.filter((s) => s["Health"] !== "healthy");
     assert(
       services.length >= 4,
       `expected 4 running services, got ${String(services.length)}`,
     );
     assert(
       unhealthy.length === 0,
-      `not healthy: ${unhealthy.map((s) => `${s.Service}=${s.Health || s.State}`).join(", ")}`,
+      `not healthy: ${unhealthy.map((s) => `${String(s["Service"])}=${String(s["Health"] || s["State"])}`).join(", ")}`,
     );
   });
 
@@ -246,13 +268,13 @@ try {
   await test("API liveness through the proxy over verified TLS", async () => {
     const res = await request(httpsPort, ca, "/api/health");
     assert(res.status === 200, `status ${String(res.status)}`);
-    assert(JSON.parse(res.body).status === "ok", `body ${res.body}`);
+    assert(jsonObject(res.body)["status"] === "ok", `body ${res.body}`);
   });
 
   await test("API readiness through the proxy", async () => {
     const res = await request(httpsPort, ca, "/api/ready");
     assert(res.status === 200, `status ${String(res.status)}: ${res.body}`);
-    assert(JSON.parse(res.body).status === "ready", `body ${res.body}`);
+    assert(jsonObject(res.body)["status"] === "ready", `body ${res.body}`);
   });
 
   await test("JMAP discovery leads to an authenticated session", async () => {
@@ -272,22 +294,25 @@ try {
       `anonymous session status ${String(anonymous.status)}`,
     );
     assert(
-      Object.keys(JSON.parse(anonymous.body).accounts ?? {}).length === 0,
+      objectKeys(jsonObject(anonymous.body)["accounts"]).length === 0,
       "anonymous session exposes accounts",
     );
     const session = await request(httpsPort, ca, location.pathname, {
       authorization: adminAuth,
     });
     assert(session.status === 200, `session status ${String(session.status)}`);
-    const body = JSON.parse(session.body);
+    const body = jsonObject(session.body);
     assert(
-      "urn:ietf:params:jmap:core" in (body.capabilities ?? {}),
+      objectKeys(body["capabilities"]).includes("urn:ietf:params:jmap:core"),
       "JMAP core capability missing",
     );
-    assert(body.username === "admin", `session user ${String(body.username)}`);
     assert(
-      String(body.apiUrl).startsWith("https://localhost/"),
-      `apiUrl ${String(body.apiUrl)}`,
+      body["username"] === "admin",
+      `session user ${String(body["username"])}`,
+    );
+    assert(
+      String(body["apiUrl"]).startsWith("https://localhost/"),
+      `apiUrl ${String(body["apiUrl"])}`,
     );
     const wrong = await request(httpsPort, ca, location.pathname, {
       authorization: `Basic ${Buffer.from("admin:wrong").toString("base64")}`,
@@ -305,11 +330,12 @@ try {
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line));
+      .map(jsonObject);
     assert(setup.length === 1, "stalwart-setup container missing");
+    assert(setup[0] !== undefined, "stalwart-setup container missing");
     assert(
-      setup[0].ExitCode === 0,
-      `stalwart-setup exit code ${String(setup[0].ExitCode)}`,
+      setup[0]["ExitCode"] === 0,
+      `stalwart-setup exit code ${String(setup[0]["ExitCode"])}`,
     );
     // Idempotent: a second run against the configured server succeeds too.
     await compose(
@@ -330,19 +356,21 @@ try {
     assert(res.status === 307, `status ${String(res.status)}`);
   });
 
-  for (const kind of ["caldav", "carddav"]) {
-    await test(`${kind === "caldav" ? "CalDAV" : "CardDAV"} discovery through the proxy`, async () => {
-      const res = await request(httpsPort, ca, `/.well-known/${kind}`);
-      assert(
-        [301, 302, 307, 308].includes(res.status),
-        `status ${String(res.status)}`,
-      );
-      assert(
-        String(res.headers.location).includes("/dav"),
-        `location ${String(res.headers.location)}`,
-      );
-    });
-  }
+  await Promise.all(
+    ["caldav", "carddav"].map(async (kind) => {
+      await test(`${kind === "caldav" ? "CalDAV" : "CardDAV"} discovery through the proxy`, async () => {
+        const res = await request(httpsPort, ca, `/.well-known/${kind}`);
+        assert(
+          [301, 302, 307, 308].includes(res.status),
+          `status ${String(res.status)}`,
+        );
+        assert(
+          String(res.headers.location).includes("/dav"),
+          `location ${String(res.headers.location)}`,
+        );
+      });
+    }),
+  );
 
   await test("SMTP listener greets on the published port", async () => {
     const banner = await smtpBanner(await hostPort("stalwart", "25"));
