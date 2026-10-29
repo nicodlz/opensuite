@@ -185,7 +185,8 @@ const cleanup = async () => {
   }
 };
 
-let failures = 1;
+/** @type {number} */
+let failures;
 try {
   await test("stack starts and every service reports healthy", async () => {
     // `--wait` treats finished one-shot jobs as failures, so wait for the
