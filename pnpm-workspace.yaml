@@ -6,6 +6,8 @@ packages:
   - packages/*
 
 catalog:
+  "@aws-sdk/client-s3": 3.1150.0
+  "@aws-sdk/client-sqs": 3.1150.0
   "@orpc/contract": 1.16.1
   "@orpc/openapi": 1.16.1
   "@orpc/server": 1.16.1

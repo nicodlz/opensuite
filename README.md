@@ -16,6 +16,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   known limitations (no mail TLS certificate yet).
 - **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
 - **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
+- **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -68,10 +69,10 @@ corresponding infrastructure.
 | ---------------------------- | ------------------------------------------------------ |
 | `apps/api`                   | HTTP API server                                        |
 | `apps/web`                   | Web client (placeholder)                               |
-| `apps/ingest`                | Inbound mail ingestion worker (placeholder)            |
+| `apps/ingest`                | Inbound mail ingestion worker                          |
 | `apps/drive`                 | File storage service (placeholder)                     |
 | `packages/contracts`         | Shared API schemas and procedure contracts             |
-| `packages/core`              | Services (currently readiness evaluation)              |
+| `packages/core`              | Domain, services and provider adapters                 |
 | `packages/jmap`              | JMAP and server-side provisioning clients              |
 | `packages/db`                | PostgreSQL schema, migration job, and provider storage |
 | `packages/design-tokens`     | Design tokens (placeholder)                            |

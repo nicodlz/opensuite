@@ -63,7 +63,7 @@ does not yet use the database or register its readiness probe.
 
 ### Local AWS substitutes
 
-The `dev` profile starts LocalStack with an `opensuite-inbound` S3 bucket and
+The `dev` profile starts LocalStack with `opensuite-inbound` and `opensuite-archive` S3 buckets and
 `opensuite-inbound` and `opensuite-inbound-dlq` SQS queues. No AWS account or
 credentials are needed. LocalStack only simulates AWS: it proves nothing about
 real SES, S3 or SQS behaviour.
@@ -125,6 +125,9 @@ change or verify its password. See [JMAP behaviour](architecture/jmap-behaviour.
 
 ## Planned, not implemented
 
-The web client, authentication, SES
-ingestion, outbound relays, the file storage service, the setup wizard and
+The web client, authentication, production SES provider proof, outbound relays, the file storage service, the setup wizard and
 backups.
+
+## Ingestion
+
+See [ingestion](architecture/ingestion.md) for configuration, archive and replay operation, and production limitations. `pnpm exec vitest run --project ingest` runs an isolated Compose project with random loopback ports for PostgreSQL, LocalStack and Stalwart. It removes its own containers and volumes, including on setup failure. The disposable PostgreSQL instance runs with fsync disabled; this suite does not test database crash durability. No real AWS or B2 access is needed.

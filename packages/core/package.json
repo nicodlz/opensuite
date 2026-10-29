@@ -13,7 +13,12 @@
   },
   "dependencies": {
     "@opensuite/contracts": "workspace:*",
-    "neverthrow": "catalog:"
+    "neverthrow": "catalog:",
+    "@aws-sdk/client-s3": "catalog:",
+    "@aws-sdk/client-sqs": "catalog:",
+    "@opensuite/db": "workspace:*",
+    "@opensuite/jmap": "workspace:*",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@opensuite/typescript-config": "workspace:*",
