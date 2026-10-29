@@ -3,8 +3,8 @@
 A self-hostable suite for mail, calendar, contacts and file storage.
 
 > **Status: early development.** Only the pieces listed below exist. Mail
-> provisioning, calendar and contacts features, drive, the web client and the
-> setup wizard are planned and not implemented yet.
+> provisioning, calendar and contacts features, drive and the setup wizard are
+> planned and not implemented yet.
 
 ## What works today
 
@@ -14,6 +14,9 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   substitutes. Passwords are generated on first start and never stored in
   `.env` or Git. See [docs/development.md](docs/development.md), including its
   known limitations (no mail TLS certificate yet).
+- **Web client** (`apps/web`): a static application shell with a live API
+  status page. Mail, calendar, contacts, drive, search, accounts and compose
+  are placeholders. See [apps/web/README.md](apps/web/README.md).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -28,6 +31,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
 ```sh
 git clone <repository> opensuite && cd opensuite
 cp deploy/env.example .env
+pnpm install && pnpm build   # build the static web client mounted by Caddy
 docker compose up -d
 curl -k https://localhost/api/health   # `localhost` uses a certificate from Caddy's local CA
 ```
@@ -40,6 +44,7 @@ Requirements: Node.js 22.18 or later, pnpm 12.
 pnpm install
 cp deploy/env.example .env   # optional; defaults match the template
 pnpm --filter @opensuite/api dev
+# In another terminal: pnpm --filter @opensuite/web dev
 curl http://127.0.0.1:3000/health
 ```
 
@@ -51,6 +56,8 @@ pnpm lint          # oxlint, type-aware
 pnpm format:check  # Prettier
 pnpm knip          # unused files, exports and dependencies
 pnpm test          # Vitest unit project
+pnpm build         # static web client
+pnpm test:e2e      # Vite preview and a local API; install Chromium first
 CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
@@ -64,14 +71,14 @@ corresponding infrastructure.
 | Path                         | Contents                                    |
 | ---------------------------- | ------------------------------------------- |
 | `apps/api`                   | HTTP API server                             |
-| `apps/web`                   | Web client (placeholder)                    |
+| `apps/web`                   | Web shell and API status page               |
 | `apps/ingest`                | Inbound mail ingestion worker (placeholder) |
 | `apps/drive`                 | File storage service (placeholder)          |
 | `packages/contracts`         | Shared API schemas and procedure contracts  |
 | `packages/core`              | Services (currently readiness evaluation)   |
 | `packages/jmap`              | JMAP client (protocol constants only)       |
 | `packages/db`                | Database access (placeholder)               |
-| `packages/design-tokens`     | Design tokens (placeholder)                 |
+| `packages/design-tokens`     | Shared light and dark theme tokens          |
 | `packages/typescript-config` | Shared strict TypeScript configuration      |
 | `packages/oxlint-config`     | Shared oxlint configuration                 |
 
