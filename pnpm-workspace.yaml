@@ -1,30 +1,51 @@
 # Dependencies must have been published for at least one day before install.
 minimumReleaseAge: 1440
-
 packages:
   - apps/*
   - packages/*
-
 catalog:
-  "@orpc/contract": 1.16.1
-  "@orpc/openapi": 1.16.1
-  "@orpc/server": 1.16.1
-  "@orpc/zod": 1.16.1
-  "@prisma/client": 6.19.3
-  "@types/node": 22.20.5
+  "@axe-core/playwright": 4.11.0
+  class-variance-authority: 0.7.1
   fastify: 5.12.7
+  "@fontsource-variable/dm-sans": 5.2.6
+  "@fontsource-variable/space-grotesk": 5.2.8
   knip: 6.43.0
   neverthrow: 8.2.0
+  "@orpc/client": 1.16.1
+  "@orpc/contract": 1.16.1
+  "@orpc/openapi": 1.16.1
+  "@orpc/openapi-client": 1.16.1
+  "@orpc/server": 1.16.1
+  "@orpc/zod": 1.16.1
   oxlint: 1.90.0
   oxlint-tsgolint: 7.0.2005
+  "@playwright/test": 1.56.1
   prettier: 3.9.10
   prisma: 6.19.3
+  "@prisma/client": 6.19.3
+  "@radix-ui/react-dialog": 1.1.15
+  "@radix-ui/react-dropdown-menu": 2.1.16
+  "@radix-ui/react-label": 2.1.7
+  "@radix-ui/react-slot": 1.2.3
+  "@radix-ui/react-toast": 1.2.15
+  react: 19.2.0
+  react-dom: 19.2.0
+  tailwindcss: 4.1.14
+  "@tailwindcss/vite": 4.1.14
+  "@tanstack/react-query": 5.90.2
+  "@tanstack/react-router": 1.132.0
   turbo: 2.11.10
+  "@types/node": 22.20.5
+  "@types/react": 19.2.2
+  "@types/react-dom": 19.2.2
   typescript: 6.0.3
+  vite: 7.1.12
+  "@vitejs/plugin-react": 5.0.4
   vitest: 5.0.5
   zod: 4.6.7
-
 allowBuilds:
+  esbuild: true
+  prisma: true
   "@prisma/client": true
   "@prisma/engines": true
-  prisma: true
+  "@tailwindcss/oxide": true

@@ -2,8 +2,8 @@
   "extends": "@opensuite/typescript-config/base.json",
   "compilerOptions": {
     "lib": ["es2023", "dom", "dom.iterable"],
-    "types": [],
+    "types": ["vite/client"],
     "jsx": "react-jsx"
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "vite.config.ts"]
 }

@@ -1,0 +1,7 @@
+{
+  "extends": "@opensuite/typescript-config/base.json",
+  "include": ["./**/*.ts", "../playwright.config.ts"],
+  "compilerOptions": {
+    "lib": ["es2023", "dom", "dom.iterable"]
+  }
+}

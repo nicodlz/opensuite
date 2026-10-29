@@ -23,7 +23,15 @@
 		reverse_proxy stalwart:8080
 	}
 
+	# Never expose an administrative interface through the SPA fallback.
+	@admin path /admin /admin/*
+	handle @admin {
+		respond 404
+	}
+
 	handle {
-		respond "OpenSuite: the web client is not available yet." 404
+		root * /srv
+		try_files {path} /index.html
+		file_server
 	}
 }

@@ -41,6 +41,7 @@ services:
       - "${HTTPS_PORT:-443}:443/udp"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./apps/web/dist:/srv:ro
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:

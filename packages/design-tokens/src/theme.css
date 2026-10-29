@@ -1,0 +1,80 @@
+:root {
+  color-scheme: light;
+  --night: #0a0710;
+  --night-soft: #140d1b;
+  --night-card: #1c1427;
+  --ivory: #f6f4f8;
+  --white: #fff;
+  --ink: #1d1727;
+  --muted-base: #635d6c;
+  --muted-light: #ded6e6;
+  --line: #dbd6e1;
+  --line-dark: rgba(246, 244, 248, 0.16);
+  --violet: #5630a8;
+  --lavender: #c9b2ff;
+  --green: #b8ef78;
+  --green-hover: #c9f59a;
+  --tint-lavender: #ebe6f5;
+  --tint-soft: #eeeaf5;
+  --tint-white: #fdfcfe;
+  --background: var(--ivory);
+  --surface: var(--white);
+  --surface-muted: var(--tint-white);
+  --foreground: var(--ink);
+  --muted: var(--muted-base);
+  --border: #ded8e5;
+  --accent: var(--violet);
+  --accent-soft: var(--tint-lavender);
+  --success: #24643b;
+  --success-soft: #e4f4df;
+  --warning: #795000;
+  --warning-soft: #fff1d0;
+  --danger: #a12c43;
+  --danger-soft: #ffedf0;
+  --focus: var(--violet);
+  --font-display: "Space Grotesk Variable", sans-serif;
+  --font-body: "DM Sans Variable", sans-serif;
+  --radius-card: 16px;
+  --radius-control: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --background: var(--night);
+    --surface: var(--night-soft);
+    --surface-muted: var(--night-card);
+    --foreground: var(--ivory);
+    --muted: var(--muted-light);
+    --border: var(--line-dark);
+    --accent: var(--lavender);
+    --accent-soft: #342649;
+    --success: #b8ef78;
+    --success-soft: #263822;
+    --warning: #ffdb88;
+    --warning-soft: #41331c;
+    --danger: #ffb4bd;
+    --danger-soft: #472331;
+    --focus: var(--green);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: var(--night);
+  --surface: var(--night-soft);
+  --surface-muted: var(--night-card);
+  --foreground: var(--ivory);
+  --muted: var(--muted-light);
+  --border: var(--line-dark);
+  --accent: var(--lavender);
+  --accent-soft: #342649;
+  --success: #b8ef78;
+  --success-soft: #263822;
+  --warning: #ffdb88;
+  --warning-soft: #41331c;
+  --danger: #ffb4bd;
+  --danger-soft: #472331;
+  --focus: var(--green);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}

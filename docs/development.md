@@ -6,20 +6,23 @@ This page describes what runs today. Planned components are listed at the end.
 
 ```sh
 cp deploy/env.example .env
+pnpm install && pnpm build   # produces apps/web/dist, mounted by Caddy
 docker compose up -d
 docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
 ```
 
-| Service          | Image (pinned by digest)                | Role                                                                                           |
-| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `caddy`          | `caddy:2.11.7`                          | HTTPS reverse proxy. `/api/*` goes to the API; JMAP, CalDAV and CardDAV go to the mail server. |
-| `api`            | built from `apps/api/Dockerfile`        | Application API (`/health`, `/ready`, `/openapi.json`).                                        |
-| `stalwart`       | `stalwartlabs/stalwart:v1.0.1`          | Mail server: SMTP, IMAP, JMAP, CalDAV, CardDAV. Data in embedded RocksDB.                      |
-| `postgres`       | `postgres:18.6`                         | Application database, plus a separate `opensuite_drive` database.                              |
-| `migrate`        | built from `deploy/postgres/Dockerfile` | One-shot job: verifies and applies application migrations before the API starts.               |
-| `secrets`        | `alpine:3.24.3`                         | One-shot job: generates local passwords on first start.                                        |
-| `stalwart-setup` | `stalwartlabs/stalwart:v1.0.1`          | One-shot job: applies mail server settings (see below).                                        |
-| `localstack`     | `localstack/localstack:4.14.0`          | `dev` profile only: local S3 bucket and SQS queues for inbound mail.                           |
+| Service          | Image (pinned by digest)                | Role                                                                                                      |
+| ---------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `caddy`          | `caddy:2.11.7`                          | Serves the static web client and proxies `/api/*` to the API and mail protocol routes to the mail server. |
+| `api`            | built from `apps/api/Dockerfile`        | Application API (`/health`, `/ready`, `/openapi.json`).                                                   |
+| `stalwart`       | `stalwartlabs/stalwart:v1.0.1`          | Mail server: SMTP, IMAP, JMAP, CalDAV, CardDAV. Data in embedded RocksDB.                                 |
+| `postgres`       | `postgres:18.6`                         | Application database, plus a separate `opensuite_drive` database.                                         |
+| `migrate`        | built from `deploy/postgres/Dockerfile` | One-shot job: verifies and applies application migrations before the API starts.                          |
+| `secrets`        | `alpine:3.24.3`                         | One-shot job: generates local passwords on first start.                                                   |
+| `stalwart-setup` | `stalwartlabs/stalwart:v1.0.1`          | One-shot job: applies mail server settings (see below).                                                   |
+| `localstack`     | `localstack/localstack:4.14.0`          | `dev` profile only: local S3 bucket and SQS queues for inbound mail.                                      |
+
+Rebuild the client with `pnpm build` after changes; Caddy mounts `apps/web/dist` read-only. The web client shows live API status; the product pages are placeholders. For the development server and browser tests, see [the web client guide](../apps/web/README.md).
 
 Every long-running service has a Compose health check and a restart policy.
 Data lives in named volumes: `postgres-data`, `stalwart-data`, `caddy-data`,
@@ -106,6 +109,5 @@ including on failure. Pass `--keep` to leave the stack running for inspection.
 
 ## Planned, not implemented
 
-The web client, authentication, SES
-ingestion, outbound relays, the file storage service, the setup wizard and
-backups.
+Mail, calendar, contacts and drive interfaces, authentication, SES ingestion,
+outbound relays, the file storage service, the setup wizard and backups.
