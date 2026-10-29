@@ -3,7 +3,7 @@
 A self-hostable suite for mail, calendar, contacts and file storage.
 
 > **Status: early development.** Only the pieces listed below exist. Mail
-> application-level mail provisioning, calendar and contacts features, drive and
+> application-level mail provisioning, the production mail API, calendar and contacts features, drive and
 > the setup wizard are planned and not implemented yet.
 
 ## What works today
@@ -15,9 +15,9 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   `.env` or Git. See [docs/development.md](docs/development.md), including its
   known limitations (no mail TLS certificate yet).
 - **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
-- **Web client** (`apps/web`): a static application shell with a live API
-  status page. Mail, calendar, contacts, drive, search, accounts and compose
-  are placeholders. See [apps/web/README.md](apps/web/README.md).
+- **Web client** (`apps/web`): a mail workspace and live API status page. Mail uses
+  synthetic in-browser data in development; the production mail API is not
+  implemented yet. Calendar, contacts and drive are placeholders. See [apps/web/README.md](apps/web/README.md).
 - **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
 - **Mail blob storage:** local by default, with an optional S3-compatible
   backend for new or migrated installations. The
@@ -82,7 +82,7 @@ corresponding infrastructure.
 | Path                         | Contents                                               |
 | ---------------------------- | ------------------------------------------------------ |
 | `apps/api`                   | HTTP API server                                        |
-| `apps/web`                   | Web shell and API status page                          |
+| `apps/web`                   | Mail workspace and API status page                     |
 | `apps/ingest`                | Inbound mail ingestion worker                          |
 | `apps/drive`                 | File storage service (placeholder)                     |
 | `packages/contracts`         | Shared API schemas and procedure contracts             |

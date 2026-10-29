@@ -22,7 +22,7 @@ docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
 | `stalwart-setup` | `stalwartlabs/stalwart:v1.0.1`          | One-shot job: applies mail server settings (see below).                                                   |
 | `localstack`     | `localstack/localstack:4.14.0`          | `dev` profile only: local S3 bucket and SQS queues for inbound mail.                                      |
 
-Rebuild the client with `pnpm build` after changes; Caddy mounts `apps/web/dist` read-only. The web client shows live API status; the product pages are placeholders. For the development server and browser tests, see [the web client guide](../apps/web/README.md).
+Rebuild the client with `pnpm build` after changes; Caddy mounts `apps/web/dist` read-only. The web client shows live API status and a mail interface. The mail backend is not implemented; synthetic data is available only in the development server. Other product pages are placeholders. For the development server and browser tests, see [the web client guide](../apps/web/README.md).
 
 Every long-running service has a Compose health check and a restart policy.
 Data lives in named volumes: `postgres-data`, `stalwart-data`, `caddy-data`,
@@ -81,10 +81,10 @@ To use a newer image, set `LOCALSTACK_IMAGE` and `LOCALSTACK_AUTH_TOKEN` in
 ## Smoke test
 
 ```sh
-CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
+node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
-The smoke test starts a separate Compose project named after `CLEITO_RUN_ID`.
+The smoke test starts a separate Compose project with a generated run ID.
 `compose.test.yaml` publishes its ports on random loopback ports. The test then
 checks the following through the proxy, over TLS verified with Caddy's local
 certificate authority:
@@ -151,7 +151,7 @@ real object-storage providers. Docker is required.
 
 ## Planned, not implemented
 
-Mail, calendar, contacts and drive interfaces, authentication, production SES provider proof, outbound relays, the file storage service, the setup wizard and
+The production mail API, calendar, contacts and drive interfaces, authentication, production SES provider proof, outbound relays, the file storage service, the setup wizard and
 backups.
 
 ## Ingestion

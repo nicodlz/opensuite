@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
+  timeout: 60_000,
   outputDir: "./node_modules/.cache/playwright-results",
   use: {
     baseURL: "http://127.0.0.1:4173",
@@ -18,7 +19,7 @@ export default defineConfig({
     },
     {
       command:
-        "API_PROXY_TARGET=http://127.0.0.1:3199 pnpm --filter @opensuite/web preview --port 4173 --strictPort",
+        "API_PROXY_TARGET=http://127.0.0.1:3199 pnpm --filter @opensuite/web dev --port 4173 --strictPort",
       url: "http://127.0.0.1:4173",
       reuseExistingServer: false,
       timeout: 30_000,

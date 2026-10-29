@@ -8,9 +8,11 @@ catalog:
   '@aws-sdk/client-sqs': 3.1150.0
   '@axe-core/playwright': 4.11.0
   class-variance-authority: 0.7.1
+  dompurify: 3.3.3
   fastify: 5.12.7
   '@fontsource-variable/dm-sans': 5.2.6
   '@fontsource-variable/space-grotesk': 5.2.8
+  jsdom: 27.4.0
   knip: 6.43.0
   neverthrow: 8.2.0
   '@orpc/client': 1.16.1
@@ -37,6 +39,7 @@ catalog:
   '@tanstack/react-query': 5.90.2
   '@tanstack/react-router': 1.132.0
   turbo: 2.11.10
+  '@types/jsdom': 27.0.0
   '@types/node': 22.20.5
   '@types/react': 19.2.2
   '@types/react-dom': 19.2.2

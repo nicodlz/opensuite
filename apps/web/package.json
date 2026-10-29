@@ -18,7 +18,10 @@
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "tailwindcss": "catalog:",
-    "vite": "catalog:"
+    "vite": "catalog:",
+    "jsdom": "catalog:",
+    "@types/jsdom": "catalog:",
+    "@orpc/server": "catalog:"
   },
   "dependencies": {
     "@orpc/client": "catalog:",
@@ -37,6 +40,7 @@
     "@orpc/openapi-client": "catalog:",
     "@orpc/contract": "catalog:",
     "@fontsource-variable/space-grotesk": "catalog:",
-    "@fontsource-variable/dm-sans": "catalog:"
+    "@fontsource-variable/dm-sans": "catalog:",
+    "dompurify": "catalog:"
   }
 }
