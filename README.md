@@ -25,6 +25,11 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   - `GET /openapi.json`: OpenAPI 3.1 document generated from the contracts.
   - Behind Caddy, these are served under `/api/`.
 
+Authentication components are under development and are not wired into the
+standard startup. They must not be used as a production login yet; mailbox
+provisioning and lifecycle reconciliation, audit coverage, account-based
+rate limits and authorization procedures remain to be integrated.
+
 ## Installation
 
 ```sh

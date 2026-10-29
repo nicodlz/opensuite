@@ -11,6 +11,10 @@ export interface ServerDependencies {
   readonly config: Pick<ApiConfig, "logLevel">;
   readonly readiness: ReadinessService;
   readonly monotonicMs: () => number;
+  readonly identity?: {
+    readonly handler: (request: Request) => Promise<Response>;
+    readonly publicOrigin: string;
+  };
 }
 
 export const buildServer = async (
@@ -43,6 +47,49 @@ export const buildServer = async (
   });
 
   app.get("/openapi.json", () => openapi);
+
+  if (dependencies.identity !== undefined) {
+    const identity = dependencies.identity;
+    app.all("/auth/*", async (request, reply) => {
+      if (
+        request.method !== "GET" &&
+        request.method !== "HEAD" &&
+        request.headers.origin !== identity.publicOrigin
+      ) {
+        return reply
+          .code(403)
+          .send({ code: "FORBIDDEN", message: "Invalid origin" });
+      }
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (name === "host" || name === "content-length" || value === undefined)
+          continue;
+        if (Array.isArray(value)) {
+          for (const part of value) headers.append(name, part);
+        } else headers.set(name, value);
+      }
+      const url = new URL(`/api${request.url}`, identity.publicOrigin);
+      const body =
+        request.method === "GET" || request.method === "HEAD"
+          ? undefined
+          : JSON.stringify(request.body);
+      const response = await identity.handler(
+        new Request(url, {
+          method: request.method,
+          headers,
+          ...(body === undefined ? {} : { body }),
+        }),
+      );
+      reply.code(response.status);
+      for (const [name, value] of response.headers) {
+        if (name !== "set-cookie" && name !== "content-length")
+          reply.header(name, value);
+      }
+      const cookies = response.headers.getSetCookie();
+      if (cookies.length > 0) reply.header("set-cookie", cookies);
+      return reply.send(await response.text());
+    });
+  }
 
   app.all("/*", async (request, reply) => {
     const { matched } = await handler.handle(request, reply, {

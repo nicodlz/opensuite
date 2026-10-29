@@ -113,6 +113,21 @@ existing names; serialize provisioning for the same domain, account or alias
 and reconcile ambiguous failures before retrying. Reusing an account does not
 change or verify its password. See [JMAP behaviour](architecture/jmap-behaviour.md).
 
+### Authentication work in progress
+
+The Better Auth factory and Fastify adapter are exercised in the `http` test
+project with a throwaway PostgreSQL container and synthetic provisioning. They
+are not wired into the standard API startup. Signup's provisioning callback
+runs after the database transaction commits; a failed callback can leave an
+unlinked application account. The session gate rejects an unlinked account,
+but repair and reconciliation are not implemented. An app-password response
+can be lost after Stalwart creates it; do not retry issuance automatically until
+the orphan credential has been identified and revoked.
+
+The production provisioning adapter, mailbox disablement workflow, audit events,
+per-IP and per-account rate limiting, roles and protected procedures are still
+required. Do not expose the test adapter as a production authentication service.
+
 ## Known limitations
 
 - **TLS for mail protocols:** the mail server has no certificate yet, so TLS

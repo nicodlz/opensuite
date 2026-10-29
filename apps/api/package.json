@@ -12,9 +12,11 @@
   "dependencies": {
     "@opensuite/contracts": "workspace:*",
     "@opensuite/core": "workspace:*",
+    "@opensuite/db": "workspace:*",
     "@orpc/openapi": "catalog:",
     "@orpc/server": "catalog:",
     "@orpc/zod": "catalog:",
+    "better-auth": "catalog:",
     "fastify": "catalog:",
     "neverthrow": "catalog:",
     "zod": "catalog:"
