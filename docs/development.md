@@ -10,15 +10,16 @@ docker compose up -d
 docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
 ```
 
-| Service          | Image (pinned by digest)         | Role                                                                                           |
-| ---------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `caddy`          | `caddy:2.11.7`                   | HTTPS reverse proxy. `/api/*` goes to the API; JMAP, CalDAV and CardDAV go to the mail server. |
-| `api`            | built from `apps/api/Dockerfile` | Application API (`/health`, `/ready`, `/openapi.json`).                                        |
-| `stalwart`       | `stalwartlabs/stalwart:v1.0.1`   | Mail server: SMTP, IMAP, JMAP, CalDAV, CardDAV. Data in embedded RocksDB.                      |
-| `postgres`       | `postgres:18.6`                  | Application database, plus a separate `opensuite_drive` database.                              |
-| `secrets`        | `alpine:3.24.3`                  | One-shot job: generates local passwords on first start.                                        |
-| `stalwart-setup` | `stalwartlabs/stalwart:v1.0.1`   | One-shot job: applies mail server settings (see below).                                        |
-| `localstack`     | `localstack/localstack:4.14.0`   | `dev` profile only: local S3 bucket and SQS queues for inbound mail.                           |
+| Service          | Image (pinned by digest)                | Role                                                                                           |
+| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `caddy`          | `caddy:2.11.7`                          | HTTPS reverse proxy. `/api/*` goes to the API; JMAP, CalDAV and CardDAV go to the mail server. |
+| `api`            | built from `apps/api/Dockerfile`        | Application API (`/health`, `/ready`, `/openapi.json`).                                        |
+| `stalwart`       | `stalwartlabs/stalwart:v1.0.1`          | Mail server: SMTP, IMAP, JMAP, CalDAV, CardDAV. Data in embedded RocksDB.                      |
+| `postgres`       | `postgres:18.6`                         | Application database, plus a separate `opensuite_drive` database.                              |
+| `migrate`        | built from `deploy/postgres/Dockerfile` | One-shot job: verifies and applies application migrations before the API starts.               |
+| `secrets`        | `alpine:3.24.3`                         | One-shot job: generates local passwords on first start.                                        |
+| `stalwart-setup` | `stalwartlabs/stalwart:v1.0.1`          | One-shot job: applies mail server settings (see below).                                        |
+| `localstack`     | `localstack/localstack:4.14.0`          | `dev` profile only: local S3 bucket and SQS queues for inbound mail.                           |
 
 Every long-running service has a Compose health check and a restart policy.
 Data lives in named volumes: `postgres-data`, `stalwart-data`, `caddy-data`,
@@ -54,8 +55,11 @@ enabled: RFC 8314 recommends implicit TLS for submission and IMAP.
 
 ### Migrations
 
-There is no application schema yet, so no migration runs. When the database
-package lands, a one-shot migration job will run before the API starts.
+The `migrate` job waits for PostgreSQL and applies versioned Prisma migrations
+before the API starts. It checks applied migration checksums before deploying;
+never change or remove an applied migration. See [the database package](../packages/db/README.md)
+for development, encrypted provider secrets, and test instructions. The API
+does not yet use the database or register its readiness probe.
 
 ### Local AWS substitutes
 
@@ -102,6 +106,6 @@ including on failure. Pass `--keep` to leave the stack running for inspection.
 
 ## Planned, not implemented
 
-The web client, the application schema and migrations, authentication, SES
+The web client, authentication, SES
 ingestion, outbound relays, the file storage service, the setup wizard and
 backups.

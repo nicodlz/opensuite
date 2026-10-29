@@ -10,3 +10,6 @@
 !packages/contracts/src/**
 !packages/core/src/**
 !packages/typescript-config/base.json
+!packages/db/prisma/**
+!packages/db/src/**
+packages/db/src/generated/
