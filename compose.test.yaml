@@ -1,0 +1,11 @@
+# Throwaway test overlay: loopback-only random host ports, so several runs
+# (one Compose project each) never collide. Used by scripts/compose-smoke.mjs.
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1::443"
+  stalwart:
+    ports: !override
+      - "127.0.0.1::25"
+      - "127.0.0.1::465"
+      - "127.0.0.1::993"

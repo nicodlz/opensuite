@@ -2,19 +2,35 @@
 
 A self-hostable suite for mail, calendar, contacts and file storage.
 
-> **Status: early development.** Only the API skeleton described below exists.
-> Mail, calendar, contacts, drive, the web client and the Docker Compose
-> installation are planned and not implemented yet.
+> **Status: early development.** Only the pieces listed below exist. Mail
+> provisioning, calendar and contacts features, drive, the web client and the
+> setup wizard are planned and not implemented yet.
 
 ## What works today
 
-- `apps/api`: a Fastify server hosting typed procedures (oRPC, Zod contracts
-  in `packages/contracts`) with structured JSON logs (pino).
+- **Docker Compose stack** (`compose.yaml`): Caddy (automatic HTTPS), the API,
+  the Stalwart mail server (SMTP, IMAP, JMAP, CalDAV, CardDAV on embedded
+  RocksDB), PostgreSQL, and an optional `dev` profile with LocalStack S3/SQS
+  substitutes. Passwords are generated on first start and never stored in
+  `.env` or Git. See [docs/development.md](docs/development.md), including its
+  known limitations (no mail TLS certificate yet).
+- **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
+  contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
   - `GET /ready`: readiness over the declared backing services; `200` when all
     are up, `503` with per-dependency status otherwise. No backing service is
     declared yet, so it currently always reports ready.
   - `GET /openapi.json`: OpenAPI 3.1 document generated from the contracts.
+  - Behind Caddy, these are served under `/api/`.
+
+## Installation
+
+```sh
+git clone <repository> opensuite && cd opensuite
+cp deploy/env.example .env
+docker compose up -d
+curl -k https://localhost/api/health   # `localhost` uses a certificate from Caddy's local CA
+```
 
 ## Development
 
@@ -35,6 +51,7 @@ pnpm lint          # oxlint, type-aware
 pnpm format:check  # Prettier
 pnpm knip          # unused files, exports and dependencies
 pnpm test          # Vitest unit project
+CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
 Vitest projects are selected by file suffix: `*.test.ts` runs in `unit`;

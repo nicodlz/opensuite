@@ -1,0 +1,12 @@
+# Only what the images need; everything else stays out of the build context.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!.npmrc
+!apps/api/package.json
+!apps/api/src/**
+!packages/*/package.json
+!packages/contracts/src/**
+!packages/core/src/**
+!packages/typescript-config/base.json

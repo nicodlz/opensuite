@@ -1,0 +1,29 @@
+# Public entry point. TLS is automatic: Let's Encrypt for a real domain,
+# Caddy's local CA for `localhost`. The admin API stays on the container's
+# loopback interface (health check only); it is not published.
+
+{$OPENSUITE_SITE_ADDRESS:localhost} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	# Application API.
+	handle_path /api/* {
+		reverse_proxy api:3000
+	}
+
+	# Mail server protocols carried over HTTPS: JMAP, CalDAV, CardDAV.
+	@stalwart path /.well-known/jmap /.well-known/caldav /.well-known/carddav /jmap /jmap/* /dav /dav/*
+	handle @stalwart {
+		reverse_proxy stalwart:8080
+	}
+
+	handle {
+		respond "OpenSuite: the web client is not available yet." 404
+	}
+}
