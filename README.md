@@ -14,6 +14,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   substitutes. Passwords are generated on first start and never stored in
   `.env` or Git. See [docs/development.md](docs/development.md), including its
   known limitations (no mail TLS certificate yet).
+- **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -61,19 +62,19 @@ corresponding infrastructure.
 
 ## Repository layout
 
-| Path                         | Contents                                    |
-| ---------------------------- | ------------------------------------------- |
-| `apps/api`                   | HTTP API server                             |
-| `apps/web`                   | Web client (placeholder)                    |
-| `apps/ingest`                | Inbound mail ingestion worker (placeholder) |
-| `apps/drive`                 | File storage service (placeholder)          |
-| `packages/contracts`         | Shared API schemas and procedure contracts  |
-| `packages/core`              | Services (currently readiness evaluation)   |
-| `packages/jmap`              | JMAP client (protocol constants only)       |
-| `packages/db`                | Database access (placeholder)               |
-| `packages/design-tokens`     | Design tokens (placeholder)                 |
-| `packages/typescript-config` | Shared strict TypeScript configuration      |
-| `packages/oxlint-config`     | Shared oxlint configuration                 |
+| Path                         | Contents                                               |
+| ---------------------------- | ------------------------------------------------------ |
+| `apps/api`                   | HTTP API server                                        |
+| `apps/web`                   | Web client (placeholder)                               |
+| `apps/ingest`                | Inbound mail ingestion worker (placeholder)            |
+| `apps/drive`                 | File storage service (placeholder)                     |
+| `packages/contracts`         | Shared API schemas and procedure contracts             |
+| `packages/core`              | Services (currently readiness evaluation)              |
+| `packages/jmap`              | JMAP client (protocol constants only)                  |
+| `packages/db`                | PostgreSQL schema, migration job, and provider storage |
+| `packages/design-tokens`     | Design tokens (placeholder)                            |
+| `packages/typescript-config` | Shared strict TypeScript configuration                 |
+| `packages/oxlint-config`     | Shared oxlint configuration                            |
 
 ## License
 

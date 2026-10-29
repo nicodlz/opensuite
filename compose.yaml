@@ -73,6 +73,9 @@ services:
       API_PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       READINESS_TIMEOUT_MS: ${READINESS_TIMEOUT_MS:-2000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -110,6 +113,28 @@ services:
     depends_on:
       secrets:
         condition: service_completed_successfully
+
+  # Apply versioned migrations before starting the API.
+  migrate:
+    build:
+      context: .
+      dockerfile: deploy/postgres/Dockerfile
+    image: opensuite-migrate:local
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opensuite}
+      POSTGRES_DB: ${POSTGRES_DB:-opensuite}
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/postgres
+        read_only: true
+        volume:
+          subpath: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   stalwart:
     <<: *restart
