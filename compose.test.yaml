@@ -1,6 +1,9 @@
 # Throwaway test overlay: loopback-only random host ports, so several runs
 # (one Compose project each) never collide. Used by scripts/compose-smoke.mjs.
 services:
+  postgres:
+    ports:
+      - "127.0.0.1::5432"
   caddy:
     ports: !override
       - "127.0.0.1::443"

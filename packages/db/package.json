@@ -8,9 +8,18 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "postinstall": "prisma generate",
+    "generate": "prisma generate",
+    "migrate": "node src/migrate.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@opensuite/core": "workspace:*",
+    "@prisma/client": "catalog:",
+    "neverthrow": "catalog:",
+    "prisma": "catalog:",
+    "zod": "catalog:"
+  },
   "devDependencies": {
     "@opensuite/typescript-config": "workspace:*",
     "@types/node": "catalog:",
