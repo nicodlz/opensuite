@@ -146,6 +146,20 @@ describe("Stalwart JMAP integration", () => {
     expect(
       (await new JmapClient(base, { authorization }).discover()).isErr(),
     ).toBe(true);
+    value(await admin.revokeApplicationPasswords(account.id));
+    value(await admin.resumeAccount(account.id));
+    expect(
+      (await new JmapClient(base, { authorization }).discover()).isErr(),
+    ).toBe(true);
+    const replacement = value(await admin.createAppPassword(account.id));
+    const replacementAuth = `Basic ${Buffer.from(`suspended@example.test:${replacement.secret}`).toString("base64")}`;
+    expect(
+      (
+        await new JmapClient(base, {
+          authorization: replacementAuth,
+        }).discover()
+      ).isOk(),
+    ).toBe(true);
   });
 
   it("provisions idempotently and adds an account alias", async () => {

@@ -50,6 +50,12 @@ const AppPasswordSetSchema = z.object({
     .optional(),
   notCreated: z.record(z.string(), SetErrorSchema).nullable().optional(),
 });
+const AppPasswordSchema = z.object({ id: z.string(), description: z.string() });
+const DestroySchema = z.object({
+  accountId: z.string(),
+  destroyed: z.array(z.string()).optional(),
+  notDestroyed: z.record(z.string(), SetErrorSchema).nullable().optional(),
+});
 type Domain = z.infer<typeof DomainSchema>;
 type Account = z.infer<typeof AccountSchema>;
 type Alias = z.infer<typeof AliasSchema>;
@@ -308,6 +314,85 @@ export class StalwartAdmin {
       : err({
           kind: "invalidResponse",
           message: "Missing account suspension result",
+        });
+  }
+
+  /** Revoke all credentials created by this application, including lost responses. */
+  async revokeApplicationPasswords(
+    accountId: string,
+  ): Promise<AdminResult<void>> {
+    const query = await this.#transport.call(
+      this.#api,
+      "x:AppPassword/query",
+      { accountId, limit: 100 },
+      using,
+      QuerySchema,
+    );
+    if (query.isErr()) return err(query.error);
+    if (query.value.position !== 0 || query.value.ids.length >= 100)
+      return err({
+        kind: "invalidResponse",
+        message: "App password list requires reconciliation",
+      });
+    if (query.value.ids.length === 0) return ok(undefined);
+    const found = await this.#transport.call(
+      this.#api,
+      "x:AppPassword/get",
+      { accountId, ids: query.value.ids },
+      using,
+      GetSchema(AppPasswordSchema),
+    );
+    if (found.isErr()) return err(found.error);
+    if (
+      found.value.notFound.length > 0 ||
+      found.value.list.length !== query.value.ids.length
+    )
+      return err({
+        kind: "invalidResponse",
+        message: "App password list changed",
+      });
+    const ids = found.value.list
+      .filter((item) => item.description === "OpenSuite application")
+      .map((item) => item.id);
+    if (ids.length === 0) return ok(undefined);
+    const method = "x:AppPassword/set";
+    const destroyed = await this.#transport.call(
+      this.#api,
+      method,
+      { accountId, destroy: ids },
+      using,
+      DestroySchema,
+    );
+    if (destroyed.isErr()) return err(destroyed.error);
+    const failure = setFailure(method, destroyed.value.notDestroyed);
+    if (failure !== undefined) return err(failure);
+    return ids.every((id) => destroyed.value.destroyed?.includes(id))
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "Missing app password revocation result",
+        });
+  }
+
+  /** Restore the inherited permissions of accounts owned by this provisioner. */
+  async resumeAccount(accountId: string): Promise<AdminResult<void>> {
+    const method = "x:Account/set";
+    const result = await this.#transport.call(
+      this.#api,
+      method,
+      { update: { [accountId]: { permissions: { "@type": "Inherit" } } } },
+      using,
+      SetSchema,
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notUpdated);
+    if (failure !== undefined) return err(failure);
+    return result.value.updated !== undefined &&
+      Object.hasOwn(result.value.updated, accountId)
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "Missing account restoration result",
         });
   }
 }

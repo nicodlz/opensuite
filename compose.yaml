@@ -26,6 +26,10 @@ services:
         }
         generate postgres 999
         generate stalwart-admin 2000
+        generate app-database 999
+        chown 999:1000 /secrets/app-database /secrets/app-database/password
+        chmod 0550 /secrets/app-database
+        chmod 0440 /secrets/app-database/password
     volumes:
       - secrets:/secrets
     network_mode: none
@@ -73,6 +77,16 @@ services:
       API_PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       READINESS_TIMEOUT_MS: ${READINESS_TIMEOUT_MS:-2000}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-opensuite}
+      APP_DATABASE_PASSWORD_FILE: /run/opensuite/app-database/password
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/app-database
+        read_only: true
+        volume:
+          subpath: app-database
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -125,6 +139,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-opensuite}
       POSTGRES_HOST: postgres
       POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
+      APP_DATABASE_PASSWORD_FILE: /run/opensuite/app-database/password
     volumes:
       - type: volume
         source: secrets
@@ -132,6 +147,12 @@ services:
         read_only: true
         volume:
           subpath: postgres
+      - type: volume
+        source: secrets
+        target: /run/opensuite/app-database
+        read_only: true
+        volume:
+          subpath: app-database
     depends_on:
       postgres:
         condition: service_healthy

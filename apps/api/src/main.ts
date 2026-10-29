@@ -1,7 +1,8 @@
 import { createReadinessService } from "@opensuite/core";
+import { createDatabase, createDatabaseProbe } from "@opensuite/db";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
-import { loadConfig } from "./config.ts";
+import { loadApplicationDatabaseUrl, loadConfig } from "./config.ts";
 import { buildServer } from "./server.ts";
 
 const config = loadConfig(process.env);
@@ -13,17 +14,32 @@ if (config.isErr()) {
 }
 
 const monotonicMs = () => performance.now();
+const url = await loadApplicationDatabaseUrl(process.env);
+if (url.isErr()) {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "invalid database configuration", issues: url.error.issues })}\n`,
+  );
+  process.exit(1);
+}
+const database = createDatabase(url.value);
+if (database.isErr()) {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "invalid database configuration" })}\n`,
+  );
+  process.exit(1);
+}
 
-// Declared dependencies: none yet. Each backing service (database, mail
-// server) registers its probe here as it is wired in.
 const readiness = createReadinessService({
-  probes: [],
+  probes: [createDatabaseProbe(database.value)],
   timeoutMs: config.value.readinessTimeoutMs,
   now: () => new Date(),
   monotonicMs,
 });
 
 const app = await buildServer({ config: config.value, readiness, monotonicMs });
+app.addHook("onClose", async () => {
+  await database.value.$disconnect();
+});
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
