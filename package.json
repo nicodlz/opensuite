@@ -14,7 +14,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "knip": "knip",
-    "test": "vitest run --project unit"
+    "test": "vitest run --project unit",
+    "iac:validate": "node scripts/iac-validate.mjs"
   },
   "devDependencies": {
     "@opensuite/core": "workspace:*",

@@ -90,6 +90,14 @@ certificate authority:
 It writes a JUnit report and always removes the containers and volumes,
 including on failure. Pass `--keep` to leave the stack running for inspection.
 
+## AWS infrastructure validation
+
+Run `node scripts/iac-validate.mjs` to check formatting and validate the pinned
+OpenTofu module in Docker without AWS credentials or a backend. Only provider
+download uses networking. See [AWS deployment](deployment/aws.md) for operator
+setup and the limits of offline validation. The ingestion worker and SES relay
+remain unimplemented.
+
 ## Known limitations
 
 - **TLS for mail protocols:** the mail server has no certificate yet, so TLS

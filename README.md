@@ -32,6 +32,8 @@ docker compose up -d
 curl -k https://localhost/api/health   # `localhost` uses a certificate from Caddy's local CA
 ```
 
+For the candidate AWS mail infrastructure, see [docs/deployment/aws.md](docs/deployment/aws.md). It is validated offline and has not been applied or tested with AWS. Drive storage is planned for Backblaze B2.
+
 ## Development
 
 Requirements: Node.js 22.18 or later, pnpm 12.
@@ -50,6 +52,7 @@ pnpm typecheck
 pnpm lint          # oxlint, type-aware
 pnpm format:check  # Prettier
 pnpm knip          # unused files, exports and dependencies
+node scripts/iac-validate.mjs # offline AWS module checks (Docker required)
 pnpm test          # Vitest unit project
 CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
