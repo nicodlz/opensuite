@@ -5,6 +5,9 @@
       "entry": ["test-support/**/*.ts"]
     },
     "apps/*": {},
-    "packages/*": {}
+    "packages/*": {},
+    "apps/web": {
+      "entry": ["src/styles.css"]
+    }
   }
 }

@@ -5,10 +5,38 @@
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {
     "@opensuite/typescript-config": "workspace:*",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "@tailwindcss/vite": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "tailwindcss": "catalog:",
+    "vite": "catalog:"
+  },
+  "dependencies": {
+    "@orpc/client": "catalog:",
+    "@radix-ui/react-dialog": "catalog:",
+    "@radix-ui/react-dropdown-menu": "catalog:",
+    "@radix-ui/react-label": "catalog:",
+    "@radix-ui/react-slot": "catalog:",
+    "@radix-ui/react-toast": "catalog:",
+    "@tanstack/react-query": "catalog:",
+    "@tanstack/react-router": "catalog:",
+    "class-variance-authority": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "@opensuite/contracts": "workspace:*",
+    "@opensuite/design-tokens": "workspace:*",
+    "@orpc/openapi-client": "catalog:",
+    "@orpc/contract": "catalog:",
+    "@fontsource-variable/space-grotesk": "catalog:",
+    "@fontsource-variable/dm-sans": "catalog:"
   }
 }

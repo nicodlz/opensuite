@@ -1,1 +1,2 @@
-// Design tokens shared by the web client. Not implemented yet.
+export type ThemeChoice = "system" | "light" | "dark";
+export const themeChoices: readonly ThemeChoice[] = ["system", "light", "dark"];

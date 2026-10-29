@@ -64,14 +64,16 @@
     {
       "files": [
         "**/packages/db/src/index.ts",
-        "**/packages/design-tokens/src/index.ts",
-        "**/apps/web/src/main.tsx",
         "**/apps/ingest/src/main.ts",
         "**/apps/drive/src/main.ts"
       ],
       "rules": {
         "unicorn/no-empty-file": "off"
       }
+    },
+    {
+      "files": ["**/apps/web/**/*.{ts,tsx}"],
+      "plugins": ["react", "react-hooks", "jsx-a11y"]
     }
   ]
 }
