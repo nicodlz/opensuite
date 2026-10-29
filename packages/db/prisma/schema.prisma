@@ -131,3 +131,31 @@ model AuditEvent {
 
   @@index([userId, createdAt])
 }
+
+// The envelope must remain recoverable even when no local user matches it.
+model InboundMessage {
+  id             String             @id
+  bucket         String
+  objectKey      String
+  notification   Json
+  state          String             @default("received")
+  receivedAt     DateTime
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  recipients     InboundRecipient[]
+}
+
+model InboundRecipient {
+  idempotencyKey String         @id
+  messageId      String
+  message        InboundMessage @relation(fields: [messageId], references: [id], onDelete: Restrict)
+  destination    String
+  addresses      Json
+  state          String         @default("received")
+  attempts       Int            @default(0)
+  remoteId       String?
+  error          String?
+  updatedAt      DateTime       @updatedAt
+
+  @@index([messageId])
+}
