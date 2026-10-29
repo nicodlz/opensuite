@@ -113,7 +113,14 @@ describe("routing and contract", () => {
       paths: Record<string, Record<string, { responses: object }>>;
     }>();
     expect(document.openapi).toMatch(/^3\.1/);
-    expect(Object.keys(document.paths)).toEqual(["/health", "/ready"]);
+    expect(Object.keys(document.paths)).toEqual(
+      expect.arrayContaining([
+        "/health",
+        "/ready",
+        "/account/me",
+        "/admin/accounts",
+      ]),
+    );
     expect(
       Object.keys(document.paths["/ready"]?.["get"]?.responses ?? {}),
     ).toEqual(expect.arrayContaining(["200", "503"]));

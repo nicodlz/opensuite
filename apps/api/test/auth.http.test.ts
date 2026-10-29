@@ -2,8 +2,14 @@ import { execFile } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { createReadinessService } from "@opensuite/core";
-import { createDatabase, createMailboxStore } from "@opensuite/db";
+import {
+  configureApplicationRole,
+  createAccountStore,
+  createDatabase,
+  createMailboxStore,
+} from "@opensuite/db";
 import type { FastifyInstance } from "fastify";
+import { err } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createIdentity } from "../src/auth/identity.ts";
@@ -17,6 +23,7 @@ let base: string;
 let databaseUrl: string;
 let disconnect = () => Promise.resolve();
 const provisioned = new Set<string>();
+const resolved = () => Promise.resolve();
 const monotonicMs = () => performance.now();
 const waitForDatabase = async (attempt: number): Promise<void> => {
   try {
@@ -40,6 +47,8 @@ beforeAll(async () => {
       container,
       "-e",
       "POSTGRES_PASSWORD=test-password",
+      "-e",
+      "POSTGRES_INITDB_ARGS=--no-sync",
       "-p",
       "127.0.0.1::5432",
       "postgres:18.6",
@@ -72,6 +81,7 @@ beforeAll(async () => {
       },
       mayStartSession: (userId) => Promise.resolve(provisioned.has(userId)),
     });
+    const accounts = createAccountStore(db);
     app = await buildServer({
       config: { logLevel: "silent" },
       readiness: createReadinessService({
@@ -81,7 +91,33 @@ beforeAll(async () => {
         monotonicMs,
       }),
       monotonicMs,
-      identity: { handler: identity.handler, publicOrigin: origin },
+      identity: {
+        handler: identity.handler,
+        publicOrigin: origin,
+        actor: async (headers) => {
+          const session = await identity.api.getSession({ headers });
+          if (session === null) return null;
+          const actor = await accounts.actor(session.user.id);
+          return actor.isOk() ? actor.value : null;
+        },
+        userIdForEmail: async (email) => {
+          const result = await accounts.userIdForEmail(email);
+          if (result.isErr()) throw new Error("account lookup failed");
+          return result.value;
+        },
+        audit: async (event) => {
+          const result = await accounts.audit(event);
+          if (result.isErr()) throw new Error("audit failed");
+        },
+      },
+      accounts: {
+        mailbox: async (actor, accountId) => accounts.mailbox(actor, accountId),
+        list: async (actor) => accounts.list(actor),
+        disable: () =>
+          Promise.resolve(
+            err({ kind: "unavailable", message: "not configured" }),
+          ),
+      },
     });
     base = await app.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
@@ -116,6 +152,174 @@ const post = (
   });
 
 describe("identity over HTTP", () => {
+  it("limits repeated password attempts per account", async () => {
+    const data = {
+      email: "limited@example.test",
+      name: "Limited",
+      password: "a-strong-test-password",
+    };
+    expect((await post("sign-up/email", data)).status).toBe(200);
+    const attempt = async (remaining: number): Promise<Response> => {
+      const response = await post("sign-in/email", {
+        email: data.email,
+        password: "incorrect-password",
+      });
+      return remaining === 1 ? response : attempt(remaining - 1);
+    };
+    const response = await attempt(6);
+    expect(response.status).toBe(429);
+    expect(Number(response.headers.get("retry-after"))).toBeGreaterThan(0);
+    const dbResult = createDatabase(databaseUrl);
+    if (dbResult.isErr()) throw new Error(dbResult.error.message);
+    const db = dbResult.value;
+    try {
+      const user = await db.user.findUniqueOrThrow({
+        where: { email: data.email },
+      });
+      expect(
+        await db.auditEvent.count({
+          where: { userId: user.id, action: "sign_in.failure" },
+        }),
+      ).toBe(5);
+      expect(
+        await db.auditEvent.count({
+          where: { userId: user.id, action: "authentication.rate_limited" },
+        }),
+      ).toBe(1);
+    } finally {
+      await db.$disconnect();
+    }
+  });
+  it("enforces account and administrator authorization through HTTP", async () => {
+    const ownerData = {
+      email: "route-owner@example.test",
+      name: "Owner",
+      password: "route-strong-password",
+    };
+    const userData = {
+      email: "route-user@example.test",
+      name: "User",
+      password: "route-strong-password",
+    };
+    const ownerSignup = await post("sign-up/email", ownerData);
+    const userSignup = await post("sign-up/email", userData);
+    expect(ownerSignup.status).toBe(200);
+    expect(userSignup.status).toBe(200);
+    const ownerResponse: unknown = await ownerSignup.json();
+    const ownerId = z
+      .object({ user: z.object({ id: z.string() }) })
+      .parse(ownerResponse).user.id;
+    const database = createDatabase(databaseUrl);
+    if (database.isErr()) throw new Error(database.error.message);
+    const db = database.value;
+    try {
+      await db.user.update({ where: { id: ownerId }, data: { role: "admin" } });
+      const storeResult = createMailboxStore(db, "cd".repeat(32));
+      if (storeResult.isErr()) throw new Error(storeResult.error.message);
+      expect(
+        (
+          await storeResult.value.create({
+            userId: ownerId,
+            accountId: "private-mailbox",
+            address: ownerData.email,
+            credentialId: "private",
+            secret: "private-secret",
+          })
+        ).isOk(),
+      ).toBe(true);
+      const login = await post("sign-in/email", {
+        email: userData.email,
+        password: userData.password,
+      });
+      const userCookie = login.headers
+        .getSetCookie()
+        .map((item) => item.split(";")[0])
+        .join("; ");
+      expect(
+        (await fetch(`${base}/account/me`, { headers: { cookie: userCookie } }))
+          .status,
+      ).toBe(200);
+      expect(
+        (
+          await fetch(`${base}/admin/accounts`, {
+            headers: { cookie: userCookie },
+          })
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await fetch(`${base}/account/mailbox/private-mailbox`, {
+            headers: { cookie: userCookie },
+          })
+        ).status,
+      ).toBe(403);
+      const adminLogin = await post("sign-in/email", {
+        email: ownerData.email,
+        password: ownerData.password,
+      });
+      const adminCookie = adminLogin.headers
+        .getSetCookie()
+        .map((item) => item.split(";")[0])
+        .join("; ");
+      expect(
+        (
+          await fetch(`${base}/admin/accounts`, {
+            headers: { cookie: adminCookie },
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        await db.auditEvent.count({
+          where: { userId: ownerId, action: "admin.accounts.list" },
+        }),
+      ).toBe(1);
+    } finally {
+      await db.$disconnect();
+    }
+  });
+  it("uses a non-owner database role that can append but cannot change audit history", async () => {
+    const ownerResult = createDatabase(databaseUrl);
+    if (ownerResult.isErr()) throw new Error(ownerResult.error.message);
+    const owner = ownerResult.value;
+    const password = "application-test-password-32-characters-long";
+    let appDisconnect = resolved;
+    try {
+      await configureApplicationRole(owner, password);
+      const url = new URL(databaseUrl);
+      url.username = "opensuite_app";
+      url.password = password;
+      const appResult = createDatabase(url.toString());
+      if (appResult.isErr()) throw new Error(appResult.error.message);
+      const application = appResult.value;
+      appDisconnect = () => application.$disconnect();
+      await application.auditEvent.create({
+        data: { action: "test.append", detail: {} },
+      });
+      expect(
+        (
+          await application.auditEvent.findMany({
+            where: { action: "test.append" },
+          })
+        ).length,
+      ).toBe(1);
+      await expect(
+        application.$executeRaw`UPDATE "AuditEvent" SET action = 'changed'`,
+      ).rejects.toThrow(/permission denied/i);
+      await expect(
+        application.$executeRaw`TRUNCATE "AuditEvent"`,
+      ).rejects.toThrow(/permission denied/i);
+      const role = z
+        .array(z.object({ rolsuper: z.boolean(), owner: z.boolean() }))
+        .length(1)
+        .parse(
+          await application.$queryRaw`SELECT r.rolsuper, (c.relowner = r.oid) AS owner FROM pg_roles r JOIN pg_class c ON c.relname = 'AuditEvent' WHERE r.rolname = current_user`,
+        );
+      expect(role[0]).toEqual({ rolsuper: false, owner: false });
+    } finally {
+      await appDisconnect();
+      await owner.$disconnect();
+    }
+  });
   it("stores an encrypted mailbox credential and scopes it to its owner", async () => {
     const dbResult = createDatabase(databaseUrl);
     if (dbResult.isErr()) throw new Error(dbResult.error.message);
@@ -188,7 +392,12 @@ describe("identity over HTTP", () => {
     };
     const signup = await post("sign-up/email", data);
     expect(signup.status).toBe(200);
-    expect(provisioned.size).toBe(1);
+    const created: unknown = await signup.json();
+    expect(
+      provisioned.has(
+        z.object({ user: z.object({ id: z.string() }) }).parse(created).user.id,
+      ),
+    ).toBe(true);
     const signIn = await post("sign-in/email", {
       email: data.email,
       password: data.password,

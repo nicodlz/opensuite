@@ -29,6 +29,16 @@ model User {
   auditEvents      AuditEvent[]
   twoFactor        TwoFactor?
   mailbox          MailboxLink?
+  mailboxProvision MailboxProvision?
+}
+
+model MailboxProvision {
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId String?
+  address   String?
+  state     String   @default("pending")
+  updatedAt DateTime @updatedAt
 }
 
 model TwoFactor {

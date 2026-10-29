@@ -59,7 +59,9 @@ The `migrate` job waits for PostgreSQL and applies versioned Prisma migrations
 before the API starts. It checks applied migration checksums before deploying;
 never change or remove an applied migration. See [the database package](../packages/db/README.md)
 for development, encrypted provider secrets, and test instructions. The API
-does not yet use the database or register its readiness probe.
+uses a separate application database login and registers a database readiness
+probe. The migration job configures that login after applying migrations;
+it can append and read audit rows but cannot change or truncate them.
 
 ### Local AWS substitutes
 
