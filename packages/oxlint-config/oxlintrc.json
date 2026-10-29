@@ -62,6 +62,17 @@
   },
   "overrides": [
     {
+      "files": ["**/scripts/compose-smoke.mjs"],
+      "rules": {
+        "typescript/no-unsafe-argument": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-return": "off",
+        "no-await-in-loop": "off"
+      }
+    },
+    {
       "files": [
         "**/packages/db/src/index.ts",
         "**/packages/design-tokens/src/index.ts",
