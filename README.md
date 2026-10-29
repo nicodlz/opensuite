@@ -3,8 +3,8 @@
 A self-hostable suite for mail, calendar, contacts and file storage.
 
 > **Status: early development.** Only the pieces listed below exist. Mail
-> provisioning, calendar and contacts features, drive and the setup wizard are
-> planned and not implemented yet.
+> application-level mail provisioning, calendar and contacts features, drive and
+> the setup wizard are planned and not implemented yet.
 
 ## What works today
 
@@ -18,6 +18,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
 - **Web client** (`apps/web`): a static application shell with a live API
   status page. Mail, calendar, contacts, drive, search, accounts and compose
   are placeholders. See [apps/web/README.md](apps/web/README.md).
+- **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -59,6 +60,7 @@ pnpm knip          # unused files, exports and dependencies
 pnpm test          # Vitest unit project
 pnpm build         # static web client
 pnpm test:e2e      # Vite preview and a local API; install Chromium first
+pnpm exec vitest run --project stalwart  # real server; Docker required
 CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
@@ -77,7 +79,7 @@ corresponding infrastructure.
 | `apps/drive`                 | File storage service (placeholder)                     |
 | `packages/contracts`         | Shared API schemas and procedure contracts             |
 | `packages/core`              | Services (currently readiness evaluation)              |
-| `packages/jmap`              | JMAP client (protocol constants only)                  |
+| `packages/jmap`              | JMAP client and Stalwart provisioning client           |
 | `packages/db`                | PostgreSQL schema, migration job, and provider storage |
 | `packages/design-tokens`     | Shared light and dark theme tokens                     |
 | `packages/typescript-config` | Shared strict TypeScript configuration                 |
