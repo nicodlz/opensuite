@@ -23,6 +23,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   backend for new or migrated installations. The
   [object storage guide](docs/operations/object-storage.md) covers restart,
   migration, backup and recovery requirements.
+- **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -82,11 +83,11 @@ corresponding infrastructure.
 | ---------------------------- | ------------------------------------------------------ |
 | `apps/api`                   | HTTP API server                                        |
 | `apps/web`                   | Web shell and API status page                          |
-| `apps/ingest`                | Inbound mail ingestion worker (placeholder)            |
+| `apps/ingest`                | Inbound mail ingestion worker                          |
 | `apps/drive`                 | File storage service (placeholder)                     |
 | `packages/contracts`         | Shared API schemas and procedure contracts             |
-| `packages/core`              | Services (currently readiness evaluation)              |
-| `packages/jmap`              | JMAP client and Stalwart provisioning client           |
+| `packages/core`              | Domain, services and provider adapters                 |
+| `packages/jmap`              | JMAP and server-side provisioning clients              |
 | `packages/db`                | PostgreSQL schema, migration job, and provider storage |
 | `packages/design-tokens`     | Shared light and dark theme tokens                     |
 | `packages/typescript-config` | Shared strict TypeScript configuration                 |
