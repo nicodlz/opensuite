@@ -40,6 +40,93 @@ const Context = z.object({ userId: z.string().min(1), id: z.string().min(1) });
 const aad = (context: z.infer<typeof Context>) =>
   Buffer.from(JSON.stringify([context.userId, context.id]));
 
+const encryptSecret = (
+  key: Buffer,
+  value: unknown,
+  context: unknown,
+): Result<string, DatabaseError> => {
+  const input = z.string().min(1).safeParse(value);
+  const owner = Context.safeParse(context);
+  if (!input.success || !owner.success)
+    return err({
+      kind: "invalid_input",
+      message: "invalid secret or context",
+    });
+  try {
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    cipher.setAAD(aad(owner.data));
+    const encrypted = Buffer.concat([
+      cipher.update(input.data, "utf8"),
+      cipher.final(),
+    ]);
+    return ok(
+      [
+        "v1",
+        nonce.toString("base64url"),
+        encrypted.toString("base64url"),
+        cipher.getAuthTag().toString("base64url"),
+      ].join("."),
+    );
+  } catch {
+    return err({
+      kind: "crypto_error",
+      message: "secret encryption failed",
+    });
+  }
+};
+
+const decryptSecret = (
+  key: Buffer,
+  value: unknown,
+  context: unknown,
+): Result<string, DatabaseError> => {
+  const input = Encoded.safeParse(value);
+  const owner = Context.safeParse(context);
+  if (!input.success || !owner.success)
+    return err({
+      kind: "crypto_error",
+      message: "invalid encrypted secret",
+    });
+  const parts = input.data.split(".");
+  const nonce = parts[1];
+  const ciphertext = parts[2];
+  const tag = parts[3];
+  if (nonce === undefined || ciphertext === undefined || tag === undefined)
+    return err({
+      kind: "crypto_error",
+      message: "invalid encrypted secret",
+    });
+  try {
+    const nonceBytes = Buffer.from(nonce, "base64url");
+    const encryptedBytes = Buffer.from(ciphertext, "base64url");
+    const tagBytes = Buffer.from(tag, "base64url");
+    if (
+      nonceBytes.toString("base64url") !== nonce ||
+      encryptedBytes.toString("base64url") !== ciphertext ||
+      tagBytes.toString("base64url") !== tag
+    )
+      return err({
+        kind: "crypto_error",
+        message: "invalid encrypted secret",
+      });
+    const decipher = createDecipheriv("aes-256-gcm", key, nonceBytes);
+    decipher.setAAD(aad(owner.data));
+    decipher.setAuthTag(tagBytes);
+    return ok(
+      Buffer.concat([
+        decipher.update(encryptedBytes),
+        decipher.final(),
+      ]).toString("utf8"),
+    );
+  } catch {
+    return err({
+      kind: "crypto_error",
+      message: "secret authentication failed",
+    });
+  }
+};
+
 /** AES-GCM binds ciphertext to both the owner and the configuration ID. */
 export const createSecretBox = (
   key: unknown,
@@ -58,82 +145,7 @@ export const createSecretBox = (
     });
   const bytes = Buffer.from(parsedKey.data, "hex");
   return ok({
-    encrypt(value, context) {
-      const input = z.string().min(1).safeParse(value);
-      const owner = Context.safeParse(context);
-      if (!input.success || !owner.success)
-        return err({
-          kind: "invalid_input",
-          message: "invalid secret or context",
-        });
-      try {
-        const nonce = randomBytes(12);
-        const cipher = createCipheriv("aes-256-gcm", bytes, nonce);
-        cipher.setAAD(aad(owner.data));
-        const encrypted = Buffer.concat([
-          cipher.update(input.data, "utf8"),
-          cipher.final(),
-        ]);
-        return ok(
-          [
-            "v1",
-            nonce.toString("base64url"),
-            encrypted.toString("base64url"),
-            cipher.getAuthTag().toString("base64url"),
-          ].join("."),
-        );
-      } catch {
-        return err({
-          kind: "crypto_error",
-          message: "secret encryption failed",
-        });
-      }
-    },
-    decrypt(value, context) {
-      const input = Encoded.safeParse(value);
-      const owner = Context.safeParse(context);
-      if (!input.success || !owner.success)
-        return err({
-          kind: "crypto_error",
-          message: "invalid encrypted secret",
-        });
-      const parts = input.data.split(".");
-      const nonce = parts[1];
-      const ciphertext = parts[2];
-      const tag = parts[3];
-      if (nonce === undefined || ciphertext === undefined || tag === undefined)
-        return err({
-          kind: "crypto_error",
-          message: "invalid encrypted secret",
-        });
-      try {
-        const nonceBytes = Buffer.from(nonce, "base64url");
-        const encryptedBytes = Buffer.from(ciphertext, "base64url");
-        const tagBytes = Buffer.from(tag, "base64url");
-        if (
-          nonceBytes.toString("base64url") !== nonce ||
-          encryptedBytes.toString("base64url") !== ciphertext ||
-          tagBytes.toString("base64url") !== tag
-        )
-          return err({
-            kind: "crypto_error",
-            message: "invalid encrypted secret",
-          });
-        const decipher = createDecipheriv("aes-256-gcm", bytes, nonceBytes);
-        decipher.setAAD(aad(owner.data));
-        decipher.setAuthTag(tagBytes);
-        return ok(
-          Buffer.concat([
-            decipher.update(encryptedBytes),
-            decipher.final(),
-          ]).toString("utf8"),
-        );
-      } catch {
-        return err({
-          kind: "crypto_error",
-          message: "secret authentication failed",
-        });
-      }
-    },
+    encrypt: (value, context) => encryptSecret(bytes, value, context),
+    decrypt: (value, context) => decryptSecret(bytes, value, context),
   });
 };

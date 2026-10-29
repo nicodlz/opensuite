@@ -1,8 +1,21 @@
-import type { DependencyProbe, ProbeFailure } from "@opensuite/core";
 import { err, errAsync, ok, ResultAsync, type Result } from "neverthrow";
 import { z } from "zod";
 import { PrismaClient } from "./generated/index.js";
 import type { DatabaseError } from "./errors.ts";
+
+/**
+ * Readiness failure, structurally compatible with the service layer's probe
+ * contract; the database layer does not depend on the service layer.
+ */
+interface ProbeFailure {
+  readonly kind: "unavailable" | "timeout";
+  readonly message: string;
+}
+
+interface DatabaseProbe {
+  readonly name: string;
+  check(signal: AbortSignal): ResultAsync<void, ProbeFailure>;
+}
 
 export const createDatabase = (
   url: unknown,
@@ -23,7 +36,7 @@ export const createDatabase = (
   return ok(new PrismaClient({ datasources: { db: { url: parsed.data } } }));
 };
 
-export const createDatabaseProbe = (client: PrismaClient): DependencyProbe => ({
+export const createDatabaseProbe = (client: PrismaClient): DatabaseProbe => ({
   name: "database",
   check(signal) {
     if (signal.aborted)

@@ -21,7 +21,7 @@ if (values.report === undefined) {
 }
 const reportPath = values.report;
 
-const runId = (process.env.CLEITO_RUN_ID ?? `local-${String(Date.now())}`)
+const runId = (process.env["CLEITO_RUN_ID"] ?? `local-${String(Date.now())}`)
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-");
 const project = `opensuite-smoke-${runId}`;
@@ -112,6 +112,27 @@ const smtpBanner = (port) =>
   });
 
 /**
+ * @param {string} text
+ * @returns {unknown}
+ */
+const parseJson = (text) => JSON.parse(text);
+
+/**
+ * Reads one property of an untrusted JSON value.
+ * @param {unknown} value
+ * @param {string} key
+ * @returns {unknown}
+ */
+const field = (value, key) =>
+  typeof value === "object" && value !== null
+    ? Reflect.get(value, key)
+    : undefined;
+
+/** @param {unknown} value */
+const keyCount = (value) =>
+  typeof value === "object" && value !== null ? Object.keys(value).length : 0;
+
+/**
  * @param {boolean} condition
  * @param {string} message
  * @returns {asserts condition}
@@ -122,6 +143,7 @@ const assert = (condition, message) => {
 
 /** @type {{ name: string, seconds: number, failure?: string }[]} */
 const cases = [];
+const redirects = new Set([301, 302, 307, 308]);
 /**
  * @param {string} name
  * @param {() => Promise<void>} fn
@@ -212,15 +234,15 @@ try {
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    const unhealthy = services.filter((s) => s.Health !== "healthy");
+      .map((line) => parseJson(line));
+    const unhealthy = services.filter((s) => field(s, "Health") !== "healthy");
     assert(
       services.length >= 4,
       `expected 4 running services, got ${String(services.length)}`,
     );
     assert(
       unhealthy.length === 0,
-      `not healthy: ${unhealthy.map((s) => `${s.Service}=${s.Health || s.State}`).join(", ")}`,
+      `not healthy: ${unhealthy.map((s) => `${String(field(s, "Service"))}=${String(field(s, "Health") || field(s, "State"))}`).join(", ")}`,
     );
   });
 
@@ -246,19 +268,22 @@ try {
   await test("API liveness through the proxy over verified TLS", async () => {
     const res = await request(httpsPort, ca, "/api/health");
     assert(res.status === 200, `status ${String(res.status)}`);
-    assert(JSON.parse(res.body).status === "ok", `body ${res.body}`);
+    assert(field(parseJson(res.body), "status") === "ok", `body ${res.body}`);
   });
 
   await test("API readiness through the proxy", async () => {
     const res = await request(httpsPort, ca, "/api/ready");
     assert(res.status === 200, `status ${String(res.status)}: ${res.body}`);
-    assert(JSON.parse(res.body).status === "ready", `body ${res.body}`);
+    assert(
+      field(parseJson(res.body), "status") === "ready",
+      `body ${res.body}`,
+    );
   });
 
   await test("JMAP discovery leads to an authenticated session", async () => {
     const discovery = await request(httpsPort, ca, "/.well-known/jmap");
     assert(
-      [301, 302, 307, 308].includes(discovery.status),
+      redirects.has(discovery.status),
       `discovery status ${String(discovery.status)}`,
     );
     const location = new URL(
@@ -272,23 +297,23 @@ try {
       `anonymous session status ${String(anonymous.status)}`,
     );
     assert(
-      Object.keys(JSON.parse(anonymous.body).accounts ?? {}).length === 0,
+      keyCount(field(parseJson(anonymous.body), "accounts")) === 0,
       "anonymous session exposes accounts",
     );
     const session = await request(httpsPort, ca, location.pathname, {
       authorization: adminAuth,
     });
     assert(session.status === 200, `session status ${String(session.status)}`);
-    const body = JSON.parse(session.body);
+    const body = parseJson(session.body);
     assert(
-      "urn:ietf:params:jmap:core" in (body.capabilities ?? {}),
+      field(field(body, "capabilities"), "urn:ietf:params:jmap:core") !==
+        undefined,
       "JMAP core capability missing",
     );
-    assert(body.username === "admin", `session user ${String(body.username)}`);
-    assert(
-      String(body.apiUrl).startsWith("https://localhost/"),
-      `apiUrl ${String(body.apiUrl)}`,
-    );
+    const username = field(body, "username");
+    assert(username === "admin", `session user ${String(username)}`);
+    const apiUrl = String(field(body, "apiUrl"));
+    assert(apiUrl.startsWith("https://localhost/"), `apiUrl ${apiUrl}`);
     const wrong = await request(httpsPort, ca, location.pathname, {
       authorization: `Basic ${Buffer.from("admin:wrong").toString("base64")}`,
     });
@@ -305,11 +330,11 @@ try {
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line));
+      .map((line) => parseJson(line));
     assert(setup.length === 1, "stalwart-setup container missing");
     assert(
-      setup[0].ExitCode === 0,
-      `stalwart-setup exit code ${String(setup[0].ExitCode)}`,
+      field(setup[0], "ExitCode") === 0,
+      `stalwart-setup exit code ${String(field(setup[0], "ExitCode"))}`,
     );
     // Idempotent: a second run against the configured server succeeds too.
     await compose(
@@ -330,19 +355,19 @@ try {
     assert(res.status === 307, `status ${String(res.status)}`);
   });
 
-  for (const kind of ["caldav", "carddav"]) {
-    await test(`${kind === "caldav" ? "CalDAV" : "CardDAV"} discovery through the proxy`, async () => {
-      const res = await request(httpsPort, ca, `/.well-known/${kind}`);
-      assert(
-        [301, 302, 307, 308].includes(res.status),
-        `status ${String(res.status)}`,
-      );
-      assert(
-        String(res.headers.location).includes("/dav"),
-        `location ${String(res.headers.location)}`,
-      );
-    });
-  }
+  /** @param {"caldav" | "carddav"} kind */
+  const davDiscovery = async (kind) => {
+    const res = await request(httpsPort, ca, `/.well-known/${kind}`);
+    assert(redirects.has(res.status), `status ${String(res.status)}`);
+    assert(
+      String(res.headers.location).includes("/dav"),
+      `location ${String(res.headers.location)}`,
+    );
+  };
+  await test("CalDAV discovery through the proxy", () =>
+    davDiscovery("caldav"));
+  await test("CardDAV discovery through the proxy", () =>
+    davDiscovery("carddav"));
 
   await test("SMTP listener greets on the published port", async () => {
     const banner = await smtpBanner(await hostPort("stalwart", "25"));

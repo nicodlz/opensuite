@@ -1,4 +1,8 @@
 {
   "extends": "@opensuite/typescript-config/base.json",
-  "include": ["vitest.config.ts", "test-support/**/*.ts"]
+  "include": ["vitest.config.ts", "test-support/**/*.ts", "scripts/**/*.mjs"],
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true
+  }
 }

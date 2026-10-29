@@ -14,7 +14,6 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@opensuite/core": "workspace:*",
     "@prisma/client": "catalog:",
     "neverthrow": "catalog:",
     "prisma": "catalog:",

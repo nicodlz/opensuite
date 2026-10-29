@@ -364,9 +364,6 @@ importers:
 
   packages/db:
     dependencies:
-      '@opensuite/core':
-        specifier: workspace:*
-        version: link:../core
       '@prisma/client':
         specifier: 'catalog:'
         version: 6.19.3(prisma@6.19.3(typescript@6.0.3))(typescript@6.0.3)
