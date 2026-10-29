@@ -43,6 +43,13 @@ const SetSchema = z.object({
   notCreated: z.record(z.string(), SetErrorSchema).nullable().optional(),
   notUpdated: z.record(z.string(), SetErrorSchema).nullable().optional(),
 });
+const AppPasswordSetSchema = z.object({
+  accountId: z.string(),
+  created: z
+    .record(z.string(), z.object({ id: z.string(), secret: z.string().min(1) }))
+    .optional(),
+  notCreated: z.record(z.string(), SetErrorSchema).nullable().optional(),
+});
 type Domain = z.infer<typeof DomainSchema>;
 type Account = z.infer<typeof AccountSchema>;
 type Alias = z.infer<typeof AliasSchema>;
@@ -235,6 +242,72 @@ export class StalwartAdmin {
       : err({
           kind: "invalidResponse",
           message: "Missing alias update result",
+        });
+  }
+
+  /** A returned app password is only available once. Reconcile ambiguous failures. */
+  async createAppPassword(
+    accountId: string,
+  ): Promise<AdminResult<{ id: string; secret: string }>> {
+    const method = "x:AppPassword/set";
+    const result = await this.#transport.call(
+      this.#api,
+      method,
+      {
+        accountId,
+        create: {
+          item: {
+            description: "OpenSuite application",
+            permissions: { "@type": "Inherit" },
+            allowedIps: {},
+          },
+        },
+      },
+      using,
+      AppPasswordSetSchema,
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notCreated);
+    if (failure !== undefined) return err(failure);
+    const credential = result.value.created?.["item"];
+    return credential === undefined
+      ? err({ kind: "invalidResponse", message: "Missing app password result" })
+      : ok(credential);
+  }
+
+  /** Suspend accounts created with the default inherited permissions. */
+  async suspendAccount(accountId: string): Promise<AdminResult<void>> {
+    const method = "x:Account/set";
+    const result = await this.#transport.call(
+      this.#api,
+      method,
+      {
+        update: {
+          [accountId]: {
+            permissions: {
+              "@type": "Merge",
+              enabledPermissions: {},
+              disabledPermissions: {
+                authenticate: true,
+                emailReceive: true,
+                emailSend: true,
+              },
+            },
+          },
+        },
+      },
+      using,
+      SetSchema,
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notUpdated);
+    if (failure !== undefined) return err(failure);
+    return result.value.updated !== undefined &&
+      Object.hasOwn(result.value.updated, accountId)
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "Missing account suspension result",
         });
   }
 }
