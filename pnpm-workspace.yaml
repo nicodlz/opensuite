@@ -21,6 +21,9 @@ catalog:
   typescript: 6.0.3
   vitest: 5.0.5
   zod: 4.6.7
+  dompurify: 3.3.3
+  jsdom: 27.4.0
+  "@types/jsdom": 27.0.0
   "@axe-core/playwright": 4.11.0
   "@fontsource-variable/space-grotesk": 5.2.8
   "@fontsource-variable/dm-sans": 5.2.6

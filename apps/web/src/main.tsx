@@ -12,9 +12,11 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  useRouterState,
 } from "@tanstack/react-router";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
+import { MailPage } from "./mail/mail-page.tsx";
 import { getHealth, getReadiness } from "./api.ts";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogContent, DialogTrigger } from "./ui/dialog.tsx";
@@ -40,6 +42,9 @@ function initialTheme(): ThemeChoice {
 }
 
 function Shell() {
+  const isMail = useRouterState({
+    select: (state) => state.location.pathname === "/mail",
+  });
   const [theme, setTheme] = useState<ThemeChoice>(initialTheme);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [label, setLabel] = useState(
@@ -72,6 +77,7 @@ function Shell() {
     if (value === "system" || value === "light" || value === "dark")
       setTheme(value);
   }
+  if (isMail) return <MailPage />;
   return (
     <ToastProvider>
       <a href="#main-content" className="skip-link">
@@ -433,7 +439,7 @@ const indexRoute = createRoute({
 const mailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mail",
-  component: () => <ProductPlaceholder name="Mail" />,
+  component: MailPage,
 });
 const calendarRoute = createRoute({
   getParentRoute: () => rootRoute,

@@ -3,7 +3,7 @@
 A self-hostable suite for mail, calendar, contacts and file storage.
 
 > **Status: early development.** Only the pieces listed below exist. Mail
-> provisioning, calendar and contacts features, drive and the setup wizard are
+> provisioning and the production mail API, calendar and contacts features, drive and the setup wizard are
 > planned and not implemented yet.
 
 ## What works today
@@ -14,9 +14,9 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   substitutes. Passwords are generated on first start and never stored in
   `.env` or Git. See [docs/development.md](docs/development.md), including its
   known limitations (no mail TLS certificate yet).
-- **Web client** (`apps/web`): a static application shell with a live API
-  status page. Mail, calendar, contacts, drive, search, accounts and compose
-  are placeholders. See [apps/web/README.md](apps/web/README.md).
+- **Web client** (`apps/web`): a mail workspace and live API status page. Mail uses
+  synthetic in-browser data in development; the production mail API is not
+  implemented yet. Calendar, contacts and drive are placeholders. See [apps/web/README.md](apps/web/README.md).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -58,7 +58,7 @@ pnpm knip          # unused files, exports and dependencies
 pnpm test          # Vitest unit project
 pnpm build         # static web client
 pnpm test:e2e      # Vite preview and a local API; install Chromium first
-CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
+node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
 Vitest projects are selected by file suffix: `*.test.ts` runs in `unit`;
@@ -71,7 +71,7 @@ corresponding infrastructure.
 | Path                         | Contents                                    |
 | ---------------------------- | ------------------------------------------- |
 | `apps/api`                   | HTTP API server                             |
-| `apps/web`                   | Web shell and API status page               |
+| `apps/web`                   | Mail workspace and API status page          |
 | `apps/ingest`                | Inbound mail ingestion worker (placeholder) |
 | `apps/drive`                 | File storage service (placeholder)          |
 | `packages/contracts`         | Shared API schemas and procedure contracts  |
