@@ -32,8 +32,9 @@ is not covered by this backup design. Alert on `scratch_too_small` and on the
 age of the last successful backup, and keep total Drive and mail usage below
 the scratch capacity until a streaming or object-level backup replaces the
 scratch copy. The
-scratch files are removed on normal exit or handled termination; inspect and
-securely clean stale directories after a crash or power loss.
+scratch files are removed on normal exit or handled termination. After acquiring
+the shared lock, backup, init and restore remove stale scratch directories from
+a prior crash before creating their own stage.
 
 **Scope and prerequisites:** This captures current object bytes, not old
 versions, bucket policies, incomplete S3 multipart uploads, or arbitrary S3
@@ -63,7 +64,7 @@ separate recovery requirements, not supplied by this backup.
 2. Copy `deploy/backup/backup.conf.example` to `/etc/opensuite/backup.conf`,
    mode 0600, and fill in its shell assignments. Choose an encrypted,
    access-restricted `BACKUP_SCRATCH` filesystem. Put a strong randomly
-   generated restic password in the named file, mode 0600. Protect and test an
+   generated restic password in the named file, mode 0600. Never keep the restic password or B2 key only in this Pass instance. Escrow the plaintext admin token separately. Protect and test an
    **independent offline copy** of the password, backup key, repository URL,
    Git revision and this procedure: none can be recovered from the repository
    without the password. The backup contains `.env`, configured mail and Drive object secrets, relay
@@ -81,9 +82,9 @@ separate recovery requirements, not supplied by this backup.
    stderr. Alert on failed systemd units, failure/overlap/restart_failed events,
    missing success events and the age of the most recent successful snapshot.
    A successful capture followed by a pruning failure is reported as failure.
-   Pass is detected from its existing Compose container (even stopped), dedicated database, or `COMPOSE_PROFILES=pass`. Set `BACKUP_PASS_ENABLED=1` in backup.conf for every installation using Pass, so a missing database/container fails instead of being mistaken for an unused profile. Missing Pass keys, credentials or unreadable data fail the whole backup.
+   Pass is detected from its existing Compose container (even stopped), dedicated database, or `COMPOSE_PROFILES=pass` or `COMPOSE_PROFILES=*`. Set `BACKUP_PASS_ENABLED=1` in backup.conf for every installation using Pass, so a missing database/container fails instead of being mistaken for an unused profile. Missing Pass keys, credentials or unreadable data fail the whole backup, including when its database exists but its volume is missing. To deliberately exclude Pass from a snapshot, set `BACKUP_PASS_EXCLUDE=1` in the trusted backup configuration; the controller logs `pass_explicitly_excluded`. Such a snapshot cannot recover Pass. Remove the override after the emergency.
 
-   Pass capture failures write `pass` to `last-failure` and emit `pass_capture_start` without `pass_captured`; observe reports `backup_pass_failure`. Other failures report `backup_failure`; a successful run clears the failure marker. Observe also alerts on a missing or stale `last-success`. Failures before the marker can be written must be caught by systemd/journal monitoring. Only after capture, service restart, upload, retention and scratch cleanup
+   After detection succeeds, Pass failures write `pass` to `last-failure` and observe reports `backup_pass_failure`. Capture starts emit `pass_capture_start`; a completed capture emits `pass_captured`. Detection errors and other failures report `backup_failure`; a successful run clears the failure marker. A lock overlap logs `overlap` without changing either marker. Observe also alerts on a missing or stale `last-success`. Failures before the marker can be written must be caught by systemd/journal monitoring. Only after capture, service restart, upload, retention and scratch cleanup
    succeed does the script atomically replace `OBSERVE_BACKUP_DIR/last-success`.
 
 4. Install `deploy/backup/opensuite-backup.service` and
@@ -91,6 +92,16 @@ separate recovery requirements, not supplied by this backup.
    paths if the checkout is elsewhere), then run `systemctl daemon-reload` and
    `systemctl enable --now opensuite-backup.timer`. The persistent timer catches
    missed runs after reboot. Check `systemctl list-timers` and the journal.
+
+For a secondary copy, use a separately administered host with read-only access
+to the primary and append-only or write-only access to the secondary. Pull and
+run `restic copy` there; the production host must not hold secondary credentials.
+Use `rest-server --append-only` or a B2 key without `deleteFiles` with Object
+Lock, tested against the provider's semantics. Grant the minimum read and list
+operations restic requires while denying deletion. Prune only from the separate
+admin host, using a separately protected prune key kept offline when practical.
+Compare snapshot ID and time with an independently recorded last success before
+restoring to detect rollback. See [Pass recovery](pass-recovery.md).
 
 Restic keeps 7 daily, 5 weekly and 12 monthly snapshots, grouped by captured
 path, then prunes unreferenced data. This is a rolling selection, not a
@@ -120,7 +131,7 @@ policies must not interfere with restic's repository operations.
    password to `/etc/opensuite`, with restricted permissions. In a clean
    checkout with **no `.env` and empty Compose volumes**, run
    `deploy/backup/restore.sh` (or pass a restic snapshot ID). It refuses
-   nonempty secrets, Caddy, RocksDB, PostgreSQL or Pass volumes, existing `.env`, or object prefixes. `restore.sh --force [snapshot-id]` explicitly replaces local volumes and restored files only when all project services are stopped; it is for an isolated recovery target. It still refuses a populated object prefix unless its contents exactly match the snapshot. A retry with `--force` is safe only after fencing all writers; failures can leave a partial target. The script
+   nonempty secrets, Caddy, RocksDB, PostgreSQL or Pass volumes, existing `.env`, or object prefixes. `COMPOSE_PROJECT_NAME=recovery restore.sh --force --confirm-project recovery [snapshot-id]` explicitly replaces local volumes and restored files only when all project services are stopped; it is for an isolated recovery target. Both prefixes must pass checks and dry-run listings before local state is cleared. Existing objects must match the snapshot; missing objects are copied without overwriting and the complete prefixes are checked. A retry with `--force` is safe only after fencing all writers; failures can leave a partial target. The script
    decrypts to scratch, restores the recorded `.env`, external secrets and env files, Compose and
    Stalwart config, object bytes, secrets and RocksDB volumes, then starts only
    PostgreSQL and restores the roles and databases, including the dedicated Pass database and its matching volume. It does not start Pass. A failed restore may

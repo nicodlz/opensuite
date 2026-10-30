@@ -10,3 +10,6 @@ BACKUP_SCRATCH='/var/lib/opensuite-backup-scratch'
 # Set to 1 when Pass is enabled even if its container/database is absent.
 # Existing Pass containers and databases are detected automatically.
 BACKUP_PASS_ENABLED=0
+# Emergency opt-out: 1 excludes Pass even if a database/container is present.
+# Each run logs pass_explicitly_excluded; the resulting snapshot cannot recover Pass.
+BACKUP_PASS_EXCLUDE=0

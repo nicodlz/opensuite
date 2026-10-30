@@ -7,10 +7,18 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 exec 9>"$BACKUP_SCRATCH/opensuite-backup.lock"
 flock -n 9 || { log overlap; exit 1; }
+sweep_stale
+make_stage
 log restore_start
 force=0
-if [ "${1:-}" = --force ]; then force=1; shift; fi
-[ "$#" -le 1 ] || { echo 'usage: restore.sh [--force] [snapshot-id]' >&2; exit 1; }
+target_project=${COMPOSE_PROJECT_NAME:-}
+if [ "${1:-}" = --force ]; then
+  force=1; shift
+  [ "${1:-}" = --confirm-project ] && [ -n "${2:-}" ] && [ -n "${COMPOSE_PROJECT_NAME:-}" ] && [ "$2" = "$COMPOSE_PROJECT_NAME" ] || { echo 'restore: --force requires COMPOSE_PROJECT_NAME and --confirm-project with the same isolated project name' >&2; exit 1; }
+  shift 2
+  log force_confirmed
+fi
+[ "$#" -le 1 ] || { echo 'usage: restore.sh [--force --confirm-project PROJECT] [snapshot-id]' >&2; exit 1; }
 if [ "$force" = 0 ]; then
   [ ! -e .env ] || { echo 'restore: remove .env and use a new, empty project, or use --force' >&2; exit 1; }
 fi
@@ -22,7 +30,8 @@ export DRIVE_S3_ENDPOINT DRIVE_S3_PUBLIC_ENDPOINT DRIVE_S3_BUCKET DRIVE_S3_REGIO
 if [ "$force" = 0 ]; then
   compose run --rm --no-deps -T backup-volumes '[ -z "$(ls -A /secrets)" ] && [ -z "$(ls -A /stalwart)" ] && [ -z "$(ls -A /postgres)" ] && [ -z "$(ls -A /caddy-data)" ] && [ -z "$(ls -A /caddy-config)" ] && [ -z "$(ls -A /pass-data)" ]' >&2 || { echo 'restore: target volumes are not empty; use --force only on an isolated target' >&2; exit 1; }
 else
-  [ -z "$(compose ps --services --filter status=running)" ] || { echo 'restore: stop all target services before --force' >&2; exit 1; }
+  services=$(compose ps --services --filter status=running)
+  [ -z "$services" ] || { echo 'restore: stop all target services before --force' >&2; exit 1; }
 fi
 snapshot=${1:-latest}
 # Restore only the captured subtree directly into the private stage.
@@ -31,27 +40,43 @@ compose run --rm --no-deps -T backup-restic 'exec restic restore "$1:/stage/data
 # to read the private stage; archive-internal ownership remains in volumes.tar.
 compose run --rm --no-deps -T backup-volumes 'chown -R "$1:$2" /stage/data' sh "$(id -u)" "$(id -g)" >&2
 [ -s "$BACKUP_STAGE/data/config/env" ] && [ -s "$BACKUP_STAGE/data/volumes.tar" ] || { echo 'restore: snapshot is missing required files' >&2; exit 1; }
+pass_restore=0
 if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
+  pass_restore=1
   [ -s "$BACKUP_STAGE/data/postgres/opensuite_pass.dump" ] && [ -s "$BACKUP_STAGE/data/pass-volume.tar" ] || { echo 'restore: Pass snapshot is incomplete' >&2; exit 1; }
 fi
+# Read the saved configuration in memory for preflight; do not replace .env or
+# any local state before both object destinations have been checked.
+set -a
+. "$BACKUP_STAGE/data/config/env"
+set +a
+if [ -n "$target_project" ]; then
+  COMPOSE_PROJECT_NAME=$target_project; export COMPOSE_PROJECT_NAME
+elif [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+  echo 'restore: saved project name requires an explicit isolated COMPOSE_PROJECT_NAME' >&2; exit 1
+fi
+if [ "$pass_restore" = 1 ]; then
+  while IFS= read -r item; do
+    name=${item%%:*}; path=${item#*:}
+    [ "$path" = /dev/null ] || [ -s "$BACKUP_STAGE/data/config/$name" ] || { echo "restore: snapshot is missing $name" >&2; exit 1; }
+  done <<PASS_SECRETS
+$(pass_secret_files)
+PASS_SECRETS
+fi
+saved_drive_secret=${DRIVE_S3_SECRET_FILE:?}
+saved_mail_secret=${MAIL_S3_SECRET_FILE:-/dev/null}
+DRIVE_S3_SECRET_FILE="$BACKUP_STAGE/data/config/drive-s3-secret"
+if [ "${MAIL_BLOB_STORE:-local}" = s3 ]; then MAIL_S3_SECRET_FILE="$BACKUP_STAGE/data/config/mail-s3-secret"; fi
+export DRIVE_S3_SECRET_FILE MAIL_S3_SECRET_FILE
+objects preflight mail "$force"
+objects preflight drive "$force"
+log restore_preflight_ok
+DRIVE_S3_SECRET_FILE=$saved_drive_secret MAIL_S3_SECRET_FILE=$saved_mail_secret
+export DRIVE_S3_SECRET_FILE MAIL_S3_SECRET_FILE
 if [ "$force" = 1 ]; then
   compose run --rm --no-deps -T backup-volumes 'for dir in /secrets /stalwart /postgres /caddy-data /caddy-config /pass-data; do find "$dir" -mindepth 1 -delete; done' >&2
 fi
 cp "$BACKUP_STAGE/data/config/env" .env
-set -a
-. ./.env
-set +a
-# Exported placeholders must not override values restored from the snapshot.
-unset DRIVE_S3_ENDPOINT DRIVE_S3_PUBLIC_ENDPOINT DRIVE_S3_BUCKET DRIVE_S3_REGION DRIVE_S3_ACCESS_KEY DRIVE_S3_SECRET_FILE
-set -a
-. ./.env
-set +a
-if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
-  for item in "pass-admin:${PASS_ADMIN_TOKEN_FILE:-/dev/null}" "pass-smtp:${PASS_SMTP_SECRET_FILE:-/dev/null}" "pass-push:${PASS_PUSH_KEY_FILE:-/dev/null}"; do
-    name=${item%%:*}; path=${item#*:}
-    [ "$path" = /dev/null ] || [ -s "$BACKUP_STAGE/data/config/$name" ] || { echo "restore: snapshot is missing $name" >&2; exit 1; }
-  done
-fi
 restore_file() { # captured name, original destination, uid
   name=$1 path=$2 uid=$3
   [ -f "$BACKUP_STAGE/data/config/$name" ] || return 0
@@ -73,10 +98,13 @@ restore_file observe "${OBSERVE_ENV_FILE:-./deploy/observe.env}" "$(id -u)"
 restore_file relay "${MAIL_RELAY_SECRET_FILE:-/dev/null}" 2000
 restore_file tls-cert "${MAIL_TLS_CERT_FILE:-/dev/null}" 2000
 restore_file tls-key "${MAIL_TLS_KEY_FILE:-/dev/null}" 2000
-if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
-  restore_file pass-admin "${PASS_ADMIN_TOKEN_FILE:-/dev/null}" 0
-  restore_file pass-smtp "${PASS_SMTP_SECRET_FILE:-/dev/null}" 0
-  restore_file pass-push "${PASS_PUSH_KEY_FILE:-/dev/null}" 0
+if [ "$pass_restore" = 1 ]; then
+  while IFS= read -r item; do
+    name=${item%%:*}; path=${item#*:}
+    restore_file "$name" "$path" 1000
+  done <<PASS_SECRETS
+$(pass_secret_files)
+PASS_SECRETS
 fi
 if [ "${MAIL_BLOB_STORE:-local}" = s3 ]; then
   restore_file mail-s3-secret "${MAIL_S3_SECRET_FILE:?}" 2000
@@ -85,12 +113,18 @@ fi
 cp "$BACKUP_STAGE/data/config/compose.yaml" compose.yaml
 cp "$BACKUP_STAGE/data/config/stalwart.json" deploy/stalwart/config.json
 cp "$BACKUP_STAGE/data/config/Caddyfile" deploy/caddy/Caddyfile
-cp -R "$BACKUP_STAGE/data/config/initdb/." deploy/postgres/initdb/
-objects restore mail
-objects restore drive
+[ "$force" = 0 ] || find deploy/postgres/initdb -mindepth 1 -delete
+cp -Rp "$BACKUP_STAGE/data/config/initdb/." deploy/postgres/initdb/
+# Older snapshots staged bootstrap scripts with a restrictive umask. Grant
+# PostgreSQL's group access without making operator-provided scripts public.
+docker run --rm --network none --mount "type=bind,src=$ROOT/deploy/postgres/initdb,dst=/init" \
+  alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a \
+  sh -ec 'chgrp -R 999 /init; chmod -R g+rX /init' >&2
+objects restore mail "$force"
+objects restore drive "$force"
 compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/volumes.tar -C /' >&2
-if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
-  compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/pass-volume.tar -C / && [ -s /pass-data/rsa_key.pem ] && [ -s /secrets/pass-database/password ]' >&2
+if [ "$pass_restore" = 1 ]; then
+  compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/pass-volume.tar -C / && chown -R 1000:1000 /pass-data && chmod 0700 /pass-data && [ -s /pass-data/rsa_key.pem ] && [ -s /secrets/pass-database/password ]' >&2
 fi
 # Start only postgres; no application can migrate or write during the restore.
 compose up -d --no-deps --wait --wait-timeout 180 postgres >&2
@@ -102,7 +136,7 @@ sed "/^CREATE ROLE $POSTGRES_USER;$/d" "$BACKUP_STAGE/data/postgres/globals.sql"
 for db in "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do
   compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d "$db" --exit-on-error < "$BACKUP_STAGE/data/postgres/$db.dump" >&2
 done
-if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
+if [ "$pass_restore" = 1 ]; then
   # Provision the dedicated database with the restored credential, then load
   # objects with their original ownership. The service itself stays stopped.
   compose run --rm --no-deps -T pass-provision >&2

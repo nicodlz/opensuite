@@ -1,20 +1,17 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const cases = [
-  "create user, encrypted item and attachment",
-  "Pass capture failure alerts and restarts service",
-  "stopped Pass and missing RSA key fail capture",
-  "real encrypted backup and success marker",
-  "nonempty target refused",
-  "fresh database, secrets and identical RSA key",
-  "login, decrypt item and download attachment",
-  "explicit isolated restore retry",
-];
+const cases = execFileSync(
+  "sh",
+  [fileURLToPath(new URL("./pass-drill.sh", import.meta.url)), "--list"],
+  { encoding: "utf8" },
+)
+  .trim()
+  .split("\n");
 const args = process.argv.slice(2);
 if (args.length !== 2 || args[0] !== "--report" || !args[1]) {
   process.stderr.write(

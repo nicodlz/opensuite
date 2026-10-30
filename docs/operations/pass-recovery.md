@@ -1,6 +1,6 @@
 # Pass recovery after server loss
 
-Pass uses the shared OpenSuite restic repository. Each successful capture stops
+Pass uses the shared Esuno restic repository. Each successful capture stops
 Pass, takes a custom PostgreSQL dump and copies its local volume while it is
 still stopped. This preserves `rsa_key*`, `config.json` when present,
 attachments, Sends and the optional icon cache; no live PostgreSQL or SQLite
@@ -19,33 +19,46 @@ operations](backup.md). Keep the restic password and B2 application key
 recorded Git revision, image pins, provider account recovery information and
 this procedure. Escrow separate copies in an access-controlled offline medium
 and a separate password manager or organizational recovery vault; arrange
-access for more than one authorized operator and test retrieval. Protect the
+access for more than one authorized operator and test retrieval. Never store the
+restic password or B2 key only in this Pass instance. Escrow the plaintext admin
+token separately as well as its backed-up hash. Protect the
 master passwords and user recovery factors separately: the server backup cannot
 recover a forgotten master password.
+Record each successful snapshot ID and capture time in an independently
+administered log; the restic JSON backup output includes the snapshot ID.
 
-Protect against compromise or deletion of the primary B2 account with an
-independently administered second location or provider and separate credentials.
-For example, use `restic copy` to a second repository, with append-only access
-or object lock where compatible with that repository's retention and pruning;
-keep the second repository's password and credentials in independent escrow.
-Verify copies and practice recovery from that location. Restic encryption alone
-does not prevent deletion or rollback by a compromised backup account.
+Protect against compromise or deletion of the primary B2 account with a
+separately administered backup host. That host pulls snapshots from the primary
+repository using a read-only key and runs `restic copy` to a secondary
+repository using its own append-only or write-only credential. For example,
+use `rest-server --append-only`, or a B2 key without `deleteFiles` with Object
+Lock configured and tested for the chosen retention policy. Grant any read and
+list operations restic requires while denying deletion. The production host
+must never hold secondary credentials. Only the separate administration host
+may prune the secondary; keep any secondary prune/delete key offline until it
+is needed. Verify and restore from the second location independently, and test
+provider-specific retention and lock behavior before relying on it.
 
 ## Restore to a new VPS
 
 1. Fence the lost/old server and external writers. Obtain the escrowed restic
    password, B2 key, repository URL and configuration. Prepare a new VPS with
-   Docker Compose, Git, `flock`, the saved OpenSuite revision, pinned images,
+   Docker Compose, Git, `flock`, the saved Esuno revision, pinned images,
    encrypted private scratch and empty Compose volumes. Prepare empty isolated
    mail and Drive object prefixes matching the saved configuration. See
    [backup operations](backup.md#rebuild-a-new-vps) for full prerequisites,
    service dependencies and build steps. No real B2 recovery has yet been
    verified by this project.
-2. Install the escrowed recovery `backup.conf` and restic password under
+2. List repository snapshots with `restic snapshots` on a trusted recovery host
+   configured with the escrowed credentials. Compare the selected snapshot ID
+   and timestamp against the independently recorded last success before
+   trusting it, to detect rollback. Select the verified ID explicitly below.
+   Install the escrowed recovery `backup.conf` and restic password under
    `/etc/opensuite` with restricted permissions. In the clean checkout, with no
-   `.env`, run:
+   `.env`, select the intended isolated project for this shell and run:
 
    ```sh
+   export COMPOSE_PROJECT_NAME=recovery
    deploy/backup/restore.sh                  # latest snapshot
    # Or select a known snapshot:
    deploy/backup/restore.sh SNAPSHOT_ID
@@ -53,10 +66,19 @@ does not prevent deletion or rollback by a compromised backup account.
 
    The controller restores configuration and secrets, the volume and the
    dedicated `opensuite_pass` role/database, then leaves Pass stopped. For an
-   isolated partial target, stop all project services and use
-   `deploy/backup/restore.sh --force SNAPSHOT_ID` to replace local state. It
-   refuses populated object prefixes unless they exactly match the selected
-   snapshot. A failed restore can leave partial state; discard the target or
+   isolated partial target, stop all project services and use the following
+   command to replace local state:
+
+   ```sh
+   export COMPOSE_PROJECT_NAME=recovery
+   deploy/backup/restore.sh --force --confirm-project recovery SNAPSHOT_ID
+   ```
+
+   Both object prefixes are checked and dry-run listed before local state is cleared.
+   Existing objects must match the snapshot; missing objects are copied and the
+   complete prefixes are verified. Keep `COMPOSE_PROJECT_NAME` exported for all
+   subsequent Compose commands, even if the recovered `.env` records another
+   project name. A failed restore can leave partial state; discard the target or
    carefully retry with `--force`. Never use this against a live system.
 
 3. Check the saved image version, `.env`, file permissions and effective
