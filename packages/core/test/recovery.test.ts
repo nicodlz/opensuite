@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import type { RecoveryStore, Storage } from "../src/ingest/contracts.ts";
 import {
   archiveKey,
+  belongs,
   recoverFirehose,
   recoverObjects,
 } from "../src/ingest/recovery.ts";
+import { parseNotification } from "../src/domain/notification.ts";
 import { synthetic } from "../src/synthetic/memory.ts";
 import { notification } from "./fixtures.ts";
 
@@ -81,6 +83,33 @@ function fakeStore(objects: Record<string, { bytes: Uint8Array; at: Date }>) {
   return { store, archive, buffer, versions };
 }
 
+const owned = (id: string, object: string, prefixes?: string[]) => {
+  const parsed = parseNotification(
+    body(["alice@example.test"], id, { object }),
+  );
+  if (parsed.isErr()) throw new Error(parsed.error);
+  return belongs(parsed.value, {
+    ...scope,
+    bufferPrefix: "messages/",
+    objectPrefixes: prefixes,
+  });
+};
+describe("notification ownership", () => {
+  it("accepts every configured rule prefix exactly, and nothing else", () => {
+    const prefixes = ["messages/", "messages/esuno/"];
+    // The current rule and an earlier one.
+    expect(owned("abc", "messages/esuno/abc", prefixes)).toBe(true);
+    expect(owned("abc", "messages/abc", prefixes)).toBe(true);
+    expect(owned("abc", "messages/other/abc", prefixes)).toBe(false);
+    expect(owned("abc", "messages/esuno/abd", prefixes)).toBe(false);
+    // A slash in the message ID would reach into the nested prefix.
+    expect(owned("esuno/abc", "messages/esuno/abc", prefixes)).toBe(false);
+    // Without a list, the buffer prefix alone.
+    expect(owned("abc", "messages/abc")).toBe(true);
+    expect(owned("abc", "messages/esuno/abc")).toBe(false);
+  });
+});
+
 describe("recovery from the Firehose archive", () => {
   const b1 = body(["alice@example.test"], "ses-b1");
   const b2 = body(["bcc@example.test"], "ses-b2");
@@ -95,7 +124,20 @@ describe("recovery from the Firehose archive", () => {
   });
   const objects = {
     "metadata/2026/10/30/a.gz": {
-      bytes: firehose(b1, b1, b2, c1, "not json", foreign, misdirected),
+      bytes: firehose(
+        b1,
+        b1,
+        b2,
+        c1,
+        "not json",
+        foreign,
+        misdirected,
+        // SES publishes this when a topic is attached to a rule: no mail.
+        JSON.stringify({
+          notificationType: "AMAZON_SES_SETUP_NOTIFICATION",
+          receipt: {},
+        }),
+      ),
       at: new Date("2026-10-30T10:00:00Z"),
     },
     "metadata/2026/10/30/b.gz": {
@@ -130,8 +172,9 @@ describe("recovery from the Firehose archive", () => {
     expect(dry.isOk() && dry.value).toMatchObject({
       objects: 3,
       unreadable: 1,
-      records: 8,
+      records: 9,
       invalid: 1,
+      setup: 1,
       foreign: 2,
       notifications: 4,
       alreadyArchived: 1,
@@ -180,6 +223,7 @@ describe("recovery from the Firehose archive", () => {
       objects: 4,
       notifications: 1,
       outsideWindow: 5,
+      setup: 1,
       missing: 1,
     });
   });

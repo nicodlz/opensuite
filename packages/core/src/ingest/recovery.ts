@@ -14,6 +14,21 @@ const inTurn = <T>(items: T[], work: (item: T) => Promise<void>) =>
     Promise.resolve(),
   );
 
+// SES publishes one such notice when an SNS topic is attached to a rule.
+const isSetupNotice = (line: string) => {
+  try {
+    const value: unknown = JSON.parse(line);
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      "notificationType" in value &&
+      value.notificationType === "AMAZON_SES_SETUP_NOTIFICATION"
+    );
+  } catch {
+    return false;
+  }
+};
+
 /** Archive entries are named after the exact notification text. */
 export const archiveKey = (body: string) =>
   `${createHash("sha256").update(body).digest("hex")}.json`;
@@ -23,16 +38,26 @@ export interface RecoveryScope {
   bucket: string;
   topic: string;
   bufferPrefix: string;
+  /**
+   * Object key prefixes of the receipt rules, current and past, each within
+   * the buffer prefix; the buffer prefix alone by default.
+   */
+  objectPrefixes?: string[] | undefined;
 }
 /**
  * Whether a notification is this installation's, and names its own message:
- * SES stores each message under the buffer prefix and its message ID, so a
- * notification cannot point at another message's object.
+ * SES stores each message under its rule's object key prefix followed by the
+ * message ID, so a notification cannot point at another message's object.
+ * SES message IDs contain no slash; one that did could reach into a nested
+ * prefix.
  */
 export const belongs = (n: Notification, scope: RecoveryScope) =>
   n.receipt.action.bucketName === scope.bucket &&
   n.receipt.action.topicArn === scope.topic &&
-  n.receipt.action.objectKey === scope.bufferPrefix + n.mail.messageId;
+  !n.mail.messageId.includes("/") &&
+  (scope.objectPrefixes ?? [scope.bufferPrefix]).some(
+    (prefix) => n.receipt.action.objectKey === prefix + n.mail.messageId,
+  );
 
 // JSON with sorted keys, so equal notifications compare equal.
 const canonical = (value: unknown): string =>
@@ -110,7 +135,13 @@ export interface FirehoseReport {
   objects: number;
   unreadable: number;
   records: number;
+  /**
+   * Records that are not a valid notification of received mail: these may be
+   * mail that was not recovered, so the command reports an error.
+   */
   invalid: number;
+  /** SES's setup notifications, which carry no mail. */
+  setup: number;
   foreign: number;
   /** Received outside `since`..`until`. */
   outsideWindow: number;
@@ -164,6 +195,7 @@ export async function recoverFirehose(
     unreadable: 0,
     records: 0,
     invalid: 0,
+    setup: 0,
     foreign: 0,
     outsideWindow: 0,
     notifications: 0,
@@ -192,8 +224,10 @@ export async function recoverFirehose(
       if (line === "") continue;
       report.records++;
       const parsed = parseNotification(line);
-      if (parsed.isErr()) report.invalid++;
-      else if (!belongs(parsed.value, scope)) report.foreign++;
+      if (parsed.isErr()) {
+        if (isSetupNotice(line)) report.setup++;
+        else report.invalid++;
+      } else if (!belongs(parsed.value, scope)) report.foreign++;
       else if (!inWindow(parsed.value)) report.outsideWindow++;
       else bodies.set(archiveKey(line), { body: line, n: parsed.value });
     }

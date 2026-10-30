@@ -41,6 +41,17 @@ const configSchema = z
     INBOUND_QUEUE_URL: z.url(),
     INBOUND_TOPIC_ARN: z.string().min(1),
     INBOUND_BUFFER_PREFIX: z.string().default(""),
+    // Receipt rules' object key prefixes, current and past, comma separated;
+    // the buffer prefix alone when empty.
+    INBOUND_OBJECT_PREFIXES: z
+      .string()
+      .default("")
+      .transform((value) =>
+        value
+          .split(",")
+          .map((item) => item.trim())
+          .filter((item) => item !== ""),
+      ),
     ARCHIVE_BUCKET: z.string().min(1),
     ARCHIVE_PREFIX: z.string().min(1).default("notifications/"),
     AWS_REGION: z.string().default("eu-north-1"),
@@ -117,6 +128,18 @@ const configSchema = z
     )
       ctx.addIssue({ code: "custom", message: "Route has no destination" });
     if (
+      value.INBOUND_OBJECT_PREFIXES.some(
+        (prefix) => !prefix.startsWith(value.INBOUND_BUFFER_PREFIX),
+      ) ||
+      new Set(value.INBOUND_OBJECT_PREFIXES).size !==
+        value.INBOUND_OBJECT_PREFIXES.length
+    )
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "Object prefixes must be distinct and within the buffer prefix",
+      });
+    if (
       value.INBOUND_BUCKET === value.ARCHIVE_BUCKET &&
       value.ARCHIVE_ENDPOINT_URL === value.AWS_ENDPOINT_URL &&
       (value.INBOUND_BUFFER_PREFIX === "" ||
@@ -178,6 +201,11 @@ async function linkedMailboxes() {
     credential: async (accountId: string) =>
       store.value.getForAccount(accountId),
   };
+}
+function objectPrefixes() {
+  return c.INBOUND_OBJECT_PREFIXES.length > 0
+    ? c.INBOUND_OBJECT_PREFIXES
+    : undefined;
 }
 const s3 = new S3Client({
   requestHandler: {
@@ -242,6 +270,7 @@ const service = new IngestService({
   },
   bucket: c.INBOUND_BUCKET,
   bufferPrefix: c.INBOUND_BUFFER_PREFIX,
+  objectPrefixes: objectPrefixes(),
   topic: c.INBOUND_TOPIC_ARN,
   maxAttempts: c.INGEST_MAX_ATTEMPTS,
   holdDays: c.INGEST_HOLD_DAYS,
@@ -317,6 +346,7 @@ try {
             bucket: c.INBOUND_BUCKET,
             topic: c.INBOUND_TOPIC_ARN,
             bufferPrefix: c.INBOUND_BUFFER_PREFIX,
+            objectPrefixes: objectPrefixes(),
           },
         },
       },

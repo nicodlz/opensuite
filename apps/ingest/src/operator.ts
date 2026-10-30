@@ -326,6 +326,7 @@ export const recoveryIncomplete = (report: unknown) => {
     .object({
       failed: z.number(),
       unreadable: z.number().optional(),
+      invalid: z.number().optional(),
       unrecoverable: z.array(z.unknown()).optional(),
       // Messages replay skips: object recovery lists their IDs, Firehose
       // recovery every variant group with whether it can be merged.
@@ -338,6 +339,7 @@ export const recoveryIncomplete = (report: unknown) => {
     parsed.success &&
     (parsed.data.failed > 0 ||
       (parsed.data.unreadable ?? 0) > 0 ||
+      (parsed.data.invalid ?? 0) > 0 ||
       (parsed.data.unrecoverable ?? []).length > 0 ||
       (parsed.data.divergent ?? []).some(
         (item) => typeof item === "string" || !item.mergeable,

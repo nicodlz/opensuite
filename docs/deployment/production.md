@@ -505,10 +505,17 @@ INGEST_ROUTES='[{"address":"user@example.com","destination":"ACCOUNT_ID"}]'
 INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","authorization":"Basic <encoded-credential>","quarantineMailbox":"JUNK_ID","rewriteSessionUrls":true}]'
 ```
 
-`INBOUND_BUFFER_PREFIX` must equal the receipt rule's object key prefix
-(`messages/` in the AWS module): the worker refuses a notification whose
-object key is not that prefix followed by its message ID. Before upgrading
-to a release with this check, confirm it on one archived real notification.
+The worker refuses a notification whose object key is not exactly an
+accepted prefix followed by its message ID. Accepted prefixes are
+`INBOUND_OBJECT_PREFIXES` (comma separated, each within
+`INBOUND_BUFFER_PREFIX`), or `INBOUND_BUFFER_PREFIX` alone. List the object
+key prefix of every receipt rule, current and past, whose notifications may
+still be replayed: with a rule writing to `messages/esuno/` and older
+notifications under `messages/`, set `INBOUND_BUFFER_PREFIX=messages/` and
+`INBOUND_OBJECT_PREFIXES=messages/,messages/esuno/`. Before upgrading to a
+release with this check, compare the object keys of the archived real
+notifications with that list: a missing prefix rejects new mail, and an old
+one makes every replay fail.
 
 Mailboxes created in the admin console, with their addresses, aliases and
 domain addresses, need no entry: Compose gives the worker the mailbox key
@@ -686,7 +693,8 @@ ingestion and subscription DLQs before their 14 days run out.
    or backup time minus 24 hours (Firehose retries delivery for up to a
    day); `SINCE` and `UNTIL` (ISO 8601) select notifications by their
    receipt time. Read the report: notifications found, already archived,
-   missing, unreadable, invalid, foreign and outside the window, and
+   missing, unreadable, invalid, SES setup notices (no mail, ignored),
+   foreign and outside the window, and
    divergent message IDs (`mergeable: false` ones are skipped by replay and
    need an operator). Run it again with `--apply` as last argument.
 
@@ -708,13 +716,18 @@ ingestion and subscription DLQs before their 14 days run out.
    `unset` the credentials and revoke the principal.
 
 Both commands can be repeated safely; they exit with an error while any
-read, write or restore failed, an original is unrecoverable or notifications
+read, write or restore failed, a record is not a valid mail notification
+(it may be mail that was not recovered: examine it), an original is
+unrecoverable or notifications
 of one message disagree beyond their envelope (an error that persists, once
 each such message is investigated, as long as the archive keeps them), and applied
 runs, complete or not, are recorded in the audit log. Before relying on
 them, test on the real buckets with the recovery principal: a conditional
 write on an existing key must answer 412, one on a key whose current version
-is a delete marker must succeed, two concurrent ones must leave one 409, all
+is a delete marker must succeed, of two concurrent ones on an absent key
+exactly one must succeed and the other answer 412 (a 409, which S3 may return
+when a write races a deletion, is reported as a failure to retry, not
+expected from two writes alone), all
 existing versions must remain, and the restored object must be encrypted;
 B2 must answer 412 to `If-None-Match` too (a B2 that ignores it rewrites
 identical bytes, harmless as entries are named after their content). Check

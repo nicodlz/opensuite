@@ -583,6 +583,53 @@ describe("replay of archived notifications", () => {
   });
 });
 
+// A notification whose object key carries a given rule prefix.
+const atObject = (id: string, object: string) => {
+  const n = notification(["alice@example.test"], "PASS", id);
+  return JSON.stringify({
+    ...n,
+    receipt: {
+      ...n.receipt,
+      action: { ...n.receipt.action, objectKey: object },
+    },
+  });
+};
+describe("receipt rule prefixes", () => {
+  it("replays notifications of the current and an earlier rule prefix", async () => {
+    const memory = synthetic();
+    const stages: unknown[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event, fields) {
+          if (event === "ingest_failure") stages.push(fields["stage"]);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "messages/",
+      objectPrefixes: ["messages/", "messages/esuno/"],
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    memory.buffers.set("messages/old", new Uint8Array([1]));
+    memory.buffers.set("messages/esuno/new", new Uint8Array([2]));
+    memory.archives.set(
+      "notifications/old.json",
+      atObject("old", "messages/old"),
+    );
+    memory.archives.set(
+      "notifications/new.json",
+      atObject("new", "messages/esuno/new"),
+    );
+    expect((await service.reconcile(86_400 * 3650)).isOk()).toBe(true);
+    expect(stages).toEqual([]);
+    expect(memory.imports).toHaveLength(2);
+  });
+});
+
 describe("held unknown recipients", () => {
   it("imports a held recipient once its address is provisioned, then deletes the object", async () => {
     const { memory, service, provision } = routed([
