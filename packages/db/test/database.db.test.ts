@@ -564,6 +564,16 @@ describe("alias reservations", () => {
     const domains = createDomainStore(db);
     const removal = await domains.beginRemoval(domain.id);
     expect(removal.isOk() && removal.value).toBe(false);
+    // So does a domain whose only account is still waiting for its mailbox.
+    const waiting = `waiting-${suffix}.example.test`;
+    await db.user.create({
+      data: { id: `waiting-${suffix}`, email: `w@${waiting}`, name: "W" },
+    });
+    const quiet = await db.domain.create({
+      data: { name: waiting, userId: owner, status: "verified" },
+    });
+    const blocked = await domains.beginRemoval(quiet.id);
+    expect(blocked.isOk() && blocked.value).toBe(false);
     expect(
       (
         await domains.addAddress(owner, domain.id, other, "OWNER", false)
