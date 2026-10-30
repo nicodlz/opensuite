@@ -82,3 +82,31 @@ for (const card of document.querySelectorAll<HTMLElement>(".card")) {
     card.style.setProperty("--my", `${event.clientY - box.top}px`);
   });
 }
+
+// The monthly links and prices remain usable when JavaScript is unavailable.
+const billingToggle = document.querySelector<HTMLFieldSetElement>(
+  "[data-billing-toggle]",
+);
+if (billingToggle) {
+  billingToggle.hidden = false;
+  billingToggle.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.name !== "interval")
+      return;
+    const interval = target.value;
+    if (interval !== "month" && interval !== "year") return;
+    for (const item of document.querySelectorAll<HTMLElement>(
+      "[data-price], [data-billing]",
+    )) {
+      item.hidden =
+        (item.dataset["price"] ?? item.dataset["billing"]) !== interval;
+    }
+    for (const link of document.querySelectorAll<HTMLAnchorElement>(
+      "[data-subscribe]",
+    )) {
+      const url = new URL(link.href);
+      url.searchParams.set("interval", interval);
+      link.href = url.href;
+    }
+  });
+}
