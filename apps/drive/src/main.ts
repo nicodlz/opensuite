@@ -22,6 +22,11 @@ if (
   url.pathname = `/${encodeURIComponent(env["POSTGRES_DRIVE_DB"] ?? "opensuite_drive")}`;
   env["DRIVE_DATABASE_URL"] = url.toString();
 }
+if (env["DRIVE_S3_SECRET_KEY_FILE"] !== undefined) {
+  env["DRIVE_S3_SECRET_KEY"] = (
+    await readFile(env["DRIVE_S3_SECRET_KEY_FILE"], "utf8")
+  ).trim();
+}
 const result = loadConfig(env);
 if (result.isErr()) {
   process.stderr.write(

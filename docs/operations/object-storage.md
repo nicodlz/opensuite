@@ -85,12 +85,11 @@ restricted to those prefixes; verify the provider actually enforces those
 restrictions. Backups must use a separate credential and failure domain where
 possible, with versioning or immutable retention to protect against deletion.
 Drive is a separate service and mail must not depend on its availability or
-credentials. Drive is not implemented yet.
+credentials.
 
 The optional SES inbound S3 buffer is a separate temporary transit store with
 its own AWS account policy, bucket, prefix, lifecycle and credentials. It is
-not the permanent B2 mail store, Drive store, or backup. SES ingestion is not
-implemented and no real provider behaviour is claimed.
+not the permanent B2 mail store, Drive store, or backup. The SES ingestion worker exists, but no real provider behaviour is claimed.
 
 If B2 or the network is unavailable, mailbox metadata may remain available but
 reading message bodies and attachments fails; writes and incoming delivery can

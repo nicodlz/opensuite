@@ -2,9 +2,10 @@
 
 A self-hostable suite for mail, calendar, contacts and file storage.
 
-> **Status: early development.** Only the pieces listed below exist. Mail
-> application-level mail provisioning, the production mail API, calendar and contacts features and
-> the setup wizard are planned and not implemented yet.
+> **Status: early development.** The mail API, mailbox provisioning, Drive,
+> ingestion and backup tools are implemented. Real SES/B2 behavior and the
+> complete production recovery process still require operator verification.
+> Calendar and contacts interfaces and the setup wizard remain planned.
 
 ## What works today
 
@@ -13,11 +14,11 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   RocksDB), PostgreSQL, and an optional `dev` profile with LocalStack S3/SQS
   substitutes. Passwords are generated on first start and never stored in
   `.env` or Git. See [docs/development.md](docs/development.md), including its
-  known limitations (no mail TLS certificate yet).
+  known limitations.
 - **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
 - **Web client** (`apps/web`): a mail workspace and live API status page. Mail uses
-  synthetic in-browser data in development; the production mail API is not
-  implemented yet. Calendar, contacts and drive are placeholders. See [apps/web/README.md](apps/web/README.md).
+  synthetic in-browser data in development and the mail and Drive APIs in
+  production. Calendar and contacts are placeholders. See [apps/web/README.md](apps/web/README.md).
 - **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
 - **Mail blob storage:** local by default, with an optional S3-compatible
   backend for new or migrated installations. The
@@ -25,32 +26,60 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   migration, backup and recovery requirements.
 - **Outbound mail:** server-only Stalwart relay configuration and DKIM DNS records; see [outbound operations](docs/operations/outbound.md) for SES, queue limits and deployment steps.
 - **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
-- **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. Authentication integration is pending; see [development](docs/development.md#drive).
+- **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. See [development](docs/development.md#drive).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
   - `GET /ready`: readiness over the declared backing services; `200` when all
     are up, `503` with per-dependency status otherwise. The standard API
-    checks its application database.
+    checks PostgreSQL and Stalwart.
   - `GET /openapi.json`: OpenAPI 3.1 document generated from the contracts.
   - Behind Caddy, these are served under `/api/`.
 
-Authentication components are under development and are not wired into the
-standard startup. They must not be used as a production login yet; mailbox
-provisioning and lifecycle reconciliation, audit coverage, account-based
-rate limits and authorization procedures remain to be integrated.
-
 ## Installation
 
-```sh
-git clone <repository> opensuite && cd opensuite
-cp deploy/env.example .env
-pnpm install && pnpm build   # build the static web client mounted by Caddy
-docker compose up -d
-curl -k https://localhost/api/health   # `localhost` uses a certificate from Caddy's local CA
-```
+For a single Ubuntu VPS, follow the complete ordered
+[production runbook](docs/deployment/production.md). It covers prerequisites,
+DNS, secrets, B2, SES, first admin, TLS renewal, backups, monitoring,
+verification and rollback. Use the operator's hostname and mail domain in
+place of its examples. The receiving MX and wildcard switch require a separate
+owner-approved cutover; the runbook does not perform one. Local tests have not
+established real SES/B2 behavior.
 
-For the candidate AWS mail infrastructure, see [docs/deployment/aws.md](docs/deployment/aws.md). It is validated offline and has not been applied or tested with AWS. Drive storage is planned for Backblaze B2.
+1. Install Docker Compose, Git, Node.js 22.18+ and pnpm 12; clone at
+   `/opt/opensuite`. Publish the hostname A/working AAAA record, allow 80/443,
+   and configure the B2 buckets, S3 CORS, SES identity, regional resources and
+   protected files as described in the runbook. Copy `deploy/env.example` to
+   `.env`, fill every required `DRIVE_S3_*` value and the file paths, and create
+   the TLS bind files. The template is not production-ready by itself.
+2. Build the web client and images and bootstrap the private mail management
+   account with public access stopped:
+
+   ```sh
+   cd /opt/opensuite
+   pnpm install --frozen-lockfile && pnpm build
+   docker compose config >/dev/null
+   docker compose build
+   docker compose run --rm secrets
+   docker compose stop caddy
+   docker compose -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml up -d --wait stalwart
+   docker compose -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml --profile bootstrap run --rm stalwart-bootstrap
+   docker compose up -d --no-deps --force-recreate --wait stalwart
+   docker compose run --rm --no-deps stalwart-setup
+   docker compose restart stalwart
+   docker compose up -d --wait stalwart
+   docker compose run --rm --no-deps stalwart-setup
+   ```
+
+   On a new B2 mail store, verify the second setup's round-trip probe, set
+   `MAIL_S3_ALLOW_SWITCH=0`, and rerun setup. Follow the separate migration
+   procedure before switching an existing store. Then run `docker compose up -d`.
+
+3. Provision the first administrator, install the mail certificate and daily
+   renewal timer, verify 465/993 before opening them, configure SES inbound and
+   the port 2587 outbound relay, and install and test encrypted backups and
+   observer alerts using the linked runbook. Exercise delivery, replay, B2,
+   restore and independent archive recovery before the approved DNS cutover.
 
 ## Development
 

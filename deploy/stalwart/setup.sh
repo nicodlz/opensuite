@@ -9,11 +9,26 @@
 set -eu
 
 api="${STALWART_URL:-http://stalwart:8080}"
-password="$(cat "${STALWART_MANAGEMENT_PASSWORD_FILE:-/run/opensuite/stalwart-management/password}")"
-case "$password" in *[!a-zA-Z0-9]*|'') echo 'stalwart-setup: invalid management password' >&2; exit 1 ;; esac
 umask 077
 auth_dir="$(mktemp -d)"
-trap 'rm -rf "$auth_dir"' EXIT HUP INT TERM
+finish() {
+  result=$?
+  trap - EXIT HUP INT TERM
+  rm -rf "$auth_dir"
+  if [ "$result" -eq 0 ]; then status=ok; else status=failed; fi
+  if [ -d /setup-status ]; then
+    tmp="/setup-status/status.$$"
+    if ! (umask 022; printf '%s\n' "$status" > "$tmp" && mv -f "$tmp" /setup-status/status); then
+      echo 'stalwart-setup: could not record status' >&2
+      result=1
+    fi
+  fi
+  exit "$result"
+}
+trap finish EXIT
+trap 'exit 1' HUP INT TERM
+password="$(cat "${STALWART_MANAGEMENT_PASSWORD_FILE:-/run/opensuite/stalwart-management/password}")"
+case "$password" in *[!a-zA-Z0-9]*|'') echo 'stalwart-setup: invalid management password' >&2; exit 1 ;; esac
 printf 'user = "management@opensuite.internal:%s"\n' "$password" >"$auth_dir/curl.conf"
 # Stalwart rejects loopback X-Forwarded-For values; use this container's address.
 self="$(hostname -i | cut -d' ' -f1)"

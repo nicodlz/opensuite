@@ -11,6 +11,14 @@ cleanup() {
     if ! compose start $running >&2; then result=1; log restart_failed; fi
   fi
   if ! clean_stage; then result=1; log scratch_cleanup_failed; fi
+  if [ "$result" -eq 0 ]; then
+    marker_dir=${OBSERVE_BACKUP_DIR:-./deploy/backup-status}
+    if ! (umask 022; mkdir -p "$marker_dir" && marker=$(mktemp "$marker_dir/.last-success.XXXXXXXX") &&
+      printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker" && mv -f "$marker" "$marker_dir/last-success"); then
+      result=1
+      log marker_failed
+    fi
+  fi
   if [ "$result" -eq 0 ]; then log success; else log failure; fi
   exit "$result"
 }
@@ -33,11 +41,11 @@ done
 compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >&2
 # The saved registry, not .env, is authoritative for the active blob store.
 # Refuse to omit a mail bucket when the two configurations disagree.
-blob=$(compose exec -T stalwart sh -ec '
-  password=$(cat /run/opensuite/stalwart-admin/password)
+blob=$(compose run --rm --no-deps -T backup-management '
+  password=$(cat /run/opensuite/stalwart-management/password)
   self=$(hostname -i | cut -d" " -f1)
-  curl -fsS -u "admin:$password" -H "X-Forwarded-For: $self" -H "Content-Type: application/json" \
-    http://127.0.0.1:8080/jmap/ -d "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:stalwart:jmap\"],\"methodCalls\":[[\"x:BlobStore/get\",{\"ids\":[\"singleton\"]},\"b\"]]}"
+  curl -fsS -u "management@opensuite.internal:$password" -H "X-Forwarded-For: $self" -H "Content-Type: application/json" \
+    http://stalwart-management:8080/jmap/ -d "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:stalwart:jmap\"],\"methodCalls\":[[\"x:BlobStore/get\",{\"ids\":[\"singleton\"]},\"b\"]]}"
 ')
 case "${MAIL_BLOB_STORE:-local}" in
   local) printf '%s' "$blob" | grep -Fq '"@type":"Default"' || { echo 'backup: active mail blob configuration differs from .env' >&2; exit 1; } ;;
@@ -50,7 +58,7 @@ case "${MAIL_BLOB_STORE:-local}" in
     ;;
   *) echo 'backup: unknown mail blob store' >&2; exit 1 ;;
 esac
-running=$(compose ps --services --filter status=running | awk '/^(caddy|api|drive|stalwart)$/ {print}')
+running=$(compose ps --services --filter status=running | awk '/^(caddy|api|drive|stalwart|ingest|observe)$/ {print}')
 # Stop clients and workers before any snapshot; operators must stop external writers.
 [ -z "$running" ] || compose stop $running >&2
 log quiesced
@@ -64,6 +72,18 @@ cp compose.yaml "$BACKUP_STAGE/data/config/compose.yaml"
 git rev-parse HEAD > "$BACKUP_STAGE/data/config/git-revision"
 cp -R deploy/postgres/initdb "$BACKUP_STAGE/data/config/initdb"
 if [ "${MAIL_BLOB_STORE:-local}" = s3 ]; then cp "${MAIL_S3_SECRET_FILE:?}" "$BACKUP_STAGE/data/config/mail-s3-secret"; fi
+cp "${DRIVE_S3_SECRET_FILE:?}" "$BACKUP_STAGE/data/config/drive-s3-secret"
+for item in "ingest:${INGEST_ENV_FILE:-./deploy/ingest.env}" "observe:${OBSERVE_ENV_FILE:-./deploy/observe.env}" \
+  "relay:${MAIL_RELAY_SECRET_FILE:-/dev/null}" "tls-cert:${MAIL_TLS_CERT_FILE:-/dev/null}" "tls-key:${MAIL_TLS_KEY_FILE:-/dev/null}"; do
+  name=${item%%:*}; path=${item#*:}
+  if [ "$path" != /dev/null ] && [ -f "$path" ]; then cp "$path" "$BACKUP_STAGE/data/config/$name"; fi
+done
+if [ "${MAIL_RELAY_CONFIGURED:-0}" = 1 ] && [ ! -s "$BACKUP_STAGE/data/config/relay" ]; then
+  echo 'backup: configured relay secret is missing' >&2; exit 1
+fi
+if [ "${MAIL_TLS_ENABLED:-0}" = 1 ] && { [ ! -s "$BACKUP_STAGE/data/config/tls-cert" ] || [ ! -s "$BACKUP_STAGE/data/config/tls-key" ]; }; then
+  echo 'backup: configured TLS files are missing' >&2; exit 1
+fi
 printf '%s\n' "$POSTGRES_USER" "$POSTGRES_DB" "$POSTGRES_DRIVE_DB" > "$BACKUP_STAGE/data/config/databases"
 compose exec -T -e PGPASSWORD="$(compose exec -T postgres cat /run/opensuite/postgres/password)" postgres pg_dumpall -h localhost -U "$POSTGRES_USER" --globals-only > "$BACKUP_STAGE/data/postgres/globals.sql"
 for db in "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do

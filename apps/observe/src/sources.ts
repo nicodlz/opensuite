@@ -3,7 +3,7 @@ import {
   GetMetricStatisticsCommand,
 } from "@aws-sdk/client-cloudwatch";
 import { GetQueueAttributesCommand, SQSClient } from "@aws-sdk/client-sqs";
-import { stat, statfs } from "node:fs/promises";
+import { readFile, stat, statfs } from "node:fs/promises";
 import { connect } from "node:tls";
 import type { Config, QueueStats, Sources } from "./checks.ts";
 
@@ -37,12 +37,22 @@ export const makeSources = (config: Config): Sources => {
       const disk = await statfs("/host-disk");
       return 100 * (1 - disk.bavail / disk.blocks);
     },
-    async certificateDays() {
+    async setupOk() {
+      return (await readFile("/setup-status/status", "utf8")).trim() === "ok";
+    },
+    async certificateDays(service) {
       return new Promise<number>((resolve, reject) => {
         const socket = connect({
-          host: config.OBSERVE_CERT_CONNECT_HOST,
-          port: 443,
-          servername: config.OBSERVE_CERT_HOST,
+          host:
+            service === "https"
+              ? config.OBSERVE_CERT_CONNECT_HOST
+              : config.OBSERVE_MAIL_CERT_CONNECT_HOST,
+          port:
+            service === "https" ? 443 : service === "submission" ? 465 : 993,
+          servername:
+            service === "https"
+              ? config.OBSERVE_CERT_HOST
+              : config.OBSERVE_MAIL_CERT_HOST,
           rejectUnauthorized: false,
         });
         socket.setTimeout(config.OBSERVE_TIMEOUT_MS, () =>

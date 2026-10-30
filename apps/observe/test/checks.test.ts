@@ -11,6 +11,7 @@ const healthy: Sources = {
   backupAge: () => Promise.resolve(100),
   diskPercent: () => Promise.resolve(50),
   certificateDays: () => Promise.resolve(60),
+  setupOk: () => Promise.resolve(true),
   queue: () =>
     Promise.resolve({
       visible: 0,
@@ -165,4 +166,26 @@ it("retries failed webhook delivery and reports recovery only after delivery", a
   expect(
     logs.some((entry) => entry["event"] === "webhook_delivery_failed"),
   ).toBe(true);
+});
+
+it("reports setup failure and independently checks both mail TLS endpoints", async () => {
+  const report = await inspect(
+    Config.parse({ OBSERVE_MAIL_TLS_ENABLED: "1" }),
+    {
+      ...healthy,
+      setupOk: () => Promise.resolve(false),
+      certificateDays: (service) =>
+        service === "submission"
+          ? Promise.resolve(2)
+          : service === "imaps"
+            ? Promise.reject(new Error("offline"))
+            : Promise.resolve(60),
+    },
+    new Date(),
+  );
+  expect(report.alerts.map((alert) => alert.code)).toEqual([
+    "mail_imaps_certificate_days_unavailable",
+    "mail_submission_certificate_days",
+    "stalwart_setup",
+  ]);
 });

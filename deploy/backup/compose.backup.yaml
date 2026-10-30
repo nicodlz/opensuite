@@ -13,6 +13,18 @@ services:
       - ${BACKUP_STAGE:?set BACKUP_STAGE}:/stage
       - ${BACKUP_PASSWORD_FILE:?set BACKUP_PASSWORD_FILE}:/run/backup/password:ro
 
+  backup-management:
+    image: stalwartlabs/stalwart:v1.0.1@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b
+    entrypoint: ["/bin/sh", "-ec"]
+    networks: [mail-management]
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-management
+        read_only: true
+        volume:
+          subpath: stalwart-management
+
   backup-objects:
     image: rclone/rclone:1.71.2@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51
     entrypoint: ["/bin/sh", "-c"]

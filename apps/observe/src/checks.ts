@@ -19,6 +19,9 @@ export const Config = z.object({
   OBSERVE_WEBHOOK_URL: z.url().optional(),
   OBSERVE_CERT_HOST: z.string().min(1).default("localhost"),
   OBSERVE_CERT_CONNECT_HOST: z.string().min(1).default("caddy"),
+  OBSERVE_MAIL_CERT_HOST: z.string().min(1).default("localhost"),
+  OBSERVE_MAIL_CERT_CONNECT_HOST: z.string().min(1).default("stalwart"),
+  OBSERVE_MAIL_TLS_ENABLED: z.enum(["0", "1"]).default("0"),
   AWS_REGION: z.string().min(1).default("eu-north-1"),
   AWS_ENDPOINT_URL: z.url().optional(),
 });
@@ -34,7 +37,8 @@ export interface Sources {
   ready(service: string): Promise<boolean>;
   backupAge(): Promise<number>;
   diskPercent(): Promise<number>;
-  certificateDays(): Promise<number>;
+  certificateDays(service: "https" | "submission" | "imaps"): Promise<number>;
+  setupOk(): Promise<boolean>;
   queue(url: string): Promise<QueueStats>;
 }
 interface Alert {
@@ -93,9 +97,23 @@ export async function inspect(
     ),
     check(
       "certificate_days",
-      () => sources.certificateDays(),
+      () => sources.certificateDays("https"),
       (value) => value <= config.OBSERVE_CERT_DAYS,
     ),
+    check(
+      "stalwart_setup",
+      async () => Number(await sources.setupOk()),
+      (value) => value !== 1,
+    ),
+    ...(config.OBSERVE_MAIL_TLS_ENABLED === "1"
+      ? (["submission", "imaps"] as const).map((service) =>
+          check(
+            `mail_${service}_certificate_days`,
+            () => sources.certificateDays(service),
+            (value) => value <= config.OBSERVE_CERT_DAYS,
+          ),
+        )
+      : []),
     ...(config.OBSERVE_INGEST_ENABLED === "true"
       ? (
           [

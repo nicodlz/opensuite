@@ -1,5 +1,6 @@
 # OpenSuite standard installation (single small server).
-#   cp deploy/env.example .env && docker compose up -d
+#   Configure .env and secrets, then follow docs/deployment/production.md.
+#   Fresh installations must bootstrap the management account before normal up.
 # Add `--profile dev` for local AWS substitutes (LocalStack).
 name: opensuite
 
@@ -44,15 +45,19 @@ services:
         chown -R 1000:1000 /secrets/mailbox-key
         chmod 0500 /secrets/mailbox-key
         chmod 0400 /secrets/mailbox-key/password
-        chown 2000:1000 /secrets/stalwart-admin /secrets/stalwart-admin/password
-        chmod 0550 /secrets/stalwart-admin
-        chmod 0440 /secrets/stalwart-admin/password
+        chown 2000:1000 /secrets/stalwart-management /secrets/stalwart-management/password
+        chmod 0550 /secrets/stalwart-management
+        chmod 0440 /secrets/stalwart-management/password
+        mkdir -p /setup-status
+        chown 2000:1000 /setup-status
+        chmod 0775 /setup-status
         generate drive-database 999
         chown 999:1000 /secrets/app-database /secrets/app-database/password
         chmod 0550 /secrets/app-database
         chmod 0440 /secrets/app-database/password
     volumes:
       - secrets:/secrets
+      - setup-status:/setup-status
     network_mode: none
 
   caddy:
@@ -62,6 +67,11 @@ services:
       api-proxy:
         ipv4_address: 172.28.254.2
     image: caddy:2.11.7@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        [ -s /srv/index.html ] || { echo 'caddy: web dist missing; run pnpm install and pnpm build' >&2; exit 1; }
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     environment:
       OPENSUITE_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
       MAIL_MANAGEMENT_SUBNET: ${MAIL_MANAGEMENT_SUBNET:-172.30.248.0/24}
@@ -87,11 +97,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
-    depends_on:
-      api:
-        condition: service_started
-      stalwart:
-        condition: service_started
 
   api:
     <<: *restart
@@ -99,6 +104,8 @@ services:
       default:
       api-proxy:
         aliases: [api-proxy]
+      mail-management:
+        ipv4_address: ${MAIL_MANAGEMENT_API_IP:-172.30.248.10}
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -114,10 +121,11 @@ services:
       TRUSTED_PROXY_IP: 172.28.254.2
       AUTH_PUBLIC_ORIGIN: https://${OPENSUITE_PUBLIC_HOST:-localhost}
       MAIL_DOMAIN: ${MAIL_DOMAIN:-localhost.test}
-      STALWART_INTERNAL_ORIGIN: http://stalwart:8080
+      STALWART_INTERNAL_ORIGIN: http://stalwart-management:8080
+      STALWART_MANAGEMENT_CLIENT_IP: ${MAIL_MANAGEMENT_API_IP:-172.30.248.10}
       AUTH_SECRET_FILE: /run/opensuite/auth/password
       MAILBOX_KEY_FILE: /run/opensuite/mailbox-key/password
-      STALWART_ADMIN_PASSWORD_FILE: /run/opensuite/stalwart-admin/password
+      STALWART_MANAGEMENT_PASSWORD_FILE: /run/opensuite/stalwart-management/password
     volumes:
       - type: volume
         source: secrets
@@ -139,13 +147,11 @@ services:
           subpath: mailbox-key
       - type: volume
         source: secrets
-        target: /run/opensuite/stalwart-admin
+        target: /run/opensuite/stalwart-management
         read_only: true
         volume:
-          subpath: stalwart-admin
+          subpath: stalwart-management
     depends_on:
-      stalwart-setup:
-        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     healthcheck:
@@ -170,7 +176,7 @@ services:
     image: opensuite-ingest:local
     env_file:
       - path: ${INGEST_ENV_FILE:-./deploy/ingest.env}
-        required: true
+        required: false
     healthcheck:
       test:
         [
@@ -195,7 +201,10 @@ services:
         required: false
     environment:
       OBSERVE_CERT_HOST: ${OPENSUITE_PUBLIC_HOST:-localhost}
+      OBSERVE_MAIL_CERT_HOST: ${MAIL_HOSTNAME:-localhost}
+      OBSERVE_MAIL_TLS_ENABLED: ${MAIL_TLS_ENABLED:-0}
     volumes:
+      - setup-status:/setup-status:ro
       - type: bind
         source: ${OBSERVE_BACKUP_DIR:-./deploy/backup-status}
         target: /backup
@@ -228,16 +237,20 @@ services:
       POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
       DRIVE_DATABASE_PASSWORD_FILE: /run/opensuite/drive-database/password
       DRIVE_SESSION_API: ${DRIVE_SESSION_API:-http://api:3000}
-      DRIVE_S3_ENDPOINT: ${DRIVE_S3_ENDPOINT:-http://localstack:4566}
-      DRIVE_S3_PUBLIC_ENDPOINT: ${DRIVE_S3_PUBLIC_ENDPOINT:-http://localhost:4566}
-      DRIVE_S3_BUCKET: ${DRIVE_S3_BUCKET:-opensuite-drive}
+      DRIVE_S3_ENDPOINT: ${DRIVE_S3_ENDPOINT:?set DRIVE_S3_ENDPOINT}
+      DRIVE_S3_PUBLIC_ENDPOINT: ${DRIVE_S3_PUBLIC_ENDPOINT:?set DRIVE_S3_PUBLIC_ENDPOINT}
+      DRIVE_S3_BUCKET: ${DRIVE_S3_BUCKET:?set DRIVE_S3_BUCKET}
       DRIVE_S3_PREFIX: ${DRIVE_S3_PREFIX:-drive/}
-      DRIVE_S3_REGION: ${DRIVE_S3_REGION:-us-east-1}
-      DRIVE_S3_ACCESS_KEY: ${DRIVE_S3_ACCESS_KEY:-test}
-      DRIVE_S3_SECRET_KEY: ${DRIVE_S3_SECRET_KEY:-test}
+      DRIVE_S3_REGION: ${DRIVE_S3_REGION:?set DRIVE_S3_REGION}
+      DRIVE_S3_ACCESS_KEY: ${DRIVE_S3_ACCESS_KEY:?set DRIVE_S3_ACCESS_KEY}
+      DRIVE_S3_SECRET_KEY_FILE: /run/opensuite/drive-s3-secret
       DRIVE_S3_PATH_STYLE: ${DRIVE_S3_PATH_STYLE:-true}
       DRIVE_QUOTA_BYTES: ${DRIVE_QUOTA_BYTES:-10000000000}
     volumes:
+      - type: bind
+        source: ${DRIVE_S3_SECRET_FILE:?set DRIVE_S3_SECRET_FILE}
+        target: /run/opensuite/drive-s3-secret
+        read_only: true
       - type: volume
         source: secrets
         target: /run/opensuite/drive-database
@@ -355,8 +368,16 @@ services:
   stalwart:
     <<: *restart
     image: stalwartlabs/stalwart:v1.0.1@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b
-    command: ["--config", "/etc/stalwart/config.json"]
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ "$$MAIL_RELAY_CONFIGURED" = 1 ] && [ ! -s /run/opensuite/smtp-secret ]; then
+          echo 'stalwart: configured relay secret is missing or empty' >&2; exit 1
+        fi
+        exec /usr/local/bin/stalwart --config /etc/stalwart/config.json
     environment:
+      MAIL_RELAY_CONFIGURED: ${MAIL_RELAY_CONFIGURED:-0}
       STALWART_HOSTNAME: ${MAIL_HOSTNAME:-localhost}
       STALWART_PUBLIC_URL: https://${OPENSUITE_PUBLIC_HOST:-localhost}
       MAIL_S3_KEY_ID: ${MAIL_S3_KEY_ID:-}
@@ -385,8 +406,9 @@ services:
         target: /run/opensuite/mail-s3-secret
         read_only: true
     networks:
-      - default
-      - mail-management
+      default:
+      mail-management:
+        aliases: [stalwart-management]
     healthcheck:
       # Stalwart trusts X-Forwarded-For (set by the proxy) and rejects loopback
       # values, so the probe identifies itself with the container address.
@@ -421,6 +443,7 @@ services:
       MAIL_S3_ALLOW_SWITCH: ${MAIL_S3_ALLOW_SWITCH:-0}
     volumes:
       - ./deploy/stalwart/setup.sh:/opt/opensuite/setup.sh:ro
+      - setup-status:/setup-status
       - type: bind
         source: ${MAIL_TLS_CERT_FILE:-/dev/null}
         target: /run/opensuite/tls/fullchain.pem
@@ -444,6 +467,29 @@ services:
     depends_on:
       stalwart:
         condition: service_healthy
+
+  # Trusted, short-lived operator command; no management port is published.
+  management:
+    profiles: [ops]
+    image: opensuite-api:local
+    entrypoint: ["/bin/sh", "/opt/opensuite/management.sh"]
+    environment:
+      MAIL_RELAY_CONFIGURED: ${MAIL_RELAY_CONFIGURED:-0}
+    networks: [mail-management]
+    volumes:
+      - ./deploy/stalwart/management.sh:/opt/opensuite/management.sh:ro
+      - ./scripts/outbound.mjs:/app/scripts/outbound.mjs:ro
+      - ./scripts/ingest-credential.mjs:/app/scripts/ingest-credential.mjs:ro
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-management
+        read_only: true
+        volume:
+          subpath: stalwart-management
+      - type: bind
+        source: ${MAIL_RELAY_SECRET_FILE:-/dev/null}
+        target: /run/opensuite/smtp-secret
+        read_only: true
 
   localstack:
     profiles: [dev]
@@ -489,3 +535,4 @@ volumes:
   postgres-data:
   stalwart-data:
   localstack-data:
+  setup-status:

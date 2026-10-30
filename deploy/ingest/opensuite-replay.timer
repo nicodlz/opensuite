@@ -1,0 +1,9 @@
+[Unit]
+Description=Reconcile OpenSuite inbound mail hourly
+
+[Timer]
+OnCalendar=*-*-* *:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

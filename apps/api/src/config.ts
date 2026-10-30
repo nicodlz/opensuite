@@ -112,9 +112,10 @@ const AuthEnvironment = z.object({
     const url = new URL(value);
     return ["http:", "https:"].includes(url.protocol) && url.origin === value;
   }),
+  STALWART_MANAGEMENT_CLIENT_IP: z.ipv4().optional(),
   AUTH_SECRET_FILE: z.string().min(1),
   MAILBOX_KEY_FILE: z.string().min(1),
-  STALWART_ADMIN_PASSWORD_FILE: z.string().min(1),
+  STALWART_MANAGEMENT_PASSWORD_FILE: z.string().min(1),
 });
 
 export const loadAuthConfig = async (
@@ -130,7 +131,7 @@ export const loadAuthConfig = async (
     const [secret, mailboxKey, adminPassword] = await Promise.all([
       readFile(parsed.data.AUTH_SECRET_FILE, "utf8"),
       readFile(parsed.data.MAILBOX_KEY_FILE, "utf8"),
-      readFile(parsed.data.STALWART_ADMIN_PASSWORD_FILE, "utf8"),
+      readFile(parsed.data.STALWART_MANAGEMENT_PASSWORD_FILE, "utf8"),
     ]);
     const values = z
       .object({
@@ -157,6 +158,9 @@ export const loadAuthConfig = async (
         "/healthz/ready",
         parsed.data.STALWART_INTERNAL_ORIGIN,
       ).toString(),
+      ...(parsed.data.STALWART_MANAGEMENT_CLIENT_IP === undefined
+        ? {}
+        : { managementClientIp: parsed.data.STALWART_MANAGEMENT_CLIENT_IP }),
       ...values.data,
     });
   } catch {
