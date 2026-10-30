@@ -17,6 +17,7 @@ import {
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { MailPage } from "./mail/mail-page.tsx";
+import { DrivePage } from "./drive/drive-page.tsx";
 import { getHealth, getReadiness } from "./api.ts";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogContent, DialogTrigger } from "./ui/dialog.tsx";
@@ -42,8 +43,8 @@ function initialTheme(): ThemeChoice {
 }
 
 function Shell() {
-  const isMail = useRouterState({
-    select: (state) => state.location.pathname === "/mail",
+  const product = useRouterState({
+    select: (state) => state.location.pathname,
   });
   const [theme, setTheme] = useState<ThemeChoice>(initialTheme);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -77,7 +78,8 @@ function Shell() {
     if (value === "system" || value === "light" || value === "dark")
       setTheme(value);
   }
-  if (isMail) return <MailPage />;
+  if (product === "/mail") return <MailPage />;
+  if (product === "/drive") return <DrivePage />;
   return (
     <ToastProvider>
       <a href="#main-content" className="skip-link">
@@ -376,10 +378,7 @@ function StatusPage() {
           </ul>
         </section>
       )}
-      <p className="status-footnote">
-        Status reflects these API checks only. Mail and other products are not
-        yet available in this interface.
-      </p>
+      <p className="status-footnote">Status reflects these API checks only.</p>
     </div>
   );
 }
@@ -454,7 +453,7 @@ const contactsRoute = createRoute({
 const driveRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/drive",
-  component: () => <ProductPlaceholder name="Drive" />,
+  component: DrivePage,
 });
 const router = createRouter({
   routeTree: rootRoute.addChildren([
