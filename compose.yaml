@@ -248,6 +248,10 @@ services:
       - ./deploy/stalwart/config.json:/etc/stalwart/config.json:ro
       - stalwart-data:/var/lib/stalwart
       - type: bind
+        source: ${MAIL_RELAY_SECRET_FILE:-/dev/null}
+        target: /run/opensuite/smtp-secret
+        read_only: true
+      - type: bind
         source: ${MAIL_S3_SECRET_FILE:-/dev/null}
         target: /run/opensuite/mail-s3-secret
         read_only: true

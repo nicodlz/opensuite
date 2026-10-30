@@ -14,6 +14,7 @@ const ErrorSchema = z.object({
   description: z.string().optional(),
 });
 export type JmapError =
+  | { kind: "invalidInput"; message: string }
   | { kind: "network"; message: string }
   | { kind: "http"; status: number; body: string }
   | {
