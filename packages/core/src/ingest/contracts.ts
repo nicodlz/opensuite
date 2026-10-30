@@ -32,7 +32,12 @@ export type RecipientState =
   | "quarantined"
   | "failed"
   | "rejected"
-  | "uncertain";
+  | "uncertain"
+  // An unknown envelope recipient waiting for its address to be provisioned
+  // or for an operator decision; its message and object are kept.
+  | "held"
+  // Addresses that became known were moved to a mailbox recipient.
+  | "rerouted";
 export interface LedgerRecipient {
   key: string;
   state: RecipientState;
@@ -44,10 +49,18 @@ export interface LedgerRecipient {
   importStartedAt: Date | null;
 }
 export interface Ledger {
+  /**
+   * Records the message and its recipients. Held addresses that now resolve
+   * to a mailbox move to that mailbox recipient, but only while the time,
+   * read under the message lock, is before `rerouteUntil` (epoch ms).
+   */
   prepare(
     notification: Notification,
     recipients: Recipient[],
+    options?: { rerouteUntil?: number },
   ): Outcome<LedgerRecipient[]>;
+  /** Rejects a held recipient whose hold window elapsed, with an audit row. */
+  expireHeld(key: string, reason: string): Outcome<boolean>;
   claim(key: string, owner: string): Outcome<boolean>;
   renew(key: string, owner: string): Outcome<boolean>;
   startImport(key: string, owner: string): Outcome<boolean>;
@@ -98,4 +111,9 @@ export interface IngestDependencies {
   bufferPrefix: string;
   topic: string;
   maxAttempts: number;
+  /**
+   * Days an unknown recipient is held. Older held recipients are never
+   * routed and are rejected automatically; defaults to 14.
+   */
+  holdDays?: number;
 }

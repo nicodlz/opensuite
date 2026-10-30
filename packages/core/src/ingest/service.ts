@@ -14,6 +14,10 @@ import type {
 } from "./contracts.ts";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
+// States after which a recipient needs no more work. `held` is not one: an
+// unknown recipient keeps the message and its object until it is routed by a
+// later replay or rejected by an operator.
+const finished = new Set(["imported", "quarantined", "rejected", "rerouted"]);
 // Exceeds the ten-minute lease plus the two-minute JMAP deadline.
 const uncertainGraceMs = 15 * 60_000;
 export const recipientKey = (
@@ -50,8 +54,8 @@ export class IngestService {
       const archive = await storage.archive(`${digest(body)}.json`, body);
       if (archive.isErr()) return archive;
     }
-    const expired = await ledger.expireClaims();
-    if (expired.isErr()) return expired;
+    const claims = await ledger.expireClaims();
+    if (claims.isErr()) return claims;
     const dynamic = await this.deps.resolveRoutes?.(n.receipt.recipients);
     if (dynamic?.isErr()) return err(dynamic.error);
     const routes = [...this.deps.routes];
@@ -64,7 +68,13 @@ export class IngestService {
       if (existing === undefined) routes.push(route);
     }
     const recipients = resolveRecipients(n.receipt.recipients, routes);
-    const prepared = await ledger.prepare(n, recipients);
+    // Past the hold window an unknown address is never routed, so a mailbox
+    // created later (possibly for someone else) does not receive old mail.
+    // The window is counted from the SES receipt time with this server's
+    // clock; the ledger re-checks it under the message lock.
+    const holdDays = this.deps.holdDays ?? 14;
+    const rerouteUntil = Date.parse(n.mail.timestamp) + holdDays * 86_400_000;
+    const prepared = await ledger.prepare(n, recipients, { rerouteUntil });
     if (prepared.isErr()) return err(prepared.error);
     let read: Result<Uint8Array, Failure> | undefined;
     const bytes = async () => {
@@ -79,8 +89,22 @@ export class IngestService {
     const quarantine = verdictPolicy(n) === "quarantine";
     // Sequential delivery bounds memory and ensures the buffer is read only once.
     const processRecipient = async (record: LedgerRecipient): Promise<void> => {
-      if (["imported", "quarantined", "rejected"].includes(record.state))
+      if (finished.has(record.state)) return;
+      if (record.state === "held") {
+        if (Date.now() < rerouteUntil) return;
+        const rejected = await ledger.expireHeld(
+          record.key,
+          `Hold window of ${String(holdDays)} days elapsed`,
+        );
+        if (rejected.isErr()) firstFailure ??= rejected.error;
+        else if (rejected.value)
+          events.emit("ingest_held_expired", {
+            messageId: n.mail.messageId,
+            recipient: record.destination,
+            recipientKey: record.key,
+          });
         return;
+      }
       if (record.permanent) {
         firstFailure ??= { message: "Recipient has a permanent rejection" };
         return;
@@ -154,17 +178,18 @@ export class IngestService {
         return;
       }
       if (!record.known) {
-        const rejected = await ledger.finish(
+        const held = await ledger.finish(
           record.key,
-          "rejected",
+          "held",
           undefined,
           "Unknown envelope recipient",
         );
-        if (rejected.isErr()) firstFailure ??= rejected.error;
+        if (held.isErr()) firstFailure ??= held.error;
         else
-          events.emit("ingest_rejected", {
+          events.emit("ingest_held", {
             messageId: n.mail.messageId,
             recipient: record.destination,
+            recipientKey: record.key,
           });
         return;
       }
@@ -261,26 +286,35 @@ export class IngestService {
       (previous, record) => previous.then(() => processRecipient(record)),
       Promise.resolve(),
     );
-    const current = await ledger.prepare(n, recipients);
+    const current = await ledger.prepare(n, recipients, { rerouteUntil });
     if (current.isErr()) return err(current.error);
-    const complete = current.value.every((r) =>
-      ["imported", "quarantined", "rejected"].includes(r.state),
-    );
-    const updated = await ledger.messageState(
-      n.mail.messageId,
-      complete ? "imported" : "failed",
-    );
-    if (updated.isErr()) return updated;
-    if (complete && firstFailure === undefined) {
+    const complete = current.value.every((r) => finished.has(r.state));
+    // Only unknown recipients remain: nothing to retry until an address is
+    // provisioned (replay routes it) or an operator rejects it.
+    const waiting =
+      !complete &&
+      current.value.every((r) => finished.has(r.state) || r.state === "held");
+    // Delete the object before recording completion: replay skips completed
+    // messages, so a failed deletion must leave the message to be retried.
+    const done = complete && firstFailure === undefined;
+    if (done) {
       const deleted = await storage.deleteBuffer(
         n.receipt.action.bucketName,
         n.receipt.action.objectKey,
       );
-      if (deleted.isErr()) return deleted;
+      if (deleted.isErr()) {
+        await ledger.messageState(n.mail.messageId, "failed");
+        return deleted;
+      }
     }
+    const updated = await ledger.messageState(
+      n.mail.messageId,
+      done ? "imported" : waiting ? "held" : "failed",
+    );
+    if (updated.isErr()) return updated;
     return firstFailure !== undefined
       ? err(firstFailure)
-      : complete
+      : complete || waiting
         ? ok(undefined)
         : err({ message: "Recipients remain incomplete" });
   }

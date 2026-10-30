@@ -17,17 +17,26 @@ const state = z.enum([
   "failed",
   "rejected",
   "uncertain",
+  "held",
+  "rerouted",
 ]);
 type Client =
   ReturnType<typeof createDatabase> extends Result<infer T, infer _E>
     ? T
     : never;
+const addressesOf = (row: { addresses: unknown }) =>
+  z.array(z.string()).parse(row.addresses);
+const isMailbox = (row: {
+  idempotencyKey: string;
+  messageId: string;
+  destination: string;
+}) => row.idempotencyKey === recipientKey(row.messageId, row.destination, true);
 const failure = (cause: unknown) => ({
   message: cause instanceof Error ? cause.message : String(cause),
 });
 export function databaseLedger(db: Client): Ledger {
   return {
-    prepare(notification, recipients) {
+    prepare(notification, recipients, options) {
       return ResultAsync.fromPromise(
         db.$transaction(async (tx) => {
           const n = notification;
@@ -51,15 +60,40 @@ export function databaseLedger(db: Client): Ledger {
           const existing = await tx.inboundRecipient.findMany({
             where: { messageId: n.mail.messageId },
           });
+          // Addresses held as unknown may now be known: move them to the
+          // mailbox recipient within this locked transaction.
+          // Decided under the message lock, so a run that started inside the
+          // hold window cannot route after it ends.
+          const held =
+            options?.rerouteUntil !== undefined &&
+            Date.now() >= options.rerouteUntil
+              ? []
+              : existing.filter(
+                  (row) => row.state === "held" && !isMailbox(row),
+                );
           const recorded = new Set(
-            existing.flatMap((row) => z.array(z.string()).parse(row.addresses)),
+            existing
+              .filter((row) => !held.includes(row))
+              .flatMap((row) => addressesOf(row)),
           );
-          await Promise.all(
-            recipients.map(async (recipient) => {
+          const heldAddresses = new Set(
+            held.flatMap((row) => addressesOf(row)),
+          );
+          const moved = new Set<string>();
+          // Sequential: two recipients may update the same held row.
+          await recipients.reduce<Promise<void>>(
+            async (previousStep, recipient) => {
+              await previousStep;
               const addresses = recipient.addresses.filter(
-                (address) => !recorded.has(address),
+                (address) =>
+                  !recorded.has(address) &&
+                  (recipient.known || !heldAddresses.has(address)),
               );
               if (addresses.length === 0) return;
+              for (const address of addresses) recorded.add(address);
+              if (recipient.known)
+                for (const address of addresses)
+                  if (heldAddresses.has(address)) moved.add(address);
               const key = recipientKey(
                 n.mail.messageId,
                 recipient.destination,
@@ -79,16 +113,37 @@ export function databaseLedger(db: Client): Ledger {
                 update: {
                   addresses: [
                     ...new Set([
-                      ...(previous === undefined
-                        ? []
-                        : z.array(z.string()).parse(previous.addresses)),
+                      ...(previous === undefined ? [] : addressesOf(previous)),
                       ...addresses,
                     ]),
                   ],
                 },
               });
-            }),
+            },
+            Promise.resolve(),
           );
+          await held.reduce<Promise<void>>(async (previousStep, row) => {
+            await previousStep;
+            const remaining = addressesOf(row).filter(
+              (address) => !moved.has(address),
+            );
+            if (remaining.length === addressesOf(row).length) return;
+            // Conditional: an operator rejection that won the race keeps
+            // its decision; the conflict rolls this transaction back.
+            const updated = await tx.inboundRecipient.updateMany({
+              where: { idempotencyKey: row.idempotencyKey, state: "held" },
+              data:
+                remaining.length === 0
+                  ? {
+                      addresses: remaining,
+                      state: "rerouted",
+                      error: "Address became known and was routed",
+                    }
+                  : { addresses: remaining },
+            });
+            if (updated.count !== 1)
+              throw new Error("Held recipient changed during routing");
+          }, Promise.resolve());
           const rows = await tx.inboundRecipient.findMany({
             where: { messageId: n.mail.messageId },
           });
@@ -104,6 +159,35 @@ export function databaseLedger(db: Client): Ledger {
               row.idempotencyKey ===
               recipientKey(row.messageId, row.destination, true),
           }));
+        }),
+        failure,
+      );
+    },
+    expireHeld(key, reason) {
+      return ResultAsync.fromPromise(
+        db.$transaction(async (tx) => {
+          const row = await tx.inboundRecipient.findUnique({
+            where: { idempotencyKey: key },
+          });
+          if (row?.state !== "held") return false;
+          // Same lock as prepare and the operator command.
+          await tx.$queryRaw`SELECT "id" FROM "InboundMessage" WHERE "id" = ${row.messageId} FOR UPDATE`;
+          const updated = await tx.inboundRecipient.updateMany({
+            where: { idempotencyKey: key, state: "held" },
+            data: { state: "rejected", error: reason },
+          });
+          if (updated.count !== 1) return false;
+          await tx.inboundResolutionAudit.create({
+            data: {
+              recipientKey: key,
+              operator: "system:expiry",
+              reason,
+              action: "expire",
+              previousState: "held",
+              remoteId: null,
+            },
+          });
+          return true;
         }),
         failure,
       );

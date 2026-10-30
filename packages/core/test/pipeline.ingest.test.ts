@@ -120,7 +120,33 @@ const connectClients = async () => {
   );
 };
 
-const connectService = () => {
+// Count by listing the whole mailbox and reading subjects: Stalwart's
+// full-text index is asynchronous, so a subject search can miss a copy.
+const bySubject = async (
+  m: { client: JmapClient; session: Session; account: string },
+  subject: string,
+) => {
+  const all = getValue(
+    await m.client.queryEmails(m.session, m.account, {}),
+  ).ids;
+  if (all.length === 0) return [];
+  return getValue(await m.client.emails(m.session, m.account, all))
+    .list.filter((email) => email.subject === subject)
+    .map((email) => email.id);
+};
+// Held mail is routed only within the hold window: date it now.
+const recent = (recipients: string[], status: string, messageId: string) => {
+  const body = notification(recipients, status, messageId);
+  const now = new Date().toISOString();
+  return JSON.stringify({
+    ...body,
+    mail: { ...body.mail, timestamp: now },
+    receipt: { ...body.receipt, timestamp: now },
+  });
+};
+const connectService = (
+  extraRoutes: { address: string; destination: string }[] = [],
+) => {
   if (s3 === undefined || db === undefined || db.isErr())
     throw new Error("Clients not initialized");
   const delivery = jmapDelivery(
@@ -144,6 +170,7 @@ const connectService = () => {
       { address: "alice@example.test", destination: "alice" },
       { address: "alias@other.test", destination: "alice" },
       { address: "hidden@example.test", destination: "bob" },
+      ...extraRoutes,
     ],
     bucket: "inbound",
     bufferPrefix: "",
@@ -151,6 +178,46 @@ const connectService = () => {
     maxAttempts: 5,
     events: { emit() {} },
   });
+};
+
+// Holds the message row lock in a separate transaction until released.
+const holdLock = async (messageId: string) => {
+  if (db === undefined || db.isErr()) throw new Error("No database");
+  const locked = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const done = db.value.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "InboundMessage" WHERE "id" = ${messageId} FOR UPDATE`;
+      locked.resolve();
+      await release.promise;
+    },
+    { timeout: 60_000 },
+  );
+  await locked.promise;
+  return async () => {
+    release.resolve();
+    await done;
+  };
+};
+const heldMessage = async (id: string, address: string, subject: string) => {
+  if (s3 === undefined || db === undefined || db.isErr())
+    throw new Error("Clients not initialized");
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: "inbound",
+      Key: id,
+      Body: Buffer.from(
+        `From: sender@example.test\r\nTo: ${address}\r\nSubject: ${subject}\r\n\r\nRace\r\n`,
+      ),
+    }),
+  );
+  const body = recent([address], "PASS", id);
+  expect((await service.process(body)).isOk()).toBe(true);
+  const row = await db.value.inboundRecipient.findFirstOrThrow({
+    where: { messageId: id },
+  });
+  expect(row.state).toBe("held");
+  return { body, key: row.idempotencyKey };
 };
 
 describe("local ingestion pipeline", () => {
@@ -232,11 +299,7 @@ describe("local ingestion pipeline", () => {
       ["alice", "bob"].map(async (name) => {
         const m = clients.get(name);
         if (m === undefined) throw new Error("Missing client");
-        const ids = getValue(
-          await m.client.queryEmails(m.session, m.account, {
-            filter: { subject: "Ingest" },
-          }),
-        ).ids;
+        const ids = await bySubject(m, "Ingest");
         expect(ids).toHaveLength(1);
         const email = getValue(await m.client.emails(m.session, m.account, ids))
           .list[0];
@@ -251,7 +314,7 @@ describe("local ingestion pipeline", () => {
       }),
     );
   }, 90_000);
-  it("quarantines a failed verdict and records an unknown recipient", async () => {
+  it("quarantines a failed verdict, holds unknown recipients and routes them once provisioned", async () => {
     if (s3 === undefined || db === undefined || db.isErr())
       throw new Error("Clients not initialized");
     const raw = Buffer.from(
@@ -260,25 +323,26 @@ describe("local ingestion pipeline", () => {
     await s3.send(
       new PutObjectCommand({ Bucket: "inbound", Key: "ses-fail", Body: raw }),
     );
-    const result = await service.process(
-      JSON.stringify(
-        notification(
-          ["alice@example.test", "unknown@example.test"],
-          "FAIL",
-          "ses-fail",
-        ),
-      ),
+    // unknown@ will become Bob's alias; late@ an alias of Alice, who already
+    // received the message and must not receive it twice.
+    const body = recent(
+      ["alice@example.test", "unknown@example.test", "late@example.test"],
+      "FAIL",
+      "ses-fail",
     );
-    expect(result.isOk()).toBe(true);
+    expect((await service.process(body)).isOk()).toBe(true);
     const rows = await db.value.inboundRecipient.findMany({
       where: { messageId: "ses-fail" },
     });
     expect(rows.map((row) => row.state).toSorted()).toEqual([
+      "held",
+      "held",
       "quarantined",
-      "rejected",
     ]);
     const alice = clients.get("alice");
-    if (alice === undefined) throw new Error("Missing Alice");
+    const bob = clients.get("bob");
+    if (alice === undefined || bob === undefined)
+      throw new Error("Missing mailboxes");
     const importedId = rows.find(
       (row) => row.state === "quarantined",
     )?.remoteId;
@@ -288,17 +352,337 @@ describe("local ingestion pipeline", () => {
       await alice.client.emails(alice.session, alice.account, [importedId]),
     ).list[0];
     expect(email?.mailboxIds[alice.quarantine]).toBe(true);
-    const list = unwrap(
-      await awsStorage(
-        s3,
-        s3,
-        "inbound",
-        "archive",
-        "notifications/",
-        "",
-      ).bufferKeys(),
+    const client = s3;
+    const storage = awsStorage(
+      client,
+      client,
+      "inbound",
+      "archive",
+      "notifications/",
+      "",
     );
-    expect(list).not.toContain("ses-fail");
+    // The held recipients keep the original message object.
+    expect(unwrap(await storage.bufferKeys())).toContain("ses-fail");
+    // A replay before provisioning changes nothing.
+    expect((await service.reconcile(3600)).isOk()).toBe(true);
+    expect(unwrap(await storage.bufferKeys())).toContain("ses-fail");
+    connectService([
+      { address: "unknown@example.test", destination: "bob" },
+      { address: "late@example.test", destination: "alice" },
+    ]);
+    try {
+      expect((await service.reconcile(3600)).isOk()).toBe(true);
+      expect((await service.reconcile(3600)).isOk()).toBe(true);
+    } finally {
+      connectService();
+    }
+    const after = await db.value.inboundRecipient.findMany({
+      where: { messageId: "ses-fail" },
+    });
+    expect(
+      after
+        .map((row) => `${row.destination} ${row.state}`)
+        .toSorted((a, b) => a.localeCompare(b)),
+    ).toEqual([
+      "alice quarantined",
+      "bob quarantined",
+      "late@example.test rerouted",
+      "unknown@example.test rerouted",
+    ]);
+    const delivered = await bySubject(bob, "Quarantine");
+    expect(delivered).toHaveLength(1);
+    // Alice already had it: still exactly one copy.
+    expect(await bySubject(alice, "Quarantine")).toHaveLength(1);
+    const copy = getValue(
+      await bob.client.emails(bob.session, bob.account, delivered),
+    ).list[0];
+    if (copy === undefined) throw new Error("Missing Bob's copy");
+    expect(
+      Buffer.from(
+        getValue(
+          await bob.client.download(bob.session, bob.account, copy.blobId),
+        ),
+      ),
+    ).toEqual(raw);
+    expect(unwrap(await storage.bufferKeys())).not.toContain("ses-fail");
+    expect(
+      (
+        await db.value.inboundMessage.findUniqueOrThrow({
+          where: { id: "ses-fail" },
+        })
+      ).state,
+    ).toBe("imported");
+  }, 120_000);
+
+  it("keeps a held recipient until an audited operator rejection", async () => {
+    if (s3 === undefined || db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    const raw = Buffer.from(
+      "From: sender@example.test\r\nTo: nobody@example.test\r\nSubject: Held\r\n\r\nWaiting\r\n",
+    );
+    await s3.send(
+      new PutObjectCommand({ Bucket: "inbound", Key: "ses-held", Body: raw }),
+    );
+    const body = recent(["nobody@example.test"], "PASS", "ses-held");
+    expect((await service.process(body)).isOk()).toBe(true);
+    const row = await db.value.inboundRecipient.findFirstOrThrow({
+      where: { messageId: "ses-held" },
+    });
+    expect(row.state).toBe("held");
+    const client = s3;
+    const storage = awsStorage(
+      client,
+      client,
+      "inbound",
+      "archive",
+      "notifications/",
+      "",
+    );
+    expect(unwrap(await storage.bufferKeys())).toContain("ses-held");
+    const dependencies = {
+      db: db.value,
+      ledger: databaseLedger(db.value),
+      delivery: jmapDelivery([]),
+      storage,
+    };
+    expect(
+      JSON.stringify(await operatorCommand(dependencies, ["list", "held"])),
+    ).toContain(row.idempotencyKey);
+    await expect(
+      operatorCommand(dependencies, [
+        "reject",
+        row.idempotencyKey,
+        "operator",
+        "short",
+      ]),
+    ).rejects.toThrow("too_small");
+    const reason = "No such mailbox; sender informed";
+    await operatorCommand(dependencies, [
+      "reject",
+      row.idempotencyKey,
+      "operator",
+      reason,
+    ]);
+    await expect(
+      operatorCommand(dependencies, [
+        "reject",
+        row.idempotencyKey,
+        "operator",
+        reason,
+      ]),
+    ).rejects.toThrow("Only a held recipient can be rejected");
+    expect(
+      await db.value.inboundResolutionAudit.findMany({
+        where: { recipientKey: row.idempotencyKey },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        action: "reject",
+        previousState: "held",
+        operator: "operator",
+        reason,
+      }),
+    ]);
+    // The next replay finds the message complete and deletes the object.
+    expect((await service.reconcile(3600)).isOk()).toBe(true);
+    expect(unwrap(await storage.bufferKeys())).not.toContain("ses-held");
+    expect(
+      (
+        await db.value.inboundMessage.findUniqueOrThrow({
+          where: { id: "ses-held" },
+        })
+      ).state,
+    ).toBe("imported");
+  }, 90_000);
+
+  for (const first of ["reject", "route"] as const)
+    it(`keeps a rejection and its audit consistent with delivery when ${first} reaches the lock first`, async () => {
+      if (s3 === undefined || db === undefined || db.isErr())
+        throw new Error("Clients not initialized");
+      const id = `ses-race-${first}`;
+      const address = `race-${first}@example.test`;
+      const subject = `Race ${first}`;
+      const { body, key } = await heldMessage(id, address, subject);
+      const client = s3;
+      const dependencies = {
+        db: db.value,
+        ledger: databaseLedger(db.value),
+        delivery: jmapDelivery([]),
+        storage: awsStorage(
+          client,
+          client,
+          "inbound",
+          "archive",
+          "notifications/",
+          "",
+        ),
+      };
+      const release = await holdLock(id);
+      const settled = new Set<string>();
+      const reject = () =>
+        operatorCommand(dependencies, [
+          "reject",
+          key,
+          "operator",
+          "Race test rejection",
+        ]).then(
+          () => "rejected",
+          (error: unknown) =>
+            error instanceof Error ? error.message : "error",
+        );
+      connectService([{ address, destination: "bob" }]);
+      let rejection: Promise<string>;
+      let routing: Promise<unknown>;
+      try {
+        if (first === "reject") {
+          rejection = reject();
+          await pause(300);
+          routing = service.process(body);
+        } else {
+          routing = service.process(body);
+          await pause(300);
+          rejection = reject();
+        }
+        void rejection.then(() => settled.add("reject"));
+        void routing.then(() => settled.add("route"));
+        await pause(500);
+        // Both are waiting for the lock.
+        expect([...settled]).toEqual([]);
+        await release();
+        await Promise.all([rejection, routing]);
+      } finally {
+        connectService();
+      }
+      const outcome = await rejection;
+      const row = await db.value.inboundRecipient.findUniqueOrThrow({
+        where: { idempotencyKey: key },
+      });
+      const audits = await db.value.inboundResolutionAudit.count({
+        where: { recipientKey: key, action: "reject" },
+      });
+      const bob = clients.get("bob");
+      if (bob === undefined) throw new Error("Missing Bob");
+      const copies = (await bySubject(bob, subject)).length;
+      // Either the rejection won (recorded, nothing delivered) or routing
+      // won (delivered once, rejection refused and not audited).
+      expect(
+        outcome === "rejected"
+          ? [row.state, audits, copies]
+          : [row.state, audits, copies, outcome],
+      ).toEqual(
+        outcome === "rejected"
+          ? ["rejected", 1, 0]
+          : ["rerouted", 0, 1, "Only a held recipient can be rejected"],
+      );
+      // Finish the message either way: the object goes once nothing is left.
+      expect((await service.reconcile(3600)).isOk()).toBe(true);
+      expect(unwrap(await dependencies.storage.bufferKeys())).not.toContain(id);
+    }, 90_000);
+
+  it("does not route a held address when the window ends while waiting for the lock", async () => {
+    if (db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    const id = "ses-race-window";
+    const address = "window@example.test";
+    const { body } = await heldMessage(id, address, "Race window");
+    const parsed = parseNotification(body);
+    if (parsed.isErr()) throw new Error(parsed.error);
+    const release = await holdLock(id);
+    // The address is now known, but the window ends before the lock frees.
+    const preparing = databaseLedger(db.value).prepare(
+      parsed.value,
+      resolveRecipients([address], [{ address, destination: "bob" }]),
+      { rerouteUntil: Date.now() + 300 },
+    );
+    await pause(700);
+    await release();
+    expect((await preparing).isOk()).toBe(true);
+    expect(
+      (
+        await db.value.inboundRecipient.findMany({ where: { messageId: id } })
+      ).map((row) => `${row.destination} ${row.state}`),
+    ).toEqual([`${address} held`]);
+    // Clean up: an operator rejection lets replay remove the object.
+    const key = (
+      await db.value.inboundRecipient.findFirstOrThrow({
+        where: { messageId: id },
+      })
+    ).idempotencyKey;
+    const updated = await db.value.inboundRecipient.updateMany({
+      where: { idempotencyKey: key, state: "held" },
+      data: { state: "rejected" },
+    });
+    expect(updated.count).toBe(1);
+    expect((await service.reconcile(3600)).isOk()).toBe(true);
+  }, 90_000);
+
+  it("rejects held mail after the hold window with an audit and never routes it late", async () => {
+    if (s3 === undefined || db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-expired",
+        Body: Buffer.from(
+          "From: sender@example.test\r\nTo: gone@example.test\r\nSubject: Expired\r\n\r\nOld\r\n",
+        ),
+      }),
+    );
+    // The fixture date (January 2026) is beyond the default 14-day window.
+    const body = JSON.stringify(
+      notification(["gone@example.test"], "PASS", "ses-expired"),
+    );
+    expect((await service.process(body)).isOk()).toBe(true);
+    const row = await db.value.inboundRecipient.findFirstOrThrow({
+      where: { messageId: "ses-expired" },
+    });
+    expect(row.state).toBe("held");
+    connectService([{ address: "gone@example.test", destination: "bob" }]);
+    try {
+      expect((await service.reconcile(3600)).isOk()).toBe(true);
+    } finally {
+      connectService();
+    }
+    expect(
+      (
+        await db.value.inboundRecipient.findUniqueOrThrow({
+          where: { idempotencyKey: row.idempotencyKey },
+        })
+      ).state,
+    ).toBe("rejected");
+    expect(
+      await db.value.inboundResolutionAudit.findMany({
+        where: { recipientKey: row.idempotencyKey },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        action: "expire",
+        operator: "system:expiry",
+        previousState: "held",
+        reason: "Hold window of 14 days elapsed",
+      }),
+    ]);
+    // Never routed: no mailbox recipient was created for it.
+    expect(
+      (
+        await db.value.inboundRecipient.findMany({
+          where: { messageId: "ses-expired" },
+        })
+      ).map((item) => `${item.destination} ${item.state}`),
+    ).toEqual(["gone@example.test rejected"]);
+    const client = s3;
+    expect(
+      unwrap(
+        await awsStorage(
+          client,
+          client,
+          "inbound",
+          "archive",
+          "notifications/",
+          "",
+        ).bufferKeys(),
+      ),
+    ).not.toContain("ses-expired");
   }, 90_000);
 
   it("replays an archived notification after queue loss with a large attachment", async () => {
@@ -447,11 +831,7 @@ describe("local ingestion pipeline", () => {
       where: { messageId: "ses-reconcile" },
     });
     expect(row.state).toBe("imported");
-    const ids = getValue(
-      await alice.client.queryEmails(alice.session, alice.account, {
-        filter: { subject: "Reconcile" },
-      }),
-    ).ids;
+    const ids = await bySubject(alice, "Reconcile");
     expect(ids).toHaveLength(1);
     const email = getValue(
       await alice.client.emails(alice.session, alice.account, ids),
