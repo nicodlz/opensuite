@@ -1,5 +1,8 @@
 import type { DomainService } from "./routes/domains.ts";
 import { randomBytes } from "node:crypto";
+import { createAliasLimiter } from "./auth/alias-limits.ts";
+import type { AliasService } from "@opensuite/core/services/aliases";
+import { registerAliasCompat } from "./routes/alias-compat.ts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
@@ -57,6 +60,7 @@ export interface ServerDependencies {
   readonly mail?: MailService;
   readonly calendar?: CalendarService;
   readonly domains?: DomainService;
+  readonly aliases?: AliasService;
   readonly setupStatus?: ApiContext["setupStatus"];
 }
 
@@ -65,11 +69,22 @@ export const buildServer = async (
 ): Promise<FastifyInstance> => {
   const app = Fastify({
     bodyLimit: 1_000_000,
-    logger: { level: dependencies.config.logLevel },
+    logger: {
+      level: dependencies.config.logLevel,
+      redact: [
+        "req.headers.authentication",
+        "req.headers.authorization",
+        "req.headers.cookie",
+        "request.headers.authentication",
+        "request.headers.authorization",
+        "request.headers.cookie",
+      ],
+    },
     logController: new LogController({ disableRequestLogging: true }),
     trustProxy: dependencies.config.trustProxy ?? false,
   });
   const startedAt = dependencies.monotonicMs();
+  const aliasLimits = createAliasLimiter();
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("x-request-id", request.id);
     done();
@@ -89,6 +104,7 @@ export const buildServer = async (
   app.addHook("onRequest", async (request, reply) => {
     const identity = dependencies.identity;
     const rawPath = request.url.split("?")[0] ?? "";
+    if (rawPath === "/alias/random/new") return undefined;
     if (
       identity !== undefined &&
       (rawPath.startsWith("/auth/") || rawPath.startsWith("/api/auth/"))
@@ -288,6 +304,11 @@ export const buildServer = async (
   });
 
   app.get("/openapi.json", () => openapi);
+
+  await app.register(registerAliasCompat, {
+    aliases: dependencies.aliases,
+    limiter: aliasLimits,
+  });
 
   const passStatus = createPassStatus(
     dependencies.passOrigin,
@@ -567,6 +588,9 @@ export const buildServer = async (
         downloads,
         accounts: dependencies.accounts,
         domains: dependencies.domains,
+        aliases: dependencies.aliases,
+        aliasCreationLimit: (userId) => aliasLimits.user(userId),
+        aliasMutationLimit: (userId) => aliasLimits.mutate(userId),
         log: request.log,
         readiness: dependencies.readiness,
         uptimeSeconds: () =>

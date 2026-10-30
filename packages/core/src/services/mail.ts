@@ -91,6 +91,7 @@ function message(email: Email, boxes: Mailbox[], fallback: string): Message {
 function draft(email: Email): Draft {
   return {
     id: email.id,
+    ...(email.from?.[0]?.email ? { from: email.from[0].email } : {}),
     to: addresses(email.to),
     cc: addresses(email.cc),
     bcc: addresses(email.bcc),
@@ -163,6 +164,8 @@ export function createMailService(dependencies: {
   origin: string;
   client?: (credential: { address: string; secret: string }) => JmapClient;
   now?: () => number;
+  canSendAs?: (userId: string, address: string) => Promise<string | null>;
+  beforeAliasSend?: (userId: string, aliasId: string) => Promise<boolean>;
 }) {
   const { run, connect: open, now } = createJmapAccess(dependencies);
   const uploads = new Map<
@@ -234,11 +237,22 @@ export function createMailService(dependencies: {
         type: item?.type ?? "application/octet-stream",
       };
     });
+    const from = content.from?.toLowerCase() ?? c.address.toLowerCase();
+    if (
+      from !== c.address.toLowerCase() &&
+      !(await dependencies.canSendAs?.(c.owner, from))
+    )
+      return fail("forbidden");
+    if (from !== c.address.toLowerCase()) {
+      const identities = value(await c.client.identities(c.session, c.id)).list;
+      if (!identities.some((identity) => identity.email.toLowerCase() === from))
+        return fail("validation");
+    }
     return value(
       await c.client.createEmail(c.session, c.id, {
         mailboxIds: { [role(list, "drafts")]: true },
         keywords: { $draft: true, $seen: true },
-        from: [{ email: c.address }],
+        from: [{ email: from }],
         to: content.to,
         cc: content.cc,
         bcc: content.bcc,
@@ -482,12 +496,23 @@ export function createMailService(dependencies: {
           ...addresses(email.bcc),
         ];
         if (!recipients.length) return fail("validation");
+        const from =
+          email.from?.[0]?.email.toLowerCase() ?? c.address.toLowerCase();
+        const aliasId =
+          from === c.address.toLowerCase()
+            ? null
+            : await dependencies.canSendAs?.(c.owner, from);
+        if (from !== c.address.toLowerCase() && !aliasId)
+          return fail("forbidden");
         const identity = value(
           await c.client.identities(c.session, c.id),
-        ).list.find(
-          (item) => item.email.toLowerCase() === c.address.toLowerCase(),
-        );
+        ).list.find((item) => item.email.toLowerCase() === from);
         if (!identity) return fail("unavailable");
+        if (
+          aliasId &&
+          !(await dependencies.beforeAliasSend?.(c.owner, aliasId))
+        )
+          return fail("rate_limited");
         value(
           await c.client.submit(
             c.session,
@@ -495,7 +520,7 @@ export function createMailService(dependencies: {
             id,
             identity.id,
             {
-              mailFrom: { email: c.address },
+              mailFrom: { email: from },
               rcptTo: recipients.map((item) => ({ email: item.email })),
             },
             role(list, "sent"),

@@ -17,6 +17,7 @@ describe("loadConfig", () => {
         port: 3000,
         logLevel: "info",
         readinessTimeoutMs: 2000,
+        aliasPerUserCap: 1000,
       }),
     );
   });
@@ -27,6 +28,7 @@ describe("loadConfig", () => {
       API_PORT: "8080",
       LOG_LEVEL: "debug",
       READINESS_TIMEOUT_MS: "500",
+      ALIAS_PER_USER_CAP: "42",
     });
     expect(config).toEqual(
       ok({
@@ -34,6 +36,7 @@ describe("loadConfig", () => {
         port: 8080,
         logLevel: "debug",
         readinessTimeoutMs: 500,
+        aliasPerUserCap: 42,
       }),
     );
   });

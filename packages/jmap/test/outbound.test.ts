@@ -57,3 +57,31 @@ describe("outbound management errors", () => {
     });
   });
 });
+
+it("treats an explicitly missing account as already detached", async () => {
+  const admin = new StalwartAdmin(
+    "http://localhost",
+    { username: "admin", password: "test" },
+    {
+      fetch: () =>
+        Promise.resolve(
+          Response.json({
+            methodResponses: [
+              [
+                "x:Account/get",
+                { accountId: "manager", list: [], notFound: ["gone"] },
+                "0",
+              ],
+            ],
+            sessionState: "s",
+          }),
+        ),
+    },
+  );
+  expect((await admin.removeAlias("gone", "alias", "domain")).isOk()).toBe(
+    true,
+  );
+  expect((await admin.removeAlias("other", "alias", "domain")).isErr()).toBe(
+    true,
+  );
+});

@@ -10,7 +10,12 @@ import type { Actor } from "./accounts.ts";
 
 /** Failures shared by the account-scoped JMAP services (mail, calendar). */
 export type AccessFailureKind =
-  "forbidden" | "not_found" | "validation" | "conflict" | "unavailable";
+  | "forbidden"
+  | "not_found"
+  | "validation"
+  | "conflict"
+  | "unavailable"
+  | "rate_limited";
 export interface MailCredentialStore {
   getForOwner(
     userId: string,

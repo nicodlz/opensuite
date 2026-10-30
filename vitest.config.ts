@@ -26,6 +26,7 @@ export default defineConfig({
           ...(suite === "http"
             ? { testTimeout: 30_000, hookTimeout: 120_000 }
             : {}),
+          ...(suite === "pass" ? { fileParallelism: false } : {}),
           include: [
             ...roots.map((root) => `${root}/**/*.${suite}.test.ts`),
             ...(suite === "stalwart" || suite === "pass"

@@ -1,4 +1,4 @@
-import { err, ok, okAsync } from "neverthrow";
+import { err, ok, okAsync, ResultAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { DnsRecord, ManagedDomain } from "@opensuite/contracts";
 import type { createDomainStore } from "@opensuite/db";
@@ -29,7 +29,16 @@ function fixture() {
     addresses: [],
   };
   const audits: string[] = [];
+  let hasDefault = false;
   const store: ReturnType<typeof createDomainStore> = {
+    beginRemoval: () => success(!hasDefault),
+    cancelRemoval: () => success(undefined),
+    withUserLease: (_user, work) =>
+      ResultAsync.fromPromise(work(), () => ({
+        kind: "unavailable" as const,
+        message: "failed",
+      })),
+    isManagedAddress: () => success(false),
     verificationTargets: () => success([]),
     audit: (_actor, action) => {
       audits.push(action);
@@ -108,12 +117,23 @@ function fixture() {
     audits,
     mail,
     provider,
+    setDefault() {
+      hasDefault = true;
+    },
     failMx() {
       published = false;
     },
   };
 }
 describe("domain management", () => {
+  it("refuses removal before changing SES when a user selected the default", async () => {
+    const f = fixture();
+    await f.service.add(actor, "example.test");
+    const receipt = vi.spyOn(f.provider, "receipt");
+    f.setDefault();
+    expect((await f.service.remove(actor, "1")).isErr()).toBe(true);
+    expect(receipt).not.toHaveBeenCalled();
+  });
   it("provisions records, verifies DNS and SES, and records failures", async () => {
     const f = fixture();
     const added = await f.service.add(actor, "EXAMPLE.TEST");

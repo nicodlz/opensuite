@@ -198,7 +198,12 @@ beforeAll(async () => {
         (failSuspend && body.includes("disabledPermissions"))
       )
         return new Response("unavailable", { status: 503 });
-      return fetch(input, init);
+      const headers = new Headers(init?.headers);
+      headers.set(
+        "Authorization",
+        `Basic ${Buffer.from("admin:integration-password").toString("base64")}`,
+      );
+      return fetch(input, { ...init, headers });
     };
     const runtime = createAuthRuntime(
       db.value,

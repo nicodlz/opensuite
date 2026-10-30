@@ -1,8 +1,14 @@
+import { createAliasService } from "@opensuite/core/services/aliases";
+import {
+  createAliasMail,
+  createAliasSendGuard,
+} from "./adapters/alias-mail.ts";
 import { createReadinessService, httpProbe } from "@opensuite/core";
 import {
   createDatabase,
   createDatabaseProbe,
   createDomainStore,
+  createAliasStore,
   createMailboxStore,
 } from "@opensuite/db";
 import { createCalendarService } from "@opensuite/core/services/calendar";
@@ -70,12 +76,35 @@ if (store.isErr()) {
   process.exit(1);
 }
 const mailboxStore = store.value;
+const aliasStore = createAliasStore(database.value);
+const aliases = createAliasService(
+  aliasStore,
+  createAliasMail(
+    {
+      origin: authConfig.value.stalwartOrigin,
+      password: authConfig.value.adminPassword,
+      ...(authConfig.value.managementClientIp === undefined
+        ? {}
+        : { managementClientIp: authConfig.value.managementClientIp }),
+    },
+    {
+      getForOwner: async (userId, accountId) =>
+        mailboxStore.getForOwner(userId, accountId),
+    },
+  ),
+  config.value.aliasPerUserCap,
+);
 const mail = createMailService({
   store: {
     getForOwner: async (userId, accountId) =>
       mailboxStore.getForOwner(userId, accountId),
   },
   origin: authConfig.value.stalwartOrigin,
+  canSendAs: async (userId, address) => {
+    const result = await aliases.canSendAs(userId, address);
+    return result.isOk() ? result.value : null;
+  },
+  beforeAliasSend: createAliasSendGuard(aliases),
 });
 const calendar = createCalendarService({
   store: {
@@ -118,6 +147,7 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   calendar,
+  aliases,
 });
 const stopDomainJob =
   domains === undefined
@@ -131,6 +161,9 @@ const stopDomainJob =
 let running: Promise<void> | undefined;
 const work = async () => {
   try {
+    const aliasResult = await aliases.reconcile();
+    if (aliasResult.isErr() || aliasResult.value > 0)
+      app.log.warn("alias reconciliation incomplete");
     const failures = await auth.reconcile();
     if (failures > 0)
       app.log.warn({ failures }, "mailbox reconciliation incomplete");

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -48,6 +48,7 @@ const cleanup = async () => {
 };
 const key = randomBytes(32).toString("hex");
 let db: PrismaClient;
+let databaseUrl = "";
 let disconnect = () => Promise.resolve();
 
 beforeAll(async () => {
@@ -77,6 +78,7 @@ beforeAll(async () => {
     url.port = port;
     url.username = "opensuite";
     url.password = password;
+    databaseUrl = url.toString();
     const result = createDatabase(url.toString());
     if (result.isErr()) throw new Error(result.error.message);
     db = result.value;
@@ -86,7 +88,7 @@ beforeAll(async () => {
     await cleanup();
     throw error;
   }
-}, 240_000);
+}, 600_000);
 
 afterAll(async () => {
   try {
@@ -97,6 +99,30 @@ afterAll(async () => {
 }, 60_000);
 
 describe("PostgreSQL schema and adapters", () => {
+  it("has no Prisma schema drift after migrations", async () => {
+    const result = await run(
+      "pnpm",
+      [
+        "--filter",
+        "@opensuite/db",
+        "exec",
+        "prisma",
+        "migrate",
+        "diff",
+        "--from-schema-datasource",
+        "prisma/schema.prisma",
+        "--to-schema-datamodel",
+        "prisma/schema.prisma",
+        "--exit-code",
+      ],
+      {
+        cwd: root,
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+        maxBuffer: 4_000_000,
+      },
+    );
+    expect(result.stdout).toContain("No difference detected");
+  }, 60_000);
   it("enforces case-insensitive names and routes addresses belonging to another user", async () => {
     const owner = `domain-owner-${randomUUID()}`;
     const target = `domain-target-${randomUUID()}`;
@@ -177,7 +203,16 @@ describe("PostgreSQL schema and adapters", () => {
       .parse(
         await db.$queryRaw`SELECT migration_name, checksum, finished_at FROM "_prisma_migrations"`,
       );
-    expect(rows).toHaveLength(6);
+    const migrations = await readdir(
+      new URL("../prisma/migrations", import.meta.url),
+      { withFileTypes: true },
+    );
+    expect(rows.map((row) => row.migration_name).toSorted()).toEqual(
+      migrations
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .toSorted(),
+    );
     const migration = rows.find(
       (row) => row.migration_name === "20261029000000_initial",
     );
@@ -470,5 +505,95 @@ describe("PostgreSQL schema and adapters", () => {
     } finally {
       await unavailable.value.$disconnect();
     }
+  });
+});
+
+describe("alias reservations", () => {
+  it("reserves deleted addresses permanently and routes only active aliases", async () => {
+    const suffix = randomUUID();
+    const owner = `alias-owner-${suffix}`;
+    const other = `alias-other-${suffix}`;
+    await db.user.createMany({
+      data: [
+        { id: owner, email: `${owner}@example.test`, name: owner },
+        { id: other, email: `${other}@example.test`, name: other },
+      ],
+    });
+    const domain = await db.domain.create({
+      data: {
+        name: `${suffix}.example.test`,
+        userId: owner,
+        status: "verified",
+      },
+    });
+    const { createDomainStore } = await import("../src/index.ts");
+    const store = createDomainStore(db);
+    await db.user.update({
+      where: { id: other },
+      data: { defaultAliasDomainId: domain.id },
+    });
+    const blocked = await store.beginRemoval(domain.id);
+    expect(blocked.isOk() && blocked.value).toBe(false);
+    expect(
+      (await db.domain.findUniqueOrThrow({ where: { id: domain.id } }))
+        .removalPending,
+    ).toBe(false);
+    await db.user.update({
+      where: { id: other },
+      data: { defaultAliasDomainId: null },
+    });
+    await db.mailboxLink.create({
+      data: {
+        userId: owner,
+        accountId: suffix,
+        address: `${owner}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const address = await db.address.create({
+      data: {
+        userId: owner,
+        domainId: domain.id,
+        localPart: "private",
+        isAlias: true,
+      },
+    });
+    const full = `private@${domain.name}`;
+    const alias = await db.emailAlias.create({
+      data: {
+        userId: owner,
+        domainId: domain.id,
+        addressId: address.id,
+        address: full,
+        localPart: "private",
+        ready: true,
+      },
+    });
+    const active = await store.routes([full]);
+    expect(active.isOk() && active.value).toEqual([
+      { address: full, destination: suffix },
+    ]);
+    await db.emailAlias.update({
+      where: { id: alias.id },
+      data: { enabled: false, deletedAt: new Date() },
+    });
+    const inactive = await store.routes([full]);
+    expect(inactive.isOk() && inactive.value).toEqual([]);
+    const tombstoneBlocked = await store.beginRemoval(domain.id);
+    expect(tombstoneBlocked.isOk() && tombstoneBlocked.value).toBe(false);
+    await expect(
+      db.address.delete({ where: { id: address.id } }),
+    ).rejects.toThrow("EmailAlias_addressId_fkey");
+    await expect(
+      db.address.create({
+        data: {
+          userId: other,
+          domainId: domain.id,
+          localPart: "PRIVATE",
+          isAlias: true,
+        },
+      }),
+    ).rejects.toThrow("Unique constraint");
   });
 });
