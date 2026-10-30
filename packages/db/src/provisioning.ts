@@ -116,6 +116,13 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
             where: { id: userId },
             data: { disabled: true },
           });
+          await tx.address.updateMany({
+            where: {
+              mailboxManaged: true,
+              OR: [{ userId }, { domain: { userId } }],
+            },
+            data: { ready: false, revision: { increment: 1 } },
+          });
           await tx.session.deleteMany({ where: { userId } });
           await tx.mailboxLink.updateMany({
             where: { userId },
@@ -240,6 +247,14 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
               secret: encrypted.value,
               status: "active",
             },
+          });
+          await tx.address.updateMany({
+            where: {
+              userId,
+              mailboxManaged: true,
+              NOT: { lastAccountId: parsed.data.accountId },
+            },
+            data: { ready: false, revision: { increment: 1 } },
           });
         }),
         failure,

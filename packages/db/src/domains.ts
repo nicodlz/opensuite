@@ -85,7 +85,14 @@ export const createDomainStore = (db: PrismaClient) => ({
   },
   isManagedAddress(addressId: string) {
     return ResultAsync.fromPromise(
-      db.emailAlias.count({ where: { addressId } }).then((count) => count > 0),
+      db.address
+        .count({
+          where: {
+            id: addressId,
+            OR: [{ mailboxManaged: true }, { emailAlias: { isNot: null } }],
+          },
+        })
+        .then((count) => count > 0),
       failure,
     );
   },
@@ -133,6 +140,7 @@ export const createDomainStore = (db: PrismaClient) => ({
   create(actor: string, name: string) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${name}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
         const row = await tx.domain.create({
           data: { name, userId: actor },
           include,
@@ -169,6 +177,10 @@ export const createDomainStore = (db: PrismaClient) => ({
         });
         const row = await tx.domain.update({ where: { id }, data, include });
         if (previous.status !== data.status) {
+          await tx.address.updateMany({
+            where: { domainId: id, mailboxManaged: true },
+            data: { ready: false, revision: { increment: 1 } },
+          });
           await tx.emailAlias.updateMany({
             where: { domainId: id, deletedAt: null, enabled: true },
             data: {
@@ -228,6 +240,10 @@ export const createDomainStore = (db: PrismaClient) => ({
           include,
         });
         if (previous.status !== nextStatus) {
+          await tx.address.updateMany({
+            where: { domainId: id, mailboxManaged: true },
+            data: { ready: false, revision: { increment: 1 } },
+          });
           await tx.emailAlias.updateMany({
             where: { domainId: id, deletedAt: null, enabled: true },
             data: {
@@ -376,7 +392,17 @@ export const createDomainStore = (db: PrismaClient) => ({
         where: {
           user: { disabled: false, mailbox: { status: "active" } },
           OR: [
-            { emailAlias: null },
+            {
+              emailAlias: null,
+              OR: [
+                { mailboxManaged: false },
+                {
+                  ready: true,
+                  removalPending: false,
+                  domain: { removalPending: false },
+                },
+              ],
+            },
             {
               emailAlias: {
                 is: {

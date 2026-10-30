@@ -1,3 +1,4 @@
+import { addressesContract } from "./addresses.ts";
 import { billingContract } from "./billing.ts";
 import { pushContract } from "./push.ts";
 import { aliasesContract } from "./aliases.ts";
@@ -13,6 +14,7 @@ export * from "./system.ts";
 export * from "./setup.ts";
 export * from "./domains.ts";
 export * from "./aliases.ts";
+export * from "./addresses.ts";
 export * from "./mail.ts";
 export * from "./drive.ts";
 export * from "./calendar.ts";
@@ -21,6 +23,7 @@ export * from "./billing.ts";
 
 export const contract = {
   aliases: aliasesContract,
+  addresses: addressesContract,
   system: systemContract,
   account: accountContract,
   admin: { ...adminContract, domains: domainsContract, setup: setupContract },

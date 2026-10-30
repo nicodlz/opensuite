@@ -1,7 +1,6 @@
 import * as React from "react";
 import type { DraftContent } from "@opensuite/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Alias } from "../aliases/client.ts";
 import { Button } from "../ui/button.tsx";
 import { Icon } from "../ui/icons.tsx";
 import { accountId, mailClient } from "./client.ts";
@@ -89,7 +88,7 @@ export function Composer({
 }: {
   state: ComposerState;
   from: string | undefined;
-  aliases: Alias[];
+  aliases: { id: string; address: string }[];
   minimized: boolean;
   onMinimize: (value: boolean) => void;
   onClose: () => void;

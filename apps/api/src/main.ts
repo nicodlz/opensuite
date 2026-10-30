@@ -1,3 +1,8 @@
+import { createAddressService } from "@opensuite/core/services/addresses";
+import { StalwartAdmin } from "@opensuite/jmap/admin";
+import { err, ok } from "neverthrow";
+import { timedFetch } from "./adapters/timed-fetch.ts";
+import { entitledAddressLimit } from "./address-limit.ts";
 import { createAliasService } from "@opensuite/core/services/aliases";
 import {
   createAliasMail,
@@ -9,6 +14,7 @@ import {
   createDatabaseProbe,
   createDomainStore,
   createAliasStore,
+  createAddressStore,
   createMailboxStore,
   createPushStore,
   createMailPushStore,
@@ -200,26 +206,60 @@ if (store.isErr()) {
 }
 const mailboxStore = store.value;
 const aliasStore = createAliasStore(database.value);
+const aliasMail = createAliasMail(
+  {
+    origin: authConfig.value.stalwartOrigin,
+    password: authConfig.value.adminPassword,
+    ...(authConfig.value.managementClientIp === undefined
+      ? {}
+      : { managementClientIp: authConfig.value.managementClientIp }),
+  },
+  {
+    getForOwner: async (userId, accountId) =>
+      mailboxStore.getForOwner(userId, accountId),
+  },
+);
 const aliases = createAliasService(
   aliasStore,
-  createAliasMail(
-    {
-      origin: authConfig.value.stalwartOrigin,
-      password: authConfig.value.adminPassword,
-      ...(authConfig.value.managementClientIp === undefined
-        ? {}
-        : { managementClientIp: authConfig.value.managementClientIp }),
-    },
-    {
-      getForOwner: async (userId, accountId) =>
-        mailboxStore.getForOwner(userId, accountId),
-    },
-  ),
+  aliasMail,
   config.value.aliasPerUserCap,
   billing.value.mode === "cloud"
     ? async (userId) => (await entitlements.get(userId)).aliasLimit
     : undefined,
 );
+const addressStore = createAddressStore(
+  database.value,
+  authConfig.value.mailDomains,
+);
+const addressAdmin = new StalwartAdmin(
+  authConfig.value.stalwartOrigin,
+  {
+    username: "management@opensuite.internal",
+    password: authConfig.value.adminPassword,
+  },
+  {
+    fetch: timedFetch(
+      authConfig.value.managementClientIp
+        ? { "X-Forwarded-For": authConfig.value.managementClientIp }
+        : {},
+    ),
+  },
+);
+const addresses = createAddressService(
+  addressStore,
+  aliasMail,
+  entitledAddressLimit(entitlements, config.value.addressPerUserCap),
+  async () => {
+    const result = await addressStore.ensureConfigured(async (name) => {
+      const domain = await addressAdmin.createDomain(name);
+      if (domain.isErr()) throw new Error("domain provisioning failed");
+      return domain.value.id;
+    });
+    return result.isErr() ? err(result.error) : ok(undefined);
+  },
+  authConfig.value.mailDomains,
+);
+const createAliasGuard = createAliasSendGuard(aliases);
 const mail = createMailService({
   store: {
     getForOwner: async (userId, accountId) =>
@@ -228,9 +268,14 @@ const mail = createMailService({
   origin: authConfig.value.stalwartOrigin,
   canSendAs: async (userId, address) => {
     const result = await aliases.canSendAs(userId, address);
-    return result.isOk() ? result.value : null;
+    if (result.isOk() && result.value) return `alias:${result.value}`;
+    const found = await addresses.canSendAs(userId, address);
+    return found.isOk() && found.value ? `address:${found.value}` : null;
   },
-  beforeAliasSend: createAliasSendGuard(aliases),
+  beforeAliasSend: async (userId, id) =>
+    id.startsWith("address:")
+      ? true
+      : createAliasGuard(userId, id.slice("alias:".length)),
 });
 const calendar = createCalendarService({
   store: {
@@ -268,7 +313,7 @@ const app = await buildServer({
   ...(authConfig.value.vaultOrigin === undefined
     ? {}
     : { vaultOrigin: authConfig.value.vaultOrigin }),
-  identity: auth.identity,
+  identity: { ...auth.identity, resolveAddress: addressStore.resolveLogin },
   accounts: auth.accounts,
   ...(domains === undefined ? {} : { domains }),
   mail,
@@ -293,6 +338,7 @@ const app = await buildServer({
           ? {}
           : { publicCheckoutOrigin: new URL(billing.value.cancelUrl).origin }),
       }),
+  addresses,
   ...(push === undefined ? {} : { push }),
   pushCleanup,
 });
@@ -355,6 +401,9 @@ const stopCalendarReminders =
 let running: Promise<void> | undefined;
 const work = async () => {
   try {
+    const addressResult = await addresses.reconcile();
+    if (addressResult.isErr() || addressResult.value > 0)
+      app.log.warn("address reconciliation incomplete");
     const aliasResult = await aliases.reconcile();
     if (aliasResult.isErr() || aliasResult.value > 0)
       app.log.warn("alias reconciliation incomplete");
