@@ -33,6 +33,10 @@ export function randomIndex(
   return (sample[0] ?? 0) % bound;
 }
 
+function isEmptyClass(value: string | undefined): boolean {
+  return !value;
+}
+
 export function generatePassword(
   length: number,
   selected: CharacterClass[],
@@ -44,7 +48,7 @@ export function generatePassword(
     length < 8 ||
     length > 128 ||
     classes.length === 0 ||
-    classes.some((value) => !value)
+    classes.some(isEmptyClass)
   )
     throw new RangeError("Invalid password options");
   const alphabet = classes.join("");
