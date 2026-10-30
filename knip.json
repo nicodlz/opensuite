@@ -6,7 +6,8 @@
         "test-support/**/*.ts",
         "test-support/**/*.mjs",
         "scripts/*.mjs"
-      ]
+      ],
+      "ignoreDependencies": ["@bitwarden/cli"]
     },
     "apps/*": {},
     "packages/*": {},

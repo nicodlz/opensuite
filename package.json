@@ -20,6 +20,8 @@
     "iac:validate": "node scripts/iac-validate.mjs"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "catalog:",
+    "@bitwarden/cli": "catalog:",
     "@opensuite/core": "workspace:*",
     "@opensuite/typescript-config": "workspace:*",
     "@types/node": "catalog:",
