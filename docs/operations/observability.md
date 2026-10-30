@@ -23,11 +23,9 @@ queue. Docker stores at most three 10 MB log files per container. View with
    those separately. Set `OBSERVE_BACKUP_DIR` to a host directory readable by
    the container's unprivileged `node` user. The default is
    `deploy/backup-status`.
-3. Have the backup system atomically update `last-success` in that directory
-   **only after** a complete backup and its manifest have succeeded, for
-   example write a temporary file and rename it to `last-success`. Its mtime
-   is the marker; clocks must be synchronized. No backup automation or restore
-   verification is provided here. Missing, future-dated or stale markers alert.
+3. `deploy/backup/backup.sh` atomically writes `last-success` after a fully
+   successful run. Its mtime is the marker; clocks must be synchronized.
+   Missing, future-dated or stale markers alert. Test restore independently.
 4. If ingestion is configured, create `deploy/ingest.env` (0600) with the
    variables and secrets described in [ingestion](../architecture/ingestion.md),
    then start with `docker compose --profile ingest up -d --build`. The worker
@@ -94,8 +92,16 @@ webhook. Health status alone does not restart an unhealthy container.
 - `certificate_days` or `certificate_days_unavailable`: the presented HTTPS
   certificate is near expiry, expired, or could not be read. Check DNS, Caddy
   logs, ACME reachability, the public hostname and port 443. Renew and verify
-  externally. This check reads expiry and does not validate the certificate
+  externally. The `mail_submission_certificate_days` and
+  `mail_imaps_certificate_days` alerts independently check ports 465 and 993
+  when `MAIL_TLS_ENABLED=1`. Check the TLS renewal timer and its journal.
+  These checks read expiry and does not validate the certificate
   chain or hostname, so use an external HTTPS check for those properties.
+
+`stalwart_setup` or `stalwart_setup_unavailable` indicates the last setup job
+failed or never recorded status. Inspect `docker compose logs stalwart-setup`,
+repair the cause and rerun `docker compose run --rm stalwart-setup`. Setup
+status does not gate API or Caddy startup.
 
 `webhook_not_configured` and `webhook_delivery_failed` appear in observer logs;
 repair the endpoint or network and verify delivery. Monitor log access: API,

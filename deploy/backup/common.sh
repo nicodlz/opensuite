@@ -18,7 +18,7 @@ BACKUP_STAGE=$(mktemp -d "$BACKUP_SCRATCH/opensuite-backup.XXXXXXXX")
 export BACKUP_STAGE BACKUP_REPOSITORY BACKUP_PASSWORD_FILE BACKUP_ACCESS_KEY_ID BACKUP_SECRET_ACCESS_KEY
 # Compose can be pointed at an isolated project/overlay for testing or recovery.
 compose() {
-  docker compose ${COMPOSE_PROJECT_NAME:+--project-name "$COMPOSE_PROJECT_NAME"} \
+  docker compose --profile "*" ${COMPOSE_PROJECT_NAME:+--project-name "$COMPOSE_PROJECT_NAME"} \
     -f "$ROOT/compose.yaml" -f "$ROOT/deploy/backup/compose.backup.yaml" ${BACKUP_COMPOSE_OVERRIDE:+-f "$BACKUP_COMPOSE_OVERRIDE"} "$@"
 }
 # Root-run helpers may create scratch files that the Docker-group operator
@@ -32,6 +32,14 @@ clean_stage() {
   fi
 }
 log() { printf '{"component":"backup","event":"%s","time":"%s"}\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }
+# Docker operators may not be able to read uid-restricted restored secrets on
+# the host. Use an isolated helper when direct access is unavailable.
+read_secret() {
+  if [ -r "$1" ]; then cat "$1"; else
+    docker run --rm --network none --mount "type=bind,src=$1,dst=/secret,readonly" \
+      alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a cat /secret
+  fi
+}
 # Exact path component names used by these services. A trailing slash makes the
 # rclone source a directory/prefix rather than a similarly named sibling.
 objects() { # direction, mail|drive
@@ -39,11 +47,11 @@ objects() { # direction, mail|drive
   if [ "$kind" = mail ]; then
     [ "${MAIL_BLOB_STORE:-local}" = s3 ] || return 0
     OBJECT_ENDPOINT=${MAIL_S3_ENDPOINT:?}; OBJECT_REGION=${MAIL_S3_REGION:?}
-    OBJECT_ACCESS_KEY_ID=${MAIL_S3_KEY_ID:?}; OBJECT_SECRET_ACCESS_KEY=$(cat "${MAIL_S3_SECRET_FILE:?}")
+    OBJECT_ACCESS_KEY_ID=${MAIL_S3_KEY_ID:?}; OBJECT_SECRET_ACCESS_KEY=$(read_secret "${MAIL_S3_SECRET_FILE:?}")
     bucket=${MAIL_S3_BUCKET:?}; prefix=${MAIL_S3_PREFIX:-}
   else
-    OBJECT_ENDPOINT=${DRIVE_S3_ENDPOINT:?}; OBJECT_REGION=${DRIVE_S3_REGION:-us-east-1}
-    OBJECT_ACCESS_KEY_ID=${DRIVE_S3_ACCESS_KEY:?}; OBJECT_SECRET_ACCESS_KEY=${DRIVE_S3_SECRET_KEY:?}
+    OBJECT_ENDPOINT=${DRIVE_S3_ENDPOINT:?}; OBJECT_REGION=${DRIVE_S3_REGION:?}
+    OBJECT_ACCESS_KEY_ID=${DRIVE_S3_ACCESS_KEY:?}; OBJECT_SECRET_ACCESS_KEY=$(read_secret "${DRIVE_S3_SECRET_FILE:?}")
     bucket=${DRIVE_S3_BUCKET:?}; prefix=${DRIVE_S3_PREFIX:-}
   fi
   export OBJECT_ENDPOINT OBJECT_REGION OBJECT_ACCESS_KEY_ID OBJECT_SECRET_ACCESS_KEY

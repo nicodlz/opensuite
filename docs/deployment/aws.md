@@ -4,15 +4,14 @@
 mail in the selected region (default `eu-north-1`), writes MIME to an encrypted
 S3 buffer, and publishes the receipt notification to SNS. SNS delivers it to an
 SQS ingestion queue and separately to Firehose for a metadata archive in the
-same bucket. The planned worker imports into Stalwart on the VPS. Sending uses
+same bucket. The worker imports into Stalwart on the VPS. Sending uses
 SES SMTP with STARTTLS on port 2587. Drive and its permanent object storage use
 Backblaze B2 and are not provisioned here.
 
 This configuration has only been checked offline: **no real AWS plan or apply,
 provider integration, delivery, IAM policy, DNS, recovery, or cost has been
-verified**. The worker, SMTP relay configuration, and end-to-end idempotency and
-backup procedures do not exist yet. Treat this as infrastructure to evaluate,
-not a production-ready mail service. See the [ingestion design](../architecture/ingestion.md).
+verified**. The worker, relay and backup tooling exist, but end-to-end provider behavior
+has not been verified. Treat this as infrastructure to evaluate before cutover. See the [ingestion design](../architecture/ingestion.md).
 
 ## Prerequisites and configuration
 
@@ -56,8 +55,9 @@ reconcile existing resources as described below, and inspect a plan. Only after
 review should the account owner apply it. This repository's validation command
 never performs these account operations.
 
-After provisioning, publish the `dns_records` output: domain verification TXT,
-three Easy DKIM CNAMEs, custom MAIL FROM MX and SPF TXT, and receiving MX. Merge
+After provisioning, publish the identity and signing records in `dns_records`
+when safe; hold the receiving MX and any conflicting wildcard changes for the
+separate, owner-approved cutover in the production runbook. Merge
 SPF with existing policy rather than creating conflicting TXT records. Confirm
 SES identity and DKIM verification, MX and MAIL FROM status, region and sandbox
 status before routing real mail; request production sending access if necessary.

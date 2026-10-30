@@ -1,8 +1,8 @@
 # Backup and recovery on one VPS
 
 This is a **downtime** backup. At 01:00 UTC the systemd timer invokes the
-Compose helper services. The controller stops running Caddy, API, Drive and
-Stalwart containers; takes `pg_dump` custom-format snapshots of both databases,
+Compose helper services. The controller stops running Caddy, API, Drive,
+ingest, observe and Stalwart containers; takes `pg_dump` custom-format snapshots of both databases,
 `pg_dumpall --globals-only`, the complete stopped Stalwart RocksDB directory
 (including WAL), the Compose secrets and Caddy volumes, configuration and both S3 object
 prefixes; checks the object copies byte-for-byte; and starts the previously
@@ -34,8 +34,8 @@ other S3 writers/deleters during every capture, including cleanup/lifecycle
 jobs. The controller cannot stop external writers. Arrange an operational
 maintenance window that enforces this, and do not run migrations, setup jobs,
 or `docker compose up` concurrently. Object lifecycle rules must not remove
-needed objects during capture. The current Compose file does not run the
-planned ingestion worker. An independent inbound archive and replay are
+needed objects during capture. The optional Compose ingestion worker is stopped and restarted if running.
+An independent inbound archive and replay are
 separate recovery requirements, not supplied by this backup.
 
 ## Provision and schedule
@@ -53,8 +53,9 @@ separate recovery requirements, not supplied by this backup.
    generated restic password in the named file, mode 0600. Protect and test an
    **independent offline copy** of the password, backup key, repository URL,
    Git revision and this procedure: none can be recovered from the repository
-   without the password. The backup contains `.env`, the mail secret, generated
-   Compose secrets and backup configuration, all encrypted by restic before
+   without the password. The backup contains `.env`, configured mail and Drive object secrets, relay
+   and TLS files, ingest and observe env files when present, generated Compose
+   secrets and backup configuration, all encrypted by restic before
    uploading. Docker administrators can read these values; restrict host and
    Docker access. Environment and configuration files must be trusted POSIX
    shell assignments, not arbitrary shell code.
@@ -67,6 +68,8 @@ separate recovery requirements, not supplied by this backup.
    stderr. Alert on failed systemd units, failure/overlap/restart_failed events,
    missing success events and the age of the most recent successful snapshot.
    A successful capture followed by a pruning failure is reported as failure.
+   Only after capture, service restart, upload, retention and scratch cleanup
+   succeed does the script atomically replace `OBSERVE_BACKUP_DIR/last-success`.
 4. Install `deploy/backup/opensuite-backup.service` and
    `deploy/backup/opensuite-backup.timer` into `/etc/systemd/system/` (edit
    paths if the checkout is elsewhere), then run `systemctl daemon-reload` and
@@ -85,8 +88,8 @@ policies must not interfere with restic's repository operations.
 
 1. Fence the old host and all external writers. Install Docker/Compose, Git,
    `flock` and the recorded OpenSuite revision at `/opt/opensuite`. Build the
-   application images and frontend for that revision as described by the
-   installation instructions. Use the same architecture and pinned images.
+   application images and run `pnpm install --frozen-lockfile && pnpm build`
+   for that revision; Caddy refuses to start without `apps/web/dist/index.html`. Use the same architecture and pinned images.
    Provision an encrypted scratch filesystem and private, **empty** mail and
    Drive buckets/prefixes. For the restored configuration, they must have the
    same endpoints, bucket names and prefixes as the saved `.env` and Stalwart
@@ -102,7 +105,7 @@ policies must not interfere with restic's repository operations.
    checkout with **no `.env` and empty Compose volumes**, run
    `deploy/backup/restore.sh` (or pass a restic snapshot ID). It refuses
    nonempty secrets, Caddy, RocksDB, PostgreSQL volumes or object prefixes. The script
-   decrypts to scratch, restores the recorded `.env`, mail secret, Compose and
+   decrypts to scratch, restores the recorded `.env`, external secrets and env files, Compose and
    Stalwart config, object bytes, secrets and RocksDB volumes, then starts only
    PostgreSQL and restores the roles and both databases. A failed restore may
    leave partial files, volumes or objects: discard the isolated target and

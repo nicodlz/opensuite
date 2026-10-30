@@ -7,20 +7,35 @@ if (
   !action ||
   !origin ||
   !passwordFile ||
-  !["apply", "dns", "reset"].includes(action)
+  !["apply", "dns", "domain", "reset"].includes(action)
 ) {
   throw new Error(
-    "Usage: node --experimental-strip-types scripts/outbound.mjs apply|dns|reset ADMIN_ORIGIN ADMIN_PASSWORD_FILE [USERNAME|DOMAIN_ID]",
+    "Usage: node --experimental-strip-types scripts/outbound.mjs apply|dns|domain|reset ADMIN_ORIGIN ADMIN_PASSWORD_FILE [USERNAME|DOMAIN_ID|DOMAIN]",
   );
 }
 const password = (await readFile(passwordFile, "utf8")).trim();
 if (!password) throw new Error("Administrator password file is empty");
-const admin = new StalwartAdmin(origin, { username: "admin", password });
+const clientIp = process.env["STALWART_MANAGEMENT_CLIENT_IP"];
+if (!clientIp) throw new Error("Management network address is required");
+const admin = new StalwartAdmin(
+  origin,
+  { username: "management@opensuite.internal", password },
+  {
+    fetch: (input, init) =>
+      fetch(input, {
+        ...init,
+        headers: {
+          ...Object.fromEntries(new Headers(init?.headers)),
+          "X-Forwarded-For": clientIp,
+        },
+      }),
+  },
+);
 let result;
 if (action === "apply") {
   if (!argument) throw new Error("SMTP username is required");
   const secretPath = process.env["MAIL_RELAY_SECRET_FILE"];
-  if (!secretPath)
+  if (!secretPath || secretPath === "/dev/null")
     throw new Error("MAIL_RELAY_SECRET_FILE must name the mounted secret file");
   if ((await readFile(secretPath)).length === 0)
     throw new Error("SMTP secret file is empty");
@@ -31,6 +46,9 @@ if (action === "apply") {
     secretFile: "/run/opensuite/smtp-secret",
     tls: "starttls",
   });
+} else if (action === "domain") {
+  if (!argument) throw new Error("Domain name is required");
+  result = await admin.createDomain(argument);
 } else if (action === "dns") {
   if (!argument) throw new Error("Domain ID is required");
   result = await admin.dkimRecords(argument);

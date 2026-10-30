@@ -24,6 +24,7 @@ interface RuntimeConfig {
   readonly secret: string;
   readonly mailboxKey: string;
   readonly adminPassword: string;
+  readonly managementClientIp?: string;
 }
 const failure = (): ProvisionFailure => ({
   kind: "unavailable",
@@ -41,10 +42,22 @@ export const createAuthRuntime = (
   const store = storeResult.value;
   const admin = new StalwartAdmin(
     config.stalwartOrigin,
-    { username: "admin", password: config.adminPassword },
+    {
+      username: "management@opensuite.internal",
+      password: config.adminPassword,
+    },
     {
       fetch: (input, init) =>
-        fetcher(input, { ...init, signal: AbortSignal.timeout(10_000) }),
+        fetcher(input, {
+          ...init,
+          headers: {
+            ...Object.fromEntries(new Headers(init?.headers)),
+            ...(config.managementClientIp === undefined
+              ? {}
+              : { "X-Forwarded-For": config.managementClientIp }),
+          },
+          signal: AbortSignal.timeout(10_000),
+        }),
     },
   );
   const audit = async (event: { userId: string | null; action: string }) => {

@@ -13,8 +13,8 @@ cleanup() {
   rc=$?
   trap - EXIT HUP INT TERM
   for project in "$old" "$new"; do
-    if [ "$rc" -ne 0 ]; then docker compose --project-name "$project" -f "$root/compose.yaml" logs --no-color postgres stalwart >&2 || :; fi
-    docker compose --project-name "$project" -f "$root/compose.yaml" down --volumes --remove-orphans --timeout 5 >/dev/null 2>&1 || :
+    if [ "$rc" -ne 0 ]; then docker compose --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" logs --no-color postgres stalwart >&2 || :; fi
+    docker compose --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" down --volumes --remove-orphans --timeout 5 >/dev/null 2>&1 || :
     docker volume rm "${project}_secrets" "${project}_stalwart-data" "${project}_postgres-data" >/dev/null 2>&1 || :
   done
   docker rm -f "$minio" >/dev/null 2>&1 || :
@@ -48,7 +48,13 @@ rclone_local() {
 for bucket in backup-fixture mail-fixture drive-fixture; do rclone_local mkdir "store:$bucket"; done
 printf 'fixture-repository-password\n' > "$work/secrets/restic"
 printf 'fixture-secret' > "$work/secrets/mail"
-chmod 644 "$work/secrets/mail"
+printf 'fixture-secret' > "$work/secrets/drive"
+printf 'relay-fixture' > "$work/secrets/relay"
+printf 'tls-cert-fixture' > "$work/secrets/tls-cert"
+printf 'tls-key-fixture' > "$work/secrets/tls-key"
+printf 'INGEST_FIXTURE=present\n' > "$work/source/deploy/ingest.env"
+printf 'OBSERVE_FIXTURE=present\n' > "$work/source/deploy/observe.env"
+chmod 644 "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$work/secrets/tls-cert" "$work/secrets/tls-key"
 cat > "$work/backup.conf" <<CONFIG
 BACKUP_REPOSITORY='s3:http://host.docker.internal:$port/backup-fixture/repo'
 BACKUP_REGION='us-east-1'
@@ -84,6 +90,8 @@ cat > "$work/source/.env" <<CONFIG
 POSTGRES_USER=opensuite
 POSTGRES_DB=opensuite
 POSTGRES_DRIVE_DB=opensuite_drive
+MAIL_MANAGEMENT_SUBNET=10.237.253.0/24
+MAIL_MANAGEMENT_API_IP=10.237.253.10
 MAIL_BLOB_STORE=s3
 MAIL_S3_ENDPOINT=http://host.docker.internal:$port
 MAIL_S3_REGION=us-east-1
@@ -92,12 +100,17 @@ MAIL_S3_PREFIX=mail/
 MAIL_S3_KEY_ID=fixture-access
 MAIL_S3_SECRET_FILE=$work/secrets/mail
 MAIL_S3_ALLOW_SWITCH=1
+MAIL_RELAY_SECRET_FILE=$work/secrets/relay
+MAIL_TLS_CERT_FILE=$work/secrets/tls-cert
+MAIL_TLS_KEY_FILE=$work/secrets/tls-key
 DRIVE_S3_ENDPOINT=http://host.docker.internal:$port
+DRIVE_S3_PUBLIC_ENDPOINT=http://host.docker.internal:$port
 DRIVE_S3_REGION=us-east-1
 DRIVE_S3_BUCKET=drive-fixture
 DRIVE_S3_PREFIX=drive/
 DRIVE_S3_ACCESS_KEY=fixture-access
-DRIVE_S3_SECRET_KEY=fixture-secret
+DRIVE_S3_SECRET_FILE=$work/secrets/drive
+OBSERVE_BACKUP_DIR=$work/source/deploy/backup-status
 CONFIG
 export BACKUP_CONFIG="$work/backup.conf" BACKUP_COMPOSE_OVERRIDE="$work/overlay.yaml" COMPOSE_PROJECT_NAME="$old" BACKUP_STAGE="$work/scratch"
 set -a
@@ -105,8 +118,13 @@ set -a
 set +a
 cd "$work/source"
 compose() { docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/backup/compose.backup.yaml -f "$work/overlay.yaml" "$@"; }
-compose up -d --wait --wait-timeout 180 postgres stalwart
+docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml up -d --wait --wait-timeout 180 stalwart
+docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml --profile bootstrap run --rm stalwart-bootstrap
+compose up -d --force-recreate --wait --wait-timeout 180 postgres stalwart
 compose up --no-deps --force-recreate --exit-code-from stalwart-setup stalwart-setup
+docker run --rm --network none -v "${old}_setup-status:/status:ro" \
+  alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a \
+  sh -ec '[ "$(cat /status/status)" = ok ]'
 compose restart stalwart
 compose up -d --wait --wait-timeout 180 stalwart
 compose exec -T postgres psql -U opensuite -d opensuite -v ON_ERROR_STOP=1 < "$root/packages/db/prisma/migrations/20261029000000_initial/migration.sql"
@@ -115,9 +133,9 @@ compose exec -T postgres psql -U opensuite -d opensuite -v ON_ERROR_STOP=1 -c 'I
 compose exec -T postgres psql -U opensuite -d opensuite_drive -v ON_ERROR_STOP=1 -c 'INSERT INTO "Entry" (id, "ownerId", name, kind, state, "objectKey", "updatedAt") VALUES ('"'"'file-fixture'"'"', '"'"'fixture'"'"', '"'"'file'"'"', '"'"'file'"'"', '"'"'ready'"'"', '"'"'drive/objects/file-fixture'"'"', now());'
 printf 'drive-content-fixture' | rclone_local rcat store:drive-fixture/drive/objects/file-fixture
 mailport=$(compose port stalwart 8080 | sed 's/.*://')
-password=$(compose exec -T stalwart cat /run/opensuite/stalwart-admin/password)
+password=$(compose run --rm --no-deps -T backup-management 'cat /run/opensuite/stalwart-management/password')
 base="http://127.0.0.1:$mailport"
-request() { curl -fsS -u "admin:$password" -H 'X-Forwarded-For: 192.0.2.10' "$@"; }
+request() { curl -fsS -u "management@opensuite.internal:$password" -H 'X-Forwarded-For: 10.237.253.10' "$@"; }
 account=$(request "$base/jmap/session" | jq -er '.primaryAccounts["urn:ietf:params:jmap:mail"]')
 jmap() { request -H 'Content-Type: application/json' -d "$1" "$base/jmap/"; }
 inbox=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Mailbox/get\",{\"accountId\":\"$account\"},\"a\"]]}" | jq -er '.methodResponses[0][1].list[] | select(.role == "inbox") | .id')
@@ -127,14 +145,20 @@ response=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jma
 email=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].created.fixture.id')
 ./deploy/backup/init.sh
 ./deploy/backup/backup.sh
+[ -s "$work/source/deploy/backup-status/last-success" ]
 # Delete live application state and object copies while retaining the backup bucket.
 compose down --volumes --remove-orphans --timeout 10
 rclone_local purge store:mail-fixture/mail
 rclone_local purge store:drive-fixture/drive
-rm "$work/secrets/mail"
+rm "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$work/secrets/tls-cert" "$work/secrets/tls-key"
 export COMPOSE_PROJECT_NAME="$new"
 cd "$work/target"
 ./deploy/backup/restore.sh
+[ "$(cat deploy/ingest.env)" = INGEST_FIXTURE=present ]
+[ "$(cat deploy/observe.env)" = OBSERVE_FIXTURE=present ]
+for fixture in relay tls-cert tls-key; do
+  [ "$(docker run --rm --network none --mount "type=bind,src=$work/secrets/$fixture,dst=/secret,readonly" alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a cat /secret)" = "$fixture-fixture" ]
+done
 compose up -d --no-deps --wait --wait-timeout 180 stalwart
 [ "$(compose exec -T postgres psql -U opensuite -d opensuite -Atc 'select name from "User"')" = account-fixture ]
 [ "$(compose exec -T postgres psql -U opensuite -d opensuite_drive -Atc 'select "objectKey" from "Entry"')" = drive/objects/file-fixture ]

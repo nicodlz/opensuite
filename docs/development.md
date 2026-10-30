@@ -6,10 +6,28 @@ This page describes what runs today. Planned components are listed at the end.
 
 ```sh
 cp deploy/env.example .env
+# Use these values only with the disposable local profile:
+printf %s test > /tmp/opensuite-drive-local-secret
+chmod 644 /tmp/opensuite-drive-local-secret
+# Set the Drive variables shown below in .env.
+docker compose --profile dev up -d localstack
 pnpm install && pnpm build   # produces apps/web/dist, mounted by Caddy
 # First bootstrap the mail management account as described below.
 docker compose up -d
 docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
+```
+
+For local-only Drive, set the following in `.env`. The file above contains a
+public test credential, so its permissive mode is not suitable for production.
+
+```dotenv
+DRIVE_S3_ENDPOINT=http://localstack:4566
+DRIVE_S3_PUBLIC_ENDPOINT=http://localhost:4566
+DRIVE_S3_BUCKET=opensuite-drive
+DRIVE_S3_PREFIX=drive/
+DRIVE_S3_REGION=us-east-1
+DRIVE_S3_ACCESS_KEY=test
+DRIVE_S3_SECRET_FILE=/tmp/opensuite-drive-local-secret
 ```
 
 | Service          | Image (pinned by digest)                | Role                                                                                                      |
@@ -25,7 +43,7 @@ docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
 | `stalwart-setup` | `stalwartlabs/stalwart:v1.0.1`          | One-shot job: applies mail server settings (see below).                                                   |
 | `localstack`     | `localstack/localstack:4.14.0`          | `dev` profile only: local S3 bucket and SQS queues for inbound mail.                                      |
 
-Rebuild the client with `pnpm build` after changes; Caddy mounts `apps/web/dist` read-only. The web client shows live API status and a mail interface. The mail backend is not implemented; synthetic data is available only in the development server. Other product pages are placeholders. For the development server and browser tests, see [the web client guide](../apps/web/README.md).
+Rebuild the client with `pnpm build` after changes; Caddy mounts `apps/web/dist` read-only. The web client shows live API status and a mail interface. The production mail API is wired to Stalwart; synthetic data is available only in the development server. Other product pages are placeholders. For the development server and browser tests, see [the web client guide](../apps/web/README.md).
 
 Every long-running service has a Compose health check and a restart policy.
 Data lives in named volumes: `postgres-data`, `stalwart-data`, `caddy-data`,
@@ -69,8 +87,8 @@ authenticates. To recover later, stop Caddy and deliberately use the temporary
 override again; remove it and recreate Stalwart afterwards.
 
 `stalwart-setup` connects to `http://stalwart:8080` on the management network
-using that account. Future server-side provisioning should use the same
-internal origin and credential with `StalwartAdmin`; its API is unchanged.
+using that account. API provisioning uses the same account over the
+management network with `StalwartAdmin`; its API is unchanged.
 Never use the public HTTPS origin for management. `Http.clientIpSource` trusts
 one X-Forwarded-For hop, and Caddy replaces client-supplied values and refuses
 connections originating from the management subnet. Do not put another
@@ -93,40 +111,10 @@ S3-compatible blobs require the separate [object storage procedure](operations/o
 
 ### Mail TLS and ports
 
-Ports 465, 993 and 4190 bind to `127.0.0.1` by default. Caddy's HTTPS
-certificate does not automatically configure Stalwart. To share it with mail,
-set `MAIL_HOSTNAME` and `OPENSUITE_SITE_ADDRESS` to the same real hostname,
-obtain Caddy's certificate, and export its full chain and private key to
-operator-managed host files outside the repository. For Caddy's usual ACME
-storage, the files are under `/data/caddy/certificates/` in the Caddy container;
-choose the actual issuer and hostname directory. Copy both files securely,
-restrict access, and make them readable to uid 2000. Do not expose the key in
-`.env`, logs or shell arguments. Configure their absolute paths in
-`MAIL_TLS_CERT_FILE` and `MAIL_TLS_KEY_FILE`, set `MAIL_TLS_ENABLED=1`, and
-recreate Stalwart and rerun setup:
-
-```sh
-docker compose up -d --force-recreate --wait stalwart
-docker compose run --rm stalwart-setup
-docker compose restart stalwart
-```
-
-Setup validates the hostname, expiry and matching key and registers file
-references. Before setting `MAIL_PROTOCOL_BIND=0.0.0.0`, use an independent
-TLS client on each loopback port to verify the served chain and hostname,
-including a STARTTLS handshake for ManageSieve. Then recreate Stalwart and
-verify externally. Caddy renewals are **not automatically copied**: arrange a
-secure renewal hook or operator procedure to refresh both exported files,
-recreate Stalwart (file bind mounts can retain old inodes), rerun setup and
-verify the new certificate before expiry. Monitor certificate expiry. The
-loopback default is the safe state until this is done.
-
-No host port 25 is published in the normal stack: inbound mail must pass through
-SES. For a deliberate emergency direct-SMTP fallback, use
-`docker compose -f compose.yaml -f deploy/stalwart/compose.direct-smtp.yaml up -d stalwart`;
-it defaults to loopback and `DIRECT_SMTP_BIND=0.0.0.0` explicitly exposes it.
-Direct mail bypasses SES filtering and archival. Remove the override and
-recreate Stalwart after the fallback. STARTTLS ports 587 and 143 remain disabled.
+Ports 465, 993 and 4190 bind to loopback until TLS has been installed and
+verified. The Caddy certificate is copied and renewed by the systemd timer in
+[the production runbook](deployment/production.md#mail-tls). Observer checks
+both 465 and 993 independently.
 
 ### Migrations
 
@@ -237,7 +225,7 @@ disable themselves or the last enabled administrator.
 Signup provisions a Stalwart account and address, with a random inaccessible
 primary password and an application credential encrypted in the database.
 The API mounts the generated Better Auth secret, mailbox encryption key, and
-Stalwart recovery administrator secret read-only; back up the secrets volume
+Stalwart management secret read-only; back up the secrets volume
 alongside the database and mail data. Loss of the mailbox key prevents
 recovering stored credentials. Do not place secrets in `.env` or Git.
 
@@ -254,8 +242,6 @@ database and active mailbox before protected procedures or Drive sessions.
 
 ## Known limitations
 
-- **Mail certificate renewal:** exporting Caddy certificates and verifying mail
-  TLS is an operator responsibility; there is no automated renewal hook.
 - **Mail delivery:** no domain or mailbox is provisioned by default. Local
   JMAP submission and delivery are tested; a fake SMTP relay is tested; real SES delivery is not.
 - **Outbound access:** the mail server downloads public network data
@@ -263,8 +249,7 @@ database and active mailbox before protected procedures or Drive sessions.
 
 ## Planned, not implemented
 
-The production mail API, calendar, contacts and drive interfaces, production SES provider proof, the setup wizard and
-backups.
+Calendar and contacts interfaces, production SES provider proof and the setup wizard.
 
 ## Ingestion
 
@@ -292,12 +277,11 @@ the database and secrets before upgrading an existing installation; orphaned
 Drive entries must be repaired before the parent foreign key can be installed.
 
 For local development, `docker compose --profile dev up -d` creates a separate
-`opensuite-drive` bucket in LocalStack. The default `test` credentials and
-loopback-only endpoint are for local use only. A browser uses the endpoint in
+`opensuite-drive` bucket in LocalStack. Set explicit test credentials and loopback-only endpoints for local use. A browser uses the endpoint in
 `DRIVE_S3_PUBLIC_ENDPOINT`, which must resolve from the browser and refer to the
 same storage as `DRIVE_S3_ENDPOINT` (used by the service); the signed host must
 not be rewritten. Configure `DRIVE_S3_BUCKET`, `DRIVE_S3_PREFIX`,
-`DRIVE_S3_REGION`, `DRIVE_S3_ACCESS_KEY`, `DRIVE_S3_SECRET_KEY`,
+`DRIVE_S3_REGION`, `DRIVE_S3_ACCESS_KEY`, `DRIVE_S3_SECRET_FILE`,
 `DRIVE_S3_PATH_STYLE`, and `DRIVE_QUOTA_BYTES` for the deployment. Use a dedicated
 bucket and credentials, separate from mail and backups, and TLS for remote
 services. Configure S3 CORS for the actual application origins, PUT/GET/HEAD,
