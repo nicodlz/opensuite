@@ -72,4 +72,26 @@ describe("account-wide authentication limits", () => {
       ),
     ).toMatchObject({ first: true });
   });
+  it("shares the MFA account limit with security-key verification", () => {
+    const limiter = createAuthLimiter(() => 0);
+    const cookie = "__Host-opensuite.two_factor=challenge";
+    limiter.remember({ email: "user@example.test" }, [`${cookie}; Secure`]);
+    for (let i = 0; i < 5; i++)
+      expect(
+        limiter.check(
+          "/auth/two-factor/verify-security-key",
+          `ip${i}`,
+          {},
+          cookie,
+        ),
+      ).toBeUndefined();
+    expect(
+      limiter.check(
+        "/auth/two-factor/verify-security-key",
+        "other",
+        {},
+        cookie,
+      ),
+    ).toMatchObject({ first: true });
+  });
 });

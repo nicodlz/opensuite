@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  startAuthentication,
+  startRegistration,
+  type PublicKeyCredentialCreationOptionsJSON,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from "@simplewebauthn/browser";
 
 const SessionSchema = z.object({
   user: z.object({
@@ -6,6 +12,8 @@ const SessionSchema = z.object({
     twoFactorEnabled: z.boolean().optional(),
   }),
 });
+export const hasWebAuthn = () =>
+  typeof Reflect.get(globalThis, "PublicKeyCredential") === "function";
 export class AuthError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -66,6 +74,61 @@ export function createAuthClient(fetcher: typeof fetch = fetch) {
         .object({ backupCodes: z.array(z.string()) })
         .parse(await request("two-factor/generate-backup-codes", { password }))
         .backupCodes;
+    },
+    async factors() {
+      return z
+        .object({
+          totp: z.boolean(),
+          backupCodesRemaining: z.number(),
+          keys: z.array(
+            z.object({
+              id: z.string(),
+              name: z.string(),
+              createdAt: z.string(),
+              lastUsedAt: z.string().nullable(),
+            }),
+          ),
+        })
+        .parse(await request("security-keys/status"));
+    },
+    async methods() {
+      return z
+        .object({
+          totp: z.boolean(),
+          securityKey: z.boolean(),
+          backup: z.boolean(),
+        })
+        .parse(await request("two-factor/methods", {}));
+    },
+    async addKey(password: string, name: string) {
+      if (!hasWebAuthn())
+        throw new Error("Security keys are not supported by this browser.");
+      const data = z
+        .object({
+          id: z.string(),
+          options: z.custom<PublicKeyCredentialCreationOptionsJSON>(),
+        })
+        .parse(await request("security-keys/register-options", { password }));
+      const response = await startRegistration({ optionsJSON: data.options });
+      return z.object({ backupCodes: z.array(z.string()) }).parse(
+        await request("security-keys/register", {
+          id: data.id,
+          name,
+          response,
+        }),
+      ).backupCodes;
+    },
+    async removeKey(id: string, password: string) {
+      await request("security-keys/remove", { id, password });
+    },
+    async verifyKey() {
+      if (!hasWebAuthn())
+        throw new Error("Security keys are not supported by this browser.");
+      const options = z
+        .custom<PublicKeyCredentialRequestOptionsJSON>()
+        .parse(await request("two-factor/security-key-options", {}));
+      const response = await startAuthentication({ optionsJSON: options });
+      await request("two-factor/verify-security-key", response);
     },
     /** Asks the sign-in origin for a token valid on one sibling origin. */
     async handoff(target: string) {

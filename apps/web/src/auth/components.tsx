@@ -9,7 +9,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { activeLayout } from "../origins.ts";
-import { auth, AuthError } from "./client.ts";
+import { auth, AuthError, hasWebAuthn } from "./client.ts";
 import { returnKey, startHandoff } from "./handoff.tsx";
 import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
@@ -21,6 +21,7 @@ import {
 } from "../ui/dropdown-menu.tsx";
 import { TextField } from "../ui/text-field.tsx";
 import { QRCodeSVG } from "qrcode.react";
+import { ChallengeInputs, FactorSummary } from "./security-controls.tsx";
 
 const sessionKey = ["auth", "session"];
 const sessionQuery = {
@@ -79,6 +80,11 @@ export function LoginPage() {
   const [code, setCode] = useState("");
   const [challenge, setChallenge] = useState(false);
   const [backup, setBackup] = useState(false);
+  const [methods, setMethods] = useState({
+    totp: true,
+    securityKey: false,
+    backup: true,
+  });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [expired] = useState(() => {
@@ -94,6 +100,31 @@ export function LoginPage() {
     if (layout.split && layout.host !== "mail")
       window.location.replace(`${layout.hub}/login`);
   }, []);
+  async function completeSignIn() {
+    const session = await auth.session();
+    if (session === null)
+      throw new Error("Could not establish a session. Please sign in again.");
+    client.setQueryData(sessionKey, session);
+    const pending = sessionStorage.getItem(returnKey);
+    sessionStorage.removeItem(returnKey);
+    if (pending?.startsWith("/auth/handoff?")) {
+      window.location.assign(pending);
+      return;
+    }
+    void navigate({ to: "/mail" });
+  }
+  async function useSecurityKey() {
+    setBusy(true);
+    setError("");
+    try {
+      await auth.verifyKey();
+      await completeSignIn();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -105,20 +136,13 @@ export function LoginPage() {
         if (result.twoFactorRedirect) {
           setPassword("");
           setChallenge(true);
+          const available = await auth.methods();
+          setMethods(available);
+          setBackup(!available.totp && available.backup);
           return;
         }
       }
-      const session = await auth.session();
-      if (session === null)
-        throw new Error("Could not establish a session. Please sign in again.");
-      client.setQueryData(sessionKey, session);
-      const pending = sessionStorage.getItem(returnKey);
-      sessionStorage.removeItem(returnKey);
-      if (pending?.startsWith("/auth/handoff?")) {
-        window.location.assign(pending);
-        return;
-      }
-      void navigate({ to: "/mail" });
+      await completeSignIn();
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -145,7 +169,7 @@ export function LoginPage() {
           {expired
             ? "Your session expired. Sign in again to continue."
             : challenge
-              ? "Enter a code from your authenticator or use a backup code."
+              ? "Choose a verification method."
               : "Welcome back to your workspace."}
         </p>
         <form
@@ -155,25 +179,21 @@ export function LoginPage() {
           className="auth-form"
         >
           {challenge ? (
-            <>
-              <TextField
-                label={backup ? "Backup code" : "Authenticator code"}
-                value={code}
-                onChange={(event) => setCode(event.target.value)}
-                autoComplete="one-time-code"
-                required
-              />
-              <button
-                type="button"
-                className="auth-link"
-                onClick={() => {
-                  setBackup(!backup);
-                  setCode("");
-                }}
-              >
-                {backup ? "Use an authenticator code" : "Use a backup code"}
-              </button>
-            </>
+            <ChallengeInputs
+              methods={methods}
+              backup={backup}
+              code={code}
+              busy={busy}
+              supported={hasWebAuthn()}
+              onCode={setCode}
+              onToggle={() => {
+                setBackup(!backup);
+                setCode("");
+              }}
+              onKey={() => {
+                void useSecurityKey();
+              }}
+            />
           ) : (
             <>
               <TextField
@@ -199,9 +219,31 @@ export function LoginPage() {
               {error}
             </p>
           )}
-          <Button type="submit" disabled={busy}>
-            {busy ? "Please wait…" : challenge ? "Verify" : "Sign in"}
-          </Button>
+          {(challenge || error) && (
+            <button
+              type="button"
+              className="auth-link"
+              onClick={() => {
+                void auth
+                  .signOut()
+                  .then(() => {
+                    setChallenge(false);
+                    setPassword("");
+                    setCode("");
+                    setError("");
+                    return undefined;
+                  })
+                  .catch((failure: unknown) => setError(errorMessage(failure)));
+              }}
+            >
+              Start over
+            </button>
+          )}
+          {(!challenge || methods.totp || methods.backup) && (
+            <Button type="submit" disabled={busy}>
+              {busy ? "Please wait…" : challenge ? "Verify" : "Sign in"}
+            </Button>
+          )}
         </form>
       </div>
     </main>
@@ -219,9 +261,44 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
   const [notice, setNotice] = useState("");
   const [newBackupCodes, setNewBackupCodes] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [keyName, setKeyName] = useState("");
   const client = useQueryClient();
   const navigate = useNavigate();
   const session = useQuery(sessionQuery);
+  const factors = useQuery({
+    queryKey: ["auth", "factors"],
+    queryFn: () => auth.factors(),
+    enabled: open,
+    retry: false,
+  });
+  async function refreshFactors() {
+    await Promise.all([
+      client.invalidateQueries({ queryKey: sessionKey }),
+      client.invalidateQueries({ queryKey: ["auth", "factors"] }),
+    ]);
+  }
+  async function manageKey(id?: string) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      if (id) {
+        await auth.removeKey(id, password);
+        setNotice("Security key removed.");
+      } else {
+        const codes = await auth.addKey(password, keyName);
+        if (codes.length) setNewBackupCodes(codes);
+        setKeyName("");
+        setNotice("Security key added.");
+      }
+      setPassword("");
+      await refreshFactors();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function signOut() {
     try {
       await auth.signOut();
@@ -255,14 +332,14 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
         setNotice(
           "Two-factor authentication enabled. Save your backup codes before closing.",
         );
-        await client.invalidateQueries({ queryKey: sessionKey });
+        await refreshFactors();
       }
       if (action === "disable") {
         await auth.disable(password);
         setPassword("");
         setEnrollment(null);
-        setNotice("Two-factor authentication disabled.");
-        await client.invalidateQueries({ queryKey: sessionKey });
+        setNotice("Authenticator app disabled.");
+        await refreshFactors();
       }
       if (action === "regenerate") {
         setNewBackupCodes(await auth.regenerateBackupCodes(password));
@@ -338,6 +415,12 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
           description="Two-factor authentication is optional. Manage your authenticator and backup codes."
         >
           <div className="auth-form">
+            {factors.isError && (
+              <p role="alert">
+                Could not load account security. Close and reopen this panel to
+                try again.
+              </p>
+            )}
             {enrollment ? (
               <>
                 <p>Scan this QR code with your authenticator app:</p>
@@ -354,7 +437,7 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                 <code className="auth-secret">
                   {enrollment.backupCodes.join("\n")}
                 </code>
-                {!session.data?.user.twoFactorEnabled ? (
+                {!factors.data?.totp ? (
                   <>
                     <TextField
                       label="Authenticator code"
@@ -386,11 +469,12 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
               </>
             ) : (
               <>
-                <p>
-                  {session.data?.user.twoFactorEnabled
-                    ? "Authenticator app: on"
-                    : "Authenticator app: off"}
-                </p>
+                <FactorSummary
+                  totp={factors.data?.totp ?? false}
+                  {...(session.data?.user.twoFactorEnabled && factors.data
+                    ? { count: factors.data.backupCodesRemaining }
+                    : {})}
+                />
                 <TextField
                   label="Current password"
                   type="password"
@@ -399,22 +483,60 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                   onChange={(event) => setPassword(event.target.value)}
                 />
                 <Button
-                  disabled={busy || !password}
+                  disabled={busy || !password || !factors.data}
                   onClick={() => {
-                    void security(
-                      session.data?.user.twoFactorEnabled
-                        ? "disable"
-                        : "enable",
-                    );
+                    void security(factors.data?.totp ? "disable" : "enable");
                   }}
                 >
-                  {session.data?.user.twoFactorEnabled
-                    ? "Disable two-factor authentication"
+                  {factors.data?.totp
+                    ? "Disable authenticator app"
                     : "Set up two-factor authentication"}
+                </Button>
+                <p>Security keys</p>
+                {factors.data?.keys.map((key) => (
+                  <div key={key.id}>
+                    <p>
+                      {key.name} — Added{" "}
+                      {new Date(key.createdAt).toLocaleDateString()}
+                      {key.lastUsedAt
+                        ? `; last used ${new Date(key.lastUsedAt).toLocaleDateString()}`
+                        : ""}
+                    </p>
+                    <Button
+                      disabled={busy || !password || !factors.data}
+                      onClick={() => {
+                        void manageKey(key.id);
+                      }}
+                    >
+                      Remove {key.name}
+                    </Button>
+                  </div>
+                ))}
+                {!hasWebAuthn() && (
+                  <p>Security keys are not supported by this browser.</p>
+                )}
+                <TextField
+                  label="Security key name"
+                  value={keyName}
+                  onChange={(event) => setKeyName(event.target.value)}
+                />
+                <Button
+                  disabled={
+                    busy ||
+                    !password ||
+                    !keyName.trim() ||
+                    !hasWebAuthn() ||
+                    !factors.data
+                  }
+                  onClick={() => {
+                    void manageKey();
+                  }}
+                >
+                  Add security key
                 </Button>
                 {session.data?.user.twoFactorEnabled && (
                   <Button
-                    disabled={busy || !password}
+                    disabled={busy || !password || !factors.data}
                     onClick={() => {
                       void security("regenerate");
                     }}

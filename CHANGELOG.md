@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add optional FIDO2 security keys as a password-following second factor, with multiple keys and audited recovery.
+
 - Show a locally generated authenticator setup QR code and manual secret, and allow password-confirmed backup-code regeneration.
 - Add an audited operator reset for locked-out TOTP accounts and optional Vault Yubico OTP configuration.
 

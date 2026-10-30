@@ -48,12 +48,10 @@ test("sign-in, MFA setup, backup challenge, disable and sign-out", async ({
   await page.getByLabel("Current password").fill("synthetic-password");
   await page.getByRole("button", { name: "Regenerate backup codes" }).click();
   await expect(page.getByText(/previous codes no longer work/i)).toBeVisible();
-  await expect(page.getByText("new-backup-code")).toBeVisible();
+  await expect(page.getByText(/backup-[0-9a-f-]{36}/)).toBeVisible();
   await page.getByRole("button", { name: "Done" }).click();
   await page.getByLabel("Current password").fill("synthetic-password");
-  await page
-    .getByRole("button", { name: "Disable two-factor authentication" })
-    .click();
+  await page.getByRole("button", { name: "Disable authenticator app" }).click();
   await expect(page.getByRole("status")).toContainText("disabled");
 });
 

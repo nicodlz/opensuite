@@ -2,10 +2,10 @@
 
 Updated: 2026-10-30. The risks below remain open unless a narrower result is stated. **Unverified** identifies behavior not established for the stated environment; local tests do not prove real-provider or production behavior. Task names in the older suite-wide table identify the original work, not its current completion status. The production target and proof gates are in [ADR 0002](adr/0002-production-target.md).
 
-Esuno sign-in currently offers TOTP and backup codes, but no FIDO2 security-key
-second factor or administrative MFA enforcement. Direct IMAP and SMTP access
-does not use web MFA. Security-key support and managed app passwords remain
-follow-up work; keep protocol listeners loopback-only in the meantime.
+Esuno MFA is optional; administrative enforcement is not implemented. Direct
+IMAP and SMTP access does not use web MFA. Managed app passwords remain
+follow-up work; keep protocol listeners loopback-only in the meantime. FIDO2
+security keys require independent security review and deployment validation.
 
 | Risk or unknown                                                                                                                                                                                                                                                                             | Resolution and plan task                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

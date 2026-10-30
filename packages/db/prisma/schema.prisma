@@ -28,6 +28,7 @@ model User {
   ingestions       IngestionRecord[]
   auditEvents      AuditEvent[]
   twoFactor        TwoFactor?
+  securityKeys     SecurityKey[]
   mailbox          MailboxLink?
   mailboxProvision MailboxProvision?
   aliasSyncToken String?
@@ -36,6 +37,21 @@ model User {
   aliasApiKeys     AliasApiKey[]
   defaultAliasDomainId String?
   defaultAliasDomain Domain? @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
+}
+
+model SecurityKey {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credentialId String   @unique
+  publicKey    Bytes
+  counter      BigInt   @default(0)
+  transports   String[]
+  name         String
+  createdAt    DateTime @default(now())
+  lastUsedAt   DateTime?
+
+  @@index([userId])
 }
 
 model MailboxProvision {

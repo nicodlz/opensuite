@@ -28,6 +28,11 @@ import {
 import { z } from "zod";
 import { router, type ApiContext } from "./routes/index.ts";
 
+const hasPendingFactor = (cookie: string | undefined) =>
+  (cookie ?? "")
+    .split(";")
+    .some((part) => /^__Host-opensuite\.two_factor=.+$/.test(part.trim()));
+
 export interface ServerDependencies {
   readonly config: Pick<ApiConfig, "logLevel"> & {
     readonly trustProxy?: string;
@@ -131,6 +136,17 @@ export const buildServer = async (
       return reply.code(400).send({
         code: "BAD_REQUEST",
         message: "Duplicate authentication cookie",
+      });
+    const pendingFactor = hasPendingFactor(request.headers.cookie);
+    if (
+      identity !== undefined &&
+      pendingFactor &&
+      !rawPath.startsWith("/auth/") &&
+      !rawPath.startsWith("/api/auth/")
+    )
+      return reply.code(401).send({
+        code: "UNAUTHORIZED",
+        message: "Complete two-factor authentication",
       });
     if (
       identity !== undefined &&
@@ -384,6 +400,26 @@ export const buildServer = async (
           identity.publicOrigin,
         );
         const path = url.pathname.replace(/^\/api(?=\/auth\/)/, "");
+        const pendingFactor = hasPendingFactor(request.headers.cookie);
+        if (
+          pendingFactor &&
+          path !== "/auth/get-session" &&
+          path !== "/auth/sign-out" &&
+          !path.startsWith("/auth/two-factor/")
+        )
+          return reply.code(401).send({
+            code: "UNAUTHORIZED",
+            message: "Complete two-factor authentication",
+          });
+        if (
+          path.startsWith("/auth/two-factor/verify-") &&
+          z.object({ trustDevice: z.literal(true) }).safeParse(request.body)
+            .success
+        )
+          return reply.code(400).send({
+            code: "BAD_REQUEST",
+            message: "Trusted devices are not supported",
+          });
         // Tokens are only issued through /session/handoff.
         if (path === "/auth/one-time-token/generate")
           return reply
@@ -423,6 +459,37 @@ export const buildServer = async (
           if (Array.isArray(value)) {
             for (const part of value) headers.append(name, part);
           } else headers.set(name, value);
+        }
+        // A previously issued trusted-device cookie must never skip MFA.
+        if (path === "/auth/sign-in/email") {
+          const cookie = headers.get("cookie");
+          if (cookie)
+            headers.set(
+              "cookie",
+              cookie
+                .split(";")
+                .filter(
+                  (part) =>
+                    !part.trim().startsWith("__Host-opensuite.trust_device="),
+                )
+                .join(";"),
+            );
+        }
+        if (path === "/auth/get-session" && pendingFactor)
+          return reply.send(null);
+        if (path.startsWith("/auth/two-factor/") && pendingFactor) {
+          const cookie = headers.get("cookie");
+          if (cookie)
+            headers.set(
+              "cookie",
+              cookie
+                .split(";")
+                .filter(
+                  (part) =>
+                    !part.trim().startsWith("__Host-opensuite.session_token="),
+                )
+                .join(";"),
+            );
         }
         if (path === "/auth/one-time-token/verify") {
           const token = z
@@ -511,6 +578,10 @@ export const buildServer = async (
             reply.header(name, value);
         }
         const cookies = response.headers.getSetCookie();
+        if (path === "/auth/sign-out" && pendingFactor)
+          cookies.push(
+            "__Host-opensuite.two_factor=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
+          );
         if (path === "/auth/sign-in/email")
           limiter.remember(request.body, cookies);
         const actions: Readonly<Record<string, string>> = {
@@ -519,6 +590,9 @@ export const buildServer = async (
           "/auth/two-factor/enable": "mfa.enrol",
           "/auth/two-factor/verify-totp": "mfa.verify",
           "/auth/two-factor/verify-backup-code": "mfa.verify",
+          "/auth/two-factor/verify-security-key": "mfa.verify",
+          "/auth/security-keys/register": "mfa.key.add",
+          "/auth/security-keys/remove": "mfa.key.remove",
           "/auth/two-factor/disable": "mfa.disable",
           "/auth/two-factor/generate-backup-codes":
             "mfa.backup_codes.regenerate",
@@ -548,6 +622,28 @@ export const buildServer = async (
             // in production); a refusal there is not a wrong password.
             action: `${action}.${response.ok ? (challenge ? "challenge" : "success") : response.status === 429 ? "rate_limited" : "failure"}`,
           });
+          if (
+            response.ok &&
+            path === "/auth/security-keys/register" &&
+            z
+              .object({ backupCodes: z.array(z.string()).min(1) })
+              .safeParse(responseBody).success
+          )
+            await identity.audit?.({
+              userId: auditUserId,
+              action: "mfa.enrol.success",
+            });
+          if (
+            response.ok &&
+            path === "/auth/security-keys/remove" &&
+            z
+              .object({ twoFactorEnabled: z.literal(false) })
+              .safeParse(responseBody).success
+          )
+            await identity.audit?.({
+              userId: auditUserId,
+              action: "mfa.disable.success",
+            });
         }
         // Clear cookies left by the previous naming on this host. A cookie
         // planted for a parent domain is ignored by name and left alone.

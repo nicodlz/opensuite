@@ -16,6 +16,8 @@ catalog:
   "@axe-core/playwright": 4.11.0
   "@bitwarden/cli": 2026.9.0
   "@noble/hashes": 1.8.0
+  "@simplewebauthn/server": 13.3.0
+  "@simplewebauthn/browser": 13.3.0
   better-auth: 1.7.13
   class-variance-authority: 0.7.1
   dompurify: 3.3.3

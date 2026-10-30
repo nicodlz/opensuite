@@ -38,6 +38,14 @@ const mfa = {
   email: "mfa-split@example.test",
   password: "mfa-strong-password",
 };
+const keyUser = {
+  email: "key-split@example.test",
+  password: "key-strong-password",
+};
+const totpUser = {
+  email: "totp-ui@example.test",
+  password: "totp-ui-strong-password",
+};
 let totpSecret = "";
 
 function totp(secret: string) {
@@ -216,7 +224,7 @@ test.beforeAll(async () => {
     mayStartSession: (userId) => Promise.resolve(provisioned.has(userId)),
   });
   await Promise.all(
-    [user, mfa].map((account) =>
+    [user, mfa, keyUser, totpUser].map((account) =>
       identity.api.signUpEmail({ body: { ...account, name: "Split" } }),
     ),
   );
@@ -409,6 +417,82 @@ test("the second factor is required before any sibling origin gets a session", a
   await page.getByLabel("Authenticator code").fill(totp(totpSecret));
   await page.getByRole("button", { name: "Verify" }).click();
   await expect(page).toHaveURL(`${drive}/?folder=projects`);
+});
+
+test("a security key is registered and used as a second factor against the real API", async ({
+  page,
+  context,
+}) => {
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "usb",
+      hasResidentKey: false,
+      hasUserVerification: true,
+      isUserVerified: true,
+    },
+  });
+  await page.goto(`${mail}/login`);
+  await signIn(page, keyUser);
+  await expect(
+    page.getByRole("button", { name: "Account menu" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Account security" }).click();
+  await page.getByLabel("Current password").fill(keyUser.password);
+  await page.getByLabel("Security key name").fill("USB key");
+  await page.getByRole("button", { name: "Add security key" }).click();
+  await expect(
+    page.getByText("Save these new backup codes somewhere safe.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByText(/USB key — Added/)).toBeVisible();
+  await page.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await signIn(page, keyUser);
+  await expect(
+    page.getByRole("heading", { name: "Verify your identity" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Use security key" }).click();
+  await expect(
+    page.getByRole("button", { name: "Account menu" }),
+  ).toBeVisible();
+  await cdp.send("WebAuthn.disable");
+});
+
+test("the real API enrols an authenticator from the displayed QR secret", async ({
+  page,
+}) => {
+  await page.goto(`${mail}/login`);
+  await signIn(page, totpUser);
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Account security" }).click();
+  await page.getByLabel("Current password").fill(totpUser.password);
+  await page
+    .getByRole("button", { name: "Set up two-factor authentication" })
+    .click();
+  await expect(
+    page.locator('svg[aria-label="Authenticator setup QR code"]'),
+  ).toBeVisible();
+  const secret = await page.locator("code.auth-secret").first().textContent();
+  if (!secret) throw new Error("Missing authenticator secret");
+  await page.getByLabel("Authenticator code").fill(totp(secret));
+  await page.getByRole("button", { name: "Confirm setup" }).click();
+  await expect(page.getByRole("status")).toContainText("enabled");
+  await page.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await signIn(page, totpUser);
+  await page.getByLabel("Authenticator code").fill(totp(secret));
+  await page.getByRole("button", { name: "Verify" }).click();
+  await expect(
+    page.getByRole("button", { name: "Account menu" }),
+  ).toBeVisible();
 });
 
 test("an MFA account signs out on calendar and signs in again with its password", async ({

@@ -13,7 +13,7 @@ audit events:
 node scripts/reset-mfa.mjs user@example.org
 ```
 
-The transaction deletes the account's MFA record, pending challenges and
+The transaction deletes the account's MFA record and security keys, pending challenges and
 trusted-device records, revokes its sessions, and appends
 `mfa.operator_reset.success` to the audit log. Restart the API and have the
 user sign in and enrol a new factor. The user's password is unchanged. Protect

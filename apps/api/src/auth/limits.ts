@@ -64,6 +64,7 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
       const isSignIn = path === "/auth/sign-in/email";
       const isMfa =
         path === "/auth/two-factor/verify-totp" ||
+        path === "/auth/two-factor/verify-security-key" ||
         path === "/auth/two-factor/verify-backup-code";
       const current = now();
       for (const [key, value] of challenges)

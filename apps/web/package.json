@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@zxcvbn-ts/core": "catalog:",
+    "@simplewebauthn/browser": "catalog:",
     "@zxcvbn-ts/language-common": "catalog:",
     "@zxcvbn-ts/language-en": "catalog:",
     "@orpc/client": "catalog:",
