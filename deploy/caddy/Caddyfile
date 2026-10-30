@@ -19,7 +19,9 @@
 
 	# Application API.
 	handle_path /api/* {
-		reverse_proxy api:3000
+		reverse_proxy api-proxy:3000 {
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	# Mail server protocols carried over HTTPS: JMAP, CalDAV, CardDAV.

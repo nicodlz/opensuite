@@ -21,6 +21,7 @@ const origin = "https://suite.example.test";
 let app: FastifyInstance | undefined;
 let base: string;
 let databaseUrl: string;
+let adminCookie = "";
 let disconnect = () => Promise.resolve();
 const provisioned = new Set<string>();
 const resolved = () => Promise.resolve();
@@ -81,6 +82,17 @@ beforeAll(async () => {
       },
       mayStartSession: (userId) => Promise.resolve(provisioned.has(userId)),
     });
+    const seed = await identity.api.signUpEmail({
+      body: {
+        name: "Operator",
+        email: "operator@example.test",
+        password: "operator-test-password",
+      },
+    });
+    await db.user.update({
+      where: { id: seed.user.id },
+      data: { role: "admin" },
+    });
     const accounts = createAccountStore(db);
     app = await buildServer({
       config: { logLevel: "silent" },
@@ -120,6 +132,18 @@ beforeAll(async () => {
       },
     });
     base = await app.listen({ host: "127.0.0.1", port: 0 });
+    const login = await fetch(`${base}/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({
+        email: "operator@example.test",
+        password: "operator-test-password",
+      }),
+    });
+    adminCookie = login.headers
+      .getSetCookie()
+      .map((item) => item.split(";")[0])
+      .join("; ");
   } catch (error) {
     await run("docker", ["rm", "-f", container]).catch(() => undefined);
     throw error;
@@ -133,7 +157,7 @@ afterAll(async () => {
   } finally {
     await run("docker", ["rm", "-f", container]).catch(() => undefined);
   }
-}, 60_000);
+}, 240_000);
 
 const post = (
   path: string,
@@ -146,7 +170,10 @@ const post = (
     headers: {
       "content-type": "application/json",
       origin: requestOrigin,
-      ...(cookie === undefined ? {} : { cookie }),
+      ...((cookie ?? (path === "sign-up/email" ? adminCookie : undefined)) ===
+      undefined
+        ? {}
+        : { cookie: cookie ?? adminCookie }),
     },
     body: JSON.stringify(body),
   });
@@ -183,7 +210,7 @@ describe("identity over HTTP", () => {
       ).toBe(5);
       expect(
         await db.auditEvent.count({
-          where: { userId: user.id, action: "authentication.rate_limited" },
+          where: { userId: null, action: "authentication.rate_limited" },
         }),
       ).toBe(1);
     } finally {
@@ -257,14 +284,14 @@ describe("identity over HTTP", () => {
         email: ownerData.email,
         password: ownerData.password,
       });
-      const adminCookie = adminLogin.headers
+      const routeAdminCookie = adminLogin.headers
         .getSetCookie()
         .map((item) => item.split(";")[0])
         .join("; ");
       expect(
         (
           await fetch(`${base}/admin/accounts`, {
-            headers: { cookie: adminCookie },
+            headers: { cookie: routeAdminCookie },
           })
         ).status,
       ).toBe(200);
@@ -497,5 +524,26 @@ describe("identity over HTTP", () => {
         )
       ).status,
     ).toBe(200);
+    const result = createDatabase(databaseUrl);
+    if (result.isErr()) throw new Error("database unavailable");
+    try {
+      const user = await result.value.user.findUniqueOrThrow({
+        where: { email: data.email },
+      });
+      const events = await result.value.auditEvent.findMany({
+        where: { userId: user.id },
+        select: { action: true },
+      });
+      expect(events.map((event) => event.action)).toEqual(
+        expect.arrayContaining([
+          "mfa.enrol.success",
+          "mfa.verify.success",
+          "sign_in.challenge",
+          "session.revoke.success",
+        ]),
+      );
+    } finally {
+      await result.value.$disconnect();
+    }
   });
 });

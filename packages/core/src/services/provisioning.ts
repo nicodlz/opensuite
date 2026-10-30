@@ -1,10 +1,11 @@
 import { err, ok, type Result } from "neverthrow";
 
 export interface ProvisionFailure {
-  readonly kind: "unavailable" | "disabled";
+  readonly kind: "unavailable" | "disabled" | "forbidden";
   readonly message: string;
 }
 export interface ProvisioningStore {
+  finishDisabled(userId: string): PromiseLike<Result<void, ProvisionFailure>>;
   markDisabled(
     userId: string,
     actorId: string,
@@ -84,21 +85,29 @@ export const createProvisioningService = (
     pending.set(userId, promise);
     return promise;
   };
+  const suspend = async (
+    userId: string,
+  ): Promise<Result<void, ProvisionFailure>> => {
+    const inFlight = pending.get(userId);
+    if (inFlight !== undefined) await inFlight;
+    const accountId = await store.mailboxAccountId(userId);
+    if (accountId.isErr()) return err(accountId.error);
+    const account =
+      accountId.value === null
+        ? await port.ensureAccount(userId)
+        : ok({ accountId: accountId.value });
+    if (account.isErr()) return err(account.error);
+    const result = await port.suspend(account.value.accountId);
+    if (result.isErr()) return err(result.error);
+    return store.finishDisabled(userId);
+  };
   const disable = async (
     userId: string,
     actorId: string,
   ): Promise<Result<void, ProvisionFailure>> => {
     const marked = await store.markDisabled(userId, actorId);
     if (marked.isErr()) return err(marked.error);
-    const inFlight = pending.get(userId);
-    if (inFlight !== undefined) await inFlight;
-    const accountId = await store.mailboxAccountId(userId);
-    if (accountId.isErr()) return err(accountId.error);
-    if (accountId.value !== null) return port.suspend(accountId.value);
-    const reconciled = await port.ensureAccount(userId);
-    return reconciled.isErr()
-      ? err(reconciled.error)
-      : port.suspend(reconciled.value.accountId);
+    return suspend(userId);
   };
-  return { ensure, disable };
+  return { ensure, disable, suspend };
 };

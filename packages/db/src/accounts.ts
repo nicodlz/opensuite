@@ -12,22 +12,26 @@ const failed = (): { kind: "unavailable"; message: string } => ({
   message: "account operation failed",
 });
 export const createAccountStore = (db: PrismaClient) => ({
-  bootstrap() {
+  bootstrap(email: string) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(1984327101)`;
-        if ((await tx.user.count({ where: { role: "admin" } })) > 0) return;
-        const first = await tx.user.findFirst({
-          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(1984327101)::text`;
+        const user = await tx.user.findFirst({
+          where: {
+            email: email.toLowerCase(),
+            disabled: false,
+            mailbox: { status: "active" },
+          },
           select: { id: true },
         });
-        if (first === null) return;
+        if (user === null)
+          throw new Error("enabled, provisioned user not found");
         await tx.user.update({
-          where: { id: first.id },
+          where: { id: user.id },
           data: { role: "admin" },
         });
         await tx.auditEvent.create({
-          data: { userId: first.id, action: "admin.bootstrap", detail: {} },
+          data: { userId: user.id, action: "admin.bootstrap", detail: {} },
         });
       }),
       failed,

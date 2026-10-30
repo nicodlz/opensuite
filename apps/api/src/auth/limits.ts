@@ -1,5 +1,5 @@
-import { z } from "zod";
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
 type Bucket = { count: number; until: number };
 const EmailBody = z.object({ email: z.email() });
@@ -7,11 +7,14 @@ const emailFromBody = (body: unknown): string | undefined => {
   const parsed = EmailBody.safeParse(body);
   return parsed.success ? parsed.data.email.toLowerCase() : undefined;
 };
-const challengeCookie = (cookie: string | undefined): string | undefined => {
-  const value = cookie
-    ?.split(";")
+const challengeValues = (cookie: string | undefined) =>
+  (cookie ?? "")
+    .split(";")
     .map((part) => part.trim())
-    .find((part) => part.split("=")[0]?.endsWith(".two_factor") === true);
+    .filter((part) => part.split("=")[0] === "__Secure-better-auth.two_factor");
+const challengeCookie = (cookie: string | undefined): string | undefined => {
+  const values = challengeValues(cookie);
+  const value = values.length === 1 ? values[0] : undefined;
   return value === undefined
     ? undefined
     : createHash("sha256").update(value).digest("hex");
@@ -22,7 +25,7 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
   const buckets = new Map<string, Bucket>();
   const challenges = new Map<string, { email: string; until: number }>();
   const windowMs = 60_000;
-  const consume = (key: string, max: number): number | undefined => {
+  const consume = (key: string, max: number) => {
     const current = now();
     const existing = buckets.get(key);
     const bucket =
@@ -32,57 +35,59 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
     bucket.count += 1;
     buckets.set(key, bucket);
     return bucket.count > max
-      ? Math.max(1, Math.ceil((bucket.until - current) / 1000))
+      ? {
+          retryAfter: Math.max(1, Math.ceil((bucket.until - current) / 1000)),
+          first: bucket.count === max + 1,
+        }
       : undefined;
   };
   return {
-    account(
-      body: unknown,
-      cookie: string | undefined,
-      actorEmail?: string,
-    ): string | undefined {
+    hasDuplicateChallenge: (cookie: string | undefined) =>
+      challengeValues(cookie).length > 1,
+    account(body: unknown, cookie: string | undefined): string | undefined {
       const token = challengeCookie(cookie);
       const challenge = token === undefined ? undefined : challenges.get(token);
       return (
-        actorEmail ??
         emailFromBody(body) ??
         (challenge !== undefined && challenge.until > now()
           ? challenge.email
           : undefined)
       );
     },
-    check(
-      path: string,
-      ip: string,
-      body: unknown,
-      cookie: string | undefined,
-      actorEmail?: string,
-    ): number | undefined {
+    check(path: string, ip: string, body: unknown, cookie: string | undefined) {
       const isSignIn = path === "/auth/sign-in/email";
       const isMfa =
         path === "/auth/two-factor/verify-totp" ||
         path === "/auth/two-factor/verify-backup-code";
-      if (!isSignIn && !isMfa) return undefined;
       const current = now();
       for (const [key, value] of buckets)
         if (value.until <= current) buckets.delete(key);
       for (const [key, value] of challenges)
         if (value.until <= current) challenges.delete(key);
       const token = challengeCookie(cookie);
-      const account = isSignIn
-        ? emailFromBody(body)
-        : (actorEmail ??
-          (token === undefined ? undefined : challenges.get(token)?.email));
-      const ipWait = consume(`${isSignIn ? "login" : "mfa"}:ip:${ip}`, 50);
+      const account =
+        emailFromBody(body) ??
+        (token === undefined ? undefined : challenges.get(token)?.email);
+      const category = isSignIn
+        ? "login"
+        : isMfa
+          ? "mfa"
+          : path === "/auth/sign-up/email"
+            ? "signup"
+            : "auth";
+      const ipWait = consume(
+        `${category}:ip:${ip}`,
+        isSignIn || isMfa ? 50 : category === "signup" ? 10 : 100,
+      );
+      if (ipWait !== undefined) return ipWait;
       const accountWait =
         account === undefined
           ? undefined
           : consume(
-              `${isSignIn ? "login" : "mfa"}:account:${account.toLowerCase()}`,
-              5,
+              `${category}:account:${ip}:${account}`,
+              isSignIn || isMfa ? 5 : 20,
             );
-      if (ipWait === undefined) return accountWait;
-      return accountWait === undefined ? ipWait : Math.max(ipWait, accountWait);
+      return accountWait;
     },
     remember(body: unknown, cookies: string[]): void {
       const email = emailFromBody(body);
