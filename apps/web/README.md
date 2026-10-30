@@ -1,6 +1,6 @@
 # Web client
 
-The production build serves Mail, Drive, Domains and API status through Caddy. Calendar and Contacts are placeholders. This checkout has no sign-in or MFA screens; see the [user guide](../../docs/user/index.md) for session and access limitations and [development](../../docs/development.md) for Compose provisioning status.
+The production build serves Mail, Drive, Domains, the setup wizard and API status through Caddy. Calendar and Contacts are placeholders. The sign-in and MFA interface is on `om-web-fix` and has not yet been merged into this checkout; see the [user guide](../../docs/user/index.md) and [administrator guide](../../docs/admin/index.md) for access and wizard limitations.
 
 From the repository root, `pnpm install && pnpm build` creates `apps/web/dist`. The Vite development server (`pnpm --filter @opensuite/web dev`) uses synthetic in-memory Mail and Drive data; changes disappear on reload. Production builds call the application and Drive APIs. Do not use synthetic data for real mail or files. Email HTML is sanitized and displayed in a sandboxed iframe; remote images require a per-message opt-in.
 

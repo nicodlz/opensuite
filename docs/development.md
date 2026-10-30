@@ -249,7 +249,7 @@ database and active mailbox before protected procedures or Drive sessions.
 
 ## Planned, not implemented
 
-Calendar and contacts interfaces, production SES provider proof and the setup wizard.
+Calendar and contacts web interfaces and production SES provider proof. The setup wizard is available; see the [administrator guide](admin/index.md) for its current user-creation limitation.
 
 ## Ingestion
 

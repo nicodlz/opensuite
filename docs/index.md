@@ -1,6 +1,6 @@
 # Documentation
 
-Start with the [project overview](../README.md). Guides describe the current checkout; the release has integration limitations, and links to work being completed in parallel are marked below.
+Start with the [project overview](../README.md). Guides describe the current checkout and its integration limitations.
 
 ## Use and administer
 
@@ -11,7 +11,7 @@ Start with the [project overview](../README.md). Guides describe the current che
 
 ## Operations and deployment
 
-- [Production deployment runbook](deployment/production.md): being prepared in parallel; it may not be present in this checkout.
+- [Production deployment runbook](deployment/production.md): ordered single-server installation and recovery.
 - [AWS mail infrastructure](deployment/aws.md): candidate infrastructure and offline validation.
 - [Domains](operations/domains.md), [outbound mail](operations/outbound.md), [mail object storage](operations/object-storage.md), [backup and recovery](operations/backup.md), and [observability](operations/observability.md).
 
