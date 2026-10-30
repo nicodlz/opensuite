@@ -182,12 +182,22 @@ See [ingestion](architecture/ingestion.md) for configuration, archive and replay
 Drive runs separately at `/drive/api/`, with its own `opensuite_drive` database,
 migrations, bucket and prefix. Caddy and mail do not depend on Drive startup.
 The session adapter forwards only the incoming cookie to the API's
-`GET /api/auth/get-session?disableCookieCache=true`; it accepts Better Auth's
+`GET /auth/get-session?disableCookieCache=true`; it accepts Better Auth's
 `{user, session}` response, verifies matching user IDs and expiry, and fails
 closed if the API is unavailable. Authentication is being implemented separately;
 until that endpoint is available, authenticated Drive operations are unavailable.
 The endpoint URL is selected with `DRIVE_SESSION_API` (default `http://api:3000`).
 The internal endpoint must be trusted and reachable at the indicated path.
+
+The `drive-migrate` job uses the PostgreSQL administrator secret only to create
+and maintain the `opensuite_drive` login and transfer the Drive database and
+existing Drive tables to it. It applies migrations as that role. The long-running
+service receives only the separately generated `drive-database` secret, through
+`DRIVE_DATABASE_PASSWORD_FILE`. The role cannot connect to the main database:
+the migration job revokes its default PUBLIC CONNECT grant and grants CONNECT to
+`opensuite_app`. Other main-database roles need explicit CONNECT grants. Back up
+the database and secrets before upgrading an existing installation; orphaned
+Drive entries must be repaired before the parent foreign key can be installed.
 
 For local development, `docker compose --profile dev up -d` creates a separate
 `opensuite-drive` bucket in LocalStack. The default `test` credentials and
@@ -209,8 +219,14 @@ multipart clients request consecutive 5 MiB parts (the last may be smaller),
 retain each ETag, and submit them to `finish`. Finalization streams and hashes
 the complete object, checks size and content type, and copies it to a key which
 is never exposed for upload. Clients must calculate a hexadecimal SHA-256 first.
-Reservations, including trashed and pending uploads, count against the per-owner
-quota until permanent deletion. Pending uploads can be trashed and deleted.
+Ready files and unexpired reservations, including trashed entries, count against
+the per-owner quota. Expired pending and failed uploads no longer reserve quota.
+The Drive process sweeps up to 100 expired uploads every minute, aborting their
+multipart uploads and deleting their storage and rows; failed cleanup is retried.
+Parts and finalization are rejected after expiry. A checksum or metadata mismatch
+marks an upload failed, and finish attempts are limited to 10 per user per minute
+per Drive process (the in-memory limit resets on restart and is not shared across
+replicas). Pending and failed uploads can also be trashed and deleted.
 Configure storage lifecycle rules to clean orphaned `pending/` objects and
 incomplete multipart uploads; a still-valid signed URL can recreate a staging
 object after finalization. Monitor for orphaned objects and interrupted
@@ -219,6 +235,7 @@ finalizations; automatic reconciliation is not implemented.
 Files are private unless explicitly shared by user ID; a share applies to the
 individual item, not its descendants. Read shares permit download and preview;
 write shares also permit rename and move subject to destination authorization.
+Only an owner can move an item to their root.
 A write share on a folder permits creating files or folders inside it, charged
 to the folder owner; each item created by the recipient receives its own write
 share, which can be revoked separately.

@@ -8,7 +8,7 @@ export const httpSessionVerifier = (baseUrl: string): SessionVerifier => ({
       (async () => {
         if (cookie === undefined || cookie.length === 0) return null;
         const url = new URL(
-          "/api/auth/get-session?disableCookieCache=true",
+          "/auth/get-session?disableCookieCache=true",
           baseUrl,
         );
         const response = await fetch(url, {

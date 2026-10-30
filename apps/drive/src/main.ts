@@ -10,13 +10,13 @@ import { buildServer } from "./server.ts";
 const env = { ...process.env };
 if (
   env["DRIVE_DATABASE_URL"] === undefined &&
-  env["POSTGRES_PASSWORD_FILE"] !== undefined
+  env["DRIVE_DATABASE_PASSWORD_FILE"] !== undefined
 ) {
   const password = (
-    await readFile(env["POSTGRES_PASSWORD_FILE"], "utf8")
+    await readFile(env["DRIVE_DATABASE_PASSWORD_FILE"], "utf8")
   ).trim();
   const url = new URL("postgresql://postgres:5432/");
-  url.username = env["POSTGRES_USER"] ?? "opensuite";
+  url.username = "opensuite_drive";
   url.password = password;
   url.pathname = `/${encodeURIComponent(env["POSTGRES_DRIVE_DB"] ?? "opensuite_drive")}`;
   env["DRIVE_DATABASE_URL"] = url.toString();
@@ -42,12 +42,35 @@ const storage = createStorage({
   secretAccessKey: config.DRIVE_S3_SECRET_KEY,
   forcePathStyle: config.DRIVE_S3_PATH_STYLE === "true",
 });
+const drive = createDrive(db, storage, config.DRIVE_QUOTA_BYTES);
 const app = buildServer(
-  createDrive(db, storage, config.DRIVE_QUOTA_BYTES),
+  drive,
   storage,
   httpSessionVerifier(config.DRIVE_SESSION_API),
 );
+let sweepTask: Promise<void> | undefined;
+const runSweep = async () => {
+  try {
+    await drive.sweepExpired();
+  } catch (error) {
+    app.log.error(
+      { errorName: error instanceof Error ? error.name : "UnknownError" },
+      "Drive upload sweep failed",
+    );
+  }
+};
+const sweep = () => {
+  if (sweepTask !== undefined) return;
+  sweepTask = runSweep().finally(() => {
+    sweepTask = undefined;
+  });
+};
+const timer = setInterval(sweep, 60_000);
+timer.unref();
+sweep();
 app.addHook("onClose", async () => {
+  clearInterval(timer);
+  await sweepTask;
   storage.close();
   await db.$disconnect();
 });

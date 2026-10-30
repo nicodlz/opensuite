@@ -5,11 +5,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { z } from "zod";
+import { configureDriveRole } from "./role.ts";
 import { PrismaClient } from "./generated/index.js";
 
 const Env = z.object({
   POSTGRES_USER: z.string().min(1),
   POSTGRES_DRIVE_DB: z.string().min(1),
+  POSTGRES_DB: z.string().min(1),
+  DRIVE_DATABASE_PASSWORD_FILE: z.string().min(1),
   POSTGRES_HOST: z.string().min(1),
   POSTGRES_PASSWORD_FILE: z.string().min(1),
 });
@@ -34,6 +37,24 @@ const run = async () => {
   url.password = password;
   url.hostname = env.POSTGRES_HOST;
   url.pathname = `/${encodeURIComponent(env.POSTGRES_DRIVE_DB)}`;
+  const drivePassword = (
+    await readFile(env.DRIVE_DATABASE_PASSWORD_FILE, "utf8")
+  ).trim();
+  const admin = new PrismaClient({
+    datasources: { db: { url: url.toString() } },
+  });
+  try {
+    await configureDriveRole(
+      admin,
+      drivePassword,
+      env.POSTGRES_DB,
+      env.POSTGRES_DRIVE_DB,
+    );
+  } finally {
+    await admin.$disconnect();
+  }
+  url.username = "opensuite_drive";
+  url.password = drivePassword;
   const client = new PrismaClient({
     datasources: { db: { url: url.toString() } },
   });
