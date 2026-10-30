@@ -25,8 +25,8 @@ docker compose up -d --no-deps --force-recreate --wait stalwart
 docker compose --profile ops run --rm --no-deps management apply SMTP_USERNAME
 ```
 
-The command reconciles the route, queue, schedule and TLS objects and reloads
-settings. Repeat sequentially after a timeout and verify the queue and logs.
+The command reconciles the route, queue, schedule and TLS objects, turns
+Stalwart's own DKIM signing off (see below) and reloads settings. Repeat sequentially after a timeout and verify the queue and logs.
 Settings are not transactional. Missing routes can fall back to direct MX;
 alert on `smtp.id-not-found` and configuration errors. The helper checks the
 mounted relay secret, so applying with `/dev/null` fails. Recreate Stalwart
@@ -36,7 +36,18 @@ The remote queue has one delivery thread, retries after 5 minutes, 30 minutes an
 
 ## DKIM and DNS
 
-Stalwart's default automatic DKIM management generates domain keys with manual DNS management. Obtain the domain ID from the idempotent management command, then request its typed TXT records:
+Through the relay, SES signs: verify each sending domain as an SES identity
+with Easy DKIM and publish its records (the AWS module's `dns_records`
+output). The relay configuration turns Stalwart's own signing off for every
+domain, new ones and key rotations included. A Stalwart signature does not
+survive SES, which rewrites headers it covers, so recipients would see a
+failing signature beside the passing SES one, and SES refuses a message
+carrying two `DKIM-Signature` headers (`554 Duplicate header`), which then
+comes back to the sender as a delivery report. Applying the relay replaces
+any per-domain signing exception set by hand. `management reset` restores
+Stalwart's default signing for direct delivery.
+
+Stalwart still generates keys for each domain (automatic DKIM management with manual DNS management); they matter only for direct delivery without the relay. Obtain the domain ID from the idempotent management command, then request its typed TXT records:
 
 ```sh
 docker compose --profile ops run --rm --no-deps management domain example.com
@@ -48,4 +59,4 @@ Publish the returned names and values at your DNS provider, verify propagation a
 
 ## Rollback and recovery
 
-Pause new submissions, inspect and preserve the queue, and decide how queued mail should be handled before changing routes. To restore Stalwart's default local/MX route, default scheduling and default TLS expressions, run `docker compose --profile ops run --rm --no-deps management reset`. This allows direct MX delivery for non-local recipients and restores Stalwart's default opportunistic TLS behavior; use only when direct delivery is intended and possible. Existing queued recipients may be affected. The named relay objects and secret file are not deleted. Verify the new policy and queue, then remove the secret mount and rotate/revoke credentials when appropriate. For a fail-closed rollback, stop outbound processing instead of selecting direct delivery. Back up the data store and secret separately.
+Pause new submissions, inspect and preserve the queue, and decide how queued mail should be handled before changing routes. To restore Stalwart's default local/MX route, default scheduling, default TLS expressions and its own DKIM signing, run `docker compose --profile ops run --rm --no-deps management reset`. This allows direct MX delivery for non-local recipients and restores Stalwart's default opportunistic TLS behavior; use only when direct delivery is intended and possible. Existing queued recipients may be affected. The named relay objects and secret file are not deleted. Verify the new policy and queue, then remove the secret mount and rotate/revoke credentials when appropriate. For a fail-closed rollback, stop outbound processing instead of selecting direct delivery. Back up the data store and secret separately.

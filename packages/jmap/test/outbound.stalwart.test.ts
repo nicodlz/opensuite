@@ -237,6 +237,8 @@ test("routes authenticated external mail to the relay and keeps local mail local
     expect(messages[0]?.to).toHaveLength(1);
     expect(messages[0]?.to[0]).toMatch(/external@example\.com/i);
     expect(messages[0]?.data).toContain("External fixture");
+    // The relay signs: Stalwart must not add a DKIM signature of its own.
+    expect(messages[0]?.data).not.toMatch(/^DKIM-Signature:/im);
     const waitLocal = async (remaining: number): Promise<string[]> => {
       const ids = value(
         await bob.queryEmails(bobSession, bobId, {
@@ -253,6 +255,21 @@ test("routes authenticated external mail to the relay and keeps local mail local
     expect(messages).toHaveLength(1);
     value(await admin.configureRelay({ ...config, tls: "starttls" }));
     value(await admin.resetOutbound());
+    // Without the relay, Stalwart signs local senders again.
+    const stage = await fetch(`${base}/jmap/`, {
+      method: "POST",
+      headers: {
+        authorization: `Basic ${Buffer.from("admin:integration-password").toString("base64")}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        using: ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"],
+        methodCalls: [["x:MtaStageData/get", { ids: ["singleton"] }, "0"]],
+      }),
+    });
+    expect(JSON.stringify(await stage.json())).toContain(
+      "is_local_domain(sender_domain) && !is_empty(authenticated_as)",
+    );
   } finally {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve, reject) =>
