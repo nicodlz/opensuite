@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { promisify } from "node:util";
 import { createReadinessService, httpProbe } from "@opensuite/core";
@@ -17,6 +17,30 @@ import { createAuthRuntime } from "../src/auth/runtime.ts";
 import { buildServer } from "../src/server.ts";
 
 const run = promisify(execFile);
+function totp(secret: string) {
+  const bits = secret
+    .toUpperCase()
+    .replaceAll("=", "")
+    .split("")
+    .map((character) =>
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+        .indexOf(character)
+        .toString(2)
+        .padStart(5, "0"),
+    )
+    .join("");
+  const bytes: number[] = [];
+  for (let index = 0; index + 8 <= bits.length; index += 8)
+    bytes.push(Number.parseInt(bits.slice(index, index + 8), 2));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000)));
+  const digest = createHmac("sha1", Buffer.from(bytes))
+    .update(counter)
+    .digest();
+  return String(
+    (digest.readUInt32BE((digest.at(-1) ?? 0) & 15) & 0x7fffffff) % 1_000_000,
+  ).padStart(6, "0");
+}
 const fixtureId = randomUUID().slice(0, 8);
 const pg = `opensuite-auth-prod-db-${fixtureId}`;
 const mail = `opensuite-auth-prod-mail-${fixtureId}`;
@@ -456,6 +480,56 @@ it("provisions, repairs, authenticates and suspends real local mailboxes", async
   } finally {
     await run("docker", ["unpause", mail]);
   }
+  const enrollment = await post(
+    "/api/auth/two-factor/enable",
+    { password: admin.password },
+    adminCookie,
+  );
+  expect(enrollment.status).toBe(200);
+  const data: unknown = await enrollment.json();
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    !("totpURI" in data) ||
+    typeof data.totpURI !== "string"
+  )
+    throw new Error("Missing authenticator URI");
+  const secret = new URL(data.totpURI).searchParams.get("secret");
+  if (!secret) throw new Error("Missing authenticator secret");
+  const activated = await post(
+    "/api/auth/two-factor/verify-totp",
+    { code: totp(secret) },
+    adminCookie,
+  );
+  expect(activated.status).toBe(200);
+  await post("/api/auth/sign-out", {}, cookieOf(activated));
+  const challenged = await post("/api/auth/sign-in/email", admin);
+  expect(await challenged.json()).toMatchObject({ twoFactorRedirect: true });
+  expect(
+    await (
+      await fetch(`${base}/api/auth/get-session`, {
+        headers: { cookie: cookieOf(challenged) },
+      })
+    ).json(),
+  ).toBeNull();
+  // The following multi-domain case shares this bootstrapped account.
+  const verified = await post(
+    "/api/auth/two-factor/verify-totp",
+    { code: totp(secret) },
+    cookieOf(challenged),
+  );
+  expect(verified.status).toBe(200);
+  const verifiedCookie = cookieOf(verified);
+  expect(
+    (
+      await post(
+        "/api/auth/two-factor/disable",
+        { password: admin.password },
+        verifiedCookie,
+      )
+    ).status,
+  ).toBe(200);
+  await post("/api/auth/sign-out", {}, verifiedCookie);
 }, 120_000);
 
 const account = (email: string) => ({

@@ -24,7 +24,10 @@ test("sign-in, MFA setup, backup challenge, disable and sign-out", async ({
   await page
     .getByRole("button", { name: "Set up two-factor authentication" })
     .click();
-  await expect(page.getByText(/otpauth:\/\/totp/)).toBeVisible();
+  await expect(
+    page.locator('svg[aria-label="Authenticator setup QR code"]'),
+  ).toBeVisible();
+  await expect(page.getByText("JBSWY3DPEHPK3PXP")).toBeVisible();
   await expect(page.getByText("backup-code")).toBeVisible();
   await page.getByLabel("Authenticator code").fill("123456");
   await page.getByRole("button", { name: "Confirm setup" }).click();
@@ -43,9 +46,12 @@ test("sign-in, MFA setup, backup challenge, disable and sign-out", async ({
   await page.getByRole("button", { name: "Account menu" }).click();
   await page.getByRole("menuitem", { name: "Account security" }).click();
   await page.getByLabel("Current password").fill("synthetic-password");
-  await page
-    .getByRole("button", { name: "Disable two-factor authentication" })
-    .click();
+  await page.getByRole("button", { name: "Regenerate backup codes" }).click();
+  await expect(page.getByText(/previous codes no longer work/i)).toBeVisible();
+  await expect(page.getByText(/backup-[0-9a-f-]{36}/)).toBeVisible();
+  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByLabel("Current password").fill("synthetic-password");
+  await page.getByRole("button", { name: "Disable authenticator app" }).click();
   await expect(page.getByRole("status")).toContainText("disabled");
 });
 

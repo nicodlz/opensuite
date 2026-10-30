@@ -19,6 +19,8 @@ case "$password" in ''|*[!A-Za-z0-9]*) echo 'Invalid Vault database secret' >&2;
 # The generated password is URL-safe. It never appears in Compose or argv.
 export DATABASE_URL="postgresql://opensuite_vault:${password}@postgres:5432/opensuite_vault"
 unset password
+. /opt/opensuite/vault-yubico.sh
+configure_yubico /run/opensuite/vault-yubico-secret
 if [ -s /run/opensuite/vault-admin-token ]; then
   case "$(cat /run/opensuite/vault-admin-token)" in '$argon2id$'*|'$argon2i$'*|'$argon2d$'*) ;; *) echo 'Vault admin token must be an Argon2 PHC string' >&2; exit 1;; esac
   export ADMIN_TOKEN_FILE=/run/opensuite/vault-admin-token
