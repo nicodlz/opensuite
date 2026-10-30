@@ -26,6 +26,12 @@ import { emptyDraft, replyDraft } from "./model.ts";
 import { ReadingPane } from "./reading-pane.tsx";
 import { ThreadRow } from "./thread-list.tsx";
 
+// Alias lookups are optional in Mail. Handle failures before they reach the
+// global query error handler, which otherwise redirects on a 401.
+const listSenders = () => aliasesClient.list({}).catch(() => []);
+const matchRecipients = (addresses: string[]) =>
+  aliasesClient.match({ addresses }).catch(() => []);
+
 const key = ["mail", accountId] as const;
 const threadKey = (id: string) => [...key, "thread", id] as const;
 const folderIcons: Record<string, IconName> = {
@@ -140,7 +146,7 @@ export function MailPage() {
   });
   const aliasList = useQuery({
     queryKey: ["aliases", "list"],
-    queryFn: () => aliasesClient.list({}),
+    queryFn: listSenders,
     retry: false,
     staleTime: 30_000,
   });
@@ -150,7 +156,7 @@ export function MailPage() {
       const addresses = recipientAddresses(message);
       return {
         queryKey: ["aliases", "match", addresses],
-        queryFn: () => aliasesClient.match({ addresses }),
+        queryFn: () => matchRecipients(addresses),
         enabled: addresses.length > 0,
         retry: false,
         staleTime: 30_000,
@@ -345,7 +351,7 @@ export function MailPage() {
       queryClient
         .fetchQuery({
           queryKey: ["aliases", "match", addresses],
-          queryFn: () => aliasesClient.match({ addresses }),
+          queryFn: () => matchRecipients(addresses),
           retry: false,
           staleTime: 30_000,
         })

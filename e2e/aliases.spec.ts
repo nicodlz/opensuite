@@ -216,6 +216,31 @@ test("recipient badge and reply sender use a matching alias", async ({
     .click();
   await expect(composer.getByLabel("From")).toHaveValue("friday@example.test");
 });
+test("alias service errors do not interrupt Mail or replies", async ({
+  page,
+}) => {
+  await page.route("**/api/aliases**", (route) =>
+    route.fulfill({
+      status: 401,
+      json: {
+        defined: false,
+        code: "UNAUTHORIZED",
+        status: 401,
+        message: "Unauthorized",
+      },
+    }),
+  );
+  await page.goto("/mail");
+  await page.getByRole("button", { name: /Maya Chen/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "A little update for Friday" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  const composer = page.getByRole("region", { name: "Compose message" });
+  await expect(composer.getByLabel("From")).toHaveValue("you@example.test");
+  await expect(page).toHaveURL(/\/mail$/);
+});
+
 for (const theme of ["light", "dark"] as const)
   test(`${theme} aliases are accessible on mobile`, async ({ page }) => {
     await mockAliases(page);
