@@ -2,6 +2,27 @@
 
 Domain management is an administrative operation and requires an authenticated administrator. Configure the API authentication and mailbox provisioning described in the [development guide](../development.md), and test inbound delivery before production use. Do not use the development web client's synthetic domains as operational data.
 
+## Ownership and infrastructure changes
+
+The domain service owns per-domain SES identities, verification and the
+recipients of its configured receipt rule. The AWS module owns rule sets and
+rule actions, but ignores recipient changes after creation; it does not manage
+SES identity, DKIM or MAIL FROM resources. Bootstrap recipients must be nonempty,
+and a replacement rule uses its configured initial list again, so coordinate
+and review any replacement with the domain operator. When adopting existing
+resources or transferring identities out of an older state, follow the
+[account adoption procedure](../deployment/aws.md#adopting-an-existing-account)
+before any apply. Serialize all SES rule and domain changes across processes and
+operators, including infrastructure plans and applies, because updates replace
+the whole rule and can otherwise overwrite concurrent recipient changes.
+
+The service uses the configured rule name in the **active** SES rule set; it
+cannot update a rule in an inactive set. The module's Esuno set is defined but
+not activated. Verify the active set, recipients and S3/SNS actions before using
+it. Domain onboarding does not update the SMTP IAM policy: coordinate additions
+with the operator maintaining `esuno_sending_domains` and verify effective SES
+sending permissions. The service does not configure custom MAIL FROM.
+
 ## Prepare
 
 Use a controlled test domain first. Record existing DNS and mail routes, TTLs, other senders, and a rollback plan. SES receiving and sending use **eu-north-1**. Configure a pre-existing, enabled rule in the active SES receipt rule set with a nonempty recipient list and the existing S3/SNS actions described in [ingestion](../architecture/ingestion.md). The service changes only that rule's recipients, preserves its other settings, and refuses to modify an unrestricted or disabled rule. It will not remove the final recipient, because an empty list matches all recipients. Serialize SES and Stalwart management across processes and operators; the AWS APIs do not provide a conditional update for receipt rules.
