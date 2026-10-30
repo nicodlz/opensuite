@@ -217,47 +217,96 @@ async function register(
   context.setDefaultTimeout(90_000);
   const page = await context.newPage();
   const errors: string[] = [];
+  const consoleMessages: string[] = [];
+  const bundleResponses: number[] = [];
+  page.on("console", (message) =>
+    consoleMessages.push(`${message.type()}: ${message.text()}`),
+  );
   page.on("pageerror", (error) => errors.push(error.message));
+  page.on("response", (response) => {
+    if (/\/app\/main\.[^/]+\.js(?:\?|$)/.test(response.url()))
+      bundleResponses.push(response.status());
+  });
   page.on("requestfailed", (req) =>
     errors.push(
       `${new URL(req.url()).pathname}: ${req.failure()?.errorText ?? "request failed"}`,
     ),
   );
+  const capture = async (name: string) => {
+    const prefix = join(privateDir, `registration-${index}-${name}`);
+    const url = page.url();
+    const html = await page.content().catch(() => "<page unavailable>");
+    await writeFile(`${prefix}.html`, html, { mode: 0o600 });
+    await writeFile(
+      `${prefix}.json`,
+      JSON.stringify(
+        { url, errors, bundleResponses, console: consoleMessages },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+    await page.screenshot({ path: `${prefix}.png` }).catch(() => undefined);
+  };
   // Concurrent Docker network changes or a slow host can interrupt initial
   // asset loading. Retry only before submitting any registration data.
   for (let attempt = 0; ; attempt++) {
     errors.length = 0;
+    bundleResponses.length = 0;
     try {
       if (attempt === 0) await page.goto(`${origin}/#/register`);
       else await page.reload();
-      await page.getByLabel("Email address").waitFor({ timeout: 30_000 });
+      // The server's index is only a loading shell. Wait for its application
+      // bundle before allowing extra time for Angular to render registration.
+      await page.waitForFunction(
+        () =>
+          performance
+            .getEntriesByType("resource")
+            .some((entry) => /\/app\/main\.[^/]+\.js(?:\?|$)/.test(entry.name)),
+        undefined,
+        { timeout: 90_000 },
+      );
+      if (!bundleResponses.some((status) => status === 200 || status === 304))
+        throw new Error(
+          `Web vault bundle response: ${bundleResponses.join(", ")}`,
+        );
+      await page.getByLabel("Email address").waitFor({ timeout: 120_000 });
       break;
     } catch (error) {
-      if (attempt < 3) continue;
+      const url = page.url();
+      await capture(String(attempt));
+      if (attempt < 1) continue;
       throw new Error(
-        `Registration ${index} page failed to load: ${errors.join("; ")}`,
+        `Registration ${index} page failed to load at ${url}: ${errors.join("; ")}; bundle HTTP: ${bundleResponses.join(", ")}; console: ${consoleMessages.join("; ")}. Diagnostics captured in disposable test directory.`,
         { cause: error },
       );
     }
   }
-  await page.getByLabel("Email address").fill(email);
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.locator('input[type="password"]').nth(0).fill(masterPassword);
-  await page.locator('input[type="password"]').nth(1).fill(masterPassword);
-  await page.locator('input[type="checkbox"]').uncheck();
-  await page.getByText("Strong", { exact: true }).waitFor({ timeout: 60_000 });
-  const registered = page.waitForResponse(
-    (r) => r.url().endsWith("/identity/accounts/register/finish"),
-    { timeout: 60_000 },
-  );
-  await page.getByRole("button", { name: "Create account" }).click();
-  const response = await registered.catch(async () => {
-    throw new Error(
-      `Registration ${index} stalled: ${await page.locator("body").innerText()}; errors: ${errors.join("; ")}`,
+  try {
+    await page.getByLabel("Email address").fill(email);
+    await page.getByRole("button", { name: "Continue" }).click();
+    await page.locator('input[type="password"]').nth(0).fill(masterPassword);
+    await page.locator('input[type="password"]').nth(1).fill(masterPassword);
+    await page.locator('input[type="checkbox"]').uncheck();
+    await page
+      .getByText("Strong", { exact: true })
+      .waitFor({ timeout: 60_000 });
+    const registered = page.waitForResponse(
+      (r) => r.url().endsWith("/identity/accounts/register/finish"),
+      { timeout: 60_000 },
     );
-  });
-  if (response.status() !== 200)
-    throw new Error(`Registration failed: ${response.status()}`);
+    await page.getByRole("button", { name: "Create account" }).click();
+    const response = await registered.catch(async () => {
+      throw new Error(
+        `Registration ${index} stalled: ${await page.locator("body").innerText()}; errors: ${errors.join("; ")}`,
+      );
+    });
+    if (response.status() !== 200)
+      throw new Error(`Registration failed: ${response.status()}`);
+  } catch (error) {
+    await capture("submit");
+    throw error;
+  }
   await context.close();
   context = undefined;
 }
@@ -356,7 +405,7 @@ describe("Bitwarden CLI against Pass", () => {
       await cleanup();
       throw error;
     }
-  }, 480_000);
+  }, 960_000);
   afterAll(cleanup, 90_000);
 
   test("invited accounts log in and sync with signups closed", async () => {

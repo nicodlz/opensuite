@@ -196,6 +196,7 @@ from the API container, so an unreachable status may also indicate a DNS, TLS or
 network problem. Results (including failures) are cached for 30 seconds and
 requests time out after two seconds. A missing origin is a normal disabled
 state. Anonymous callers receive only enabled and reachable; the version and check time are available to authenticated sessions. The status does not verify login or client compatibility.
+
 For client setup, version-specific evidence and manual checks, see the
 [Pass client compatibility guide](../user/pass-clients.md). Run
 `pnpm exec vitest run --project pass` against a local Docker Compose daemon
