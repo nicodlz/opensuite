@@ -96,6 +96,12 @@ variable "activate_rule_set" {
   default     = false
 }
 
+variable "activate_esuno_rule_set" {
+  type        = bool
+  description = "Manage the Esuno rule set as active; import it first if already active."
+  default     = false
+}
+
 variable "alarm_actions" {
   type        = list(string)
   description = "Existing CloudWatch alarm action ARNs; arrange and test operator notifications."

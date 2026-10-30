@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDatabase, createDomainStore } from "@opensuite/db";
-import { ok } from "neverthrow";
+import { err, ok, okAsync } from "neverthrow";
 import { createSesDomainProvider } from "@opensuite/core/adapters/domain-ses";
 import { configureDomains } from "../src/routes/domain-setup.ts";
 import { startDomainJob } from "../src/routes/domain-job.ts";
@@ -26,6 +26,8 @@ afterEach(async () => {
       .splice(0)
       .map((path) => rm(path, { recursive: true, force: true })),
   );
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 const database = createDatabase("postgresql://localhost/domain-test");
@@ -107,6 +109,34 @@ describe("domain API configuration", () => {
     if (service === undefined) throw new Error("domain service disabled");
     const stop = startDomainJob(store, service, "", () => undefined);
     expect(stop).toBeTypeOf("function");
+    await stop();
+  });
+
+  it("backs off scheduled retries when the provider is unavailable", async () => {
+    const { env } = await fixture();
+    const service = await configureDomains(
+      { ...env, DOMAINS_SES_CREDENTIALS_FILE: "" },
+      store,
+    );
+    if (service === undefined) throw new Error("domain service disabled");
+    vi.spyOn(store, "verificationTargets").mockReturnValue(
+      okAsync([
+        { id: "domain", user: { id: "admin", email: "admin@example.test" } },
+      ]),
+    );
+    const recheck = vi
+      .spyOn(service, "recheck")
+      .mockResolvedValue(
+        err({ kind: "unavailable", message: "temporarily unavailable" }),
+      );
+    vi.useFakeTimers();
+    const stop = startDomainJob(store, service, 60, () => undefined);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(recheck).toHaveBeenCalledTimes(2);
     await stop();
   });
 

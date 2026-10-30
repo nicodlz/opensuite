@@ -8,8 +8,16 @@ import { GetEmailIdentityCommand, SESv2Client } from "@aws-sdk/client-sesv2";
 import { ResultAsync } from "neverthrow";
 import type { DomainProvider } from "../services/domains.ts";
 
-const failure = (): { kind: "unavailable"; message: string } => ({
-  kind: "unavailable",
+class ConfirmedFailure extends Error {}
+const failure = (
+  error: unknown,
+): { kind: "confirmed" | "unavailable"; message: string } => ({
+  kind:
+    error instanceof ConfirmedFailure ||
+    (error instanceof Error &&
+      ["NotFoundException", "RuleDoesNotExistException"].includes(error.name))
+      ? "confirmed"
+      : "unavailable",
   message: "SES domain operation failed",
 });
 /** Read-only adoption; no clients or AWS requests unless explicitly enabled. */
@@ -53,6 +61,17 @@ export function createSesDomainProvider(config: {
           const identity = await sesv2.send(
             new GetEmailIdentityCommand({ EmailIdentity: name }),
           );
+          if (
+            identity.VerifiedForSendingStatus === false ||
+            identity.DkimAttributes?.Status === "FAILED"
+          )
+            throw new ConfirmedFailure("identity verification or DKIM failed");
+          if (
+            identity.VerifiedForSendingStatus !== true ||
+            identity.DkimAttributes?.Status !== "SUCCESS" ||
+            !identity.DkimAttributes.Tokens?.length
+          )
+            throw new Error("identity verification or DKIM unavailable");
           const verification = await ses.send(
             new GetIdentityVerificationAttributesCommand({
               Identities: [name],
@@ -60,15 +79,7 @@ export function createSesDomainProvider(config: {
           );
           const token =
             verification.VerificationAttributes?.[name]?.VerificationToken;
-          if (
-            !identity.VerifiedForSendingStatus ||
-            !token ||
-            identity.DkimAttributes?.Status !== "SUCCESS" ||
-            !identity.DkimAttributes.Tokens?.length
-          )
-            throw new Error(
-              "verified identity, verification token and DKIM required",
-            );
+          if (!token) throw new Error("verification token unavailable");
           return {
             verificationToken: token,
             dkimTokens: identity.DkimAttributes.Tokens,
@@ -95,14 +106,17 @@ export function createSesDomainProvider(config: {
             }),
           );
           const rule = found.Rule;
+          if (!rule || rule.Enabled === undefined)
+            throw new Error("receipt rule unavailable");
           if (
-            !rule?.Enabled ||
-            !rule.Recipients?.length ||
-            !rule.Recipients.some(
+            !rule.Enabled ||
+            !rule.Recipients?.some(
               (item) => item.toLowerCase() === name.toLowerCase(),
             )
           )
-            throw new Error("enabled rule with approved recipient required");
+            throw new ConfirmedFailure(
+              "enabled rule with approved recipient required",
+            );
         })(),
         failure,
       );

@@ -122,6 +122,7 @@ model Domain {
   stalwartId String?
   status String @default("pending")
   removalPending Boolean @default(false)
+  adoptionFailureCount Int @default(0)
   records Json @default("[]")
   checkedAt DateTime?
   createdAt DateTime  @default(now())

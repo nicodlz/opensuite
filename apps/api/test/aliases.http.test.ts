@@ -613,6 +613,85 @@ describe("alias API", () => {
       true,
     );
   });
+  it("keeps aliases attached across transient and two confirmed adoption failures", async () => {
+    const store = createDomainStore(db);
+    const before = await db.emailAlias.findMany({
+      where: { domainId, enabled: true, deletedAt: null },
+      orderBy: { id: "asc" },
+    });
+    expect(before.length).toBeGreaterThan(0);
+    const outcomes = [
+      "confirmed",
+      "unavailable",
+      "confirmed",
+      "confirmed",
+    ] as const;
+    await outcomes.reduce<Promise<void>>(async (previous, outcome) => {
+      await previous;
+      expect(
+        (
+          await store.recordAdoptionCheck(
+            "alice",
+            domainId,
+            outcome,
+            [],
+            "manual",
+          )
+        ).isOk(),
+      ).toBe(true);
+    }, Promise.resolve());
+    expect(
+      (await db.domain.findUniqueOrThrow({ where: { id: domainId } })).status,
+    ).toBe("verified");
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    const unchanged = await db.emailAlias.findMany({
+      where: { domainId, enabled: true, deletedAt: null },
+      orderBy: { id: "asc" },
+    });
+    expect(
+      unchanged.map((row) => ({
+        id: row.id,
+        revision: row.revision,
+        ready: row.ready,
+        detached: row.detachedByDomain,
+      })),
+    ).toEqual(
+      before.map((row) => ({
+        id: row.id,
+        revision: row.revision,
+        ready: row.ready,
+        detached: row.detachedByDomain,
+      })),
+    );
+    const failure = await store.recordAdoptionCheck(
+      "alice",
+      domainId,
+      "confirmed",
+      [],
+      "manual",
+    );
+    expect(failure.isOk() && failure.value.status).toBe("failing");
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    const detached = await db.emailAlias.findMany({
+      where: { domainId, enabled: true, deletedAt: null },
+    });
+    expect(detached.every((row) => row.detachedByDomain)).toBe(true);
+    const recovery = await store.recordAdoptionCheck(
+      "alice",
+      domainId,
+      "verified",
+      [],
+      "manual",
+    );
+    expect(recovery.isOk() && recovery.value.status).toBe("verified");
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    const restored = await db.emailAlias.findMany({
+      where: { domainId, enabled: true, deletedAt: null },
+    });
+    expect(restored.every((row) => row.ready && !row.detachedByDomain)).toBe(
+      true,
+    );
+  });
   it("does not let an old network result confirm a newer state", async () => {
     const row = await db.emailAlias.findFirstOrThrow({
       where: { userId: "bob", deletedAt: null, enabled: true },

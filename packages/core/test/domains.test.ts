@@ -30,6 +30,7 @@ function fixture() {
   };
   const audits: string[] = [];
   let hasDefault = false;
+  let confirmedFailures = 0;
   const store: ReturnType<typeof createDomainStore> = {
     beginRemoval: () => success(!hasDefault),
     cancelRemoval: () => success(undefined),
@@ -59,6 +60,25 @@ function fixture() {
         checkedAt: data.checkedAt?.toISOString() ?? row.checkedAt,
       };
       audits.push(action);
+      return success(row);
+    },
+    recordAdoptionCheck: (_actor, _id, outcome, records, source) => {
+      confirmedFailures =
+        outcome === "confirmed" ? Math.min(confirmedFailures + 1, 3) : 0;
+      const status =
+        outcome === "verified"
+          ? "verified"
+          : confirmedFailures >= 3
+            ? "failing"
+            : row.status;
+      row = {
+        ...row,
+        status,
+        ...(outcome === "verified" || confirmedFailures >= 3
+          ? { records }
+          : {}),
+      };
+      audits.push(`admin.domain.recheck.${source}`);
       return success(row);
     },
     remove: () => {
@@ -239,6 +259,43 @@ describe("domain management", () => {
       true,
     );
     expect(domain.audits).toEqual([]);
+  });
+  it("keeps the prior status on transient recheck errors and resets the confirmed streak", async () => {
+    const f = fixture();
+    await f.adoption.add(actor, "example.test");
+    const receipt = vi.spyOn(f.provider, "receipt");
+    receipt.mockResolvedValue(
+      err({ kind: "confirmed", message: "recipient missing" }),
+    );
+    const first = await f.adoption.recheck(actor, "1");
+    expect(first.isOk() && first.value.status).toBe("verified");
+    receipt.mockResolvedValue(
+      err({ kind: "unavailable", message: "throttled" }),
+    );
+    expect((await f.adoption.recheck(actor, "1")).isErr()).toBe(true);
+    receipt.mockResolvedValue(
+      err({ kind: "confirmed", message: "recipient missing" }),
+    );
+    const afterRetry = await f.adoption.recheck(actor, "1");
+    expect(afterRetry.isOk() && afterRetry.value.status).toBe("verified");
+  });
+  it("requires three consecutive confirmed failures and restores verified status on recovery", async () => {
+    const f = fixture();
+    await f.adoption.add(actor, "example.test");
+    const receipt = vi
+      .spyOn(f.provider, "receipt")
+      .mockResolvedValue(
+        err({ kind: "confirmed", message: "recipient missing" }),
+      );
+    const first = await f.adoption.recheck(actor, "1");
+    const second = await f.adoption.recheck(actor, "1");
+    const third = await f.adoption.recheck(actor, "1");
+    expect(first.isOk() && first.value.status).toBe("verified");
+    expect(second.isOk() && second.value.status).toBe("verified");
+    expect(third.isOk() && third.value.status).toBe("failing");
+    receipt.mockResolvedValue(ok(undefined));
+    const recovered = await f.adoption.recheck(actor, "1");
+    expect(recovered.isOk() && recovered.value.status).toBe("verified");
   });
   it("does not instantiate the AWS adapter unless enabled", () => {
     expect(

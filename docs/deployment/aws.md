@@ -104,18 +104,28 @@ or rules. They can reveal other metadata in that region. No SES write,
 outside state and store them in the API's protected secret file. Verify the real
 policy and its effective permissions before any approved apply.
 
-The Esuno rule set is defined but **not activated** by this module. The original
-rule set is also inactive by default; `activate_rule_set = true` explicitly
-activates the original set, not the Esuno set. SES permits only one active set
-per account and region, so activation can interrupt other domains. Inventory
-all existing rules, ordering, recipients and permissions before a separately
-approved migration or activation. Do not manage the same active set from two
-states. The application locates the configured rule name in the **active** set;
-an inactive rule will not receive mail and cannot be updated by the application.
-Serialize infrastructure changes and operators: SES updates replace a whole
-rule, and AWS provides no conditional update. Confirm the
-actual active set, recipient list and S3/SNS actions before enabling the domain
-service. SES inbound TLS is optional; the VPS SMTP relay must use STARTTLS and
+Both rule sets default to unmanaged activation. Set `activate_rule_set = true`
+only to manage the original set, or `activate_esuno_rule_set = true` only to
+manage the Esuno set. Never enable both. SES permits one active set per account
+and region. Both active-set resources and the Esuno rule set and rule use
+`prevent_destroy`: switching, replacing, or stopping their management requires
+deliberate operator reconciliation, not a routine apply. Import an already active set into exactly one state before planning;
+otherwise it is not tracked. A missing resource in state does not establish
+whether a set is active. Inspect the real active set and complete plan; never
+apply a plan that deactivates production receipt.
+
+On 2026-10-30 the operator confirmed the active production set is
+`opensuite-esuno-inbound`, containing enabled rule `opensuite-esuno-store`,
+recipient `esuno.net`, and its S3 action in `eu-north-1`. For this account the
+private variables must include `name_prefix = "opensuite"`,
+`activate_esuno_rule_set = true`, `activate_rule_set = false`, and
+`esuno_initial_recipients = ["esuno.net"]`. These are production values, not
+module defaults. Import the active-set resource as described below and confirm
+the full rule, its order and permissions. Verify current AWS state again before
+any future plan: these values are an observation, not a guarantee. The API's
+`DOMAINS_SES_RULE_SET` and `DOMAINS_SES_RULE` must name the actual active set
+and its rule; the API verifies that the configured set is active before reading
+the rule. SES inbound TLS is optional; the VPS SMTP relay must use STARTTLS and
 certificate verification.
 
 ## Adopting an existing account
@@ -150,13 +160,18 @@ account and region. These are account and state operations, not offline checks:
    tofu import -var-file="$VARS" aws_ses_receipt_rule.inbound "$RULE_SET:$RULE"
    tofu import -var-file="$VARS" aws_ses_receipt_rule_set.esuno "$ESUNO_RULE_SET"
    tofu import -var-file="$VARS" aws_ses_receipt_rule.esuno "$ESUNO_RULE_SET:$ESUNO_RULE"
+   # Only when the Esuno set is already active and activate_esuno_rule_set is true:
+   tofu import -var-file="$VARS" 'aws_ses_active_receipt_rule_set.esuno[0]' "$ESUNO_RULE_SET"
    ```
 
    Also import versioning, public access block and encryption configuration,
    SNS topic and policy, all queues, queue policies and redrive settings,
    subscriptions, Firehose, IAM users/roles and inline policies, and alarms as
    applicable. Import the original active-rule-set resource only if that set is
-   already active and `activate_rule_set` is true. Do not import SES identities,
+   already active and `activate_rule_set` is true. An active set is a singleton:
+   never import it into two resources or states. If a previous state tracks a
+   different active-set address, back up state and coordinate a state-only
+   handoff before import; do not destroy or deactivate the live set. Do not import SES identities,
    DKIM or MAIL FROM into this module. The old adopted state addresses
    `aws_s3_bucket_lifecycle_configuration.esuno_buffer` and
    `aws_iam_user_policy.esuno_smtp` move to

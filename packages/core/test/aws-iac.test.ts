@@ -329,4 +329,40 @@ describe("AWS infrastructure ownership and complete policies", () => {
     }`),
     );
   });
+  it("keeps the adopted alarm descriptions", () => {
+    const alarm = block(
+      readModule("alarms.tf"),
+      'resource "aws_cloudwatch_metric_alarm" "inbound"',
+    );
+    expect(alarm).toContain(
+      'alarm_description   = "OpenSuite ${each.key}; investigate and recover before retention expires."',
+    );
+  });
+  it("protects both active receipt sets and makes Esuno activation explicit", () => {
+    const source = readModule("ses.tf");
+    const esuno = block(
+      source,
+      'resource "aws_ses_active_receipt_rule_set" "esuno"',
+    );
+    const original = block(
+      source,
+      'resource "aws_ses_active_receipt_rule_set" "inbound"',
+    );
+    expect(
+      block(source, 'resource "aws_ses_receipt_rule_set" "esuno"'),
+    ).toMatch(/prevent_destroy\s*=\s*true/);
+    expect(block(source, 'resource "aws_ses_receipt_rule" "esuno"')).toMatch(
+      /prevent_destroy\s*=\s*true/,
+    );
+    expect(esuno).toMatch(
+      /count\s*=\s*var\.activate_esuno_rule_set\s*\?\s*1\s*:\s*0/,
+    );
+    expect(esuno).toContain(
+      "rule_set_name = aws_ses_receipt_rule_set.esuno.rule_set_name",
+    );
+    expect(esuno).toMatch(/prevent_destroy\s*=\s*true/);
+    expect(esuno).toMatch(/condition\s*=\s*!var\.activate_rule_set/);
+    expect(original).toMatch(/prevent_destroy\s*=\s*true/);
+    expect(original).toMatch(/condition\s*=\s*!var\.activate_esuno_rule_set/);
+  });
 });

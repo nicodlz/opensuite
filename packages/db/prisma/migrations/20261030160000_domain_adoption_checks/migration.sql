@@ -1,0 +1,2 @@
+ALTER TABLE "Domain"
+  ADD COLUMN "adoptionFailureCount" INTEGER NOT NULL DEFAULT 0;

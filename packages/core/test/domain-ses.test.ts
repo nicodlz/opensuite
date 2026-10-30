@@ -5,12 +5,15 @@ import { createSesDomainProvider } from "../src/adapters/domain-ses.ts";
 type Scenario =
   | "valid"
   | "identity_missing"
+  | "api_error"
   | "unverified"
   | "token_missing"
   | "dkim_missing"
   | "dkim_unverified"
+  | "dkim_failed"
   | "rule_missing"
   | "wrong_rule_set"
+  | "rule_not_found"
   | "recipient_missing"
   | "disabled";
 async function withSes(
@@ -38,6 +41,12 @@ async function withSes(
       requests.push({ method: request.method, path: request.url, action });
       if (request.url?.startsWith("/v2/")) {
         response.setHeader("content-type", "application/json");
+        if (scenario === "api_error") {
+          response.statusCode = 403;
+          response.setHeader("x-amzn-errortype", "AccessDeniedException");
+          response.end(JSON.stringify({ message: "unavailable" }));
+          return;
+        }
         if (scenario === "identity_missing") {
           response.statusCode = 404;
           response.setHeader("x-amzn-errortype", "NotFoundException");
@@ -48,10 +57,23 @@ async function withSes(
           JSON.stringify({
             DkimAttributes: {
               Tokens: scenario === "dkim_missing" ? [] : ["existing"],
-              Status: scenario === "dkim_unverified" ? "PENDING" : "SUCCESS",
+              Status:
+                scenario === "dkim_unverified"
+                  ? "PENDING"
+                  : scenario === "dkim_failed"
+                    ? "FAILED"
+                    : "SUCCESS",
             },
             VerifiedForSendingStatus: scenario !== "unverified",
           }),
+        );
+        return;
+      }
+      if (scenario === "rule_not_found" && action === "DescribeReceiptRule") {
+        response.statusCode = 400;
+        response.setHeader("content-type", "text/xml");
+        response.end(
+          '<ErrorResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><Error><Type>Sender</Type><Code>RuleDoesNotExist</Code><Message>missing</Message></Error><RequestId>test</RequestId></ErrorResponse>',
         );
         return;
       }
@@ -136,6 +158,31 @@ describe("read-only SES domain adoption", () => {
     await withSes(scenario, async (provider) =>
       expect((await provider.ensure("example.test")).isErr()).toBe(true),
     );
+  });
+  it.each([
+    ["identity_missing", "confirmed"],
+    ["unverified", "confirmed"],
+    ["dkim_failed", "confirmed"],
+    ["api_error", "unavailable"],
+    ["token_missing", "unavailable"],
+    ["dkim_unverified", "unavailable"],
+  ] as const)("classifies %s as %s", async (scenario, kind) => {
+    await withSes(scenario, async (provider) => {
+      const result = await provider.ensure("example.test");
+      expect(result.isErr() && result.error.kind).toBe(kind);
+    });
+  });
+  it.each([
+    ["recipient_missing", "confirmed"],
+    ["rule_not_found", "confirmed"],
+    ["disabled", "confirmed"],
+    ["rule_missing", "unavailable"],
+    ["wrong_rule_set", "unavailable"],
+  ] as const)("classifies rule %s as %s", async (scenario, kind) => {
+    await withSes(scenario, async (provider) => {
+      const result = await provider.receipt("example.test", true);
+      expect(result.isErr() && result.error.kind).toBe(kind);
+    });
   });
   it.each([
     "rule_missing",

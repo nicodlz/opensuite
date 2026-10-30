@@ -190,6 +190,70 @@ export const createDomainStore = (db: PrismaClient) => ({
       failure,
     );
   },
+  // Serialize status transitions and the persisted streak across API processes.
+  recordAdoptionCheck(
+    actor: string,
+    id: string,
+    outcome: "verified" | "confirmed" | "unavailable",
+    checkedRecords: z.infer<typeof records>,
+    source: "manual" | "scheduled",
+  ) {
+    return ResultAsync.fromPromise(
+      db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${id}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+        const previous = await tx.domain.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, adoptionFailureCount: true },
+        });
+        const count =
+          outcome === "confirmed"
+            ? Math.min(previous.adoptionFailureCount + 1, 3)
+            : 0;
+        const nextStatus =
+          outcome === "verified"
+            ? "verified"
+            : count >= 3
+              ? "failing"
+              : previous.status;
+        const row = await tx.domain.update({
+          where: { id },
+          data: {
+            adoptionFailureCount: count,
+            status: nextStatus,
+            ...(outcome === "verified" ||
+            (outcome === "confirmed" && count >= 3)
+              ? { records: checkedRecords, checkedAt: new Date() }
+              : {}),
+          },
+          include,
+        });
+        if (previous.status !== nextStatus) {
+          await tx.emailAlias.updateMany({
+            where: { domainId: id, deletedAt: null, enabled: true },
+            data: {
+              ready: false,
+              detachedByDomain: false,
+              revision: { increment: 1 },
+            },
+          });
+        }
+        await tx.auditEvent.create({
+          data: {
+            userId: actor,
+            action: `admin.domain.recheck.${source}`,
+            detail: {
+              domainId: id,
+              status: nextStatus,
+              outcome,
+              confirmedFailures: count,
+            },
+          },
+        });
+        return convert(row);
+      }),
+      failure,
+    );
+  },
   remove(actor: string, id: string) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {

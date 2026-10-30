@@ -9,7 +9,7 @@ import type { createDomainStore } from "@opensuite/db";
 import type { Actor } from "./accounts.ts";
 
 type Failure = {
-  kind: "forbidden" | "unavailable" | "invalid";
+  kind: "forbidden" | "unavailable" | "invalid" | "confirmed";
   message: string;
 };
 type Outcome<T> = PromiseLike<Result<T, Failure>>;
@@ -193,52 +193,73 @@ export function createDomainService(
         row = result.value;
       }
       const checks = await Promise.all(
-        row.records.map(async (record): Promise<DnsRecord> => {
-          const result = await dns.lookup(record);
-          return {
-            ...record,
-            status: result.isOk() && result.value ? "verified" : "failing",
-          };
-        }),
+        row.records.map(async (record) => ({
+          record,
+          result: await dns.lookup(record),
+        })),
       );
-      const ses =
-        options.adoptionOnly === true
-          ? undefined
-          : await provider.verified(row.name);
-      const receipt =
-        options.adoptionOnly === true
-          ? await provider.receipt(row.name, true)
-          : ok(undefined);
-      const currentIdentity =
-        options.adoptionOnly === true
-          ? await provider.ensure(row.name)
-          : undefined;
-      const identityRecordsMatch =
-        currentIdentity === undefined ||
-        (currentIdentity.isOk() &&
-          checks.some(
+      if (options.adoptionOnly === true) {
+        const receipt = await provider.receipt(row.name, true);
+        const identity = await provider.ensure(row.name);
+        const unavailableCheck =
+          checks.some(({ result }) => result.isErr()) ||
+          (receipt.isErr() && receipt.error.kind !== "confirmed") ||
+          (identity.isErr() && identity.error.kind !== "confirmed");
+        const checkedRecords: DnsRecord[] = checks.map(({ record, result }) =>
+          Object.assign({}, record, {
+            status: result.isOk() && result.value ? "verified" : "failing",
+          }),
+        );
+        const identityRecordsMatch =
+          identity.isOk() &&
+          checkedRecords.some(
             (record) =>
               record.name === `_amazonses.${row.name}` &&
-              record.value === currentIdentity.value.verificationToken,
+              record.value === identity.value.verificationToken,
           ) &&
-          currentIdentity.value.dkimTokens.every((token) =>
-            checks.some(
+          identity.value.dkimTokens.every((token) =>
+            checkedRecords.some(
               (record) =>
                 record.name === `${token}._domainkey.${row.name}` &&
                 record.value === `${token}.dkim.amazonses.com`,
             ),
-          ));
+          );
+        const confirmedFailure =
+          checks.some(({ result }) => result.isOk() && !result.value) ||
+          (receipt.isErr() && receipt.error.kind === "confirmed") ||
+          (identity.isErr() && identity.error.kind === "confirmed") ||
+          (identity.isOk() && !identityRecordsMatch);
+        const outcome = unavailableCheck
+          ? "unavailable"
+          : confirmedFailure
+            ? "confirmed"
+            : "verified";
+        const recorded = await store.recordAdoptionCheck(
+          actor.id,
+          id,
+          outcome,
+          checkedRecords,
+          source,
+        );
+        if (recorded.isErr() || unavailableCheck) return err(unavailable());
+        return ok(recorded.value);
+      }
+      const records: DnsRecord[] = checks.map(({ record, result }) =>
+        Object.assign({}, record, {
+          status: result.isOk() && result.value ? "verified" : "failing",
+        }),
+      );
+      const ses = await provider.verified(row.name);
       const verified =
-        checks.every((record) => record.status === "verified") &&
-        (ses === undefined || (ses.isOk() && ses.value)) &&
-        receipt.isOk() &&
-        identityRecordsMatch;
+        records.every((record) => record.status === "verified") &&
+        ses.isOk() &&
+        ses.value;
       const saved = await store.save(
         actor.id,
         id,
         {
           status: verified ? "verified" : "failing",
-          records: checks,
+          records,
           checkedAt: new Date(),
         },
         `admin.domain.recheck.${source}`,

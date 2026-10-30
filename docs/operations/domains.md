@@ -14,10 +14,14 @@ accepts only approved, already verified and configured domains. It does not
 create an identity, request verification, or alter a receipt rule. New SES
 domains and recipients remain an operator task.
 
-The service checks the configured rule name in the **active** SES rule set. The
-module's Esuno set is not activated by this configuration. Verify the active
-set, recipients and S3/SNS actions before using adoption. Coordinate sending
-policy changes with `esuno_sending_domains`. See the
+The service reads the **active** SES rule set and checks that its name matches
+`DOMAINS_SES_RULE_SET` before looking up `DOMAINS_SES_RULE`. The operator
+confirmed that production used `opensuite-esuno-inbound` and
+`opensuite-esuno-store` on 2026-10-30. Configure those as the expected values
+for that deployment, not as defaults; verify the active set, recipients and
+S3/SNS actions before use. A different active set is treated as unavailable,
+not as a confirmed domain failure. Coordinate sending policy changes with
+`esuno_sending_domains`. See the
 [account adoption procedure](../deployment/aws.md#adopting-an-existing-account)
 before any apply.
 
@@ -87,8 +91,17 @@ case coordinate a separate operator-owned verification workflow before adoption.
 DNS checks require a matching token but do not themselves create any record.
 
 On success the service stores a verified domain. Recheck and the hourly job also
-recheck SES, the rule and DNS; a failing check marks it failing and removes it
-from the eligible alias domains. The job runs under the active administrator who
+recheck SES, the active rule and DNS. SES/API and DNS lookup errors, throttling,
+a configured-set mismatch, or a domain absent from the approved list are
+unavailable, not confirmed failures: the previous status and records remain,
+the confirmed-failure streak resets, and scheduled checks retry with exponential
+backoff from twice the interval up to 24 hours. A verified domain changes to
+failing only after three consecutive confirmed checks (for example SES reports
+verification revoked, DKIM failed, a recipient is absent, or DNS returns a
+definitive mismatch). A successful check resets the streak and restores verified
+status. The count is stored in the database across restarts and status updates
+are serialized; only a real status change schedules alias detachment. This
+requires the database migration before the updated API starts. The job runs under the active administrator who
 added it. These checks do not prove end-to-end mail delivery or recovery; test
 those separately. If a database write fails after preflight, inspect the row and
 use Recheck where applicable before retrying. Only an operator changes DNS.
