@@ -7,3 +7,8 @@ coverage/
 .env.*
 *.log
 .DS_Store
+
+# Operator configuration and backup freshness marker
+deploy/ingest.env
+deploy/observe.env
+deploy/backup-status/last-success

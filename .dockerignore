@@ -18,3 +18,8 @@ packages/db/src/generated/
 !apps/drive/prisma/**
 !apps/drive/src/**
 apps/drive/src/db/generated/
+!apps/ingest/package.json
+!apps/ingest/src/**
+!packages/jmap/src/**
+!apps/observe/package.json
+!apps/observe/src/**

@@ -6,6 +6,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  HeadBucketCommand,
   PutObjectCommand,
   S3Client,
   UploadPartCommand,
@@ -43,6 +44,11 @@ export const createStorage = (config: StorageConfig) => {
     `${config.prefix}${stage ? "pending" : "objects"}/${id}`;
   return {
     key,
+    async check(signal: AbortSignal) {
+      await client.send(new HeadBucketCommand({ Bucket }), {
+        abortSignal: signal,
+      });
+    },
     async initiate(
       id: string,
       contentType: string,

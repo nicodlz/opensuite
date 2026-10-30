@@ -15,7 +15,12 @@ resource "aws_iam_user_policy" "ingestion" {
       },
       {
         Effect   = "Allow"
-        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"]
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.buffer.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]
         Resource = aws_sqs_queue.ingestion.arn
       }
     ]

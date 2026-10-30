@@ -1,0 +1,21 @@
+{
+  "name": "@opensuite/observe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "catalog:",
+    "@aws-sdk/client-sqs": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@opensuite/typescript-config": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:"
+  }
+}

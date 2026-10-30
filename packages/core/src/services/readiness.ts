@@ -33,9 +33,9 @@ export interface ReadinessOptions {
   readonly monotonicMs: () => number;
 }
 
-const describe = (cause: unknown): ProbeFailure => ({
+const describe = (): ProbeFailure => ({
   kind: "unavailable",
-  message: cause instanceof Error ? cause.message : String(cause),
+  message: "dependency check failed",
 });
 
 const timeoutAfter = (

@@ -7,10 +7,17 @@ COPY apps/drive/package.json apps/drive/
 COPY apps/drive/prisma apps/drive/prisma
 COPY apps/drive/prisma.config.ts apps/drive/
 COPY packages/contracts/package.json packages/contracts/
+COPY packages/core/package.json packages/core/
+COPY packages/db/package.json packages/db/
+COPY packages/db/prisma packages/db/prisma
+COPY packages/jmap/package.json packages/jmap/
 COPY packages/typescript-config/package.json packages/typescript-config/
 RUN pnpm install --frozen-lockfile --prod --filter @opensuite/drive...
 COPY apps/drive/src apps/drive/src
 COPY packages/contracts/src packages/contracts/src
+COPY packages/core/src packages/core/src
+COPY packages/db/src packages/db/src
+COPY packages/jmap/src packages/jmap/src
 ENV NODE_ENV=production
 USER 999:999
 EXPOSE 3001

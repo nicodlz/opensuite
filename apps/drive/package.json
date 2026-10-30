@@ -25,6 +25,7 @@
     "fastify": "catalog:",
     "neverthrow": "catalog:",
     "prisma": "catalog:",
-    "zod": "catalog:"
+    "zod": "catalog:",
+    "@opensuite/core": "workspace:*"
   }
 }

@@ -4,7 +4,7 @@ import { OpenAPIGenerator } from "@orpc/openapi";
 import { OpenAPIHandler } from "@orpc/openapi/fastify";
 import { ORPCError, onError } from "@orpc/server";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { LogController, type FastifyInstance } from "fastify";
 import type { ApiConfig } from "./config.ts";
 import { createAuthLimiter } from "./auth/limits.ts";
 import { router, type ApiContext } from "./routes/index.ts";
@@ -31,8 +31,24 @@ export const buildServer = async (
 ): Promise<FastifyInstance> => {
   const app = Fastify({
     logger: { level: dependencies.config.logLevel },
+    logController: new LogController({ disableRequestLogging: true }),
   });
   const startedAt = dependencies.monotonicMs();
+  app.addHook("onRequest", (request, reply, done) => {
+    reply.header("x-request-id", request.id);
+    done();
+  });
+  app.addHook("onResponse", (request, reply, done) => {
+    request.log.info(
+      {
+        method: request.method,
+        statusCode: reply.statusCode,
+        durationMs: Math.round(reply.elapsedTime),
+      },
+      "request completed",
+    );
+    done();
+  });
 
   const handler = new OpenAPIHandler<ApiContext>(router, {
     interceptors: [
@@ -44,7 +60,7 @@ export const buildServer = async (
         ) {
           return;
         }
-        context.log.error({ err: error }, "procedure failed");
+        context.log.error("procedure failed");
       }),
     ],
   });

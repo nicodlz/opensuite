@@ -1,6 +1,7 @@
+import type { ReadinessService } from "@opensuite/core/services/readiness";
 import { OpenAPIHandler } from "@orpc/openapi/fastify";
 import { ORPCError } from "@orpc/server";
-import Fastify from "fastify";
+import Fastify, { LogController } from "fastify";
 import { Readable } from "node:stream";
 import { z } from "zod";
 import type { Storage } from "./adapters/storage.ts";
@@ -13,8 +14,27 @@ export const buildServer = (
   drive: DriveService,
   storage: Storage,
   sessions: SessionVerifier,
+  readiness?: ReadinessService,
 ) => {
-  const app = Fastify({ logger: true, disableRequestLogging: true });
+  const app = Fastify({
+    logger: true,
+    logController: new LogController({ disableRequestLogging: true }),
+  });
+  app.addHook("onRequest", (request, reply, done) => {
+    reply.header("x-request-id", request.id);
+    done();
+  });
+  app.addHook("onResponse", (request, reply, done) => {
+    request.log.info(
+      {
+        method: request.method,
+        statusCode: reply.statusCode,
+        durationMs: Math.round(reply.elapsedTime),
+      },
+      "request completed",
+    );
+    done();
+  });
   const handler = new OpenAPIHandler<Context>(router);
   const identity = async (cookie: string | undefined) => {
     const result = await sessions.verify(cookie);
@@ -26,6 +46,14 @@ export const buildServer = (
     return result.value;
   };
   app.get("/health", () => ({ status: "ok" }));
+  app.get("/ready", async (_request, reply) => {
+    if (readiness === undefined)
+      return reply.code(503).send({ status: "not_ready" });
+    const report = await readiness.check();
+    return reply
+      .code(report.readiness.status === "ready" ? 200 : 503)
+      .send(report.readiness);
+  });
   app.get("/v1/preview/:id", async (request, reply) => {
     const params = z
       .object({ id: z.string().min(1).max(200) })
@@ -88,14 +116,14 @@ export const buildServer = (
     if (!matched) return reply.code(404).send({ code: "NOT_FOUND" });
     return reply;
   });
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof ORPCError)
       return reply
         .code(error.status)
         .send({ code: "DRIVE_ERROR", message: error.message });
     if (error instanceof z.ZodError)
       return reply.code(400).send({ code: "BAD_REQUEST" });
-    app.log.error("Drive request failed");
+    request.log.error("Drive request failed");
     return reply.code(500).send({ code: "INTERNAL_SERVER_ERROR" });
   });
   return app;
