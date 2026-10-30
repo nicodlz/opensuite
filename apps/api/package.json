@@ -23,6 +23,7 @@
     "@simplewebauthn/server": "catalog:",
     "fastify": "catalog:",
     "neverthrow": "catalog:",
+    "stripe": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

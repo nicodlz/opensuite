@@ -323,3 +323,89 @@ export function loadMailPushConfig(
     pushConnections: value.MAIL_PUSH_CONNECTIONS,
   });
 }
+
+const BillingEnvironment = z.object({
+  ESUNO_DEPLOYMENT_MODE: z
+    .enum(["self-hosted", "cloud"])
+    .default("self-hosted"),
+  STRIPE_SECRET_KEY_FILE: z.string().min(1).optional(),
+  STRIPE_WEBHOOK_SECRET_FILE: z.string().min(1).optional(),
+  BILLING_INTERNAL_TOKEN_FILE: z.string().min(1).optional(),
+  STRIPE_AUTOMATIC_TAX: z.enum(["true", "false"]).default("true"),
+  // Where a cancelled checkout returns; the public site by default.
+  BILLING_CANCEL_URL: z
+    .url()
+    .refine((value) => new URL(value).protocol === "https:")
+    .optional(),
+});
+export type BillingConfig =
+  | { readonly mode: "self-hosted" }
+  | {
+      readonly mode: "cloud";
+      readonly stripeSecretKey: string;
+      readonly webhookSecret: string;
+      readonly internalToken: string;
+      readonly automaticTax: boolean;
+      readonly cancelUrl?: string;
+    };
+/**
+ * The deployment mode comes from trusted server configuration only. Cloud
+ * mode never falls back to self-hosted: missing Stripe secrets are fatal.
+ */
+export async function loadBillingConfig(
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<Result<BillingConfig, ConfigError>> {
+  const parsed = BillingEnvironment.safeParse(env);
+  if (!parsed.success)
+    return err({
+      kind: "invalid_environment",
+      issues: parsed.error.issues.map(
+        (issue) => `${issue.path.join(".")}: ${issue.message}`,
+      ),
+    });
+  const value = parsed.data;
+  if (value.ESUNO_DEPLOYMENT_MODE === "self-hosted")
+    return ok({ mode: "self-hosted" });
+  const files = [
+    value.STRIPE_SECRET_KEY_FILE,
+    value.STRIPE_WEBHOOK_SECRET_FILE,
+    value.BILLING_INTERNAL_TOKEN_FILE,
+  ];
+  if (files.some((file) => file === undefined))
+    return err({
+      kind: "invalid_environment",
+      issues: ["cloud mode requires Stripe and internal token secret files"],
+    });
+  try {
+    const [secretKey, webhookSecret, internalToken] = await Promise.all(
+      files.map(async (file) => (await readFile(file ?? "", "utf8")).trim()),
+    );
+    const secrets = z
+      .object({
+        secretKey: z.string().regex(/^(sk|rk)_(test|live)_[A-Za-z0-9]{10,}$/),
+        webhookSecret: z.string().regex(/^whsec_[A-Za-z0-9+/=]{16,}$/),
+        internalToken: z.string().min(32),
+      })
+      .safeParse({ secretKey, webhookSecret, internalToken });
+    if (!secrets.success)
+      return err({
+        kind: "invalid_environment",
+        issues: ["invalid billing secrets"],
+      });
+    return ok({
+      mode: "cloud",
+      stripeSecretKey: secrets.data.secretKey,
+      webhookSecret: secrets.data.webhookSecret,
+      internalToken: secrets.data.internalToken,
+      automaticTax: value.STRIPE_AUTOMATIC_TAX === "true",
+      ...(value.BILLING_CANCEL_URL === undefined
+        ? {}
+        : { cancelUrl: value.BILLING_CANCEL_URL }),
+    });
+  } catch {
+    return err({
+      kind: "invalid_environment",
+      issues: ["billing secrets unavailable"],
+    });
+  }
+}

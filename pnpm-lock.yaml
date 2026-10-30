@@ -326,6 +326,9 @@ catalogs:
     react-dom:
       specifier: 19.2.0
       version: 19.2.0
+    stripe:
+      specifier: 23.0.1
+      version: 23.0.1
     tailwindcss:
       specifier: 4.1.14
       version: 4.1.14
@@ -451,6 +454,9 @@ importers:
       neverthrow:
         specifier: 'catalog:'
         version: 8.2.0
+      stripe:
+        specifier: 'catalog:'
+        version: 23.0.1(@types/node@22.20.5)
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -4279,6 +4285,15 @@ packages:
     resolution: {integrity: sha512-1tB5mhVo7U+ETBKNf92xT4hrQa3pm0MZ0PQvuDnWgAAGHDsfp4lPSpiS6psrSiet87wyGPh9ft6wmhOMQ0hDiw==}
     engines: {node: '>=14.16'}
 
+  stripe@23.0.1:
+    resolution: {integrity: sha512-VFLs9IAzSZ8GIm6/vqhjqOL0fbYrSNYCpgZ3LS3YkSi/i5RnyMpu/Hf9YxPTOCYwc3mZKU3IJvuvKffQH2NLMg==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@types/node': '>=20'
+    peerDependenciesMeta:
+      '@types/node':
+        optional: true
+
   supports-color@7.2.0:
     resolution: {integrity: sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==}
     engines: {node: '>=8'}
@@ -8099,6 +8114,10 @@ snapshots:
       ansi-regex: 5.0.1
 
   strip-json-comments@5.0.3: {}
+
+  stripe@23.0.1(@types/node@22.20.5):
+    optionalDependencies:
+      '@types/node': 22.20.5
 
   supports-color@7.2.0:
     dependencies:

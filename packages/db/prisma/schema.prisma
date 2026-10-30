@@ -44,6 +44,8 @@ model User {
   calendarTimeZone String @default("UTC")
   defaultAliasDomainId String?
   defaultAliasDomain Domain? @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
+  billingCustomer BillingCustomer?
+  subscriptions Subscription[]
 }
 
 model SecurityKey {
@@ -366,4 +368,61 @@ model CalendarReminder {
   @@index([state, triggerAt])
   @@index([state, updatedAt])
   @@index([userId, state])
+}
+
+// Managed Cloud billing. Stripe is the source of truth: rows are refreshed from
+// the Stripe API after a verified webhook, never from client input. No payment
+// card data is stored.
+model BillingCustomer {
+  userId           String   @id
+  user             User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  stripeCustomerId String   @unique
+  createdAt        DateTime @default(now())
+}
+
+model Subscription {
+  // The Stripe subscription ID.
+  id                 String    @id
+  // Null until a checkout started without an account is claimed.
+  userId             String?
+  user               User?     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  stripeCustomerId   String
+  plan               String
+  interval           String
+  status             String
+  priceId            String
+  storageQuotaBytes  BigInt
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean   @default(false)
+  canceledAt         DateTime?
+  endedAt            DateTime?
+  latestInvoiceStatus String?
+  // Stripe's own timestamp of the state stored here; older reads never win.
+  stripeObservedAt   DateTime
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  @@index([userId, status])
+  @@index([stripeCustomerId])
+}
+
+model StripeEvent {
+  id          String    @id
+  type        String
+  createdAt   DateTime
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  attempts    Int       @default(0)
+  @@index([processedAt, receivedAt])
+}
+
+// A paid checkout started from the public site, before an account exists.
+model CheckoutClaim {
+  sessionId        String    @id
+  stripeCustomerId String
+  subscriptionId   String    @unique
+  claimedByUserId  String?   @unique
+  claimedAt        DateTime?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
 }
