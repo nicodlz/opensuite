@@ -32,11 +32,12 @@ API contract](aliases.md) for key storage, authorization, lifecycle and CORS.
 Provisioning and deletion are reconciled across PostgreSQL and Stalwart; they
 are not an atomic transaction with SES or ingestion. The UI identifies aliases
 from stored recipient headers on a best-effort basis. It cannot always identify
-Bcc from the stored MIME. Disabling an alias prevents newly resolved delivery
-through the managed route, but a message already accepted by SES may be
-recorded as rejected without a bounce, while previously resolved deliveries or
-independent static routes may still deliver. Alias identities and outbound mail
-are locally tested, but real SES relay behavior is unverified. Replies can expose
+Bcc from the stored MIME. Disabling an alias removes its managed route. After
+SES acceptance, newly unknown recipients are held for replay; re-enabling the
+alias and replaying within the hold window can deliver held mail. Operator
+rejection or expiry does not bounce the sender. Previously resolved deliveries
+or independent static routes may still deliver. Alias identities and outbound
+mail are locally tested, but real SES relay behavior is unverified. Replies can expose
 primary addresses through headers, quoted text or other metadata. See [alias
 inbound behavior and limits](aliases.md#inbound-behavior-and-limits) for details.
 

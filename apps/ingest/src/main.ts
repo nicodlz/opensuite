@@ -63,6 +63,7 @@ const configSchema = z
     INGEST_HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(3002),
     INGEST_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(5),
     INGEST_AGE_SECONDS: z.coerce.number().int().min(1).default(3600),
+    INGEST_HOLD_DAYS: z.coerce.number().int().min(1).max(365).default(14),
   })
   .superRefine((value, ctx) => {
     if (
@@ -180,6 +181,7 @@ const service = new IngestService({
   bufferPrefix: c.INBOUND_BUFFER_PREFIX,
   topic: c.INBOUND_TOPIC_ARN,
   maxAttempts: c.INGEST_MAX_ATTEMPTS,
+  holdDays: c.INGEST_HOLD_DAYS,
   events: {
     emit(event, fields) {
       const count = (counters.get(event) ?? 0) + 1;
