@@ -320,6 +320,10 @@ belong to only one account.
    [outbound DKIM and DNS](../operations/outbound.md#dkim-and-dns).
    Until then SES rejects its messages and the sender receives a bounce.
 
+To retire a domain listed in `MAIL_DOMAINS`, remove it from that list and
+recreate the API as well as removing its managed domain: once the domain
+record is gone, the list alone accepts new accounts in it again.
+
 Before deploying a release with this support, list the domain records
 (`SELECT name, status, "removalPending" FROM "Domain";`): every managed
 domain whose removal has not started becomes available for accounts. Before
