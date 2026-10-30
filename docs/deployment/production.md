@@ -408,10 +408,31 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 
 ## Rollback
 
-Before running a worker release that predates held recipients, finish every
-held recipient: older code does not know the `held` and `rerouted` states and
-fails on messages that contain them. List them with `operator list held`, then
-provision the addresses and run replay, or reject them, until the list is empty.
+Before running a worker release that predates held recipients, convert the
+ledger to states that release knows. Older code fails on any message that has a
+`held` or `rerouted` recipient, including a duplicate or redriven SQS
+notification for a message that was already delivered, and sends it to the
+dead-letter queue after its retries:
+
+1. Stop the current worker and let it drain (SIGTERM); leave the queues in
+   place.
+2. With the current release, finish every held recipient: list them with
+   `operator list held`, then provision the address and run replay, or reject
+   them, until the list is empty.
+3. Mark routed rows as finished in a form the older release treats as terminal:
+
+   ```sql
+   UPDATE "InboundRecipient"
+   SET state = 'rejected', error = 'Rerouted before rollback'
+   WHERE state = 'rerouted';
+   ```
+
+   A `rerouted` row has no addresses left; its message was delivered through
+   the mailbox recipient, so this only changes how the row is labelled.
+
+4. Start the older worker. It then processes the queue backlog and any redrive
+   normally; mail for unknown recipients is again rejected and its object
+   deleted once the other recipients finish.
 
 Pause new submissions and preserve the Stalwart outbound queue, SES buffer,
 notifications, DLQs and ingestion ledger. Restore the recorded DNS MX and any
