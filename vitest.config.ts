@@ -5,7 +5,7 @@ import { defineConfig } from "vitest/config";
  * select the project: `*.test.ts` runs in `unit`, `*.<project>.test.ts` in
  * the matching project.
  */
-const suites = ["db", "http", "stalwart", "ingest", "drive"] as const;
+const suites = ["db", "http", "stalwart", "ingest", "drive", "pass"] as const;
 const roots = ["apps/*/test", "packages/*/test"];
 
 export default defineConfig({
@@ -28,8 +28,8 @@ export default defineConfig({
             : {}),
           include: [
             ...roots.map((root) => `${root}/**/*.${suite}.test.ts`),
-            ...(suite === "stalwart"
-              ? ["test-support/**/*.stalwart.test.ts"]
+            ...(suite === "stalwart" || suite === "pass"
+              ? [`test-support/**/*.${suite}.test.ts`]
               : []),
           ],
         },
