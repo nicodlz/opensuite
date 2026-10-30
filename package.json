@@ -15,7 +15,7 @@
     "format:check": "prettier --ignore-path .prettierignore --ignore-path .gitignore --ignore-path packages/db/.gitignore --check .",
     "knip": "knip",
     "test": "vitest run --project unit",
-    "build": "pnpm --filter @opensuite/web build",
+    "build": "pnpm --filter @opensuite/web --filter @opensuite/landing build",
     "test:e2e": "playwright test",
     "iac:validate": "node scripts/iac-validate.mjs"
   },

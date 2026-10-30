@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0710" />
+    <title>Esuno · Your private suite, on your own server</title>
+    <meta
+      name="description"
+      content="Esuno brings mail, calendar, files and passwords together in one calm workspace. Free software, self-hosted with Docker Compose, portable down to the last message."
+    />
+    <link rel="canonical" href="https://esuno.net/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://esuno.net/" />
+    <meta property="og:site_name" content="Esuno" />
+    <meta
+      property="og:title"
+      content="Esuno · Your private suite, on your own server"
+    />
+    <meta
+      property="og:description"
+      content="Mail, calendar, files and passwords in one calm workspace. Free software you run yourself."
+    />
+    <meta property="og:image" content="https://esuno.net/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="esuno-mark" viewBox="-4 -2 110 104">
+        <path
+          fill="currentColor"
+          d="M33 15C45 3 61-1 76 2c17 3 28 14 28 28 0 9-4 17-10 21-4 3-11 3-13 0-1-2 1-5 2-8 2-8-4-16-14-22C59 15 46 13 33 15Z"
+        />
+        <path
+          fill="currentColor"
+          d="M52 30C33 28 15 34 6 45-4 57 1 71 12 81c12 11 30 17 47 17 18 0 33-7 42-18 3-4 2-7-2-7-2 0-3 1-5 2-12 8-28 9-43 4C36 74 28 66 29 56c1-10 10-18 23-20 5-1 5-5 0-6Z"
+        />
+        <circle cx="58" cy="57" r="14.5" fill="#4f9c28" />
+      </symbol>
+      <symbol id="check" viewBox="0 0 20 20">
+        <path
+          d="m5 10.5 3.2 3.2L15 6.8"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="arrow" viewBox="0 0 20 20">
+        <path
+          d="M4 10h11m-4.5-4.5L15 10l-4.5 4.5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+    </svg>
+
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="nav" data-nav>
+      <div class="nav__inner">
+        <a class="brand" href="#top" aria-label="Esuno, back to top">
+          <svg class="brand__mark" aria-hidden="true">
+            <use href="#esuno-mark" />
+          </svg>
+          <span class="brand__word">esuno</span>
+        </a>
+        <nav class="nav__links" aria-label="Sections">
+          <a href="#suite">Suite</a>
+          <a href="#principles">Principles</a>
+          <a href="#mail-first">Mail first</a>
+          <a href="#self-host">Self-host</a>
+          <a href="#scale">Scale</a>
+        </nav>
+        <a class="button button--small" href="#self-host">Run Esuno</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" data-hero>
+        <div class="hero__sky" aria-hidden="true">
+          <div class="aurora aurora--violet"></div>
+          <div class="aurora aurora--lavender"></div>
+          <div class="aurora aurora--green"></div>
+          <div class="hero__grid"></div>
+        </div>
+
+        <div class="hero__copy">
+          <p class="eyebrow rise rise--1">
+            <span class="eyebrow__dot" aria-hidden="true"></span>
+            Free software · Self-hosted · Yours
+          </p>
+          <h1 class="hero__title rise rise--2">
+            Your private suite,
+            <em>on your own server.</em>
+          </h1>
+          <p class="hero__lede rise rise--3">
+            Esuno brings mail, calendar, files and passwords together in one
+            calm workspace. You run it, you own it, and you can take every
+            message with you.
+          </p>
+          <div class="hero__actions rise rise--4">
+            <a class="button" href="#self-host">
+              Run it yourself
+              <svg aria-hidden="true"><use href="#arrow" /></svg>
+            </a>
+            <a class="button button--ghost" href="#suite">Explore the suite</a>
+          </div>
+        </div>
+
+        <div class="stage rise rise--5" data-stage>
+          <div class="window" data-tilt>
+            <div class="window__bar" aria-hidden="true">
+              <span></span><span></span><span></span>
+              <p class="window__url">mail.yourdomain.com</p>
+            </div>
+            <div class="app" aria-hidden="true">
+              <aside class="app__rail">
+                <svg class="app__logo"><use href="#esuno-mark" /></svg>
+                <img
+                  class="is-active"
+                  src="../web/public/mail-mark.svg"
+                  alt=""
+                />
+                <img src="../web/public/calendar-mark.svg" alt="" />
+                <img src="../web/public/contacts-mark.svg" alt="" />
+                <img src="../web/public/vault-mark.svg" alt="" />
+                <img src="../web/public/drive-mark.svg" alt="" />
+              </aside>
+              <div class="app__folders">
+                <p class="app__compose">Compose</p>
+                <p class="is-active">Inbox <b>4</b></p>
+                <p>Starred</p>
+                <p>Sent</p>
+                <p>Drafts</p>
+                <p>Aliases</p>
+                <p class="app__label">Domains</p>
+                <p><i class="tag tag--violet"></i>yourdomain.com</p>
+                <p><i class="tag tag--green"></i>studio.dev</p>
+              </div>
+              <div class="app__list">
+                <div class="app__search">Search mail</div>
+                <article class="msg is-active">
+                  <i class="avatar avatar--a">CM</i>
+                  <div>
+                    <p class="msg__from">Camille Martin <small>09:41</small></p>
+                    <p class="msg__subject">Q4 planning, draft attached</p>
+                    <p class="msg__preview">
+                      Here's the first draft, let me know what you think…
+                    </p>
+                  </div>
+                </article>
+                <article class="msg is-unread">
+                  <i class="avatar avatar--b">NS</i>
+                  <div>
+                    <p class="msg__from">Noah Silva <small>08:12</small></p>
+                    <p class="msg__subject">Photos from the offsite</p>
+                    <p class="msg__preview">
+                      Uploaded everything to the shared Drive folder…
+                    </p>
+                  </div>
+                </article>
+                <article class="msg is-unread">
+                  <i class="avatar avatar--c">LB</i>
+                  <div>
+                    <p class="msg__from">
+                      Léa Bernard <small>Yesterday</small>
+                    </p>
+                    <p class="msg__subject">Comments on the brief</p>
+                    <p class="msg__preview">
+                      I've added two comments on page 4…
+                    </p>
+                  </div>
+                </article>
+                <article class="msg">
+                  <i class="avatar avatar--d">AT</i>
+                  <div>
+                    <p class="msg__from">Atelier Tomas <small>Tue</small></p>
+                    <p class="msg__subject">Your invoice #2026-114</p>
+                    <p class="msg__preview">
+                      Thanks for your business. Your invoice is…
+                    </p>
+                  </div>
+                </article>
+              </div>
+              <div class="app__read">
+                <p class="read__subject">Q4 planning, draft attached</p>
+                <div class="read__meta">
+                  <i class="avatar avatar--a">CM</i>
+                  <p><b>Camille Martin</b><br />to you@yourdomain.com</p>
+                </div>
+                <div class="read__body">
+                  <span class="line"></span>
+                  <span class="line"></span>
+                  <span class="line line--short"></span>
+                  <span class="line"></span>
+                  <span class="line line--mid"></span>
+                </div>
+                <div class="read__file">
+                  <img src="../web/public/drive-mark.svg" alt="" />
+                  <p><b>Q4-plan.pdf</b><br />1.8 MB · Save to Drive</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="float float--event" aria-hidden="true">
+            <img src="../web/public/calendar-mark.svg" alt="" />
+            <p><b>Design review</b><br />Thursday · 14:00 – 15:00</p>
+          </div>
+          <div class="float float--alias" aria-hidden="true">
+            <img src="../web/public/vault-mark.svg" alt="" />
+            <p><b>New alias</b><br />shop.k7x2@yourdomain.com</p>
+          </div>
+          <div class="float float--upload" aria-hidden="true">
+            <img src="../web/public/drive-mark.svg" alt="" />
+            <div>
+              <p><b>offsite-photos.zip</b> · 248 MB</p>
+              <span class="progress"><i></i></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="built" aria-label="Built on">
+        <p class="built__label">Standing on proven open-source software</p>
+        <ul class="built__list">
+          <li>Stalwart</li>
+          <li>PostgreSQL</li>
+          <li>Caddy</li>
+          <li>Vaultwarden</li>
+          <li>Docker Compose</li>
+        </ul>
+      </section>
+
+      <section class="section" id="suite">
+        <header class="section__head" data-reveal>
+          <p class="kicker">The suite</p>
+          <h2>Everything you open first thing in the morning.</h2>
+          <p class="section__lede">
+            One sign-in, one look, one server. Each app stays independent, so
+            your inbox keeps working whatever happens to the rest.
+          </p>
+        </header>
+
+        <div class="bento">
+          <article class="card card--mail" data-reveal>
+            <img class="card__mark" src="../web/public/mail-mark.svg" alt="" />
+            <h3>Mail</h3>
+            <p>
+              Several custom domains on one server, hide-my-email aliases that
+              forward to your inbox, and a fast web app with IMAP and JMAP
+              underneath.
+            </p>
+            <div class="domains" aria-hidden="true">
+              <p><i class="tag tag--violet"></i>you@yourdomain.com</p>
+              <p><i class="tag tag--green"></i>hello@studio.dev</p>
+              <p class="domains__alias">
+                <i class="tag tag--lavender"></i>shop.k7x2@yourdomain.com
+                <span>alias</span>
+              </p>
+            </div>
+          </article>
+
+          <article class="card card--calendar" data-reveal>
+            <img
+              class="card__mark"
+              src="../web/public/calendar-mark.svg"
+              alt=""
+            />
+            <h3>Calendar</h3>
+            <p>
+              Day, week and month views, quick editing, and CalDAV underneath,
+              an open standard rather than a silo.
+            </p>
+            <div class="week" aria-hidden="true">
+              <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span
+              ><span>Fri</span>
+              <i class="ev ev--1">Standup</i>
+              <i class="ev ev--2">Design review</i>
+              <i class="ev ev--3">Focus</i>
+              <i class="ev ev--4">Lunch</i>
+            </div>
+          </article>
+
+          <article class="card card--drive" data-reveal>
+            <img class="card__mark" src="../web/public/drive-mark.svg" alt="" />
+            <h3>Drive</h3>
+            <p>
+              Files go straight to the S3-compatible storage you choose, with
+              share links and guarded previews.
+            </p>
+          </article>
+
+          <article class="card card--vault" data-reveal>
+            <img class="card__mark" src="../web/public/vault-mark.svg" alt="" />
+            <h3>Vault <span class="pill pill--preview">Preview</span></h3>
+            <p>
+              A password vault built on Vaultwarden, on its own origin and its
+              own database.
+            </p>
+          </article>
+
+          <article class="card card--contacts" data-reveal>
+            <img
+              class="card__mark"
+              src="../web/public/contacts-mark.svg"
+              alt=""
+            />
+            <h3>Contacts <span class="pill">Coming</span></h3>
+            <p>
+              CardDAV sync through the mail server today. The web app is on its
+              way.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="principles">
+        <header class="section__head" data-reveal>
+          <p class="kicker">Principles</p>
+          <h2>Own it. <em>Really.</em></h2>
+          <p class="section__lede">
+            Esuno is not a service you subscribe to. It is software you install,
+            on a server you control, wired to providers you pick.
+          </p>
+        </header>
+        <ul class="principles">
+          <li data-reveal>
+            <span class="principles__n">01</span>
+            <h3>No landlord</h3>
+            <p>
+              No central Esuno service and no account with us. Every
+              installation stands on its own.
+            </p>
+          </li>
+          <li data-reveal>
+            <span class="principles__n">02</span>
+            <h3>Your providers</h3>
+            <p>
+              Pick the S3-compatible storage you trust and use your own provider
+              accounts and credentials.
+            </p>
+          </li>
+          <li data-reveal>
+            <span class="principles__n">03</span>
+            <h3>Standards, not silos</h3>
+            <p>
+              SMTP, IMAP, JMAP, CalDAV and CardDAV, built in. Your data speaks
+              open protocols.
+            </p>
+          </li>
+          <li data-reveal>
+            <span class="principles__n">04</span>
+            <h3>Encrypted backups</h3>
+            <p>
+              Encrypted, scheduled backups with documented restore procedures
+              you can rehearse.
+            </p>
+          </li>
+          <li data-reveal>
+            <span class="principles__n">05</span>
+            <h3>Leave anytime</h3>
+            <p>
+              Your data stays in open formats and standard protocols. Moving out
+              is a procedure, not a negotiation.
+            </p>
+          </li>
+          <li data-reveal>
+            <span class="principles__n">06</span>
+            <h3>Free software</h3>
+            <p>
+              Licensed AGPL-3.0-or-later. Read it, change it, run it, share it.
+            </p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="section section--split" id="mail-first">
+        <header class="section__head" data-reveal>
+          <p class="kicker">Mail first</p>
+          <h2>Mail is the one thing that cannot wait.</h2>
+          <p class="section__lede">
+            Incoming mail is received by a dedicated relay, kept in durable
+            storage and recorded before it reaches your mailbox. If your server
+            is briefly away, messages wait and are replayed when it returns. The
+            web app and Drive are never in that path.
+          </p>
+        </header>
+        <ol class="flow" data-reveal aria-label="Path of an incoming message">
+          <li>
+            <b>Sender</b>
+            <span>Anywhere on the internet</span>
+          </li>
+          <li>
+            <b>Inbound relay</b>
+            <span>Accepts the message for you</span>
+          </li>
+          <li>
+            <b>Durable buffer</b>
+            <span>Keeps a copy until delivery</span>
+          </li>
+          <li>
+            <b>Ingest ledger</b>
+            <span>Records, delivers, replays</span>
+          </li>
+          <li class="flow__end">
+            <b>Your mailbox</b>
+            <span>Stalwart, on your server</span>
+          </li>
+        </ol>
+      </section>
+
+      <section class="section" id="self-host">
+        <div class="install">
+          <header class="section__head" data-reveal>
+            <p class="kicker">Self-host</p>
+            <h2>One small server. One Compose file.</h2>
+            <p class="section__lede">
+              Esuno starts on a single small VPS. A step-by-step runbook covers
+              DNS, secrets, storage, backups and verification before you switch
+              your mail over.
+            </p>
+            <ul class="needs">
+              <li>
+                <svg aria-hidden="true"><use href="#check" /></svg>An Ubuntu VPS
+                with Docker Compose
+              </li>
+              <li>
+                <svg aria-hidden="true"><use href="#check" /></svg>A domain you
+                control
+              </li>
+              <li>
+                <svg aria-hidden="true"><use href="#check" /></svg>An
+                S3-compatible bucket
+              </li>
+              <li>
+                <svg aria-hidden="true"><use href="#check" /></svg>An Amazon SES
+                account for sending and receiving
+              </li>
+            </ul>
+          </header>
+          <figure class="terminal" data-reveal>
+            <div class="terminal__bar" aria-hidden="true">
+              <span></span><span></span><span></span>
+              <p>esuno · ubuntu</p>
+            </div>
+            <pre
+              tabindex="0"
+            ><code><span class="c"># abridged, not runnable as is: follow the runbook</span>
+<span class="p">$</span> cp deploy/env.example .env  <span class="c"># domain, storage, mail</span>
+<span class="p">$</span> pnpm install --frozen-lockfile &amp;&amp; pnpm build
+<span class="p">$</span> docker compose run --rm secrets
+<span class="p">$</span> docker compose up -d
+<span class="ok">✔</span> caddy  <span class="ok">✔</span> api  <span class="ok">✔</span> stalwart  <span class="ok">✔</span> postgres  <span class="ok">✔</span> drive</code></pre>
+            <figcaption class="sr-only">
+              Abridged installation commands for Esuno.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section" id="scale">
+        <header class="section__head" data-reveal>
+          <p class="kicker">Scale</p>
+          <h2>Start on one server. <em>Grow without a ceiling.</em></h2>
+          <p class="section__lede">
+            The same Esuno that fits on a small VPS is built to grow with you:
+            for a family, a company or many more. Storage, mail and the web
+            workspace each scale on their own, so you add capacity exactly where
+            you need it.
+          </p>
+        </header>
+        <ol class="scale">
+          <li data-reveal>
+            <div class="nodes nodes--solo" aria-hidden="true"><i></i></div>
+            <p class="scale__step">Day one</p>
+            <h3>One small server</h3>
+            <p>
+              Mail, calendar, files and passwords in a single Compose file, on a
+              modest VPS.
+            </p>
+          </li>
+          <li data-reveal>
+            <div class="nodes nodes--storage" aria-hidden="true">
+              <i></i><b></b>
+            </div>
+            <p class="scale__step">Growing</p>
+            <h3>Storage that keeps up</h3>
+            <p>
+              Files and mail contents can live in S3-compatible object storage,
+              and encrypted backups go there too. Grow it as far as you like.
+            </p>
+          </li>
+          <li data-reveal>
+            <div class="nodes nodes--cluster" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            </div>
+            <p class="scale__step">At scale</p>
+            <h3>As many machines as you need</h3>
+            <p>
+              Independent services, and a mail engine that supports clustering
+              on shared storage. Add servers when you grow, keep one when you
+              don't.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="closing" data-reveal>
+        <svg class="closing__mark" aria-hidden="true">
+          <use href="#esuno-mark" />
+        </svg>
+        <h2>Take your mail <em>home.</em></h2>
+        <p>
+          Your messages, your calendar, your files. On a server with your name
+          on it.
+        </p>
+        <a class="button" href="#self-host">
+          Run Esuno
+          <svg aria-hidden="true"><use href="#arrow" /></svg>
+        </a>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <a class="brand" href="#top" aria-label="Esuno, back to top">
+        <svg class="brand__mark" aria-hidden="true">
+          <use href="#esuno-mark" />
+        </svg>
+        <span class="brand__word">esuno</span>
+      </a>
+      <p>Free software under AGPL-3.0-or-later.</p>
+      <p>© 2026 Esuno</p>
+    </footer>
+  </body>
+</html>

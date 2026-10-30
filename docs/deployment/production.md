@@ -270,6 +270,15 @@ following steps:
    Use the [upgrade and rollback procedure](../operations/vault.md#upgrade-and-rollback)
    before changing the pinned image.
 
+## Optional project website
+
+Caddy can serve the static [project website](../../apps/landing/README.md) on a
+separate origin. Publish its A record (and the `www.` record, if wanted) to the
+server, set `LANDING_SITE_ADDRESS="example.com, www.example.com"` in `.env`, run
+`pnpm build`, and recreate Caddy with
+`docker compose up -d --no-deps --force-recreate --wait caddy`. The `www.` name
+redirects to the bare name. Leave the variable unset to skip it.
+
 ## First administrator
 
 Create a strong initial password in a protected file outside the checkout and

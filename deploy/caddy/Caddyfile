@@ -83,3 +83,39 @@
 		header_up X-Real-IP {remote_host}
 	}
 }
+
+# Optional static project website (apps/landing), on its own origin. A www.
+# address in the list redirects to the same host without the prefix. Errors
+# repeat the headers because deferred headers are skipped on error responses.
+(landing_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+		X-Frame-Options DENY
+		-Server
+	}
+}
+
+{$LANDING_SITE_ADDRESS:landing.localhost} {
+	encode zstd gzip
+	import landing_headers
+
+	@www header_regexp www Host (?i)^www\.(.+)$
+	redir @www https://{re.www.1}{uri} 308
+
+	# The parent directory is mounted so a missing build is a 404, not a
+	# root-owned directory created by Docker in the checkout.
+	root * /landing/dist
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	@pages not path /assets/*
+	header @pages Cache-Control "no-cache"
+	file_server
+
+	handle_errors {
+		import landing_headers
+		respond "{err.status_code} {err.status_text}"
+	}
+}
