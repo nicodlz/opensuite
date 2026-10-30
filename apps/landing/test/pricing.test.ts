@@ -21,7 +21,7 @@ function content(source: string, attribute: string): string {
 }
 
 describe("landing catalogue", () => {
-  it("matches every displayed price, annual saving and storage figure", () => {
+  it("matches every displayed price, annual saving, storage and address figure", () => {
     const pricing = content(html, 'id="pricing"');
     // Guard against new, untested monetary or storage figures in pricing.
     expect(pricing.match(/€\d+(?:\.\d{2})?/g)).toHaveLength(8);
@@ -49,6 +49,7 @@ describe("landing catalogue", () => {
       expect(content(card, "data-storage")).toBe(
         `${plan.storageBytes / 1_000_000_000} GB`,
       );
+      expect(content(card, "data-addresses")).toBe(String(plan.addressLimit));
     }
   });
 });
