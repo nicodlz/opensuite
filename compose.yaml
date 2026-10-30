@@ -47,6 +47,7 @@ services:
         chown 2000:1000 /secrets/stalwart-admin /secrets/stalwart-admin/password
         chmod 0550 /secrets/stalwart-admin
         chmod 0440 /secrets/stalwart-admin/password
+        generate drive-database 999
         chown 999:1000 /secrets/app-database /secrets/app-database/password
         chmod 0550 /secrets/app-database
         chmod 0440 /secrets/app-database/password
@@ -223,9 +224,8 @@ services:
       dockerfile: apps/drive/Dockerfile
     image: opensuite-drive:local
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-opensuite}
       POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
-      POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
+      DRIVE_DATABASE_PASSWORD_FILE: /run/opensuite/drive-database/password
       DRIVE_SESSION_API: ${DRIVE_SESSION_API:-http://api:3000}
       DRIVE_S3_ENDPOINT: ${DRIVE_S3_ENDPOINT:-http://localstack:4566}
       DRIVE_S3_PUBLIC_ENDPOINT: ${DRIVE_S3_PUBLIC_ENDPOINT:-http://localhost:4566}
@@ -239,10 +239,10 @@ services:
     volumes:
       - type: volume
         source: secrets
-        target: /run/opensuite/postgres
+        target: /run/opensuite/drive-database
         read_only: true
         volume:
-          subpath: postgres
+          subpath: drive-database
     depends_on:
       drive-migrate:
         condition: service_completed_successfully
@@ -271,6 +271,8 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-opensuite}
       POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
+      POSTGRES_DB: ${POSTGRES_DB:-opensuite}
+      DRIVE_DATABASE_PASSWORD_FILE: /run/opensuite/drive-database/password
       POSTGRES_HOST: postgres
       POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
     volumes:
@@ -280,7 +282,15 @@ services:
         read_only: true
         volume:
           subpath: postgres
+      - type: volume
+        source: secrets
+        target: /run/opensuite/drive-database
+        read_only: true
+        volume:
+          subpath: drive-database
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 

@@ -2,8 +2,8 @@ import type { DriveCommand, DriveOutput } from "@opensuite/contracts";
 import { ORPCError } from "@orpc/server";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { PrismaClient, Entry } from "../db/generated/index.js";
-import type { Storage } from "../adapters/storage.ts";
+import type { PrismaClient, Entry, Prisma } from "../db/generated/index.js";
+import { UploadMismatchError, type Storage } from "../adapters/storage.ts";
 import { reserveQuota } from "./quota.ts";
 import { createLinkToken, hashLinkToken } from "../sharing/tokens.ts";
 
@@ -31,6 +31,36 @@ const creatorShare = (user: string, owner: string) =>
           create: { id: randomUUID(), userId: user, access: "write" },
         },
       };
+
+const destinationOwner = async (
+  client: PrismaClient | Prisma.TransactionClient,
+  user: string,
+  id: string | null,
+  expectedOwner?: string,
+) => {
+  if (id === null) {
+    if (expectedOwner !== undefined && expectedOwner !== user) throw missing();
+    return user;
+  }
+  const item = await client.entry.findFirst({
+    where: {
+      id,
+      ...(expectedOwner === undefined ? {} : { ownerId: expectedOwner }),
+      kind: "folder",
+      state: "ready",
+      trashedAt: null,
+      OR: [
+        { ownerId: user },
+        { shares: { some: { userId: user, access: "write" } } },
+      ],
+    },
+  });
+  if (item === null) throw missing();
+  return item.ownerId;
+};
+const lockOwner = async (tx: Prisma.TransactionClient, owner: string) => {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${owner}, 0))`;
+};
 
 export const createDrive = (
   db: PrismaClient,
@@ -66,21 +96,26 @@ export const createDrive = (
     if (entry === null) throw missing();
     return entry;
   };
-  const parent = async (user: string, id: string | null, owner: string) => {
-    if (id === null) return;
-    const item = await get(user, id, "owner");
-    if (
-      item.ownerId !== owner ||
-      item.kind !== "folder" ||
-      item.state !== "ready"
-    )
-      throw missing();
-  };
-  const writableOwner = async (user: string, id: string | null) => {
-    if (id === null) return user;
-    const item = await get(user, id, "write");
-    if (item.kind !== "folder" || item.state !== "ready") throw missing();
-    return item.ownerId;
+  // Bound both request rate and memory use. The state claim below also prevents
+  // concurrent verification of the same upload across service instances.
+  const finishAttempts = new Map<string, { count: number; until: number }>();
+  const limitFinish = (user: string) => {
+    const now = Date.now();
+    for (const [key, value] of finishAttempts)
+      if (value.until <= now) finishAttempts.delete(key);
+    const current = finishAttempts.get(user);
+    if (current !== undefined && current.count >= 10)
+      throw new ORPCError("TOO_MANY_REQUESTS", {
+        message: "Too many upload finalizations",
+      });
+    if (current !== undefined) current.count++;
+    else {
+      if (finishAttempts.size >= 10_000)
+        throw new ORPCError("TOO_MANY_REQUESTS", {
+          message: "Too many upload finalizations",
+        });
+      finishAttempts.set(user, { count: 1, until: now + 60_000 });
+    }
   };
   const file = async (user: string, id: string) => {
     const entry = await get(user, id);
@@ -134,68 +169,80 @@ export const createDrive = (
         return { entries: entries.map(visible) };
       }
       case "folder": {
-        const owner = await writableOwner(user, input.parentId);
-        const entry = await db.entry.create({
-          data: {
-            id: randomUUID(),
-            ownerId: owner,
-            parentId: input.parentId,
-            name: input.name,
-            ...creatorShare(user, owner),
-            kind: "folder",
-            state: "ready",
-          },
-        });
-        return visible(entry);
-      }
-      case "upload": {
-        const owner = await writableOwner(user, input.parentId);
-        const id = randomUUID();
-        await db.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${owner}, 0))`;
-          const totals = z
-            .array(z.object({ total: z.bigint() }))
-            .parse(
-              await tx.$queryRaw`SELECT COALESCE(SUM("size"), 0)::bigint AS total FROM "Entry" WHERE "ownerId" = ${owner} AND kind = 'file'`,
-            );
-          if (
-            reserveQuota(
-              totals[0]?.total ?? 0n,
-              BigInt(input.size),
-              BigInt(quota),
-            ).isErr()
-          )
-            throw new ORPCError("FORBIDDEN", { message: "Quota exceeded" });
-          await tx.entry.create({
+        const owner = await destinationOwner(db, user, input.parentId);
+        return db.$transaction(async (tx) => {
+          await lockOwner(tx, owner);
+          await destinationOwner(tx, user, input.parentId, owner);
+          const entry = await tx.entry.create({
             data: {
-              id,
+              id: randomUUID(),
               ownerId: owner,
               parentId: input.parentId,
               name: input.name,
               ...creatorShare(user, owner),
-              kind: "file",
-              state: "pending",
-              size: BigInt(input.size),
-              checksum: input.checksum,
-              contentType: input.contentType,
-              expiresAt: new Date(Date.now() + 300_000),
+              kind: "folder",
+              state: "ready",
             },
           });
+          return visible(entry);
         });
+      }
+      case "upload": {
+        const owner = await destinationOwner(db, user, input.parentId);
+        const id = randomUUID();
+        const uploadState: { id: string | null } = { id: null };
         try {
-          const upload = await storage.initiate(
-            id,
-            input.contentType,
-            input.multipart,
-            input.size,
+          const upload = await db.$transaction(
+            async (tx) => {
+              await lockOwner(tx, owner);
+              await destinationOwner(tx, user, input.parentId, owner);
+              const totals = z
+                .array(z.object({ total: z.bigint() }))
+                .parse(
+                  await tx.$queryRaw`SELECT COALESCE(SUM("size"), 0)::bigint AS total FROM "Entry" WHERE "ownerId" = ${owner} AND kind = 'file' AND (state NOT IN ('pending', 'failed') OR "expiresAt" IS NULL OR "expiresAt" > clock_timestamp())`,
+                );
+              if (
+                reserveQuota(
+                  totals[0]?.total ?? 0n,
+                  BigInt(input.size),
+                  BigInt(quota),
+                ).isErr()
+              )
+                throw new ORPCError("FORBIDDEN", { message: "Quota exceeded" });
+              await tx.entry.create({
+                data: {
+                  id,
+                  ownerId: owner,
+                  parentId: input.parentId,
+                  name: input.name,
+                  ...creatorShare(user, owner),
+                  kind: "file",
+                  state: "pending",
+                  size: BigInt(input.size),
+                  checksum: input.checksum,
+                  contentType: input.contentType,
+                  expiresAt: new Date(Date.now() + 300_000),
+                },
+              });
+              const started = await storage.initiate(
+                id,
+                input.contentType,
+                input.multipart,
+                input.size,
+              );
+              uploadState.id = started.uploadId;
+              await tx.entry.update({
+                where: { id },
+                data: { uploadId: uploadState.id },
+              });
+              return started;
+            },
+            { timeout: 30_000 },
           );
-          await db.entry.update({
-            where: { id },
-            data: { uploadId: upload.uploadId },
-          });
           return { id, url: upload.url, expiresIn: 300 };
         } catch (error) {
-          await db.entry.delete({ where: { id } });
+          if (uploadState.id !== null)
+            await storage.remove(id, null, uploadState.id);
           throw error;
         }
       }
@@ -203,6 +250,15 @@ export const createDrive = (
         const entry = await get(user, input.id, "write");
         if (entry.state !== "pending" || entry.uploadId === null)
           throw invalid("No multipart upload");
+        if (entry.expiresAt === null || entry.expiresAt <= new Date())
+          throw invalid("Upload expired");
+        const expiresIn = Math.min(
+          300,
+          Math.max(
+            1,
+            Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000),
+          ),
+        );
         const partSize = 5 * 1024 * 1024;
         const remaining =
           Number(entry.size) - (input.partNumber - 1) * partSize;
@@ -213,11 +269,13 @@ export const createDrive = (
             entry.uploadId,
             input.partNumber,
             Math.min(remaining, partSize),
+            expiresIn,
           ),
-          expiresIn: 300,
+          expiresIn,
         };
       }
       case "finish": {
+        limitFinish(user);
         const entry = await get(user, input.id, "write");
         if (
           entry.state !== "pending" ||
@@ -225,6 +283,8 @@ export const createDrive = (
           entry.contentType === null
         )
           throw invalid("Upload is not pending");
+        if (entry.expiresAt === null || entry.expiresAt <= new Date())
+          throw invalid("Upload expired");
         if ((entry.uploadId === null) !== (input.parts === undefined))
           throw invalid("Invalid multipart parts");
         if (
@@ -235,16 +295,21 @@ export const createDrive = (
             input.parts.some((p, index) => p.partNumber !== index + 1))
         )
           throw invalid("Parts must be consecutive");
-        const claim = await db.entry.updateMany({
-          where: {
-            id: entry.id,
-            ownerId: entry.ownerId,
-            state: "pending",
-            trashedAt: null,
-          },
-          data: { state: "verifying" },
+        const claim = await db.$transaction(async (tx) => {
+          await lockOwner(tx, entry.ownerId);
+          return tx.entry.updateMany({
+            where: {
+              id: entry.id,
+              ownerId: entry.ownerId,
+              state: "pending",
+              trashedAt: null,
+              expiresAt: { gt: new Date() },
+            },
+            data: { state: "verifying" },
+          });
         });
-        if (claim.count !== 1) throw invalid("Upload already being finalized");
+        if (claim.count !== 1)
+          throw invalid("Upload expired or already being finalized");
         try {
           if (entry.uploadId !== null && input.parts !== undefined) {
             await storage.complete(entry.id, entry.uploadId, input.parts);
@@ -269,11 +334,16 @@ export const createDrive = (
               expiresAt: null,
             },
           });
+          // A failure to remove staging must not roll back an already committed entry.
+          await storage.removeStaging(entry.id).catch(() => {});
           return visible(result);
         } catch (error) {
           await db.entry.updateMany({
             where: { id: entry.id, state: "verifying" },
-            data: { state: "pending" },
+            data: {
+              state:
+                error instanceof UploadMismatchError ? "failed" : "pending",
+            },
           });
           throw error;
         }
@@ -304,7 +374,7 @@ export const createDrive = (
       case "move": {
         const original = await get(user, input.id, "write");
         return db.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${original.ownerId}, 0))`;
+          await lockOwner(tx, original.ownerId);
           const entry = await tx.entry.findFirst({
             where: {
               id: original.id,
@@ -318,6 +388,8 @@ export const createDrive = (
           });
           if (entry === null) throw missing();
           if (entry.state !== "ready") throw invalid("Entry is not ready");
+          if (input.parentId === null && entry.ownerId !== user)
+            throw missing();
           if (input.parentId !== null) {
             const destination = await tx.entry.findFirst({
               where: {
@@ -356,37 +428,44 @@ export const createDrive = (
         });
       }
       case "trash":
-      case "restore": {
-        const entry = await get(user, input.id, "owner", true);
-        if (entry.state === "verifying")
-          throw invalid("Upload is being finalized");
-        if (
-          entry.kind === "folder" &&
-          (await db.entry.count({ where: { parentId: entry.id } })) > 0
-        )
-          throw invalid("Folder must be empty");
-        if (input.action === "restore")
-          await parent(user, entry.parentId, user);
-        return visible(
-          await db.entry.update({
-            where: { id: entry.id },
-            data: { trashedAt: input.action === "trash" ? new Date() : null },
-          }),
-        );
-      }
+      case "restore":
       case "delete": {
-        const entry = await get(user, input.id, "owner", true);
-        if (entry.trashedAt === null || entry.state === "verifying")
-          throw invalid("Trash entry before deleting");
-        if (
-          entry.kind === "folder" &&
-          (await db.entry.count({ where: { parentId: entry.id } })) > 0
-        )
-          throw invalid("Folder must be empty");
-        if (entry.kind === "file")
-          await storage.remove(entry.id, entry.objectKey, entry.uploadId);
-        await db.entry.delete({ where: { id: entry.id } });
-        return { deleted: true };
+        const original = await get(user, input.id, "owner", true);
+        return db.$transaction(
+          async (tx) => {
+            await lockOwner(tx, original.ownerId);
+            const entry = await tx.entry.findFirst({
+              where: { id: original.id, ownerId: user },
+            });
+            if (entry === null) throw missing();
+            if (entry.state === "verifying")
+              throw invalid("Upload is being finalized");
+            if (
+              entry.kind === "folder" &&
+              (await tx.entry.count({ where: { parentId: entry.id } })) > 0
+            )
+              throw invalid("Folder must be empty");
+            if (input.action === "delete") {
+              if (entry.trashedAt === null)
+                throw invalid("Trash entry before deleting");
+              if (entry.kind === "file")
+                await storage.remove(entry.id, entry.objectKey, entry.uploadId);
+              await tx.entry.delete({ where: { id: entry.id } });
+              return { deleted: true };
+            }
+            if (input.action === "restore")
+              await destinationOwner(tx, user, entry.parentId, user);
+            return visible(
+              await tx.entry.update({
+                where: { id: entry.id },
+                data: {
+                  trashedAt: input.action === "trash" ? new Date() : null,
+                },
+              }),
+            );
+          },
+          { timeout: 30_000 },
+        );
       }
       case "share": {
         const entry = await get(user, input.id, "owner");
@@ -458,6 +537,37 @@ export const createDrive = (
       throw missing();
     return link.entry;
   };
-  return { command, file, publicFile };
+  const sweepExpired = async () => {
+    const expired = await db.entry.findMany({
+      where: {
+        state: { in: ["pending", "failed"] },
+        expiresAt: { lte: new Date() },
+      },
+      select: { id: true, ownerId: true },
+      take: 100,
+      orderBy: { expiresAt: "asc" },
+    });
+    await expired.reduce<Promise<void>>(async (previous, candidate) => {
+      await previous;
+      await db.$transaction(
+        async (tx) => {
+          await lockOwner(tx, candidate.ownerId);
+          const entry = await tx.entry.findFirst({
+            where: {
+              id: candidate.id,
+              state: { in: ["pending", "failed"] },
+              expiresAt: { lte: new Date() },
+            },
+          });
+          if (entry === null) return;
+          await storage.remove(entry.id, entry.objectKey, entry.uploadId);
+          await tx.entry.delete({ where: { id: entry.id } });
+        },
+        { timeout: 30_000 },
+      );
+    }, Promise.resolve());
+    return expired.length;
+  };
+  return { command, file, publicFile, sweepExpired };
 };
 export type DriveService = ReturnType<typeof createDrive>;

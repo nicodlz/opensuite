@@ -21,7 +21,7 @@ it("only permits identified safe preview formats", () => {
 describe("Better Auth session adapter", () => {
   it("forwards the cookie, verifies identity and fails closed", async () => {
     const server = createServer((request, response) => {
-      expect(request.url).toBe("/api/auth/get-session?disableCookieCache=true");
+      expect(request.url).toBe("/auth/get-session?disableCookieCache=true");
       expect(request.headers.cookie).toBe("session=valid");
       response.setHeader("content-type", "application/json");
       response.end(

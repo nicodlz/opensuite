@@ -24,8 +24,12 @@ model Entry {
   trashedAt   DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  parent      Entry? @relation("EntryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children    Entry[] @relation("EntryTree")
   shares      Share[]
   links       PublicLink[]
+  @@index([parentId])
+  @@index([state, expiresAt])
   @@index([ownerId, parentId])
   @@index([ownerId, state])
 }
