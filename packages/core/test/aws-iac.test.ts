@@ -85,7 +85,7 @@ const originalTopicStatements = [
 ];
 
 describe("AWS infrastructure ownership and complete policies", () => {
-  it("leaves every receipt rule's recipients to the application after bootstrap", () => {
+  it("keeps recipient changes visible to the operator in every receipt rule", () => {
     const files = readdirSync(moduleDirectory).filter((name) =>
       name.endsWith(".tf"),
     );
@@ -104,9 +104,7 @@ describe("AWS infrastructure ownership and complete policies", () => {
     for (const match of rules) {
       const rule = block(source, match[0], match.index);
       expect(rule).toMatch(/recipients\s*=\s*sort\(tolist\(var\.[a-z_]+\)\)/);
-      expect(block(rule, "lifecycle")).toMatch(
-        /ignore_changes\s*=\s*\[\s*recipients\s*\]/,
-      );
+      expect(rule).not.toMatch(/\bignore_changes\b/);
     }
   });
 
@@ -299,5 +297,36 @@ describe("AWS infrastructure ownership and complete policies", () => {
       normalize("removed { from = aws_ses_domain_mail_from.domain }"),
       normalize("removed { from = aws_iam_user.sending }"),
     ]);
+  });
+  it("grants only read-only SES adoption permissions with explicit identity and region scope", () => {
+    const policy = block(
+      readModule("iam.tf"),
+      'resource "aws_iam_user_policy" "domain_adoption"',
+    );
+    expect(normalize(policy)).toBe(
+      normalize(`resource "aws_iam_user_policy" "domain_adoption" {
+      count = length(var.domain_adoption_domains) > 0 ? 1 : 0
+      name = "\${var.name_prefix}-domain-adoption"
+      user = aws_iam_user.domain_adoption[0].name
+      policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [
+          {
+            Sid = "ReadApprovedIdentities"
+            Effect = "Allow"
+            Action = "ses:GetEmailIdentity"
+            Resource = [for domain in sort(tolist(var.domain_adoption_domains)) : "arn:\${data.aws_partition.current.partition}:ses:\${var.region}:\${data.aws_caller_identity.current.account_id}:identity/\${domain}"]
+          },
+          {
+            Sid = "ReadRegionalSesMetadata"
+            Effect = "Allow"
+            Action = ["ses:GetIdentityVerificationAttributes", "ses:DescribeActiveReceiptRuleSet", "ses:DescribeReceiptRule"]
+            Resource = "*"
+            Condition = { StringEquals = { "aws:RequestedRegion" = var.region } }
+          }
+        ]
+      })
+    }`),
+    );
   });
 });

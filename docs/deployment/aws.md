@@ -60,10 +60,10 @@ alarm_actions = ["<existing-alarm-action-arn>"]
 The two initial recipient lists must be nonempty, lowercase addresses and/or
 domains. SES treats an empty list as a catch-all. Choose values that match the
 intended verified receiving identities, including aliases, subdomains and Bcc,
-and consider SES's 500-recipient rule limit. On initial creation these values
-restrict the rule; after creation they are ignored in favor of runtime changes.
-They must be refreshed and reviewed before any rule replacement: ignoring changes
-does not protect recipients when a rule is created or recreated.
+and consider SES's 500-recipient rule limit. Despite their historical names,
+these variables manage recipients continuously. Update them through the single
+operator-owned IaC workflow; drift appears in plans. Review the exact recipient
+list before any apply or replacement.
 
 `esuno_message_prefix` defaults to `messages/esuno/`; set it to the existing
 dedicated prefix if different. It scopes the Esuno rule's S3 action, the added
@@ -74,7 +74,7 @@ prefix is no longer granted by this module. Ensure the worker's
 that other rules' messages have a safe, separately authorized cleanup process.
 The existing SMTP user and its credentials are managed outside this module. The
 inline policy permits `ses:SendRawEmail` only for the SES identity ARNs and
-`*@domain` From addresses in `esuno_sending_domains`. Runtime domain creation
+`*@domain` From addresses in `esuno_sending_domains`. Domain adoption
 does not extend that policy: the operator must review and update it for each
 additional sending domain. Other attached policies can also grant access; review
 the user's effective permissions, including restrictions and deny cases. Derive
@@ -85,15 +85,24 @@ supported. Provision and rotate ingestion credentials separately.
 
 ## SES ownership and activation
 
-The application owns per-domain SES identities, verification and receipt-rule
-recipients. OpenTofu creates and manages both rule sets, the rules' S3/SNS
-actions and other rule settings, plus the bucket, topic, queues, DLQs, IAM and
+The operator owns the whole receipt rule, including recipients, in one OpenTofu
+state and separately manages SES identities and verification. OpenTofu manages
+both rule sets, the rules' S3/SNS actions, bucket, topic, queues, DLQs, IAM and
 policies. It does not manage domain identities, DKIM or custom MAIL FROM.
-`ignore_changes = [recipients]` on both rules prevents routine plans from
-reverting application-managed recipients while retaining IaC ownership of the
-rule actions. The application creates or reuses identities and obtains
-verification and Easy DKIM records; see [domain operations](../operations/domains.md).
-Custom MAIL FROM, if needed, needs separate ownership and DNS configuration.
+The API can opt into read-only adoption of explicitly approved, already verified
+domains with existing recipients; it does not create or verify an SES identity
+or update a rule. See [domain operations](../operations/domains.md).
+
+Set `domain_adoption_domains` to approved domains to create the optional
+separate IAM user and its read-only policy; an empty set creates neither.
+`ses:GetEmailIdentity` is scoped to those identity ARNs. SES v1 requires
+`Resource: "*"` for `GetIdentityVerificationAttributes`,
+`DescribeActiveReceiptRuleSet`, and `DescribeReceiptRule`; they are constrained
+by `aws:RequestedRegion`, which limits the region but not individual identities
+or rules. They can reveal other metadata in that region. No SES write,
+`iam:PassRole`, S3, SNS or SQS permission is granted. Provision credentials
+outside state and store them in the API's protected secret file. Verify the real
+policy and its effective permissions before any approved apply.
 
 The Esuno rule set is defined but **not activated** by this module. The original
 rule set is also inactive by default; `activate_rule_set = true` explicitly
@@ -103,8 +112,8 @@ all existing rules, ordering, recipients and permissions before a separately
 approved migration or activation. Do not manage the same active set from two
 states. The application locates the configured rule name in the **active** set;
 an inactive rule will not receive mail and cannot be updated by the application.
-Serialize domain changes, infrastructure changes and operators: the application
-updates a whole rule, and AWS provides no conditional update. Confirm the
+Serialize infrastructure changes and operators: SES updates replace a whole
+rule, and AWS provides no conditional update. Confirm the
 actual active set, recipient list and S3/SNS actions before enabling the domain
 service. SES inbound TLS is optional; the VPS SMTP relay must use STARTTLS and
 certificate verification.
@@ -185,8 +194,8 @@ account and region. These are account and state operations, not offline checks:
    replacement, policy, lifecycle, queue name, recipient, IAM or activation
    change with the operator and repeat the plan. Inspect the move annotations
    and confirm no replacements, deletions, or unintended policy changes; a
-   state move is not itself proof that the remote attributes match. In particular, ignored
-   recipients will not show drift, so inspect them directly in AWS. Queue
+   state move is not itself proof that the remote attributes match. Inspect
+   the full recipient lists in the plan and directly in AWS. Queue
    `max_message_size` drift is also intentionally ignored; inspect it separately.
    The queue defaults now derive as `<prefix>-inbound` and
    `<prefix>-inbound-dlq`; use the optional name variables to preserve existing

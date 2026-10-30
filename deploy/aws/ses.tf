@@ -17,11 +17,6 @@ resource "aws_ses_receipt_rule" "inbound" {
     position          = 1
   }
 
-  # SES domain management owns this field after initial creation.
-  lifecycle {
-    ignore_changes = [recipients]
-  }
-
   depends_on = [
     aws_s3_bucket_policy.buffer,
     aws_s3_bucket_server_side_encryption_configuration.buffer,
@@ -56,10 +51,6 @@ resource "aws_ses_receipt_rule" "esuno" {
     object_key_prefix = var.esuno_message_prefix
     topic_arn         = aws_sns_topic.inbound.arn
     position          = 1
-  }
-
-  lifecycle {
-    ignore_changes = [recipients]
   }
 
   depends_on = [

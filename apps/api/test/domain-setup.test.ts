@@ -41,6 +41,9 @@ async function fixture() {
   const env = {
     DOMAINS_SES_ENABLED: "true",
     DOMAINS_SES_RULE: "inbound",
+    DOMAINS_SES_RULE_SET: "active",
+    DOMAINS_SES_MODE: "adopt",
+    DOMAINS_ADOPT_DOMAINS: "example.test",
     DOMAINS_STALWART_ORIGIN: "http://localhost:8080",
     DOMAINS_STALWART_USER: "manager",
     DOMAINS_STALWART_PASSWORD_FILE: password,
@@ -65,6 +68,8 @@ describe("domain API configuration", () => {
     expect(createSesDomainProvider).toHaveBeenCalledWith({
       enabled: true,
       ruleName: "inbound",
+      ruleSetName: "active",
+      approvedDomains: ["example.test"],
       credentials: {
         accessKeyId: "test-id",
         secretAccessKey: "test-secret",
@@ -88,6 +93,8 @@ describe("domain API configuration", () => {
     expect(createSesDomainProvider).toHaveBeenCalledWith({
       enabled: true,
       ruleName: "inbound",
+      ruleSetName: "active",
+      approvedDomains: ["example.test"],
     });
   });
 
@@ -101,6 +108,23 @@ describe("domain API configuration", () => {
     const stop = startDomainJob(store, service, "", () => undefined);
     expect(stop).toBeTypeOf("function");
     await stop();
+  });
+
+  it("requires explicit adoption mode, rule set, and exact approved domains", async () => {
+    const { env } = await fixture();
+    await Promise.all(
+      [
+        { DOMAINS_SES_MODE: "" },
+        { DOMAINS_SES_RULE_SET: "" },
+        { DOMAINS_ADOPT_DOMAINS: "" },
+        { DOMAINS_ADOPT_DOMAINS: "*.example.test" },
+      ].map(async (missing) =>
+        expect(
+          configureDomains({ ...env, ...missing }, store),
+        ).rejects.toBeDefined(),
+      ),
+    );
+    expect(createSesDomainProvider).not.toHaveBeenCalled();
   });
 
   it("rejects malformed credentials without including their contents in the error", async () => {

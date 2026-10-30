@@ -6,7 +6,7 @@ variable "region" {
 
 variable "initial_recipients" {
   type        = set(string)
-  description = "Nonempty bootstrap recipients for the original rule; subsequent changes belong to the application."
+  description = "Operator-managed nonempty recipients for the original rule."
   validation {
     condition = length(var.initial_recipients) > 0 && alltrue([
       for recipient in var.initial_recipients : can(regex("^([a-z0-9.!#$%&'+/=?^_`{|}~-]+@)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", recipient))
@@ -17,7 +17,7 @@ variable "initial_recipients" {
 
 variable "esuno_initial_recipients" {
   type        = set(string)
-  description = "Nonempty bootstrap recipients for the Esuno rule; subsequent changes belong to the application."
+  description = "Operator-managed nonempty recipients for the Esuno rule."
   validation {
     condition = length(var.esuno_initial_recipients) > 0 && alltrue([
       for recipient in var.esuno_initial_recipients : can(regex("^([a-z0-9.!#$%&'+/=?^_`{|}~-]+@)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", recipient))
@@ -100,4 +100,16 @@ variable "alarm_actions" {
   type        = list(string)
   description = "Existing CloudWatch alarm action ARNs; arrange and test operator notifications."
   default     = []
+}
+
+variable "domain_adoption_domains" {
+  type        = set(string)
+  description = "Approved domains for read-only API adoption; empty disables the dedicated IAM user."
+  default     = []
+  validation {
+    condition = alltrue([
+      for domain in var.domain_adoption_domains : can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", domain)) && length(domain) <= 253
+    ])
+    error_message = "Use lowercase DNS domains without wildcards."
+  }
 }

@@ -15,3 +15,4 @@ output "receipt_rule_name" { value = aws_ses_receipt_rule.inbound.name }
 output "esuno_receipt_rule_set" { value = aws_ses_receipt_rule_set.esuno.rule_set_name }
 output "esuno_receipt_rule_name" { value = aws_ses_receipt_rule.esuno.name }
 output "esuno_message_prefix" { value = var.esuno_message_prefix }
+output "domain_adoption_iam_user" { value = try(aws_iam_user.domain_adoption[0].name, null) }
