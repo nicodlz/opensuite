@@ -21,6 +21,7 @@ export interface ApiContext {
   readonly billing: StripeBilling | undefined;
   readonly claims: ClaimService | undefined;
   readonly publicCheckoutLimit: () => boolean;
+  readonly claimLimit: (kind: "status" | "claim") => boolean;
   readonly push:
     | {
         publicKey: string;

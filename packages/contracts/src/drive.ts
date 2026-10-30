@@ -116,6 +116,10 @@ export const DriveOutputSchema = z.union([
 export type DriveOutput = z.infer<typeof DriveOutputSchema>;
 export const driveContract = {
   command: oc
+    .errors({
+      NO_PLAN: { status: 403, message: "No active plan" },
+      QUOTA_EXCEEDED: { status: 403, message: "Quota exceeded" },
+    })
     .route({
       method: "POST",
       path: "/v1/command",

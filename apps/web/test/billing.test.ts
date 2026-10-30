@@ -4,7 +4,7 @@ import { bytes, price, statusText, usageState } from "../src/billing/model.ts";
 describe("billing presentation", () => {
   it("formats prices and storage", () => {
     expect(price(349, "month")).toBe("€3.49/month");
-    expect(price(3588, "year")).toBe("€2.99/month, billed €35.88 yearly");
+    expect(price(3588, "year")).toBe("€2.99/month, billed €35.88 per year");
     expect(bytes(1_500_000_000)).toBe("1.5 GB");
   });
   it("maps measured usage at each boundary", () => {

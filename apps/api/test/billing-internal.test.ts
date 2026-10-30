@@ -159,3 +159,79 @@ it("reports automatic-tax Checkout failures as unavailable", async () => {
     await app.close();
   }
 });
+
+it("limits status and claim calls per client and maps missing Stripe sessions", async () => {
+  let statuses = 0;
+  let claims = 0;
+  const service = {} as NonNullable<
+    Parameters<typeof buildServer>[0]["billing"]
+  >;
+  const claimService = {
+    status: () => {
+      statuses++;
+      return Promise.resolve({
+        state: "pending",
+        plan: null,
+        interval: null,
+        domain: "example.test",
+      });
+    },
+    claim: () => {
+      claims++;
+      return Promise.reject(
+        Object.assign(new Error("missing"), { code: "resource_missing" }),
+      );
+    },
+  } as unknown as NonNullable<Parameters<typeof buildServer>[0]["claims"]>;
+  const app = await buildServer({
+    config: { logLevel: "silent" },
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: () => 0,
+    }),
+    monotonicMs: () => 0,
+    identity: {
+      handler: () => Promise.resolve(new Response()),
+      publicOrigin: "https://mail.example.test",
+    },
+    billing: service,
+    claims: claimService,
+  });
+  try {
+    const statusResponses = await Promise.all(
+      Array.from({ length: 61 }, () =>
+        app.inject("/billing/checkout/cs_test_a"),
+      ),
+    );
+    expect(
+      statusResponses.filter((response) => response.statusCode === 429),
+    ).toHaveLength(1);
+    expect(statuses).toBe(60);
+    const claimResponses = await Promise.all(
+      Array.from({ length: 11 }, () =>
+        app.inject({
+          method: "POST",
+          url: "/billing/claim",
+          headers: { origin: "https://mail.example.test" },
+          payload: {
+            sessionId: "cs_test_a",
+            name: "User",
+            localPart: "member",
+            password: "a-long-password",
+          },
+        }),
+      ),
+    );
+    expect(
+      claimResponses.filter((response) => response.statusCode === 400),
+    ).toHaveLength(10);
+    expect(
+      claimResponses.filter((response) => response.statusCode === 429),
+    ).toHaveLength(1);
+    expect(claims).toBe(10);
+  } finally {
+    await app.close();
+  }
+});

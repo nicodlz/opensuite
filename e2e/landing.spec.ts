@@ -3,7 +3,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 const appOrigin =
-  process.env["VITE_ESUNO_APP_ORIGIN"] || "https://mail.cleito.tech";
+  process.env["VITE_ESUNO_APP_ORIGIN"] || "https://mail.esuno.net";
 const screenshots = "node_modules/.cache/landing-screenshots";
 
 async function checkAxe(page: Page) {

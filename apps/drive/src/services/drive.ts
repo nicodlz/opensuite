@@ -237,23 +237,40 @@ export const createDrive = (
               try {
                 entitlement =
                   typeof quota === "function"
-                    ? await quota(owner)
+                    ? await Promise.race([
+                        quota(owner),
+                        new Promise<never>((_, reject) =>
+                          setTimeout(
+                            () => reject(new Error("entitlements timeout")),
+                            1500,
+                          ),
+                        ),
+                      ])
                     : { quotaBytes: quota, mailBytes: 0, uploadsAllowed: true };
               } catch {
                 throw new ORPCError("SERVICE_UNAVAILABLE", {
                   message: "Entitlements unavailable",
                 });
               }
+              if (!entitlement.uploadsAllowed)
+                throw new ORPCError("NO_PLAN", {
+                  status: 403,
+                  defined: true,
+                  message: "No active plan",
+                });
               if (
-                !entitlement.uploadsAllowed ||
-                (entitlement.quotaBytes !== null &&
-                  reserveQuota(
-                    (totals[0]?.total ?? 0n) + BigInt(entitlement.mailBytes),
-                    BigInt(input.size),
-                    BigInt(entitlement.quotaBytes),
-                  ).isErr())
+                entitlement.quotaBytes !== null &&
+                reserveQuota(
+                  (totals[0]?.total ?? 0n) + BigInt(entitlement.mailBytes),
+                  BigInt(input.size),
+                  BigInt(entitlement.quotaBytes),
+                ).isErr()
               )
-                throw new ORPCError("FORBIDDEN", { message: "Quota exceeded" });
+                throw new ORPCError("QUOTA_EXCEEDED", {
+                  status: 403,
+                  defined: true,
+                  message: "Quota exceeded",
+                });
               await tx.entry.create({
                 data: {
                   id,
@@ -286,6 +303,7 @@ export const createDrive = (
             },
             { timeout: 30_000 },
           );
+          notifyQuota(owner);
           return { id, url: upload.url, expiresIn: 300 };
         } catch (error) {
           if (uploadState.id !== null)
@@ -616,6 +634,7 @@ export const createDrive = (
         },
         { timeout: 30_000 },
       );
+      notifyQuota(candidate.ownerId);
     }, Promise.resolve());
     return expired.length;
   };

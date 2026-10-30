@@ -1,3 +1,4 @@
+import { ORPCError } from "@orpc/client";
 import * as React from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import type { DriveCommand } from "@opensuite/contracts";
@@ -17,7 +18,7 @@ import {
   type FormEvent,
 } from "react";
 import { billingQuery } from "../billing/client.ts";
-import { bytes, usageState } from "../billing/model.ts";
+import { bytes } from "../billing/model.ts";
 import { activeLayout, hubHref } from "../origins.ts";
 import { AppShell, SidebarItem } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
@@ -707,7 +708,10 @@ export function DrivePage() {
                   setTransfer({ ...current, phase, progress }),
               );
             } catch (error) {
-              if (error instanceof Error && error.message === "Quota exceeded")
+              if (
+                error instanceof ORPCError &&
+                (error.code === "QUOTA_EXCEEDED" || error.code === "NO_PLAN")
+              )
                 quotaExceeded = true;
               throw error;
             }
@@ -1180,10 +1184,11 @@ export function DrivePage() {
       >
         <div className="drive-page">
           {menuAnchor("main")}
-          {storage && usageState(storage) === "over" && (
+          {billingOverview.data?.uploadsAllowed === false && (
             <output className="billing-warning drive-billing-banner">
-              Storage quota reached: new uploads and incoming mail are paused;
-              nothing is deleted.{" "}
+              {billingOverview.data.plan === "none"
+                ? "Choose a plan to enable uploads and incoming mail."
+                : "Storage quota reached: new uploads and incoming mail are paused; nothing is deleted."}{" "}
               <a className="drive-billing-link" href={settingsHref}>
                 Plan &amp; storage
               </a>

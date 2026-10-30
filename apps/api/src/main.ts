@@ -47,6 +47,7 @@ import { createStripeBilling } from "./billing/stripe.ts";
 import { createClaimService } from "./billing/claims.ts";
 import { createWebhookProcessor } from "./billing/webhook.ts";
 import { startQuotaJob } from "./billing/quota-job.ts";
+import { startSubscriptionSync } from "./billing/subscription-sync.ts";
 import { startCustomerMetadataJob } from "./billing/customer-job.ts";
 
 const config = loadConfig(process.env);
@@ -137,12 +138,6 @@ const entitlements = createEntitlements(
   database.value,
   billing.value,
   config.value.aliasPerUserCap,
-  billing.value.mode === "cloud"
-    ? async (subscription) => {
-        if (stripeBilling === undefined) throw new Error("billing unavailable");
-        return stripeBilling.verifySubscription(subscription);
-      }
-    : undefined,
 );
 const driveOrigin = z
   .url()
@@ -334,9 +329,6 @@ const app = await buildServer({
           secret: billing.value.webhookSecret,
           processor: webhookProcessor,
         },
-        ...(billing.value.cancelUrl === undefined
-          ? {}
-          : { publicCheckoutOrigin: new URL(billing.value.cancelUrl).origin }),
       }),
   addresses,
   ...(push === undefined ? {} : { push }),
@@ -355,6 +347,34 @@ const stopCustomerJob =
     : startCustomerMetadataJob(database.value, stripeBilling.client, () =>
         app.log.warn("billing customer synchronization failed"),
       );
+const stopSubscriptionSync =
+  stripeBilling === undefined
+    ? undefined
+    : startSubscriptionSync(
+        database.value,
+        stripeBilling.client,
+        storageMeter.refresh,
+        () => app.log.warn("billing subscription synchronization failed"),
+      );
+const stuckEventsTimer = setInterval(() => {
+  void database.value.stripeEvent
+    .count({
+      where: {
+        processedAt: null,
+        receivedAt: { lt: new Date(Date.now() - 6 * 60 * 60 * 1000) },
+      },
+    })
+    .then((count) => {
+      if (count > 0)
+        app.log.error(
+          { count },
+          "Stripe events unprocessed for over six hours",
+        );
+      return undefined;
+    })
+    .catch(() => app.log.warn("could not count stuck Stripe events"));
+}, 300_000);
+stuckEventsTimer.unref();
 const mailPushConfig = loadMailPushConfig(process.env);
 if (mailPushConfig.isErr())
   app.log.error(
@@ -427,8 +447,10 @@ const timer = setInterval(() => {
 }, 60_000);
 app.addHook("onClose", async () => {
   clearInterval(timer);
+  clearInterval(stuckEventsTimer);
   await stopQuotaJob?.();
   await stopCustomerJob?.();
+  await stopSubscriptionSync?.();
   await stopDomainJob?.();
   await stopMailNotifier?.();
   await stopCalendarReminders?.();

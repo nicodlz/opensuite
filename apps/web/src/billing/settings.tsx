@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   plans,
+  entitledStatuses,
   type BillingInterval,
   type BillingOverview,
   type PlanId,
@@ -76,6 +77,17 @@ export function BillingSettings() {
   const [returned] = useState(() =>
     new URLSearchParams(window.location.search).get("billing"),
   );
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("billing")) {
+      url.searchParams.delete("billing");
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `${url.pathname}${url.search}${url.hash}`,
+      );
+    }
+  }, []);
   const refetch = overview.refetch;
   useEffect(() => {
     if (returned !== "updated") return undefined;
@@ -104,6 +116,10 @@ export function BillingSettings() {
   const subscription = data?.subscription;
   const end = date(subscription?.currentPeriodEnd ?? null);
   const ended = date(subscription?.endedAt ?? null);
+  const entitled =
+    subscription !== null &&
+    subscription !== undefined &&
+    entitledStatuses.some((status) => status === subscription.status);
   const paid = data?.plan === "plus" || data?.plan === "pro";
   const downgradeRisk =
     data?.storage.measured === true &&
@@ -165,16 +181,24 @@ export function BillingSettings() {
               <h2 id="plan-heading">
                 {data.mode === "self-hosted"
                   ? "Self-hosted"
-                  : data.exempt
-                    ? "Operator account"
-                    : paid
-                      ? data.plan === "pro"
-                        ? plans.pro.name
-                        : plans.plus.name
-                      : "No plan"}
+                  : data.source === "grant"
+                    ? "Complimentary plan"
+                    : data.exempt
+                      ? "Operator account"
+                      : paid
+                        ? data.plan === "pro"
+                          ? plans.pro.name
+                          : plans.plus.name
+                        : "No plan"}
               </h2>
               {data.mode === "self-hosted" ? (
                 <p>Self-hosted — no subscription, no Esuno storage quota.</p>
+              ) : data.source === "grant" ? (
+                <p>
+                  {data.exempt
+                    ? "Complimentary — no plan limits"
+                    : `Complimentary plan — ${plans[data.plan === "pro" ? "pro" : "plus"].name}`}
+                </p>
               ) : data.exempt ? (
                 <p>Operator account — no plan limits.</p>
               ) : (
@@ -226,80 +250,85 @@ export function BillingSettings() {
               <h2 id="storage-heading">Storage</h2>
               <StorageUsage storage={data.storage} />
             </section>
-            {data.mode === "cloud" && !data.exempt && (
-              <section
-                className="billing-card"
-                aria-labelledby="choose-heading"
-              >
-                <p className="eyebrow">ESUNO CLOUD</p>
-                <h2 id="choose-heading">
-                  {subscription ? "Change your plan" : "Choose your plan"}
-                </h2>
-                <p>Review the change on Stripe before confirming.</p>
-                <div className="billing-fields">
-                  <label>
-                    Plan
-                    <select
-                      value={plan}
-                      onChange={(event) => {
-                        setPlan(event.target.value === "pro" ? "pro" : "plus");
-                        setConfirm(false);
-                      }}
-                    >
-                      <option value="plus">Plus — 50 GB</option>
-                      <option value="pro">Pro — 500 GB</option>
-                    </select>
-                  </label>
-                  <label>
-                    Billing interval
-                    <select
-                      value={interval}
-                      onChange={(event) =>
-                        setInterval(
-                          event.target.value === "year" ? "year" : "month",
-                        )
-                      }
-                    >
-                      <option value="month">Monthly</option>
-                      <option value="year">Yearly</option>
-                    </select>
-                  </label>
-                </div>
-                <p className="billing-price">
-                  {price(plans[plan].prices[interval].amount, interval)}
-                </p>
-                {confirm && (
-                  <p className="billing-warning" role="alert">
-                    Your usage is above this plan’s quota. Nothing is deleted,
-                    but uploads and incoming mail will pause until usage is
-                    below the limit.
-                  </p>
-                )}
-                <Button
-                  disabled={
-                    busy ||
-                    (paid &&
-                      plan === data.plan &&
-                      interval === subscription?.interval)
-                  }
-                  onClick={() => {
-                    if (downgradeRisk && !confirm) {
-                      setConfirm(true);
-                      return;
-                    }
-                    void redirect(subscription ? "change" : "checkout");
-                  }}
+            {data.mode === "cloud" &&
+              !data.exempt &&
+              data.source !== "grant" && (
+                <section
+                  className="billing-card"
+                  aria-labelledby="choose-heading"
                 >
-                  {busy
-                    ? "Opening Stripe…"
-                    : confirm
-                      ? "Continue with downgrade"
-                      : subscription
-                        ? "Continue to change plan"
-                        : "Continue to checkout"}
-                </Button>
-              </section>
-            )}
+                  <p className="eyebrow">ESUNO CLOUD</p>
+                  <h2 id="choose-heading">
+                    {entitled ? "Change your plan" : "Choose your plan"}
+                  </h2>
+                  <p>Review the change on Stripe before confirming.</p>
+                  <div className="billing-fields">
+                    <label>
+                      Plan
+                      <select
+                        value={plan}
+                        onChange={(event) => {
+                          setPlan(
+                            event.target.value === "pro" ? "pro" : "plus",
+                          );
+                          setConfirm(false);
+                        }}
+                      >
+                        <option value="plus">Plus — 50 GB</option>
+                        <option value="pro">Pro — 500 GB</option>
+                      </select>
+                    </label>
+                    <label>
+                      Billing interval
+                      <select
+                        value={interval}
+                        onChange={(event) => {
+                          setInterval(
+                            event.target.value === "year" ? "year" : "month",
+                          );
+                          setConfirm(false);
+                        }}
+                      >
+                        <option value="month">Monthly</option>
+                        <option value="year">Yearly</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p className="billing-price">
+                    {price(plans[plan].prices[interval].amount, interval)}
+                  </p>
+                  {confirm && (
+                    <p className="billing-warning" role="alert">
+                      Your usage is above this plan’s quota. Nothing is deleted,
+                      but uploads and incoming mail will pause until usage is
+                      below the limit.
+                    </p>
+                  )}
+                  <Button
+                    disabled={
+                      busy ||
+                      (paid &&
+                        plan === data.plan &&
+                        interval === subscription?.interval)
+                    }
+                    onClick={() => {
+                      if (downgradeRisk && !confirm) {
+                        setConfirm(true);
+                        return;
+                      }
+                      void redirect(entitled ? "change" : "checkout");
+                    }}
+                  >
+                    {busy
+                      ? "Opening Stripe…"
+                      : confirm
+                        ? "Continue with downgrade"
+                        : entitled
+                          ? "Continue to change plan"
+                          : "Continue to checkout"}
+                  </Button>
+                </section>
+              )}
             {error && (
               <p className="field-error" role="alert">
                 {error}

@@ -89,8 +89,8 @@ const billingToggle = document.querySelector<HTMLFieldSetElement>(
 );
 if (billingToggle) {
   billingToggle.hidden = false;
-  billingToggle.addEventListener("change", (event) => {
-    const target = event.target;
+  // oxlint-disable-next-line unicorn/consistent-function-scoping
+  const applyInterval = (target: EventTarget | null) => {
     if (!(target instanceof HTMLInputElement) || target.name !== "interval")
       return;
     const interval = target.value;
@@ -108,5 +108,9 @@ if (billingToggle) {
       url.searchParams.set("interval", interval);
       link.href = url.href;
     }
-  });
+  };
+  billingToggle.addEventListener("change", (event) =>
+    applyInterval(event.target),
+  );
+  applyInterval(billingToggle.querySelector('input[name="interval"]:checked'));
 }

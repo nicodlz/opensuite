@@ -23,6 +23,12 @@ const logged = async <T>(
       /^[a-z0-9_]{1,80}$/.test(error.code)
         ? error.code
         : null;
+    if (code === "resource_missing")
+      throw new ORPCError("BAD_REQUEST", {
+        status: 400,
+        defined: true,
+        message: "Checkout cannot be claimed",
+      });
     context.log.error({ stripeCode: code }, "billing request failed");
     throw new ORPCError("SERVICE_UNAVAILABLE", {
       status: 503,
@@ -40,9 +46,8 @@ export const billingRouter = billing.router({
     checkout: context.billing !== undefined,
     pricesIncludeTax: true,
   })),
-  overview: billing.overview
-    .use(requireSession)
-    .handler(async ({ context }) => {
+  overview: billing.overview.use(requireSession).handler(async ({ context }) =>
+    logged(context, async () => {
       const entitlement = await context.entitlements?.get(context.actor.id);
       const usage =
         context.storageMeter === undefined
@@ -55,7 +60,24 @@ export const billingRouter = billing.router({
         mode: entitlement?.mode ?? "self-hosted",
         plan: entitlement?.plan ?? "free",
         exempt: entitlement?.exempt ?? false,
-        uploadsAllowed: entitlement?.uploadsAllowed ?? true,
+        source:
+          entitlement === undefined || entitlement.mode === "self-hosted"
+            ? ("self-hosted" as const)
+            : entitlement.grant
+              ? ("grant" as const)
+              : entitlement.exempt
+                ? ("operator" as const)
+                : entitlement.plan === "none"
+                  ? ("none" as const)
+                  : ("subscription" as const),
+        uploadsAllowed:
+          (entitlement?.uploadsAllowed ?? true) &&
+          !(
+            usage.measured &&
+            entitlement?.quotaBytes !== null &&
+            entitlement?.quotaBytes !== undefined &&
+            usage.usedBytes >= entitlement.quotaBytes
+          ),
         storage: {
           quotaBytes: entitlement === undefined ? null : entitlement.quotaBytes,
           ...usage,
@@ -75,6 +97,7 @@ export const billingRouter = billing.router({
             : null,
       };
     }),
+  ),
   checkout: billing.checkout.handler(({ context, input }) => {
     const service = context.billing;
     if (service === undefined) return disabled();
@@ -100,12 +123,16 @@ export const billingRouter = billing.router({
     const service = context.claims;
     if (context.billing === undefined || service === undefined)
       return disabled();
+    if (!context.claimLimit("status"))
+      throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
     return logged(context, () => service.status(input.sessionId));
   }),
   claim: billing.claim.handler(({ context, input }) => {
     const service = context.claims;
     if (context.billing === undefined || service === undefined)
       return disabled();
+    if (!context.claimLimit("claim"))
+      throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
     return logged(context, () => service.claim(input));
   }),
 });

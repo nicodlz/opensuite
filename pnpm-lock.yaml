@@ -603,6 +603,9 @@ importers:
       '@opensuite/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@opensuite/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@opensuite/design-tokens':
         specifier: workspace:*
         version: link:../../packages/design-tokens

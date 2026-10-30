@@ -1,7 +1,11 @@
 /* oxlint-disable typescript/consistent-type-assertions, typescript/no-unsafe-type-assertion */
 import { expect, it, vi } from "vitest";
 import type Stripe from "stripe";
-import { createPriceResolver, matchesPrice } from "../src/billing/prices.ts";
+import {
+  classifyPrice,
+  createPriceResolver,
+  matchesPrice,
+} from "../src/billing/prices.ts";
 
 it("checks Stripe prices against the catalogue and caches only valid results", async () => {
   const price = {
@@ -26,6 +30,10 @@ it("checks Stripe prices against the catalogue and caches only valid results", a
     expect(
       matchesPrice({ ...price, ...patch } as Stripe.Price, "plus", "month"),
     ).toBe(false);
+  expect(classifyPrice({ ...price, active: false })).toEqual({
+    plan: "plus",
+    interval: "month",
+  });
   const list = vi
     .fn<() => Promise<{ data: Stripe.Price[] }>>()
     .mockResolvedValue({ data: [price] });
@@ -36,6 +44,10 @@ it("checks Stripe prices against the catalogue and caches only valid results", a
   await resolve("plus", "month");
   expect(list).toHaveBeenCalledTimes(1);
   time = 300_001;
+  list.mockResolvedValue({ data: [{ ...price, active: false }] });
+  await expect(resolve("plus", "month")).rejects.toThrow(
+    "Stripe price mismatch",
+  );
   list.mockResolvedValue({ data: [{ ...price, unit_amount: 1 }] });
   await expect(resolve("plus", "month")).rejects.toThrow(
     "Stripe price mismatch",

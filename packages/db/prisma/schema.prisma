@@ -419,6 +419,7 @@ model Subscription {
   endedAt            DateTime?
   latestInvoiceStatus String?
   // Stripe's own timestamp of the state stored here; older reads never win.
+  stripeCreatedAt    DateTime?
   stripeObservedAt   DateTime
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
@@ -442,6 +443,7 @@ model CheckoutClaim {
   sessionId        String    @id
   stripeCustomerId String
   subscriptionId   String    @unique
+  pendingEmail     String?   @unique
   claimedByUserId  String?   @unique
   claimedAt        DateTime?
   expiresAt        DateTime

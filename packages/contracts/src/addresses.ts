@@ -3,32 +3,6 @@ import { z } from "zod";
 import { AliasPrefix } from "./aliases.ts";
 
 export const AddressLocalPart = AliasPrefix;
-export const reservedAddressNames = new Set([
-  "postmaster",
-  "abuse",
-  "hostmaster",
-  "webmaster",
-  "admin",
-  "administrator",
-  "root",
-  "security",
-  "noreply",
-  "no-reply",
-  "support",
-  "billing",
-  "mailer-daemon",
-  "info",
-  "mail",
-  "www",
-  "ftp",
-  "help",
-  "sales",
-  "contact",
-  "privacy",
-  "legal",
-]);
-export const isReservedAddress = (localPart: string) =>
-  reservedAddressNames.has(localPart.toLowerCase());
 const procedure = oc.errors({
   BAD_REQUEST: { status: 400, message: "Invalid address or domain" },
   RESERVED: { status: 400, message: "This address name is reserved" },

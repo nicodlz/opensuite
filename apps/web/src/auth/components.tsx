@@ -35,6 +35,11 @@ const sessionQuery = {
   retry: false,
 };
 export function expireSession() {
+  if (window.location.pathname === "/settings/billing")
+    sessionStorage.setItem(
+      returnKey,
+      `${window.location.pathname}${window.location.search}`,
+    );
   sessionStorage.setItem("auth-session-expired", "1");
   window.dispatchEvent(new Event("opensuite-session-expired"));
 }
@@ -51,7 +56,14 @@ export function Protected({ children }: { children: ReactNode }) {
         // after repeated failures, fall back to its sign-in page.
         if (!startHandoff()) window.location.assign(`${layout.hub}/login`);
       } else if (hadSession.current) expireSession();
-      else void navigate({ to: "/login" });
+      else {
+        if (window.location.pathname === "/settings/billing")
+          sessionStorage.setItem(
+            returnKey,
+            `${window.location.pathname}${window.location.search}`,
+          );
+        void navigate({ to: "/login" });
+      }
     }
   }, [session.isSuccess, session.data, navigate]);
   if (session.isPending)
@@ -120,7 +132,10 @@ export function LoginPage() {
     client.setQueryData(sessionKey, session);
     const pending = sessionStorage.getItem(returnKey);
     sessionStorage.removeItem(returnKey);
-    if (pending?.startsWith("/auth/handoff?")) {
+    if (
+      pending?.startsWith("/auth/handoff?") ||
+      pending?.startsWith("/settings/billing?billing=")
+    ) {
       window.location.assign(pending);
       return;
     }

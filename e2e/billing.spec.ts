@@ -4,6 +4,7 @@ import type { BillingOverview } from "../packages/contracts/src/billing.ts";
 
 const base: BillingOverview = {
   mode: "cloud",
+  source: "subscription",
   plan: "plus",
   exempt: false,
   subscription: {
@@ -49,12 +50,15 @@ const scenarios = {
   no_plan: {
     ...base,
     plan: "none",
+    source: "none",
+    uploadsAllowed: false,
     subscription: null,
     storage: { ...base.storage, quotaBytes: null },
   },
   self_hosted: {
     ...base,
     mode: "self-hosted",
+    source: "self-hosted",
     plan: "free",
     subscription: null,
     storage: { ...base.storage, quotaBytes: null },
@@ -96,7 +100,7 @@ for (const size of ["desktop", "mobile"] as const) {
       ).toBeVisible();
       if (state === "active")
         await expect(
-          page.getByText("€2.99/month, billed €35.88 yearly"),
+          page.getByText("€2.99/month, billed €35.88 per year"),
         ).toBeVisible();
       if (state === "past_due")
         await expect(
@@ -142,6 +146,7 @@ test("settings handle unknown usage, warning, read-only and cancellation", async
   await page.route("**/api/billing", (route) => route.fulfill({ json: data }));
   await page.goto("/settings/billing?billing=updated");
   await expect(page.getByText("Usage temporarily unavailable.")).toBeVisible();
+  await expect(page).toHaveURL(/\/settings\/billing$/);
   await expect(page.getByText(/read-only/)).toBeVisible();
   await expect(page.getByText(/Cancellation scheduled/)).toBeVisible();
   await expect(
@@ -157,6 +162,7 @@ test("operator account has no purchase UI", async ({ page }) => {
   await mockOverview(page, {
     ...base,
     exempt: true,
+    source: "operator",
     storage: { ...base.storage, quotaBytes: null },
   });
   await page.goto("/settings/billing");
@@ -227,9 +233,20 @@ test("downgrade asks for confirmation when current usage exceeds target", async 
   await expect(
     page.getByRole("button", { name: "Continue with downgrade" }),
   ).toBeVisible();
+  await page
+    .getByRole("combobox", { name: "Billing interval" })
+    .selectOption("year");
+  await expect(
+    page.getByRole("button", { name: "Continue with downgrade" }),
+  ).toHaveCount(0);
 });
 test("subscribe chooser, checkout and billing error", async ({ page }) => {
   await live(page);
+  await page.route("**/api/billing/plans", (route) =>
+    route.fulfill({
+      json: { mode: "cloud", checkout: true, pricesIncludeTax: true },
+    }),
+  );
   await page.goto("/subscribe?plan=invalid&interval=month");
   await expect(
     page.getByRole("heading", { name: "Choose Esuno Cloud" }),
@@ -256,7 +273,15 @@ test("subscribe chooser, checkout and billing error", async ({ page }) => {
 });
 test("subscribe follows a checkout URL", async ({ page }) => {
   await live(page);
+  await page.addInitScript(() =>
+    sessionStorage.setItem("auth-fixture-signed-out", "1"),
+  );
   let body: unknown;
+  await page.route("**/api/billing/plans", (route) =>
+    route.fulfill({
+      json: { mode: "cloud", checkout: true, pricesIncludeTax: true },
+    }),
+  );
   await page.route("**/api/billing/checkout", async (route) => {
     body = route.request().postDataJSON();
     await route.fulfill({
@@ -336,7 +361,7 @@ test("Drive shows over quota and maps upload quota errors", async ({
           status: 403,
           json: {
             defined: true,
-            code: "FORBIDDEN",
+            code: "QUOTA_EXCEEDED",
             status: 403,
             message: "Quota exceeded",
           },
@@ -414,4 +439,109 @@ test("settings are accessible from the account menu in dark mode", async ({
   ).toBeVisible();
   await axe(page);
   await shot(page, "settings-active-dark");
+});
+
+test("an ended subscription starts checkout and complimentary plans cannot be purchased", async ({
+  page,
+}) => {
+  await live(page);
+  let overview: BillingOverview = {
+    ...base,
+    plan: "none",
+    source: "none",
+    uploadsAllowed: false,
+    subscription: { ...scenarios.past_due.subscription, status: "canceled" },
+  };
+  await page.route("**/api/billing", (route) =>
+    route.fulfill({ json: overview }),
+  );
+  let checkout = 0;
+  await page.route("**/api/billing/checkout", (route) => {
+    checkout++;
+    return route.fulfill({
+      status: 503,
+      json: {
+        defined: true,
+        code: "SERVICE_UNAVAILABLE",
+        status: 503,
+        message: "Unavailable",
+      },
+    });
+  });
+  await page.goto("/settings/billing");
+  await expect(
+    page.getByRole("heading", { name: "Choose your plan" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Continue to checkout" }).click();
+  await expect.poll(() => checkout).toBe(1);
+  overview = { ...base, source: "grant", subscription: null };
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Complimentary plan" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /checkout|change plan|Manage billing/i }),
+  ).toHaveCount(0);
+});
+
+test("self-hosted subscribe does not request checkout", async ({ page }) => {
+  await live(page);
+  let calls = 0;
+  await page.route("**/api/billing/plans", (route) =>
+    route.fulfill({
+      json: { mode: "self-hosted", checkout: false, pricesIncludeTax: true },
+    }),
+  );
+  await page.route("**/api/billing/checkout", (route) => {
+    calls++;
+    return route.abort();
+  });
+  await page.goto("/subscribe?plan=plus&interval=year");
+  await expect(page.getByText(/Esuno is self-hosted here/)).toBeVisible();
+  expect(calls).toBe(0);
+});
+
+test("welcome explains an unavailable address", async ({ page }) => {
+  await live(page);
+  await page.route("**/api/billing/checkout/cs_test_abc", (route) =>
+    route.fulfill({
+      json: {
+        state: "claimable",
+        plan: "plus",
+        interval: "month",
+        domain: "example.test",
+      },
+    }),
+  );
+  await page.route("**/api/billing/claim", (route) =>
+    route.fulfill({
+      status: 409,
+      json: {
+        defined: true,
+        code: "CONFLICT",
+        status: 409,
+        message: "Unavailable",
+      },
+    }),
+  );
+  await page.goto("/welcome?session_id=cs_test_abc");
+  await page.getByLabel("Name", { exact: true }).fill("Sam");
+  await page.getByLabel("Address", { exact: true }).fill("sam");
+  await page
+    .getByLabel("Password", { exact: true })
+    .fill("a long secure password");
+  await page.getByLabel("Confirm password").fill("a long secure password");
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "This address is unavailable, choose another",
+  );
+});
+
+test("Drive explains when there is no plan", async ({ page }) => {
+  await live(page);
+  await mockOverview(page, scenarios.no_plan);
+  await page.goto("/drive");
+  await expect(
+    page.getByText("Choose a plan to enable uploads and incoming mail."),
+  ).toBeVisible();
 });

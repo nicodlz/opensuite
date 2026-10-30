@@ -347,6 +347,8 @@ following steps:
 
 ## Optional project website
 
+The landing checkout links default to the production app at `https://mail.esuno.net`; set `VITE_ESUNO_APP_ORIGIN` at build time to target a different app origin.
+
 Caddy can serve the static [project website](../../apps/landing/README.md) on a
 separate origin. Publish its A record (and the `www.` record, if wanted) to the
 server, set `LANDING_SITE_ADDRESS="example.com, www.example.com"` in `.env`, run
@@ -945,3 +947,5 @@ must re-enable them once after upgrading. Expired or unauthorized endpoints are 
 push provider returns 401, 403, 404 or 410. Back up the new key pair securely. Mail and
 calendar event producers are added separately; the test button verifies the
 shared push path.
+
+Drive uses cloud entitlements only when `ESUNO_DEPLOYMENT_MODE=cloud`; self-hosted Drive uses its local `DRIVE_QUOTA_BYTES` setting.

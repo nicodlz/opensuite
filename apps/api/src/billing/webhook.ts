@@ -99,6 +99,10 @@ export function createWebhookProcessor(
       });
       return;
     }
+    await db.stripeEvent.updateMany({
+      where: { id: event.id, processedAt: null },
+      data: { attempts: { increment: 1 } },
+    });
     const touched = await db.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${event.id}, 71031))`;
@@ -107,10 +111,6 @@ export function createWebhookProcessor(
         });
         if (recorded.processedAt !== null)
           return { duplicate: true, userId: null };
-        await tx.stripeEvent.update({
-          where: { id: event.id },
-          data: { attempts: { increment: 1 } },
-        });
         const ignore = async () => {
           await tx.stripeEvent.update({
             where: { id: event.id },
@@ -137,22 +137,25 @@ export function createWebhookProcessor(
           subscriptionId = objectId(session.subscription);
         } else if (event.type.startsWith("customer.subscription.")) {
           const original = subscriptionEvent.safeParse(event.data.object);
-          const price = original.success
-            ? original.data.items.data[0]?.price
-            : undefined;
-          if (!original.success || original.data.metadata?.["esuno"] !== "1")
-            return ignore();
+          if (!original.success) return ignore();
+          subscriptionId = original.data.id;
+          const price = original.data.items.data[0]?.price;
           if (
+            original.data.metadata?.["esuno"] !== "1" ||
             original.data.items.data.length !== 1 ||
-            price?.lookup_key === null ||
             price === undefined ||
+            price.lookup_key === null ||
             !keys.has(price.lookup_key) ||
             price.metadata?.["esuno"] !== "1"
           ) {
-            logUnknown(event.id, event.type);
-            return ignore();
+            // Unknown objects are ignored unless this ID is already ours, in
+            // which case inspect live state so an old active row cannot linger.
+            const known = await tx.subscription.findUnique({
+              where: { id: subscriptionId },
+              select: { id: true },
+            });
+            if (known === null) return ignore();
           }
-          subscriptionId = original.data.id;
         } else {
           const original = invoiceEvent.safeParse(event.data.object);
           const details = original.success
@@ -203,27 +206,61 @@ export function createWebhookProcessor(
         });
         const customerId = objectId(current.customer);
         if (customerId === undefined) throw new Error("customer unavailable");
+        const existing = await tx.subscription.findUnique({
+          where: { id: subscriptionId },
+        });
+        const rejectExisting = async () => {
+          if (existing === null) return ignore();
+          await tx.subscription.update({
+            where: { id: subscriptionId },
+            data: { status: "unowned", stripeObservedAt: new Date() },
+          });
+          await tx.stripeEvent.update({
+            where: { id: event.id },
+            data: { ignoredAt: new Date(), processedAt: new Date() },
+          });
+          logUnknown(event.id, event.type);
+          return { duplicate: false, userId: existing.userId };
+        };
         const currentItem = current.items.data[0];
-        if (current.metadata["esuno"] !== "1") return ignore();
+        if (
+          current.metadata["esuno"] !== "1" ||
+          current.metadata["integration"] !== BILLING_INTEGRATION ||
+          (existing !== null && existing.stripeCustomerId !== customerId)
+        )
+          return rejectExisting();
         if (
           current.items.data.length !== 1 ||
           currentItem === undefined ||
           currentItem.quantity !== 1 ||
           classifyPrice(currentItem.price) === null
         ) {
-          logUnknown(event.id, event.type);
-          return ignore();
+          return rejectExisting();
         }
-        const customer = await stripe.customers.retrieve(customerId);
-        if (customer.deleted || customer.metadata["esuno"] !== "1")
-          return ignore();
+        let customer = await stripe.customers.retrieve(customerId);
+        if (customer.deleted) return rejectExisting();
+        if (
+          customer.metadata["esuno"] !== "1" &&
+          session !== undefined &&
+          session.client_reference_id === null &&
+          session.status === "complete" &&
+          session.payment_status === "paid" &&
+          objectId(session.customer) === customerId &&
+          objectId(session.subscription) === subscriptionId
+        ) {
+          customer = await stripe.customers.update(customerId, {
+            metadata: { esuno: "1", integration: BILLING_INTEGRATION },
+          });
+        }
+        if (customer.metadata["esuno"] !== "1") return rejectExisting();
         const owner = await tx.billingCustomer.findUnique({
           where: { stripeCustomerId: customerId },
         });
-        const existing = await tx.subscription.findUnique({
-          where: { id: subscriptionId },
-        });
-        const userId = owner?.userId ?? existing?.userId ?? null;
+        if (existing?.userId && owner && existing.userId !== owner.userId)
+          return ignore();
+        const userId = existing?.userId ?? owner?.userId ?? null;
+        if (userId !== null)
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 71035))`;
         const item = currentItem;
         const classification: {
           plan: PlanId;
@@ -234,10 +271,7 @@ export function createWebhookProcessor(
           .parse(await tx.$queryRaw`SELECT clock_timestamp() AS at`);
         const observed = observations[0]?.at;
         if (observed === undefined) throw new Error("observation unavailable");
-        if (
-          classification === null ||
-          current.metadata["integration"] !== BILLING_INTEGRATION
-        ) {
+        if (classification === null) {
           logUnknown(event.id, event.type);
           return ignore();
         } else if (existing === null || existing.stripeObservedAt <= observed) {
@@ -260,6 +294,7 @@ export function createWebhookProcessor(
             canceledAt: date(current.canceled_at),
             endedAt: date(current.ended_at),
             latestInvoiceStatus: invoice,
+            stripeCreatedAt: date(current.created),
             stripeObservedAt: observed,
           };
           await tx.subscription.upsert({
@@ -267,6 +302,24 @@ export function createWebhookProcessor(
             create: { id: subscriptionId, ...data },
             update: data,
           });
+          if (
+            userId !== null &&
+            ["active", "trialing", "past_due"].includes(current.status)
+          ) {
+            const duplicate = await tx.subscription.findFirst({
+              where: {
+                userId,
+                id: { not: subscriptionId },
+                status: { in: ["active", "trialing", "past_due"] },
+              },
+              select: { id: true },
+            });
+            if (duplicate !== null)
+              logUnknown(
+                event.id,
+                "duplicate entitled subscription: operator refund required",
+              );
+          }
           if (
             session !== undefined &&
             session.status === "complete" &&
@@ -298,12 +351,8 @@ export function createWebhookProcessor(
     if (touched.userId !== null) {
       try {
         await refresh(touched.userId);
-      } catch (error) {
-        await db.stripeEvent.update({
-          where: { id: event.id },
-          data: { processedAt: null },
-        });
-        throw error;
+      } catch {
+        logUnknown(event.id, "mail quota refresh failed");
       }
     }
   };

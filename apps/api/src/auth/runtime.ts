@@ -202,7 +202,11 @@ export const createAuthRuntime = (
       if (input.email.toLowerCase().split("@")[1] !== config.mailDomain)
         throw new Error("address unavailable");
       try {
-        const created = await identity.api.signUpEmail({ body: input });
+        const created = await primaryReservations.withPrimaryReservation(
+          input.email,
+          () => identity.api.signUpEmail({ body: input }),
+        );
+        if (!created) throw new Error("address unavailable");
         await audit({ userId: created.user.id, action: "sign_up.success" });
         return created.user.id;
       } catch {

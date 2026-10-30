@@ -124,3 +124,33 @@ it("serves self-hosted billing without calling Stripe", async () => {
   expect(status.json()).toMatchObject({ code: "BILLING_DISABLED" });
   expect(network).not.toHaveBeenCalled();
 });
+
+it("returns a defined 503 when the billing backend throws", async () => {
+  const storage = {
+    measure: () => Promise.reject(new Error("backend down")),
+  } as unknown as StorageMeter;
+  app = await buildServer({
+    config: { logLevel: "silent" },
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: () => 0,
+    }),
+    monotonicMs: () => 0,
+    identity: {
+      handler: () => Promise.resolve(new Response()),
+      publicOrigin: "https://mail.example.test",
+      actor: () =>
+        Promise.resolve({
+          id: "user",
+          email: "user@example.test",
+          role: "user",
+        }),
+    },
+    storageMeter: storage,
+  });
+  const response = await app.inject("/billing");
+  expect(response.statusCode).toBe(503);
+  expect(response.json()).toMatchObject({ code: "SERVICE_UNAVAILABLE" });
+});

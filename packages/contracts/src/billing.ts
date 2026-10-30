@@ -71,6 +71,7 @@ export const BillingOverview = z.object({
   plan: z.enum(["free", "none", "plus", "pro"]),
   /** Operator accounts in Cloud mode are not limited by a plan. */
   exempt: z.boolean(),
+  source: z.enum(["subscription", "grant", "operator", "self-hosted", "none"]),
   subscription: z
     .object({
       status: z.string(),
@@ -95,6 +96,13 @@ const PlanInput = z
 const CheckoutSessionId = z
   .string()
   .regex(/^cs_(test|live)_[A-Za-z0-9]{1,200}$/);
+export const ClaimLocalPart = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(3)
+  .max(40)
+  .regex(/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/);
 const RedirectUrl = z.object({ url: z.url() });
 const procedure = oc.errors({
   BILLING_DISABLED: { status: 404, message: "Billing is not enabled" },
@@ -151,14 +159,8 @@ export const billingContract = {
         .object({
           sessionId: CheckoutSessionId,
           name: z.string().trim().min(1).max(100),
-          localPart: z
-            .string()
-            .trim()
-            .toLowerCase()
-            .min(3)
-            .max(40)
-            .regex(/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/),
-          password: z.string().min(12).max(256),
+          localPart: ClaimLocalPart,
+          password: z.string().min(12).max(128),
         })
         .strict(),
     )

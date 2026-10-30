@@ -40,6 +40,7 @@
     "react": "catalog:",
     "react-dom": "catalog:",
     "@opensuite/contracts": "workspace:*",
+    "@opensuite/core": "workspace:*",
     "@opensuite/design-tokens": "workspace:*",
     "@orpc/openapi-client": "catalog:",
     "@orpc/contract": "catalog:",

@@ -3,6 +3,7 @@ import type { ContractRouterClient } from "@orpc/contract";
 
 const base: BillingOverview = {
   mode: "cloud",
+  source: "subscription",
   plan: "plus",
   exempt: false,
   subscription: {
@@ -58,6 +59,7 @@ function overview(): BillingOverview {
       return {
         ...base,
         plan: "none",
+        source: "none",
         subscription: null,
         uploadsAllowed: false,
         storage: { ...base.storage, quotaBytes: null },
@@ -67,6 +69,7 @@ function overview(): BillingOverview {
       return {
         ...base,
         mode: "self-hosted",
+        source: "self-hosted",
         plan: "free",
         subscription: null,
         storage: { ...base.storage, quotaBytes: null },
