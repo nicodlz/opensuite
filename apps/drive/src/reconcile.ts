@@ -6,8 +6,13 @@ import { PrismaClient } from "./db/generated/index.js";
 import { reconcileObjects } from "./services/reconcile.ts";
 
 const args = process.argv.slice(2);
-if (args.some((arg) => arg !== "--delete-old-staging") || args.length > 1) {
-  process.stderr.write("Usage: node src/reconcile.ts [--delete-old-staging]\n");
+if (
+  args.some(
+    (arg) => arg !== "--delete-old-staging" && arg !== "--delete-orphans",
+  ) ||
+  args.length > 1
+) {
+  process.stderr.write("Usage: node src/reconcile.ts [--delete-orphans]\n");
   process.exit(1);
 }
 const env = z
@@ -58,7 +63,9 @@ try {
     {
       bucket: env.DRIVE_S3_BUCKET,
       prefix: env.DRIVE_S3_PREFIX,
-      deleteStaging: args.includes("--delete-old-staging"),
+      deleteStaging:
+        args.includes("--delete-orphans") ||
+        args.includes("--delete-old-staging"),
       now: new Date(),
     },
     (finding) => process.stdout.write(`${JSON.stringify(finding)}\n`),

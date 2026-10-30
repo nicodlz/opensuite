@@ -192,6 +192,40 @@ it("reports a configured account disk quota and rejects an over-quota mail impor
       await call("x:Account/get", { ids: [id] }, management),
     );
     expect(after.list[0]?.usedDiskQuota).toBeGreaterThan(100);
+    expect((await admin.setDiskQuota(id, 1)).isOk()).toBe(true);
+    const reading = await client.download(
+      session,
+      accountId,
+      blob.value.blobId,
+      "existing.eml",
+      "message/rfc822",
+    );
+    expect(reading.isOk() && reading.value.length).toBeGreaterThan(100);
+    const another = await client.upload(
+      session,
+      accountId,
+      Buffer.from(
+        "From: a@quota.test\r\nTo: alice@quota.test\r\nSubject: another\r\n\r\nNew mail",
+      ),
+    );
+    if (another.isErr()) throw new Error("upload failed");
+    const refused = await client.importEmail(session, accountId, {
+      blobId: another.value.blobId,
+      mailboxIds: { [inbox.id]: true },
+    });
+    expect(refused.isErr() && refused.error).toMatchObject({
+      kind: "set",
+      type: "overQuota",
+    });
+    expect((await admin.diskUsage(id)).isOk()).toBe(true);
+    expect((await admin.setDiskQuota(id, null)).isOk()).toBe(true);
+    const removed = quotaResponse.parse(
+      await call("Quota/get", { accountId: id }, [
+        JmapCapability.core,
+        "urn:ietf:params:jmap:quota",
+      ]),
+    );
+    expect(removed.list).toEqual([]);
   } finally {
     await compose("down", "--volumes", "--remove-orphans");
   }

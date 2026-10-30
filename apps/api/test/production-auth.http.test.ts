@@ -54,6 +54,8 @@ let closeDb = () => Promise.resolve();
 let reconcile = () => Promise.resolve(0);
 let bootstrap = (_email: string, _password: string, _name: string) =>
   Promise.resolve();
+let claimSignUp = (_input: { name: string; email: string; password: string }) =>
+  Promise.resolve("");
 let failIssue = false;
 let failSuspend = false;
 const wait = async (
@@ -245,6 +247,7 @@ beforeAll(async () => {
     );
     reconcile = runtime.reconcile;
     bootstrap = runtime.bootstrap;
+    claimSignUp = runtime.claimSignUp;
     const store = createMailboxStore(db.value, "ab".repeat(32));
     if (store.isErr()) throw new Error("mail store unavailable");
     const mailboxStore = store.value;
@@ -684,5 +687,27 @@ it("provisions and authenticates accounts on every configured or managed domain 
     ).toBe(0);
   } finally {
     await db.value.$disconnect();
+  }
+}, 120_000);
+
+it("provisions a public claim through the normal sign-up path", async () => {
+  const input = {
+    name: "Claimed user",
+    email: "claim-fixture@example.test",
+    password: "long-claim-password-123",
+  };
+  const id = await claimSignUp(input);
+  const client = createDatabase(databaseUrl);
+  if (client.isErr()) throw new Error("database unavailable");
+  try {
+    const link = await client.value.mailboxLink.findUniqueOrThrow({
+      where: { userId: id },
+    });
+    expect(link.status).toBe("active");
+    expect(link.address).toBe(input.email);
+    expect((await post("/api/auth/sign-in/email", input)).status).toBe(200);
+    await expect(claimSignUp(input)).rejects.toThrow("address unavailable");
+  } finally {
+    await client.value.$disconnect();
   }
 }, 120_000);

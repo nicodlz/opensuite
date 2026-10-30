@@ -14,6 +14,7 @@ export function createAliasOperations(
   store: AliasStore,
   cap: number,
   sync: (userId: string, id: string) => Output<ReturnType<typeof view>>,
+  limitForUser?: (userId: string) => Promise<number>,
 ) {
   return {
     create: (
@@ -26,7 +27,9 @@ export function createAliasOperations(
           userId,
           input,
           generateAliasLocalPart(input.prefix),
-          cap,
+          limitForUser === undefined
+            ? cap
+            : Math.min(cap, await limitForUser(userId)),
         );
         if (reserved.isErr()) return err(reserved.error);
         if (reserved.value.ready)

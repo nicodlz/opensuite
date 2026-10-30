@@ -74,7 +74,14 @@ export const createDrive = (
         mailBytes: number;
         uploadsAllowed: boolean;
       }>),
+  refreshQuota?: (owner: string) => Promise<void>,
 ) => {
+  const notifyQuota = (owner: string) => {
+    if (refreshQuota !== undefined)
+      void Promise.resolve()
+        .then(() => refreshQuota(owner))
+        .catch(() => {});
+  };
   const usage = async (owner: string) => {
     const totals = z
       .array(z.object({ total: z.bigint() }))
@@ -376,6 +383,7 @@ export const createDrive = (
           });
           // A failure to remove staging must not roll back an already committed entry.
           await storage.removeStaging(entry.id).catch(() => {});
+          notifyQuota(entry.ownerId);
           return visible(result);
         } catch (error) {
           await db.entry.updateMany({
@@ -471,7 +479,7 @@ export const createDrive = (
       case "restore":
       case "delete": {
         const original = await get(user, input.id, "owner", true);
-        return db.$transaction(
+        const result = await db.$transaction(
           async (tx) => {
             await lockOwner(tx, original.ownerId);
             const entry = await tx.entry.findFirst({
@@ -491,7 +499,7 @@ export const createDrive = (
               if (entry.kind === "file")
                 await storage.remove(entry.id, entry.objectKey, entry.uploadId);
               await tx.entry.delete({ where: { id: entry.id } });
-              return { deleted: true };
+              return { deleted: true as const };
             }
             if (input.action === "restore")
               await destinationOwner(tx, user, entry.parentId, user);
@@ -506,6 +514,9 @@ export const createDrive = (
           },
           { timeout: 30_000 },
         );
+        if (input.action === "delete" && original.kind === "file")
+          notifyQuota(original.ownerId);
+        return result;
       }
       case "share": {
         const entry = await get(user, input.id, "owner");

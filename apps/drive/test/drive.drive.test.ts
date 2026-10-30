@@ -605,6 +605,41 @@ it("protects internal usage with the configured bearer token", async () => {
   }
 });
 
+it("refreshes mail quota after finish and delete without blocking on failure", async () => {
+  const calls: string[] = [];
+  const service = createDrive(db, storage, null, (owner) => {
+    calls.push(owner);
+    if (calls.length === 1) throw new Error("synchronous failure");
+    return Promise.reject(new Error("unavailable"));
+  });
+  const bytes = Buffer.from("quota refresh fixture");
+  const upload = signed.parse(
+    await service.command("refresh-owner", {
+      action: "upload",
+      name: "fixture.txt",
+      parentId: null,
+      size: bytes.length,
+      checksum: digest(bytes),
+      contentType: "text/plain",
+      multipart: false,
+    }),
+  );
+  if (upload.url === null) throw new Error("upload URL missing");
+  expect(
+    (
+      await fetch(upload.url, {
+        method: "PUT",
+        headers: { "content-type": "text/plain" },
+        body: bytes,
+      })
+    ).ok,
+  ).toBe(true);
+  await service.command("refresh-owner", { action: "finish", id: upload.id });
+  await service.command("refresh-owner", { action: "trash", id: upload.id });
+  await service.command("refresh-owner", { action: "delete", id: upload.id });
+  expect(calls).toEqual(["refresh-owner", "refresh-owner"]);
+}, 120_000);
+
 it("reports storage drift and only deletes old, unreferenced staging objects on request", async () => {
   const client = new S3Client({
     endpoint: s3Endpoint,

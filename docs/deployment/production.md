@@ -1,8 +1,8 @@
 # Production installation on one Ubuntu VPS
 
-Managed Cloud billing is not available in this version. Leave
-`ESUNO_DEPLOYMENT_MODE=self-hosted`; cloud mode refuses to start. See
-[billing status](../operations/billing.md).
+The default is self-hosted. Managed Cloud requires the separate
+[billing operations guide](../operations/billing.md), including Stripe Tax
+registrations, before accepting payments.
 
 This is the ordered procedure for one Ubuntu host, Docker Compose, a public
 HTTPS/mail hostname, Backblaze B2 for Stalwart blobs and Drive, and SES in

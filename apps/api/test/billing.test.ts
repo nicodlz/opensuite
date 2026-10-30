@@ -1,11 +1,58 @@
+/* oxlint-disable typescript/consistent-type-assertions, typescript/no-unsafe-type-assertion */
 import { createReadinessService } from "@opensuite/core";
 import { afterEach, expect, it, vi } from "vitest";
 import { buildServer } from "../src/server.ts";
+import type { StorageMeter } from "../src/billing/storage.ts";
 
 let app: Awaited<ReturnType<typeof buildServer>> | undefined;
 afterEach(async () => {
   await app?.close();
   vi.restoreAllMocks();
+});
+
+it("returns measured self-hosted usage when both backends answer", async () => {
+  const storage = {
+    measure: () =>
+      Promise.resolve({
+        driveBytes: 600,
+        mailBytes: 30,
+        usedBytes: 630,
+        measured: true,
+      }),
+  } as unknown as StorageMeter;
+  app = await buildServer({
+    config: { logLevel: "silent" },
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: () => 0,
+    }),
+    monotonicMs: () => 0,
+    identity: {
+      handler: () => Promise.resolve(new Response()),
+      publicOrigin: "https://mail.example.test",
+      actor: () =>
+        Promise.resolve({
+          id: "user",
+          email: "user@example.test",
+          role: "user",
+        }),
+    },
+    storageMeter: storage,
+  });
+  const response = await app.inject("/billing");
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({
+    mode: "self-hosted",
+    storage: {
+      quotaBytes: null,
+      driveBytes: 600,
+      mailBytes: 30,
+      usedBytes: 630,
+      measured: true,
+    },
+  });
 });
 
 it("serves self-hosted billing without calling Stripe", async () => {

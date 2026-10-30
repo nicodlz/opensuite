@@ -15,8 +15,7 @@
       "entry": ["src/styles.css", "public/push-sw-v1.js"]
     },
     "apps/api": {
-      "entry": ["src/bootstrap.ts"],
-      "ignoreDependencies": ["stripe"]
+      "entry": ["src/bootstrap.ts", "src/billing-grant.ts"]
     },
     "apps/drive": {
       "ignoreDependencies": ["@prisma/client"]

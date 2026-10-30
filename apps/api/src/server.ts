@@ -1,6 +1,6 @@
 import { createFixedWindow } from "./auth/fixed-window.ts";
 import type { DomainService } from "./routes/domains.ts";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createAliasLimiter } from "./auth/alias-limits.ts";
 import type { AliasService } from "@opensuite/core/services/aliases";
 import { registerAliasCompat } from "./routes/alias-compat.ts";
@@ -31,6 +31,11 @@ import {
 } from "./auth/limits.ts";
 import { z } from "zod";
 import { router, type ApiContext } from "./routes/index.ts";
+import type { Entitlements } from "./billing/entitlements.ts";
+import type { StorageMeter } from "./billing/storage.ts";
+import type { StripeBilling } from "./billing/stripe.ts";
+import type { ClaimService } from "./billing/claims.ts";
+import type { createWebhookProcessor } from "./billing/webhook.ts";
 
 export interface ServerDependencies {
   readonly config: Pick<ApiConfig, "logLevel"> & {
@@ -70,7 +75,20 @@ export interface ServerDependencies {
   readonly push?: NonNullable<ApiContext["push"]>;
   readonly pushCleanup?: NonNullable<ApiContext["pushCleanup"]>;
   readonly setupStatus?: ApiContext["setupStatus"];
+  readonly entitlements?: Entitlements;
+  readonly storageMeter?: StorageMeter;
+  readonly internalToken?: string;
+  readonly billing?: StripeBilling;
+  readonly claims?: ClaimService;
+  readonly webhook?: {
+    secret: string;
+    processor: ReturnType<typeof createWebhookProcessor>;
+  };
+  readonly publicCheckoutOrigin?: string;
 }
+
+const tokenDigest = (value: string) =>
+  createHash("sha256").update(value).digest();
 
 export const buildServer = async (
   dependencies: ServerDependencies,
@@ -94,6 +112,7 @@ export const buildServer = async (
   const startedAt = dependencies.monotonicMs();
   const aliasLimits = createAliasLimiter();
   const pushLimits = createFixedWindow();
+  const checkoutLimits = createFixedWindow();
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("x-request-id", request.id);
     done();
@@ -113,6 +132,24 @@ export const buildServer = async (
   app.addHook("onRequest", async (request, reply) => {
     const identity = dependencies.identity;
     const rawPath = request.url.split("?")[0] ?? "";
+    const publicCheckout =
+      dependencies.publicCheckoutOrigin !== undefined &&
+      request.headers.origin === dependencies.publicCheckoutOrigin &&
+      rawPath === "/billing/checkout";
+    if (publicCheckout) {
+      reply
+        .header(
+          "access-control-allow-origin",
+          dependencies.publicCheckoutOrigin ?? "",
+        )
+        .header("vary", "origin");
+      if (request.method === "OPTIONS")
+        return reply
+          .header("access-control-allow-methods", "POST")
+          .header("access-control-allow-headers", "content-type")
+          .code(204)
+          .send();
+    }
     if (
       identity !== undefined &&
       (rawPath.startsWith("/auth/") || rawPath.startsWith("/api/auth/"))
@@ -167,6 +204,16 @@ export const buildServer = async (
       identity !== undefined &&
       request.method !== "GET" &&
       request.method !== "HEAD" &&
+      !(publicCheckout && request.method === "POST") &&
+      !(
+        request.method === "POST" &&
+        rawPath === "/billing/webhook" &&
+        dependencies.webhook !== undefined
+      ) &&
+      !(
+        request.method === "POST" &&
+        /^\/internal\/storage\/[^/]+\/refresh$/.test(rawPath)
+      ) &&
       !(identity.trustedOrigins ?? [identity.publicOrigin]).includes(
         request.headers.origin ?? "",
       )
@@ -335,6 +382,108 @@ export const buildServer = async (
   });
 
   app.get("/openapi.json", () => openapi);
+
+  if (
+    dependencies.billing !== undefined &&
+    dependencies.webhook !== undefined
+  ) {
+    const stripe = dependencies.billing.client;
+    const webhook = dependencies.webhook;
+    await app.register((scope, _options, done) => {
+      scope.removeContentTypeParser("application/json");
+      scope.addContentTypeParser(
+        "application/json",
+        { parseAs: "buffer", bodyLimit: 65_536 },
+        (_request, body, parseDone) => parseDone(null, body),
+      );
+      scope.post(
+        "/billing/webhook",
+        { bodyLimit: 65_536 },
+        async (request, reply) => {
+          const signature = request.headers["stripe-signature"];
+          if (typeof signature !== "string" || !Buffer.isBuffer(request.body))
+            return reply.code(400).send({ code: "BAD_SIGNATURE" });
+          let event;
+          try {
+            event = stripe.webhooks.constructEvent(
+              request.body,
+              signature,
+              webhook.secret,
+            );
+          } catch {
+            return reply.code(400).send({ code: "BAD_SIGNATURE" });
+          }
+          try {
+            await webhook.processor.process(event);
+            return { received: true };
+          } catch (error) {
+            const code =
+              typeof error === "object" &&
+              error !== null &&
+              "code" in error &&
+              typeof error.code === "string" &&
+              /^[a-z0-9_]{1,80}$/.test(error.code)
+                ? error.code
+                : null;
+            request.log.error(
+              { eventId: event.id, eventType: event.type, stripeCode: code },
+              "billing webhook failed",
+            );
+            return reply.code(500).send({ code: "PROCESSING_FAILED" });
+          }
+        },
+      );
+      done();
+    });
+  }
+
+  const internalAuthorized = (authorization: string | undefined) =>
+    dependencies.internalToken !== undefined &&
+    timingSafeEqual(
+      tokenDigest(authorization ?? ""),
+      tokenDigest(`Bearer ${dependencies.internalToken}`),
+    );
+  app.get("/internal/storage/:userId", async (request, reply) => {
+    if (!internalAuthorized(request.headers.authorization))
+      return reply.code(401).send({ code: "UNAUTHORIZED" });
+    if (
+      dependencies.entitlements === undefined ||
+      dependencies.storageMeter === undefined
+    )
+      return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+    const { userId } = z
+      .object({ userId: z.string().min(1).max(200) })
+      .parse(request.params);
+    try {
+      const [entitlement, mailBytes] = await Promise.all([
+        dependencies.entitlements.get(userId),
+        dependencies.storageMeter.mailBytes(userId),
+      ]);
+      reply.header("cache-control", "no-store");
+      return {
+        quotaBytes: entitlement.quotaBytes,
+        uploadsAllowed: entitlement.uploadsAllowed,
+        mailBytes,
+      };
+    } catch {
+      return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+    }
+  });
+  app.post("/internal/storage/:userId/refresh", async (request, reply) => {
+    if (!internalAuthorized(request.headers.authorization))
+      return reply.code(401).send({ code: "UNAUTHORIZED" });
+    if (dependencies.storageMeter === undefined)
+      return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+    const { userId } = z
+      .object({ userId: z.string().min(1).max(200) })
+      .parse(request.params);
+    try {
+      await dependencies.storageMeter.refresh(userId);
+      return { refreshed: true };
+    } catch {
+      return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+    }
+  });
 
   await app.register(registerAliasCompat, {
     aliases: dependencies.aliases,
@@ -715,6 +864,13 @@ export const buildServer = async (
     const { matched } = await handler.handle(request, reply, {
       context: {
         actor,
+        entitlements: dependencies.entitlements,
+        storageMeter: dependencies.storageMeter,
+        billing: dependencies.billing,
+        claims: dependencies.claims,
+        publicCheckoutLimit: () =>
+          checkoutLimits.consume(`checkout:${request.ip}`, 10, 60_000) ===
+          undefined,
         push: dependencies.push,
         pushCleanup: dependencies.pushCleanup ?? dependencies.push?.store,
         pushSubscribeLimit: (userId) =>

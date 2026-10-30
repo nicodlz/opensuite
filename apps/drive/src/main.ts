@@ -4,12 +4,14 @@ import process from "node:process";
 import { PrismaClient } from "./db/generated/index.js";
 import { createStorage } from "./adapters/storage.ts";
 import { httpSessionVerifier } from "./adapters/session.ts";
-import { httpEntitlements } from "./adapters/entitlements.ts";
+import { httpEntitlements, httpQuotaRefresh } from "./adapters/entitlements.ts";
 import { loadConfig } from "./config.ts";
 import { createDrive } from "./services/drive.ts";
 import { buildServer } from "./server.ts";
 
 const env = { ...process.env };
+if (env["DRIVE_INTERNAL_TOKEN_OVERRIDE_FILE"])
+  env["DRIVE_INTERNAL_TOKEN_FILE"] = env["DRIVE_INTERNAL_TOKEN_OVERRIDE_FILE"];
 if (
   env["DRIVE_DATABASE_URL"] === undefined &&
   env["DRIVE_DATABASE_PASSWORD_FILE"] !== undefined
@@ -61,12 +63,27 @@ const readiness = createReadinessService({
   monotonicMs: () => performance.now(),
 });
 
-const token =
+const configuredToken =
   config.DRIVE_ENTITLEMENTS_TOKEN_FILE === undefined
     ? undefined
     : (await readFile(config.DRIVE_ENTITLEMENTS_TOKEN_FILE, "utf8")).trim();
-if (token !== undefined && token.length < 32) {
+if (configuredToken !== undefined && configuredToken.length < 32) {
   process.stderr.write("invalid Drive entitlements token\n");
+  process.exit(1);
+}
+const internalToken =
+  config.DRIVE_INTERNAL_TOKEN_FILE === undefined
+    ? configuredToken
+    : (await readFile(config.DRIVE_INTERNAL_TOKEN_FILE, "utf8")).trim();
+if (internalToken !== undefined && internalToken.length < 32) {
+  process.stderr.write("invalid Drive internal token\n");
+  process.exit(1);
+}
+const token =
+  configuredToken ??
+  (config.ESUNO_DEPLOYMENT_MODE === "cloud" ? internalToken : undefined);
+if (config.ESUNO_DEPLOYMENT_MODE === "cloud" && token === undefined) {
+  process.stderr.write("Cloud Drive requires an entitlements token\n");
   process.exit(1);
 }
 const drive = createDrive(
@@ -78,6 +95,12 @@ const drive = createDrive(
         config.DRIVE_ENTITLEMENTS_API ?? config.DRIVE_SESSION_API,
         token,
       ),
+  token === undefined
+    ? undefined
+    : httpQuotaRefresh(
+        config.DRIVE_ENTITLEMENTS_API ?? config.DRIVE_SESSION_API,
+        token,
+      ),
 );
 const app = buildServer(
   drive,
@@ -85,7 +108,7 @@ const app = buildServer(
   httpSessionVerifier(config.DRIVE_SESSION_API),
   readiness,
   config.DRIVE_TRUSTED_ORIGINS,
-  token,
+  internalToken,
 );
 let sweepTask: Promise<void> | undefined;
 const runSweep = async () => {

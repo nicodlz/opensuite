@@ -60,6 +60,10 @@ services:
         chown 2000:1000 /setup-status
         chmod 0775 /setup-status
         generate drive-database 999
+        generate storage-token 999
+        chown 999:1000 /secrets/storage-token /secrets/storage-token/password
+        chmod 0550 /secrets/storage-token
+        chmod 0440 /secrets/storage-token/password
         generate vault-database 999
         chown 999:1000 /secrets/vault-database /secrets/vault-database/password
         chmod 0550 /secrets/vault-database
@@ -93,6 +97,7 @@ services:
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     environment:
       OPENSUITE_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
+      OPENSUITE_PUBLIC_HOST: ${OPENSUITE_PUBLIC_HOST:-localhost}
       VAULT_SITE_ADDRESS: ${VAULT_PUBLIC_HOST:-vault.localhost}
       LANDING_SITE_ADDRESS: ${LANDING_SITE_ADDRESS:-landing.localhost}
       MAIL_MANAGEMENT_SUBNET: ${MAIL_MANAGEMENT_SUBNET:-172.30.248.0/24}
@@ -141,7 +146,9 @@ services:
       ESUNO_DEPLOYMENT_MODE: ${ESUNO_DEPLOYMENT_MODE:-self-hosted}
       STRIPE_SECRET_KEY_FILE: ${STRIPE_SECRET_KEY_FILE:+/run/opensuite/stripe-secret}
       STRIPE_WEBHOOK_SECRET_FILE: ${STRIPE_WEBHOOK_SECRET_FILE:+/run/opensuite/stripe-webhook-secret}
-      BILLING_INTERNAL_TOKEN_FILE: ${BILLING_INTERNAL_TOKEN_FILE:+/run/opensuite/billing-internal-token}
+      BILLING_INTERNAL_TOKEN_FILE: /run/opensuite/storage-token/password
+      BILLING_INTERNAL_TOKEN_OVERRIDE_FILE: ${BILLING_INTERNAL_TOKEN_FILE:+/run/opensuite/storage-token-override}
+      BILLING_DRIVE_ORIGIN: http://drive:3001
       STRIPE_AUTOMATIC_TAX: ${STRIPE_AUTOMATIC_TAX:-true}
       BILLING_CANCEL_URL: ${BILLING_CANCEL_URL:-}
       READINESS_TIMEOUT_MS: ${READINESS_TIMEOUT_MS:-2000}
@@ -185,8 +192,14 @@ services:
         read_only: true
       - type: bind
         source: ${BILLING_INTERNAL_TOKEN_FILE:-/dev/null}
-        target: /run/opensuite/billing-internal-token
+        target: /run/opensuite/storage-token-override
         read_only: true
+      - type: volume
+        source: secrets
+        target: /run/opensuite/storage-token
+        read_only: true
+        volume:
+          subpath: storage-token
       - type: bind
         source: ${DOMAINS_SES_CREDENTIALS_FILE:-/dev/null}
         target: /run/opensuite/domain-ses-credentials
@@ -348,9 +361,22 @@ services:
       DRIVE_S3_SECRET_KEY_FILE: /run/opensuite/drive-s3-secret
       DRIVE_S3_PATH_STYLE: ${DRIVE_S3_PATH_STYLE:-true}
       DRIVE_QUOTA_BYTES: ${DRIVE_QUOTA_BYTES:-}
+      ESUNO_DEPLOYMENT_MODE: ${ESUNO_DEPLOYMENT_MODE:-self-hosted}
+      DRIVE_INTERNAL_TOKEN_FILE: /run/opensuite/storage-token/password
+      DRIVE_INTERNAL_TOKEN_OVERRIDE_FILE: ${BILLING_INTERNAL_TOKEN_FILE:+/run/opensuite/storage-token-override}
       DRIVE_ENTITLEMENTS_TOKEN_FILE: ${DRIVE_ENTITLEMENTS_TOKEN_FILE:+/run/opensuite/entitlements-token}
       DRIVE_ENTITLEMENTS_API: ${DRIVE_ENTITLEMENTS_API:-http://api:3000}
     volumes:
+      - type: bind
+        source: ${BILLING_INTERNAL_TOKEN_FILE:-/dev/null}
+        target: /run/opensuite/storage-token-override
+        read_only: true
+      - type: volume
+        source: secrets
+        target: /run/opensuite/storage-token
+        read_only: true
+        volume:
+          subpath: storage-token
       - type: bind
         source: ${DRIVE_ENTITLEMENTS_TOKEN_FILE:-/dev/null}
         target: /run/opensuite/entitlements-token
