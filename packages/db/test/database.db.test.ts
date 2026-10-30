@@ -580,6 +580,17 @@ describe("alias reservations", () => {
     });
     const inactive = await store.routes([full]);
     expect(inactive.isOk() && inactive.value).toEqual([]);
+    // A mailbox's primary address routes without an address record, until
+    // its user is disabled.
+    const primary = `${owner}@example.test`.toLowerCase();
+    const routed = await store.routes([primary.toUpperCase()]);
+    expect(routed.isOk() && routed.value).toEqual([
+      { address: primary, destination: suffix },
+    ]);
+    await db.user.update({ where: { id: owner }, data: { disabled: true } });
+    const disabled = await store.routes([primary]);
+    expect(disabled.isOk() && disabled.value).toEqual([]);
+    await db.user.update({ where: { id: owner }, data: { disabled: false } });
     const tombstoneBlocked = await store.beginRemoval(domain.id);
     expect(tombstoneBlocked.isOk() && tombstoneBlocked.value).toBe(false);
     await expect(

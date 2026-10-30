@@ -739,8 +739,8 @@ describe("local ingestion pipeline", () => {
       ).state,
     ).toBe("held");
 
-    // Provision Carol as the admin console does: Stalwart account, then the user,
-    // domain address and encrypted mailbox link in PostgreSQL.
+    // Provision Carol as signup and bootstrap do: a Stalwart account, then
+    // only the user and its encrypted mailbox link, with no address record.
     const admin = new StalwartAdmin(origin, {
       username: "admin",
       password: "integration-password",
@@ -763,12 +763,6 @@ describe("local ingestion pipeline", () => {
       throw new Error("Missing inbox or junk");
     await prisma.user.create({
       data: { id: "carol", name: "Carol", email: "carol@example.test" },
-    });
-    const row = await prisma.domain.create({
-      data: { userId: "carol", name: "example.test", status: "active" },
-    });
-    await prisma.address.create({
-      data: { userId: "carol", domainId: row.id, localPart: "carol" },
     });
     unwrap(
       await store.create({
