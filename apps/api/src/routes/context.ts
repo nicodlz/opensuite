@@ -19,6 +19,7 @@ export interface ApiContext {
     | undefined;
   readonly mail: MailService | undefined;
   /** Public origin of each application when they are served separately. */
+  readonly passOrigin?: string | undefined;
   readonly productOrigins: Readonly<Record<string, string>>;
   readonly calendar: CalendarService | undefined;
   readonly downloads: {

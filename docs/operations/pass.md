@@ -175,3 +175,23 @@ For rollback stop Pass, restore the pre-upgrade database **and** matching data
 volume and secrets into an isolated environment, then set `PASS_IMAGE` to the previous
 image pin. Do not point an older image at a migrated database without upstream
 confirmation. Test recovery before reconnecting users.
+
+## Esuno shell status
+
+To enable the Pass launcher in Esuno, include the exact HTTPS vault origin in
+`AUTH_PRODUCT_ORIGINS`, for example
+`AUTH_PRODUCT_ORIGINS=pass=https://pass.example.org` (comma-separate existing
+`drive=` and `calendar=` entries). It must match the dedicated `PASS_PUBLIC_HOST`.
+The API checks the origin against `PASS_PUBLIC_HOST` at startup and refuses a mismatch. Recreate the API after changing it. Leave the entry absent when Pass is not
+configured. The vault origin is not an Esuno authentication origin and does
+not receive sign-in handoffs.
+
+The API reports `GET /api/pass/status`, independently of startup and readiness.
+When configured, it calls only `/alive` and `/api/config` on the public HTTPS
+origin, without credentials or redirects. The API does not join the dedicated
+Pass network and never forwards other vault paths. This avoids changing network
+isolation or adding a proxy route; it does require public DNS and TLS to work
+from the API container, so an unreachable status may also indicate a DNS, TLS or
+network problem. Results (including failures) are cached for 30 seconds and
+requests time out after two seconds. A missing origin is a normal disabled
+state. Anonymous callers receive only enabled and reachable; the version and check time are available to authenticated sessions. The status does not verify login or client compatibility.

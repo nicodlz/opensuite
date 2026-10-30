@@ -15,6 +15,7 @@ import Fastify, {
   type FastifyRequest,
 } from "fastify";
 import type { ApiConfig } from "./config.ts";
+import { createPassStatus } from "./routes/pass-status.ts";
 import { createHandoffRegistry } from "./auth/handoff.ts";
 import {
   createAuthLimiter,
@@ -28,6 +29,8 @@ export interface ServerDependencies {
   readonly config: Pick<ApiConfig, "logLevel"> & {
     readonly trustProxy?: string;
   };
+  readonly passOrigin?: string;
+  readonly passStatusOptions?: Parameters<typeof createPassStatus>[1];
   readonly readiness: ReadinessService;
   readonly monotonicMs: () => number;
   readonly identity?: {
@@ -286,6 +289,26 @@ export const buildServer = async (
 
   app.get("/openapi.json", () => openapi);
 
+  const passStatus = createPassStatus(
+    dependencies.passOrigin,
+    dependencies.passStatusOptions,
+  );
+  app.get("/pass/status", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (value === undefined) continue;
+      if (Array.isArray(value))
+        for (const part of value) headers.append(name, part);
+      else headers.set(name, value);
+    }
+    const actor = (await dependencies.identity?.actor?.(headers)) ?? null;
+    const { version, ...status } = await passStatus();
+    return actor === null
+      ? { enabled: status.enabled, reachable: status.reachable }
+      : { ...status, version };
+  });
+
   if (dependencies.identity !== undefined) {
     const identity = dependencies.identity;
     const limiter = createAuthLimiter();
@@ -540,6 +563,7 @@ export const buildServer = async (
         mail: dependencies.mail,
         calendar: dependencies.calendar,
         productOrigins: dependencies.identity?.productOrigins ?? {},
+        passOrigin: dependencies.passOrigin,
         downloads,
         accounts: dependencies.accounts,
         domains: dependencies.domains,
