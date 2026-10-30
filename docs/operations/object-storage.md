@@ -128,9 +128,9 @@ the restored instance in isolation and verify a known message and attachment,
 mailbox metadata, and application health before any cutover. Never overwrite a
 live bucket with an older backup while writers are active. Keep independent
 copies and test recovery regularly, including encryption keys and permissions.
-The integration test exercises a stopped RocksDB archive, a separate object
-copy, replacement of the volume and restoration of the same bucket on a local
-S3 substitute. It is not an operational backup automation or a B2 test.
+The automated encrypted backup and new-host restore procedure is documented in
+[Backup and recovery](backup.md). Its local S3 substitute test is not a B2
+compatibility test.
 
 ## Migrating local blobs to S3
 

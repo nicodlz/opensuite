@@ -1,0 +1,9 @@
+# Install as /etc/opensuite/backup.conf, mode 0600. Trusted shell syntax.
+# A separate B2 key scoped to the private backup bucket/prefix. Never commit it.
+BACKUP_REPOSITORY='s3:https://s3.example.invalid/private-backup/opensuite'
+BACKUP_REGION='us-east-1'
+BACKUP_ACCESS_KEY_ID='replace-me'
+BACKUP_SECRET_ACCESS_KEY='replace-me'
+BACKUP_PASSWORD_FILE='/etc/opensuite/restic-password'
+# Private encrypted filesystem with room for the entire uncompressed set.
+BACKUP_SCRATCH='/var/lib/opensuite-backup-scratch'

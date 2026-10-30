@@ -1,0 +1,41 @@
+# Loaded only by backup.sh / restore.sh. The stage is private local scratch.
+services:
+  backup-restic:
+    image: restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      RESTIC_REPOSITORY: ${BACKUP_REPOSITORY:?set BACKUP_REPOSITORY}
+      RESTIC_PASSWORD_FILE: /run/backup/password
+      AWS_ACCESS_KEY_ID: ${BACKUP_ACCESS_KEY_ID:?set BACKUP_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_SECRET_ACCESS_KEY:?set BACKUP_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${BACKUP_REGION:-us-east-1}
+    volumes:
+      - ${BACKUP_STAGE:?set BACKUP_STAGE}:/stage
+      - ${BACKUP_PASSWORD_FILE:?set BACKUP_PASSWORD_FILE}:/run/backup/password:ro
+
+  backup-objects:
+    image: rclone/rclone:1.71.2@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      RCLONE_CONFIG_STORE_TYPE: s3
+      RCLONE_CONFIG_STORE_PROVIDER: Other
+      RCLONE_CONFIG_STORE_ACCESS_KEY_ID: ${OBJECT_ACCESS_KEY_ID:-unused}
+      RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY: ${OBJECT_SECRET_ACCESS_KEY:-unused}
+      RCLONE_CONFIG_STORE_ENDPOINT: ${OBJECT_ENDPOINT:-http://invalid}
+      RCLONE_CONFIG_STORE_REGION: ${OBJECT_REGION:-us-east-1}
+      RCLONE_CONFIG_STORE_FORCE_PATH_STYLE: "true"
+      RCLONE_CONFIG_STORE_NO_CHECK_BUCKET: "true"
+    volumes:
+      - ${BACKUP_STAGE:?set BACKUP_STAGE}:/stage
+
+  backup-volumes:
+    image: alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+    entrypoint: ["/bin/sh", "-ec"]
+    network_mode: none
+    volumes:
+      - ${BACKUP_STAGE:?set BACKUP_STAGE}:/stage
+      - secrets:/secrets
+      - stalwart-data:/stalwart
+      - postgres-data:/postgres
+      - caddy-data:/caddy-data
+      - caddy-config:/caddy-config
