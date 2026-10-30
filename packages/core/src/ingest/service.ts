@@ -303,6 +303,10 @@ export class IngestService {
         n.receipt.action.objectKey,
       );
       if (deleted.isErr()) {
+        events.emit("ingest_failure", {
+          stage: "buffer_delete",
+          code: deleted.error.code ?? "unknown",
+        });
         await ledger.messageState(n.mail.messageId, "failed");
         return deleted;
       }
@@ -364,16 +368,26 @@ export class IngestService {
     const bufferKeys = new Set(keys.isOk() ? keys.value : []);
     const referenced = new Set<string>();
     let failures = keys.isErr() ? 1 : 0;
+    if (keys.isErr())
+      this.deps.events.emit("ingest_failure", {
+        stage: "buffer_list",
+        code: keys.error.code ?? "unknown",
+      });
     const archived: { body: string; id: string }[] = [];
     const read = async (key: string): Promise<void> => {
       const body = await this.deps.storage.readArchive(key);
       if (body.isErr()) {
         failures++;
+        this.deps.events.emit("ingest_failure", {
+          stage: "archive_read",
+          code: body.error.code ?? "unknown",
+        });
         return;
       }
       const n = parseNotification(body.value);
       if (n.isErr()) {
         failures++;
+        this.deps.events.emit("ingest_failure", { stage: "archive_parse" });
         return;
       }
       referenced.add(n.value.receipt.action.objectKey);
@@ -417,8 +431,12 @@ export class IngestService {
           if (
             !completed.has(item.id) &&
             (await this.process(item.body, true)).isErr()
-          )
+          ) {
             failures++;
+            this.deps.events.emit("ingest_failure", {
+              stage: "replay_message",
+            });
+          }
           return undefined;
         }),
       Promise.resolve(),

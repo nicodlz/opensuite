@@ -24,6 +24,9 @@ const identitySchema = z
   .refine((value) => !value.toLowerCase().startsWith("system:"));
 const reasonSchema = z.string().trim().min(8).max(1000);
 
+const unconfigured = "Destination is not configured";
+const notRejectable =
+  "Only a held recipient or one whose destination is not configured can be rejected";
 export async function operatorCommand(
   deps: Dependencies,
   args: string[],
@@ -75,7 +78,9 @@ export async function operatorCommand(
   const key = keySchema.parse(rawKey);
   // An unknown recipient is held with its message until its address is
   // provisioned (a replay then routes it) or an operator rejects it here.
-  // Rejecting lets the next replay delete the stored message object.
+  // So can a recipient whose mailbox was disabled after routing, which
+  // otherwise fails without end. Rejecting lets the next replay delete the
+  // stored message object.
   if (command === "reject") {
     if (args.length !== 4) throw new Error("Invalid operator command");
     const operator = identitySchema.parse(action);
@@ -84,17 +89,26 @@ export async function operatorCommand(
       const found = await tx.inboundRecipient.findUnique({
         where: { idempotencyKey: key },
       });
-      if (found === null)
-        throw new Error("Only a held recipient can be rejected");
+      if (found === null) throw new Error(notRejectable);
       // Take the message lock that routing holds, then read the row again.
       await tx.$queryRaw`SELECT "id" FROM "InboundMessage" WHERE "id" = ${found.messageId} FOR UPDATE`;
       const row = await tx.inboundRecipient.findUnique({
         where: { idempotencyKey: key },
       });
-      if (row === null || row.state !== "held")
-        throw new Error("Only a held recipient can be rejected");
+      if (
+        row === null ||
+        !(
+          row.state === "held" ||
+          (row.state === "failed" && row.error === unconfigured)
+        )
+      )
+        throw new Error(notRejectable);
       const updated = await tx.inboundRecipient.updateMany({
-        where: { idempotencyKey: key, state: "held", updatedAt: row.updatedAt },
+        where: {
+          idempotencyKey: key,
+          state: row.state,
+          updatedAt: row.updatedAt,
+        },
         data: { state: "rejected", error: "Rejected by operator" },
       });
       if (updated.count !== 1)
@@ -105,7 +119,7 @@ export async function operatorCommand(
           operator,
           reason,
           action: "reject",
-          previousState: "held",
+          previousState: row.state,
           remoteId: null,
         },
       });

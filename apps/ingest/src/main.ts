@@ -31,6 +31,8 @@ const destination = z.object({
   quarantineMailbox: z.string().min(1),
   rewriteSessionUrls: z.boolean().default(false),
 });
+const unset = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((value) => (value === "" ? undefined : value), schema);
 const configSchema = z
   .object({
     DATABASE_URL: z.string().min(1),
@@ -72,8 +74,9 @@ const configSchema = z
         }
       }),
     // Delivery to mailboxes linked in the database, without a restart.
-    MAILBOX_KEY_FILE: z.string().min(1).optional(),
-    INGEST_MAILBOX_ORIGIN: z.url().optional(),
+    // An empty value turns it off, as Compose cannot remove a variable.
+    MAILBOX_KEY_FILE: unset(z.string().min(1).optional()),
+    INGEST_MAILBOX_ORIGIN: unset(z.url().optional()),
     INGEST_HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(3002),
     INGEST_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(5),
     INGEST_AGE_SECONDS: z.coerce.number().int().min(1).default(3600),
@@ -155,18 +158,19 @@ async function linkedMailboxes() {
   if (db.isErr()) return fatal("invalid_database_configuration");
   const store = createMailboxStore(db.value, key.trim());
   if (store.isErr()) return fatal("invalid_mailbox_key");
-  const sample = await db.value.mailboxLink.findFirst({
-    where: { status: "active", user: { disabled: false } },
-    select: { accountId: true },
-  });
+  const sample = await db.value.mailboxLink
+    .findFirst({
+      where: { status: "active", user: { disabled: false } },
+      select: { accountId: true },
+    })
+    .catch(() => fatal("mailbox_key_check_failed"));
   if (sample !== null) {
     const opened = await store.value.getForAccount(sample.accountId);
-    if (opened.isErr())
-      return fatal(
-        opened.error.kind === "database_error"
-          ? "mailbox_key_check_failed"
-          : "invalid_mailbox_key",
-      );
+    // A mailbox disabled meanwhile proves nothing either way.
+    if (opened.isErr() && opened.error.kind === "database_error")
+      return fatal("mailbox_key_check_failed");
+    if (opened.isErr() && opened.error.kind === "crypto_error")
+      return fatal("invalid_mailbox_key");
   }
   return {
     origin: c.INGEST_MAILBOX_ORIGIN,
@@ -250,6 +254,7 @@ const service = new IngestService({
         delaySeconds: fields["delaySeconds"],
         matches: fields["matches"],
         recipientKey: fields["recipientKey"],
+        code: fields["code"],
       };
       process.stdout.write(
         `${JSON.stringify({ level: event === "ingest_duplicate" ? "error" : "info", event, count, ...safe })}\n`,

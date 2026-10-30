@@ -17,6 +17,7 @@ import type { Queue, Storage } from "../ingest/contracts.ts";
 
 const failure = (cause: unknown) => ({
   message: cause instanceof Error ? cause.message : String(cause),
+  ...(cause instanceof Error ? { code: cause.name } : {}),
 });
 const queueResponse = z
   .object({

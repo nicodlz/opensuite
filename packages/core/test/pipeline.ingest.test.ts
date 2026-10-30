@@ -1,7 +1,11 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import {
   GetQueueUrlCommand,
   SendMessageCommand,
@@ -483,7 +487,7 @@ describe("local ingestion pipeline", () => {
         "operator",
         reason,
       ]),
-    ).rejects.toThrow("Only a held recipient can be rejected");
+    ).rejects.toThrow("Only a held recipient");
     expect(
       await db.value.inboundResolutionAudit.findMany({
         where: { recipientKey: row.idempotencyKey },
@@ -585,7 +589,12 @@ describe("local ingestion pipeline", () => {
       ).toEqual(
         outcome === "rejected"
           ? ["rejected", 1, 0]
-          : ["rerouted", 0, 1, "Only a held recipient can be rejected"],
+          : [
+              "rerouted",
+              0,
+              1,
+              "Only a held recipient or one whose destination is not configured can be rejected",
+            ],
       );
       // Finish the message either way: the object goes once nothing is left.
       expect((await service.reconcile(3600)).isOk()).toBe(true);
@@ -710,19 +719,20 @@ describe("local ingestion pipeline", () => {
       credential: async (accountId) => store.getForAccount(accountId),
     });
     // Built before the mailbox exists, as a running worker would be.
-    const dynamic = new IngestService({
+    const dependencies = {
       storage: awsStorage(s3, s3, "inbound", "archive", "notifications/", ""),
       ledger: databaseLedger(prisma),
       delivery: linked,
       routes: [],
-      resolveRoutes: async (addresses) =>
+      resolveRoutes: async (addresses: string[]) =>
         createDomainStore(prisma).routes(addresses),
       bucket: "inbound",
       bufferPrefix: "",
       topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
       maxAttempts: 5,
       events: { emit() {} },
-    });
+    };
+    const dynamic = new IngestService(dependencies);
     const raw = Buffer.from(
       "From: sender@example.test\r\nTo: carol@example.test\r\nSubject: Linked\r\n\r\nWelcome\r\n",
     );
@@ -745,7 +755,9 @@ describe("local ingestion pipeline", () => {
       username: "admin",
       password: "integration-password",
     });
-    getValue(await admin.createAccount("carol", domainId, password));
+    const created = getValue(
+      await admin.createAccount("carol", domainId, password),
+    );
     const carolClient = new JmapClient(origin, {
       authorization: `Basic ${Buffer.from(`carol@example.test:${password}`).toString("base64")}`,
       rewriteSessionUrlsToOrigin: origin,
@@ -753,6 +765,9 @@ describe("local ingestion pipeline", () => {
     const session = getValue(await carolClient.discover());
     const carolAccount = session.primaryAccounts[JmapCapability.mail];
     if (carolAccount === undefined) throw new Error("Missing account");
+    // The API stores the management API's account ID; delivery checks it
+    // against the JMAP session.
+    expect(created.id).toBe(carolAccount);
     const boxes = getValue(
       await carolClient.mailboxes(session, carolAccount),
     ).list;
@@ -886,6 +901,64 @@ describe("local ingestion pipeline", () => {
     expect(blocked.isErr() && blocked.error.message).toBe(
       "Destination is not configured",
     );
+    await prisma.user.update({
+      where: { id: "carol" },
+      data: { disabled: false },
+    });
+    // Mail routed before its mailbox was disabled waits without end; an
+    // operator can reject it and the next pass deletes its object.
+    const closed = new IngestService({
+      ...dependencies,
+      delivery: jmapDelivery([], {
+        origin,
+        credential: () => Promise.resolve(err({ kind: "not_found" })),
+      }),
+    });
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-linked-closed",
+        Body: suspect,
+      }),
+    );
+    const closedBody = recent(
+      ["carol@example.test"],
+      "PASS",
+      "ses-linked-closed",
+    );
+    await closed.process(closedBody);
+    const stuck = await prisma.inboundRecipient.findFirstOrThrow({
+      where: { messageId: "ses-linked-closed" },
+    });
+    expect([stuck.state, stuck.error]).toEqual([
+      "failed",
+      "Destination is not configured",
+    ]);
+    await operatorCommand(
+      {
+        db: prisma,
+        ledger: databaseLedger(prisma),
+        delivery: linked,
+        storage: dependencies.storage,
+      },
+      [
+        "reject",
+        stuck.idempotencyKey,
+        "operator",
+        "Mailbox closed; sender told",
+      ],
+    );
+    expect(
+      await prisma.inboundResolutionAudit.findFirstOrThrow({
+        where: { recipientKey: stuck.idempotencyKey },
+      }),
+    ).toMatchObject({ action: "reject", previousState: "failed" });
+    expect((await closed.process(closedBody)).isOk()).toBe(true);
+    await expect(
+      s3.send(
+        new GetObjectCommand({ Bucket: "inbound", Key: "ses-linked-closed" }),
+      ),
+    ).rejects.toThrow(/does not exist/);
     expect(await bySubject(carol, "Linked junk")).toHaveLength(1);
   }, 90_000);
   it("replays an archived notification after queue loss with a large attachment", async () => {

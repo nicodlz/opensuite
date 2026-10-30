@@ -378,16 +378,17 @@ Mailboxes created in the admin console, with their addresses, aliases and
 domain addresses, need no entry: Compose gives the worker the mailbox key
 (`MAILBOX_KEY_FILE`) and the internal Stalwart origin
 (`INGEST_MAILBOX_ORIGIN`), and it delivers with each mailbox's stored
-credential, read at every connection. A mailbox without an address row (the
-bootstrap administrator, for example) has no route and its mail is held.
-Held mail for a new mailbox is delivered by the next replay, and the first
-deployment with linked delivery may at once deliver older mail that waited
-with `Destination is not configured`. That credential is the one the API
+credential, read at every connection. Each mailbox's primary address is
+routed, as well as its addresses and aliases. Held mail for a new mailbox is
+delivered by the next replay, and the first deployment with linked delivery
+may at once deliver older mail that waited with `Destination is not
+configured` or was held for a primary address within `INGEST_HOLD_DAYS`. That credential is the one the API
 uses, not a separate inbound app password: the key opens every mailbox with
 full access, so the worker must stay on the private network, without a
 published port, and its logs and environment remain restricted. Compose's
-`environment` overrides `deploy/ingest.env`; to turn linked delivery off,
-remove the two variables in a `compose.override.yaml`. Alert on repeated
+`environment` overrides `deploy/ingest.env`; to turn linked delivery off, set
+`INGEST_MAILBOX_KEY_FILE=` and `INGEST_MAILBOX_ORIGIN=` (both empty) in
+`.env` and recreate the worker. Alert on repeated
 `Destination lookup failed` or JMAP 401 errors, and if Stalwart rate-limits
 or bans failed authentication, exempt the worker's network: every delivery
 comes from its address, so one stale credential must not block the others.
@@ -402,7 +403,13 @@ them to `INGEST_ROUTES`, because static routes can bypass alias disablement
 Every static route's `destination` must match a destination's `id`, which is
 the Stalwart account ID. Changing them requires recreating the worker with
 `docker compose --profile ingest up -d ingest` (a plain restart keeps the old
-environment). Protect and back up these files; safely delete the intermediate
+environment). Before upgrading to linked delivery, compare each static entry
+with `SELECT address, "accountId" FROM "MailboxLink";`: a static route must
+name the same account as the database for that address, or the message fails
+with `Conflicting recipient routes`, and a static destination's `id` must be
+the account its credential opens, or delivery fails with `Destination
+credential is for another account`. Neither loses mail; both block it until
+corrected. Protect and back up these files; safely delete the intermediate
 destination file after use. The exact schema, permission requirements,
 ambiguity handling and replay procedure are in
 [ingestion](../architecture/ingestion.md). Start and check `docker compose --profile ingest up -d --build ingest`. Install the replay timer after configuring backups below. Alert on replay
@@ -488,6 +495,13 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 
 ## Rollback
 
+To return to a worker release that has held recipients but not linked
+delivery, no ledger conversion is needed: roll back the image together with
+`compose.yaml` and keep a static route and destination for every mailbox
+that must keep receiving. Recipients of other mailboxes then wait with
+`Destination is not configured`, and mail for primary addresses without an
+address record is held again, until linked delivery returns.
+
 Before running a worker release that predates held recipients, convert the
 ledger to states that release knows (procedure checked against the previous
 release's ledger on PostgreSQL). Older code fails on any message that has a
@@ -521,10 +535,11 @@ dead-letter queue after its retries:
 
    ```sh
    . /etc/opensuite/backup.conf
-   [ -z "$(docker ps -q --filter label=com.docker.compose.service=ingest)" ] &&
-     flock -n "$BACKUP_SCRATCH/opensuite-backup.lock" \
+   { [ -z "$(docker ps -q --filter label=com.docker.compose.service=ingest)" ] &&
+     flock -n "${BACKUP_SCRATCH:?}/opensuite-backup.lock" \
        docker compose exec -T postgres \
-       sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < rollback-relabel.sql
+       sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < rollback-relabel.sql; } ||
+     echo 'ingest running, lock held or SQL failed: relabel NOT applied' >&2
    ```
 
    with `rollback-relabel.sql` containing:
