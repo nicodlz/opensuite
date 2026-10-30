@@ -177,7 +177,7 @@ describe("PostgreSQL schema and adapters", () => {
       .parse(
         await db.$queryRaw`SELECT migration_name, checksum, finished_at FROM "_prisma_migrations"`,
       );
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(6);
     const migration = rows.find(
       (row) => row.migration_name === "20261029000000_initial",
     );

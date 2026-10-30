@@ -24,6 +24,8 @@ const MailboxSchema = z.object({
   name: z.string(),
   role: z.string().nullable(),
   parentId: z.string().nullable(),
+  totalEmails: z.number().default(0),
+  unreadEmails: z.number().default(0),
 });
 const AddressSchema = z.object({
   name: z.string().nullable(),
@@ -35,6 +37,7 @@ const PartSchema = z.object({
   name: z.string().nullable(),
   type: z.string(),
   size: z.number(),
+  charset: z.string().nullable().optional(),
 });
 const EmailSchema = z.object({
   id: z.string(),
@@ -48,6 +51,19 @@ const EmailSchema = z.object({
   to: z.array(AddressSchema).nullable(),
   messageId: z.array(z.string()).nullable(),
   attachments: z.array(PartSchema),
+  cc: z.array(AddressSchema).nullable().default(null),
+  bcc: z.array(AddressSchema).nullable().default(null),
+  sentAt: z.string().nullable().default(null),
+  inReplyTo: z.array(z.string()).nullable().default(null),
+  references: z.array(z.string()).nullable().default(null),
+  headers: z
+    .array(z.object({ name: z.string(), value: z.string() }))
+    .default([]),
+  preview: z.string().default(""),
+  hasAttachment: z.boolean().default(false),
+  textBody: z.array(PartSchema).default([]),
+  htmlBody: z.array(PartSchema).default([]),
+  bodyValues: z.record(z.string(), z.object({ value: z.string() })).default({}),
 });
 const IdentitySchema = z.object({
   id: z.string(),
@@ -76,6 +92,8 @@ const SetSchema = <T>(created: z.ZodType<T>) =>
     updated: z.record(z.string(), z.unknown()).nullable().optional(),
     notCreated: z.record(z.string(), SetErrorSchema).nullable().optional(),
     notUpdated: z.record(z.string(), SetErrorSchema).nullable().optional(),
+    destroyed: z.array(z.string()).nullable().optional(),
+    notDestroyed: z.record(z.string(), SetErrorSchema).nullable().optional(),
   });
 const BlobSchema = z.object({
   id: z.string(),
@@ -110,21 +128,72 @@ const expand = (template: string, values: Record<string, string>) =>
 export class JmapClient {
   readonly #transport: Transport;
   readonly #origin: string;
+  readonly #rewriteOrigin: string | undefined;
   constructor(origin: string, options: TransportOptions) {
     this.#origin = new URL(origin).origin;
     this.#transport = new Transport(origin, options);
+    this.#rewriteOrigin =
+      options.rewriteSessionUrlsToOrigin === undefined
+        ? undefined
+        : new URL(options.rewriteSessionUrlsToOrigin).origin;
+    if (
+      this.#rewriteOrigin !== undefined &&
+      ("window" in globalThis || !("process" in globalThis))
+    )
+      throw new Error("Session URL rewrite is server-side only");
+    if (
+      this.#rewriteOrigin !== undefined &&
+      this.#rewriteOrigin !== this.#origin
+    )
+      throw new Error("Session rewrite origin must match the client origin");
   }
-  discover(): Promise<JmapResult<Session>> {
-    return this.#transport.json(
+  async discover(): Promise<JmapResult<Session>> {
+    const result = await this.#transport.json(
       `${this.#origin}/.well-known/jmap`,
       SessionSchema,
     );
+    if (result.isErr() || this.#rewriteOrigin === undefined) return result;
+    try {
+      const rewrite = (value: string) => {
+        const url = new URL(value, this.#origin);
+        if (
+          !["http:", "https:"].includes(url.protocol) ||
+          url.username ||
+          url.password
+        )
+          throw new Error("Invalid advertised endpoint");
+        return `${this.#origin}${url.pathname}${url.search}`
+          .replaceAll("%7B", "{")
+          .replaceAll("%7D", "}");
+      };
+      return ok({
+        ...result.value,
+        apiUrl: rewrite(result.value.apiUrl),
+        uploadUrl: rewrite(result.value.uploadUrl),
+        downloadUrl: rewrite(result.value.downloadUrl),
+      });
+    } catch {
+      return err({
+        kind: "invalidResponse",
+        message: "Invalid advertised endpoint",
+      });
+    }
   }
   mailboxes(session: Session, accountId: string) {
     return this.#transport.call(
       session.apiUrl,
       "Mailbox/get",
-      { accountId, properties: ["id", "name", "role", "parentId"] },
+      {
+        accountId,
+        properties: [
+          "id",
+          "name",
+          "role",
+          "parentId",
+          "totalEmails",
+          "unreadEmails",
+        ],
+      },
       usingMail,
       GetSchema(MailboxSchema),
     );
@@ -137,6 +206,8 @@ export class JmapClient {
       sort?: readonly object[];
       position?: number;
       limit?: number;
+      collapseThreads?: boolean;
+      calculateTotal?: boolean;
     } = {},
   ) {
     return this.#transport.call(
@@ -166,11 +237,73 @@ export class JmapClient {
           "to",
           "messageId",
           "attachments",
+          "cc",
+          "bcc",
+          "sentAt",
+          "inReplyTo",
+          "references",
+          "headers",
+          "preview",
+          "hasAttachment",
+          "textBody",
+          "htmlBody",
+          "bodyValues",
         ],
+        fetchAllBodyValues: true,
       },
       usingMail,
       GetSchema(EmailSchema),
     );
+  }
+  threads(session: Session, accountId: string, ids: readonly string[]) {
+    return this.#transport.call(
+      session.apiUrl,
+      "Thread/get",
+      { accountId, ids },
+      usingMail,
+      GetSchema(z.object({ id: z.string(), emailIds: z.array(z.string()) })),
+    );
+  }
+  async createEmail(
+    session: Session,
+    accountId: string,
+    email: object,
+  ): Promise<JmapResult<{ id: string; threadId: string }>> {
+    const method = "Email/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      { accountId, create: { item: email } },
+      usingMail,
+      SetSchema(z.object({ id: z.string(), threadId: z.string() })),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notCreated);
+    if (failure !== undefined) return err(failure);
+    const item = result.value.created?.["item"];
+    return item === undefined
+      ? err({ kind: "invalidResponse", message: "Missing Email/set result" })
+      : ok(item);
+  }
+  async destroyEmail(
+    session: Session,
+    accountId: string,
+    id: string,
+  ): Promise<JmapResult<void>> {
+    const method = "Email/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      { accountId, destroy: [id] },
+      usingMail,
+      SetSchema(z.unknown()),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notDestroyed);
+    if (failure !== undefined) return err(failure);
+    return result.value.destroyed?.includes(id)
+      ? ok(undefined)
+      : err({ kind: "invalidResponse", message: "Missing Email/set result" });
   }
   identities(session: Session, accountId: string) {
     return this.#transport.call(
@@ -290,6 +423,7 @@ export class JmapClient {
     emailId: string,
     identityId: string,
     envelope?: { mailFrom: { email: string }; rcptTo: { email: string }[] },
+    sentMailboxId?: string,
   ): Promise<JmapResult<{ id: string }>> {
     const method = "EmailSubmission/set";
     const result = await this.#transport.call(
@@ -297,6 +431,17 @@ export class JmapClient {
       method,
       {
         accountId,
+        ...(sentMailboxId === undefined
+          ? {}
+          : {
+              onSuccessUpdateEmail: {
+                "#item": {
+                  mailboxIds: { [sentMailboxId]: true },
+                  "keywords/$draft": null,
+                  "keywords/$seen": true,
+                },
+              },
+            }),
         create: {
           item: {
             emailId,
@@ -307,6 +452,7 @@ export class JmapClient {
       },
       [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
       SetSchema(z.object({ id: z.string() })),
+      sentMailboxId === undefined ? undefined : "Email/set",
     );
     if (result.isErr()) return err(result.error);
     const failure = setFailure(method, result.value.notCreated);

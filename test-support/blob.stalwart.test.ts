@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { connect } from "node:tls";
 import { expect, test } from "vitest";
 import { z } from "zod";
 
 const run = promisify(execFile);
-const suffix = (process.env["CLEITO_RUN_ID"] ?? "local")
+const suffix = (process.env["OPENSUITE_RUN_ID"] ?? "local")
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-")
   .slice(0, 30);
@@ -42,9 +43,35 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
   const secretFile = join(directory, "secret");
   // The server runs as uid 2000. These are throwaway local-service credentials.
   await writeFile(secretFile, "local-fixture-secret", { mode: 0o644 });
+  const certFile = join(directory, "fullchain.pem");
+  const keyFile = join(directory, "privkey.pem");
+  await run("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-days",
+    "2",
+    "-subj",
+    "/CN=localhost",
+    "-addext",
+    "subjectAltName=DNS:localhost",
+    "-keyout",
+    keyFile,
+    "-out",
+    certFile,
+  ]);
+  await run("chmod", ["644", keyFile, certFile]);
+  const certFileContents = await readFile(certFile);
   const env = {
     ...process.env,
+    MAIL_TLS_ENABLED: "1",
+    MAIL_TLS_CERT_FILE: certFile,
+    MAIL_TLS_KEY_FILE: keyFile,
+    MAIL_HOSTNAME: "localhost",
     MAIL_BLOB_STORE: "s3",
+    MAIL_MANAGEMENT_SUBNET: `172.29.${String(100 + (process.pid % 100))}.0/24`,
     MAIL_S3_ENDPOINT: "http://minio:9000",
     MAIL_S3_REGION: "us-east-1",
     MAIL_S3_BUCKET: bucket,
@@ -76,6 +103,15 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
   const docker = async (...args: string[]) =>
     (await run("docker", args, { env, maxBuffer: 8 * 1024 * 1024 })).stdout;
   const compose = (...args: string[]) => docker(...composeArgs, ...args);
+  const bootstrap = (...args: string[]) =>
+    docker(
+      ...composeArgs,
+      "-f",
+      "deploy/stalwart/compose.bootstrap.yaml",
+      "--profile",
+      "bootstrap",
+      ...args,
+    );
   // The CLI runs inside the disposable LocalStack container and is explicitly
   // confined to the disposable MinIO endpoint; no provider is contacted.
   const aws = (...args: string[]) =>
@@ -108,7 +144,7 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
 
   let stage = "start";
   try {
-    await compose(
+    await bootstrap(
       "up",
       "-d",
       "--wait",
@@ -118,20 +154,87 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
       "localstack",
       "minio",
     );
+    await bootstrap("run", "--rm", "--no-deps", "stalwart-bootstrap");
+    await compose(
+      "up",
+      "-d",
+      "--force-recreate",
+      "--wait",
+      "--wait-timeout",
+      "180",
+      "stalwart",
+    );
     await aws("s3api", "create-bucket", "--bucket", bucket);
     env.MAIL_S3_ALLOW_SWITCH = "0";
     await expect(setup()).rejects.toThrow("Command failed");
+    // Even a refused blob switch must leave proxy trust active.
+    const directPort = /:(\d+)\s*$/.exec(
+      await compose("port", "stalwart", "8080"),
+    )?.[1];
+    expect(
+      (
+        await fetch(`http://127.0.0.1:${directPort}/healthz/live`, {
+          headers: { "x-forwarded-for": "invalid" },
+        })
+      ).status,
+    ).toBe(400);
     env.MAIL_S3_ALLOW_SWITCH = "1";
     const firstSetup = await setup();
     expect(firstSetup).toContain("restart Stalwart");
     await compose("restart", "stalwart");
     await startMail();
+    const imapPort = /:(\d+)\s*$/.exec(
+      await compose("port", "stalwart", "993"),
+    )?.[1];
+    if (imapPort === undefined) throw new Error("No IMAPS port");
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect(
+        {
+          host: "127.0.0.1",
+          port: Number(imapPort),
+          servername: "localhost",
+          ca: certFileContents,
+        },
+        () => {
+          socket.end();
+          resolve();
+        },
+      );
+      socket.setTimeout(10_000, () => socket.destroy(new Error("TLS timeout")));
+      socket.once("error", reject);
+    });
     env.MAIL_S3_ALLOW_SWITCH = "0";
     expect(await setup()).toContain("upload/download succeeded");
     expect(await setup()).toContain("upload/download succeeded");
     env.MAIL_S3_BUCKET = "different-fixture-bucket";
     await expect(setup()).rejects.toThrow("Command failed");
     env.MAIL_S3_BUCKET = bucket;
+    stage = "management isolation";
+    await compose("up", "-d", "--no-deps", "caddy");
+    const caddyPort = /:(\d+)\s*$/.exec(
+      await compose("port", "caddy", "80"),
+    )?.[1];
+    if (caddyPort === undefined) throw new Error("No proxy port");
+    const blocked = await fetch(`http://127.0.0.1:${caddyPort}/jmap/`, {
+      method: "POST",
+      headers: {
+        authorization: `Basic ${Buffer.from(`management@opensuite.internal:${(await compose("exec", "-T", "stalwart", "cat", "/run/opensuite/stalwart-management/password")).trim()}`).toString("base64")}`,
+        "content-type": "application/json",
+        "x-forwarded-for": env.MAIL_MANAGEMENT_SUBNET.replace("0/24", "5"),
+      },
+      body: JSON.stringify({
+        using: ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"],
+        methodCalls: [["x:Domain/query", {}, "q"]],
+      }),
+    });
+    expect(blocked.status).toBe(403);
+    expect(
+      (
+        await fetch(`http://127.0.0.1:${caddyPort}/.well-known/jmap`, {
+          redirect: "manual",
+        })
+      ).status,
+    ).toBe(307);
     stage = "import";
 
     const portOutput = await compose("port", "stalwart", "8080");
@@ -144,12 +247,12 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
         "-T",
         "stalwart",
         "cat",
-        "/run/opensuite/stalwart-admin/password",
+        "/run/opensuite/stalwart-management/password",
       )
     ).trim();
     const headers = {
-      authorization: `Basic ${Buffer.from(`admin:${password}`).toString("base64")}`,
-      "x-forwarded-for": "192.0.2.10",
+      authorization: `Basic ${Buffer.from(`management@opensuite.internal:${password}`).toString("base64")}`,
+      "x-forwarded-for": env.MAIL_MANAGEMENT_SUBNET.replace("0/24", "5"),
     };
     const request = (path: string, init: RequestInit = {}) => {
       const requestHeaders = new Headers(init.headers);

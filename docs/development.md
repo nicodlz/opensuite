@@ -7,6 +7,7 @@ This page describes what runs today. Planned components are listed at the end.
 ```sh
 cp deploy/env.example .env
 pnpm install && pnpm build   # produces apps/web/dist, mounted by Caddy
+# First bootstrap the mail management account as described below.
 docker compose up -d
 docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
 ```
@@ -32,23 +33,55 @@ Data lives in named volumes: `postgres-data`, `stalwart-data`, `caddy-data`,
 
 ### Secrets
 
-On first start, the `secrets` job generates the PostgreSQL password and the
-mail server administrator password into the `secrets` volume. Each service
-mounts only its own sub-directory, read-only. Neither `.env` nor Git ever
-contains these passwords. To read the mail administrator password:
+On first start, the `secrets` job generates separate PostgreSQL, Stalwart
+recovery and management passwords in the `secrets` volume. Normal Stalwart
+startup does not mount or activate the recovery password. Back up the secrets
+with the data volumes; losing the management password requires deliberate
+recovery. Docker administrators and processes with access to the internal
+mail listener and management credential are trusted.
+
+### Mail bootstrap and upgrades
+
+`deploy/stalwart/config.json` locates RocksDB; settings live in the store.
+For a fresh install **or an upgrade from the old recovery-only setup**, stop
+public access before starting the temporary recovery administrator. Choose a
+non-overlapping `MAIL_MANAGEMENT_SUBNET` first; do not change it later without
+updating the account's allowed IPs. Run from the repository root:
 
 ```sh
-docker compose exec stalwart cat /run/opensuite/stalwart-admin/password
+docker compose run --rm secrets
+docker compose stop caddy
+docker compose -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml up -d --wait stalwart
+docker compose -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml --profile bootstrap run --rm stalwart-bootstrap
+docker compose up -d --force-recreate --wait stalwart
+docker compose up -d
 ```
 
-Removing the `secrets` volume while the data volumes remain makes the stored
-passwords stale. Back it up together with the data volumes.
+The job creates `management@opensuite.internal` with a separately generated
+password and an allowed-IP restriction to the management network; it verifies
+the credential before exiting. It refuses to take over an existing domain if
+that credential does not work. Resolve that collision or an interrupted
+bootstrap manually using the temporary recovery override. The account is an
+administrator: protecting its secret and every container with access to the
+mail listener is essential. The recovery override must be removed and Stalwart
+recreated before Caddy is restarted. Verify the recovery credential no longer
+authenticates. To recover later, stop Caddy and deliberately use the temporary
+override again; remove it and recreate Stalwart afterwards.
 
-### Mail server configuration
+`stalwart-setup` connects to `http://stalwart:8080` on the management network
+using that account. Future server-side provisioning should use the same
+internal origin and credential with `StalwartAdmin`; its API is unchanged.
+Never use the public HTTPS origin for management. `Http.clientIpSource` trusts
+one X-Forwarded-For hop, and Caddy replaces client-supplied values and refuses
+connections originating from the management subnet. Do not put another
+untrusted proxy in front of Caddy or attach Caddy to the management network.
+Containers that can directly contact Stalwart can forge that header, so the
+allowed-IP rule is a boundary against public clients, not against compromised
+containers or Docker administrators. The stock Caddy image cannot inspect JSON
+request bodies; it does not filter `urn:stalwart:jmap` itself.
 
-`deploy/stalwart/config.json` only locates the data store. Stalwart keeps all
-other settings in that store. The `stalwart-setup` job runs after the server is
-healthy and applies idempotent settings through the Stalwart management API:
+Setup enables stdout logging and proxy trust before checking blob storage;
+S3-compatible blobs require the separate [object storage procedure](operations/object-storage.md).
 
 - logs go to standard output (`docker compose logs stalwart`);
 - the client address is taken from `X-Forwarded-For`, which Caddy sets
@@ -58,9 +91,42 @@ healthy and applies idempotent settings through the Stalwart management API:
   [object storage operations](operations/object-storage.md), including the
   explicit switch guard, restart, probe and migration precautions.
 
-Published mail ports: 25 (SMTP), 465 (submission, implicit TLS), 993 (IMAP,
-implicit TLS) and 4190 (ManageSieve). STARTTLS ports 587 and 143 are not
-enabled: RFC 8314 recommends implicit TLS for submission and IMAP.
+### Mail TLS and ports
+
+Ports 465, 993 and 4190 bind to `127.0.0.1` by default. Caddy's HTTPS
+certificate does not automatically configure Stalwart. To share it with mail,
+set `MAIL_HOSTNAME` and `OPENSUITE_SITE_ADDRESS` to the same real hostname,
+obtain Caddy's certificate, and export its full chain and private key to
+operator-managed host files outside the repository. For Caddy's usual ACME
+storage, the files are under `/data/caddy/certificates/` in the Caddy container;
+choose the actual issuer and hostname directory. Copy both files securely,
+restrict access, and make them readable to uid 2000. Do not expose the key in
+`.env`, logs or shell arguments. Configure their absolute paths in
+`MAIL_TLS_CERT_FILE` and `MAIL_TLS_KEY_FILE`, set `MAIL_TLS_ENABLED=1`, and
+recreate Stalwart and rerun setup:
+
+```sh
+docker compose up -d --force-recreate --wait stalwart
+docker compose run --rm stalwart-setup
+docker compose restart stalwart
+```
+
+Setup validates the hostname, expiry and matching key and registers file
+references. Before setting `MAIL_PROTOCOL_BIND=0.0.0.0`, use an independent
+TLS client on each loopback port to verify the served chain and hostname,
+including a STARTTLS handshake for ManageSieve. Then recreate Stalwart and
+verify externally. Caddy renewals are **not automatically copied**: arrange a
+secure renewal hook or operator procedure to refresh both exported files,
+recreate Stalwart (file bind mounts can retain old inodes), rerun setup and
+verify the new certificate before expiry. Monitor certificate expiry. The
+loopback default is the safe state until this is done.
+
+No host port 25 is published in the normal stack: inbound mail must pass through
+SES. For a deliberate emergency direct-SMTP fallback, use
+`docker compose -f compose.yaml -f deploy/stalwart/compose.direct-smtp.yaml up -d stalwart`;
+it defaults to loopback and `DIRECT_SMTP_BIND=0.0.0.0` explicitly exposes it.
+Direct mail bypasses SES filtering and archival. Remove the override and
+recreate Stalwart after the fallback. STARTTLS ports 587 and 143 remain disabled.
 
 ### Migrations
 
@@ -95,8 +161,8 @@ checks the following through the proxy, over TLS verified with Caddy's local
 certificate authority:
 
 - API liveness and readiness;
-- JMAP discovery, the anonymous and authenticated sessions, and rejection of a
-  wrong password;
+- JMAP discovery, the anonymous session, rejection of the internal management
+  account through Caddy, and rejection of a wrong password;
 - CalDAV and CardDAV discovery;
 - the SMTP greeting;
 - that a client cannot spoof `X-Forwarded-For`;
@@ -142,33 +208,62 @@ message with an attachment, a storage outage and a stopped-store restore,
 then removes its containers and volumes. The local substitute does not verify
 real object-storage providers. Docker is required.
 
-### Authentication work in progress
+## Authentication and mailbox provisioning
 
-The Better Auth factory and Fastify adapter are exercised in the `http` test
-project with a throwaway PostgreSQL container and synthetic provisioning. They
-are not wired into the standard API startup. Signup's provisioning callback
-runs after the database transaction commits; a failed callback can leave an
-unlinked application account. The session gate rejects an unlinked account,
-but repair and reconciliation are not implemented. An app-password response
-can be lost after Stalwart creates it; do not retry issuance automatically until
-the orphan credential has been identified and revoked.
+The API serves Better Auth at `/api/auth/*` through Caddy, with secure,
+HTTP-only, SameSite=Lax cookies. Set `OPENSUITE_PUBLIC_HOST` to the HTTPS host
+and `MAIL_DOMAIN` to the single domain allowed for new accounts. Registration is
+restricted to authenticated administrators; it does not verify email ownership.
+The administrator must verify the address out of band and send the initial
+password securely. Passwords need at least 12 characters. MFA supports TOTP
+and backup codes. Caddy must be the only proxy trusted by the API: Compose uses
+a dedicated network and fixed Caddy address and replaces X-Forwarded-For.
+Do not publish the API directly or add untrusted containers to that network.
 
-The production provisioning adapter, mailbox disablement workflow, audit events,
-per-IP and per-account rate limiting, roles and protected procedures are still
-required. Do not expose the test adapter as a production authentication service.
+There is no automatic first administrator. To create or promote an enabled,
+provisioned account, prepare a password file outside Git and `.env`, then run:
+
+```sh
+docker compose exec -T api node apps/api/src/bootstrap.ts admin@example.com /dev/stdin < /secure/path/initial-password
+```
+
+The email must belong to `MAIL_DOMAIN`. For an existing account the command
+promotes that account without changing its password; a disabled account cannot be
+promoted. An administrator can then create accounts with
+`POST /api/auth/sign-up/email` using their session and the configured Origin.
+The command is an operator action: restrict Docker access. Administrators cannot
+disable themselves or the last enabled administrator.
+
+Signup provisions a Stalwart account and address, with a random inaccessible
+primary password and an application credential encrypted in the database.
+The API mounts the generated Better Auth secret, mailbox encryption key, and
+Stalwart recovery administrator secret read-only; back up the secrets volume
+alongside the database and mail data. Loss of the mailbox key prevents
+recovering stored credentials. Do not place secrets in `.env` or Git.
+
+Provisioning can fail after the account transaction commits. A startup and
+one-minute reconciliation retries unlinked accounts and interrupted suspensions.
+It suspends the mailbox, revokes application-owned credentials (including a
+credential whose response was lost), then issues a replacement. Disabled users
+lose sessions immediately; a failed Stalwart suspension is retried. Monitor API
+logs for reconciliation failures. Run one API instance: provisioning locks and
+rate limits are in-process and are not shared across replicas. Auth limits are
+per IP and per account plus IP, and reset on restart. Audit events are append-only
+for the application database role. The API's live-session middleware checks the
+database and active mailbox before protected procedures or Drive sessions.
 
 ## Known limitations
 
-- **TLS for mail protocols:** the mail server has no certificate yet, so TLS
-  handshakes on 465 and 993 do not succeed. Certificate provisioning for mail
-  is planned with domain onboarding. HTTPS through Caddy works.
-- **Mail delivery:** no domain or mailbox is provisioned by default. Local JMAP submission and delivery and a fake SMTP relay are tested; real SES delivery is not.
+- **Mail certificate renewal:** exporting Caddy certificates and verifying mail
+  TLS is an operator responsibility; there is no automated renewal hook.
+- **Mail delivery:** no domain or mailbox is provisioned by default. Local
+  JMAP submission and delivery are tested; a fake SMTP relay is tested; real SES delivery is not.
 - **Outbound access:** the mail server downloads public network data
   (ASN/geolocation) from GitHub at startup.
 
 ## Planned, not implemented
 
-The production mail API, calendar, contacts and drive interfaces, authentication, production SES provider proof, the setup wizard and
+The production mail API, calendar, contacts and drive interfaces, production SES provider proof, the setup wizard and
 backups.
 
 ## Ingestion
@@ -180,12 +275,21 @@ See [ingestion](architecture/ingestion.md) for configuration, archive and replay
 Drive runs separately at `/drive/api/`, with its own `opensuite_drive` database,
 migrations, bucket and prefix. Caddy and mail do not depend on Drive startup.
 The session adapter forwards only the incoming cookie to the API's
-`GET /api/auth/get-session?disableCookieCache=true`; it accepts Better Auth's
+`GET /auth/get-session?disableCookieCache=true`; it accepts Better Auth's
 `{user, session}` response, verifies matching user IDs and expiry, and fails
-closed if the API is unavailable. Authentication is being implemented separately;
-until that endpoint is available, authenticated Drive operations are unavailable.
+closed if the API is unavailable. The API must be running for authenticated Drive operations.
 The endpoint URL is selected with `DRIVE_SESSION_API` (default `http://api:3000`).
 The internal endpoint must be trusted and reachable at the indicated path.
+
+The `drive-migrate` job uses the PostgreSQL administrator secret only to create
+and maintain the `opensuite_drive` login and transfer the Drive database and
+existing Drive tables to it. It applies migrations as that role. The long-running
+service receives only the separately generated `drive-database` secret, through
+`DRIVE_DATABASE_PASSWORD_FILE`. The role cannot connect to the main database:
+the migration job revokes its default PUBLIC CONNECT grant and grants CONNECT to
+`opensuite_app`. Other main-database roles need explicit CONNECT grants. Back up
+the database and secrets before upgrading an existing installation; orphaned
+Drive entries must be repaired before the parent foreign key can be installed.
 
 For local development, `docker compose --profile dev up -d` creates a separate
 `opensuite-drive` bucket in LocalStack. The default `test` credentials and
@@ -200,6 +304,17 @@ services. Configure S3 CORS for the actual application origins, PUT/GET/HEAD,
 required headers, and exposed `ETag`; local development uses permissive CORS.
 AWS and other S3-compatible providers have not been exercised here.
 
+The web Drive workspace uses synthetic in-memory data in the Vite development
+server and the real Drive API in production builds. Set `DRIVE_PROXY_TARGET` to
+proxy `/drive/api` to a local Drive service when testing a production preview.
+The current contract does not expose quota totals or lists of existing shares
+and links; the workspace reports quota as unavailable and accepts user and
+link IDs to change or revoke access. A public link and its ID must be saved
+when created because the token is returned only once. The browser attempts to
+remove pending reservations when an upload fails or is cancelled; if it lacks
+owner access, the service has no separate abort command and cleanup requires
+the owner.
+
 The oRPC endpoint `POST /drive/api/v1/command` accepts the discriminated actions
 in `packages/contracts/src/drive.ts`. Uploads reserve quota first and return a
 five-minute URL. Single uploads require the specified content type and length;
@@ -207,8 +322,14 @@ multipart clients request consecutive 5 MiB parts (the last may be smaller),
 retain each ETag, and submit them to `finish`. Finalization streams and hashes
 the complete object, checks size and content type, and copies it to a key which
 is never exposed for upload. Clients must calculate a hexadecimal SHA-256 first.
-Reservations, including trashed and pending uploads, count against the per-owner
-quota until permanent deletion. Pending uploads can be trashed and deleted.
+Ready files and unexpired reservations, including trashed entries, count against
+the per-owner quota. Expired pending and failed uploads no longer reserve quota.
+The Drive process sweeps up to 100 expired uploads every minute, aborting their
+multipart uploads and deleting their storage and rows; failed cleanup is retried.
+Parts and finalization are rejected after expiry. A checksum or metadata mismatch
+marks an upload failed, and finish attempts are limited to 10 per user per minute
+per Drive process (the in-memory limit resets on restart and is not shared across
+replicas). Pending and failed uploads can also be trashed and deleted.
 Configure storage lifecycle rules to clean orphaned `pending/` objects and
 incomplete multipart uploads; a still-valid signed URL can recreate a staging
 object after finalization. Monitor for orphaned objects and interrupted
@@ -217,6 +338,7 @@ finalizations; automatic reconciliation is not implemented.
 Files are private unless explicitly shared by user ID; a share applies to the
 individual item, not its descendants. Read shares permit download and preview;
 write shares also permit rename and move subject to destination authorization.
+Only an owner can move an item to their root.
 A write share on a folder permits creating files or folders inside it, charged
 to the folder owner; each item created by the recipient receives its own write
 share, which can be revoked separately.
@@ -233,3 +355,24 @@ public links are checked on each request.
 Compose project with random loopback ports, migrates a fresh database, tests
 against LocalStack, and removes its containers and volumes on exit. The Compose
 smoke test also stops Drive and LocalStack and verifies mail remains available.
+
+## Mail API composition
+
+The mail routes use the authenticated actor supplied by the API identity adapter.
+Configure `JMAP_ORIGIN` with the Stalwart JMAP origin and
+`PROVIDER_ENCRYPTION_KEY` with the same 64-character hexadecimal key used to
+protect mailbox credentials. Both belong on the API server; the browser only
+receives the application session cookie. The JMAP session's advertised URLs
+must use that same origin. The auth startup composition must pass its identity
+adapter to `buildServer` so requests can resolve the current session; it may
+also supply the mail service through the `mail` dependency. The web app uses
+its synthetic mailbox in the Vite dev server and the API in production builds.
+
+Attachment links are scoped to the signed-in user and expire after one minute.
+They are held in process memory, so deployments with multiple API instances
+need sticky routing or a shared token store. Replacing a draft creates a new
+JMAP email ID; callers must use the ID returned by each update. A successful
+submission means Stalwart accepted the message for delivery, not that a remote
+recipient received it. If submission times out or its follow-up mailbox update
+fails, delivery may already be underway; inspect the mailbox and delivery queue
+before retrying.

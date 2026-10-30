@@ -12,6 +12,7 @@ describe("mailbox provisioning recovery", () => {
     let active = false;
     let attempts = 0;
     const store: ProvisioningStore = {
+      finishDisabled: () => Promise.resolve(ok(undefined)),
       markDisabled: () => Promise.resolve(ok(undefined)),
       mailboxAccountId: () => Promise.resolve(ok("mail")),
       prepare: () => Promise.resolve(ok({ active, disabled: false })),

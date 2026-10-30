@@ -3,6 +3,19 @@ services:
   stalwart:
     ports: !override
       - "127.0.0.1::8080"
+      - "127.0.0.1::993"
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-management
+        read_only: true
+        volume:
+          subpath: stalwart-management
+  caddy:
+    environment:
+      OPENSUITE_SITE_ADDRESS: ":80"
+    ports: !override
+      - "127.0.0.1::80"
   localstack:
     ports: !override []
   minio:

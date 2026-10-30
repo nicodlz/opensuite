@@ -16,6 +16,9 @@ const domain: ManagedDomain & { stalwartId: string } = {
 };
 const list = vi.fn<DomainService["list"]>(() => Promise.resolve(ok([domain])));
 const add = vi.fn<DomainService["add"]>(() => Promise.resolve(ok(domain)));
+const audit = vi.fn<
+  (event: { userId: string | null; action: string }) => Promise<void>
+>(() => Promise.resolve());
 const service: DomainService = {
   list,
   add,
@@ -40,6 +43,7 @@ async function server(role: "admin" | "user" | "none") {
     domains: service,
     identity: {
       publicOrigin: origin,
+      audit,
       handler: () => Promise.resolve(new Response()),
       actor: () =>
         Promise.resolve(
@@ -64,6 +68,14 @@ describe("domain API", () => {
       }),
     );
     expect(list).not.toHaveBeenCalled();
+    expect(audit).toHaveBeenCalledWith({
+      userId: null,
+      action: "admin.access_denied",
+    });
+    expect(audit).toHaveBeenCalledWith({
+      userId: "u",
+      action: "admin.access_denied",
+    });
   });
   it("validates input and lets an admin add and recheck", async () => {
     const app = await server("admin");

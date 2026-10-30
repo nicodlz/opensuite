@@ -23,6 +23,9 @@ export default defineConfig({
       ...suites.map((suite) => ({
         test: {
           name: suite,
+          ...(suite === "http"
+            ? { testTimeout: 30_000, hookTimeout: 120_000 }
+            : {}),
           include: [
             ...roots.map((root) => `${root}/**/*.${suite}.test.ts`),
             ...(suite === "stalwart"

@@ -25,6 +25,7 @@ const destination = z.object({
   origin: z.url(),
   authorization: z.string().min(1),
   quarantineMailbox: z.string().min(1),
+  rewriteSessionUrls: z.boolean().default(false),
 });
 const configSchema = z
   .object({
@@ -114,15 +115,30 @@ if (db.isErr()) {
   process.exit(1);
 }
 const s3 = new S3Client({
+  requestHandler: {
+    connectionTimeout: 10_000,
+    requestTimeout: 120_000,
+    throwOnRequestTimeout: true,
+  },
   region: c.AWS_REGION,
   ...(c.AWS_ENDPOINT_URL === undefined ? {} : { endpoint: c.AWS_ENDPOINT_URL }),
   forcePathStyle: c.AWS_ENDPOINT_URL !== undefined,
 });
 const sqs = new SQSClient({
+  requestHandler: {
+    connectionTimeout: 10_000,
+    requestTimeout: 120_000,
+    throwOnRequestTimeout: true,
+  },
   region: c.AWS_REGION,
   ...(c.AWS_ENDPOINT_URL === undefined ? {} : { endpoint: c.AWS_ENDPOINT_URL }),
 });
 const archive = new S3Client({
+  requestHandler: {
+    connectionTimeout: 10_000,
+    requestTimeout: 120_000,
+    throwOnRequestTimeout: true,
+  },
   region: c.ARCHIVE_REGION,
   ...(c.ARCHIVE_ENDPOINT_URL === undefined
     ? {}
@@ -207,33 +223,37 @@ try {
       process.exitCode = 1;
     }
   } else if (command === "worker") {
-    let stopping = false;
-    healthServer = createHealthServer(readiness, () => stopping);
+    const state = { stopping: false };
+    healthServer = createHealthServer(readiness, () => state.stopping);
     await new Promise<void>((resolve) =>
       healthServer?.listen(c.INGEST_HEALTH_PORT, "0.0.0.0", resolve),
     );
     process.on("SIGTERM", () => {
-      stopping = true;
+      state.stopping = true;
     });
     process.on("SIGINT", () => {
-      stopping = true;
+      state.stopping = true;
     });
-    const poll = async (): Promise<void> => {
-      if (stopping) return;
+    const pollOnce = async (): Promise<boolean> => {
       const received = await queue.receive();
       if (received.isErr()) {
         process.stderr.write(
           `${JSON.stringify({ level: "error", event: "ingest_failure", stage: "queue" })}\n`,
         );
         await new Promise((resolve) => setTimeout(resolve, 5000));
-        return poll();
+        return false;
       }
       await Promise.all(
         received.value.map((item) => service.handle(queue, item)),
       );
-      return poll();
+      return true;
     };
-    await poll();
+    async function* polls(): AsyncGenerator<boolean> {
+      while (!state.stopping) yield pollOnce();
+    }
+    for await (const result of polls()) {
+      if (!result) continue;
+    }
   } else {
     process.stderr.write(
       `${JSON.stringify({ level: "error", event: "unknown_command" })}\n`,

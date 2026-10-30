@@ -15,6 +15,8 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { createHash } from "node:crypto";
 import { verifiedType } from "../domain/content.ts";
 
+export class UploadMismatchError extends Error {}
+
 export interface StorageConfig {
   endpoint: string;
   publicEndpoint: string;
@@ -83,7 +85,13 @@ export const createStorage = (config: StorageConfig) => {
       );
       return { uploadId: null, url };
     },
-    async part(id: string, uploadId: string, partNumber: number, size: number) {
+    async part(
+      id: string,
+      uploadId: string,
+      partNumber: number,
+      size: number,
+      expiresIn: number,
+    ) {
       return getSignedUrl(
         publicClient,
         new UploadPartCommand({
@@ -93,7 +101,7 @@ export const createStorage = (config: StorageConfig) => {
           PartNumber: partNumber,
           ContentLength: size,
         }),
-        { expiresIn: 300, signableHeaders: new Set(["content-length"]) },
+        { expiresIn, signableHeaders: new Set(["content-length"]) },
       );
     },
     async complete(
@@ -128,7 +136,7 @@ export const createStorage = (config: StorageConfig) => {
         head.ContentType !== contentType ||
         head.ETag === undefined
       )
-        throw new Error("upload metadata mismatch");
+        throw new UploadMismatchError("upload metadata mismatch");
       const object = await client.send(
         new GetObjectCommand({ Bucket, Key, IfMatch: head.ETag }),
       );
@@ -139,13 +147,14 @@ export const createStorage = (config: StorageConfig) => {
       for await (const chunk of object.Body.transformToWebStream()) {
         const bytes = Buffer.from(chunk);
         length += bytes.length;
-        if (length > size) throw new Error("upload size mismatch");
+        if (length > size)
+          throw new UploadMismatchError("upload size mismatch");
         hash.update(bytes);
         if (first.length < 16)
           first = Buffer.concat([first, bytes.subarray(0, 16 - first.length)]);
       }
       if (length !== size || hash.digest("hex") !== checksum)
-        throw new Error("upload checksum mismatch");
+        throw new UploadMismatchError("upload checksum mismatch");
       const safeType = verifiedType(contentType, first);
       await client.send(
         new CopyObjectCommand({
@@ -158,8 +167,12 @@ export const createStorage = (config: StorageConfig) => {
           ContentDisposition: "attachment",
         }),
       );
-      await client.send(new DeleteObjectCommand({ Bucket, Key }));
       return safeType;
+    },
+    async removeStaging(id: string) {
+      await client.send(
+        new DeleteObjectCommand({ Bucket, Key: key(id, true) }),
+      );
     },
     async download(objectKey: string, name: string, contentType: string) {
       // ASCII fallback plus RFC 5987 filename prevents header injection.
@@ -183,18 +196,28 @@ export const createStorage = (config: StorageConfig) => {
       objectKey: string | null,
       uploadId: string | null,
     ) {
-      if (uploadId !== null)
-        await client.send(
-          new AbortMultipartUploadCommand({
-            Bucket,
-            Key: key(id, true),
-            UploadId: uploadId,
-          }),
-        );
+      if (uploadId !== null) {
+        try {
+          await client.send(
+            new AbortMultipartUploadCommand({
+              Bucket,
+              Key: key(id, true),
+              UploadId: uploadId,
+            }),
+          );
+        } catch (error) {
+          // A previous completion or cleanup may already have consumed the upload.
+          if (!(error instanceof Error) || error.name !== "NoSuchUpload")
+            throw error;
+        }
+      }
       await client.send(
         new DeleteObjectCommand({ Bucket, Key: key(id, true) }),
       );
-      if (objectKey !== null)
+      await client.send(
+        new DeleteObjectCommand({ Bucket, Key: key(id, false) }),
+      );
+      if (objectKey !== null && objectKey !== key(id, false))
         await client.send(new DeleteObjectCommand({ Bucket, Key: objectKey }));
     },
     close() {

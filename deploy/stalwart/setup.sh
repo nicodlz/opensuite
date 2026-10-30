@@ -9,12 +9,17 @@
 set -eu
 
 api="${STALWART_URL:-http://stalwart:8080}"
-password="$(cat "${STALWART_ADMIN_PASSWORD_FILE:-/run/opensuite/stalwart-admin/password}")"
+password="$(cat "${STALWART_MANAGEMENT_PASSWORD_FILE:-/run/opensuite/stalwart-management/password}")"
+case "$password" in *[!a-zA-Z0-9]*|'') echo 'stalwart-setup: invalid management password' >&2; exit 1 ;; esac
+umask 077
+auth_dir="$(mktemp -d)"
+trap 'rm -rf "$auth_dir"' EXIT HUP INT TERM
+printf 'user = "management@opensuite.internal:%s"\n' "$password" >"$auth_dir/curl.conf"
 # Stalwart rejects loopback X-Forwarded-For values; use this container's address.
 self="$(hostname -i | cut -d' ' -f1)"
 
 jmap() { # method calls as a JSON array
-  curl -fsS -u "admin:${password}" -H "X-Forwarded-For: ${self}" \
+  curl -fsS -K "$auth_dir/curl.conf" -H "X-Forwarded-For: ${self}" \
     -H 'Content-Type: application/json' "${api}/jmap/" \
     -d "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:stalwart:jmap\"],\"methodCalls\":$1}"
 }
@@ -33,6 +38,59 @@ safe_value() {
     *[!a-zA-Z0-9._:/-]*|'') echo "stalwart-setup: invalid or empty $1" >&2; exit 1 ;;
   esac
 }
+
+tracers="$(jmap '[["x:Tracer/get",{},"t"]]')"
+fail_on_errors "$tracers"
+# The image's default file tracer, which cannot write to its log directory.
+log_ids="$(printf '%s' "$tracers" | grep -o '"@type":"Log","id":"[a-z0-9]*"' | sed 's/.*"id":"\([a-z0-9]*\)"/\1/' || true)"
+updates=""
+for id in $log_ids; do
+  updates="${updates:+${updates},}\"${id}\":{\"enable\":false}"
+done
+create='{}'
+if ! printf '%s' "$tracers" | grep -q '"@type":"Stdout"'; then
+  create='{"stdout":{"@type":"Stdout","enable":true,"level":"info"}}'
+fi
+
+result="$(jmap "[[\"x:Tracer/set\",{\"create\":${create},\"update\":{${updates}}},\"t\"],
+  [\"x:Http/set\",{\"update\":{\"singleton\":{\"clientIpSource\":\"xForwardedFor\",\"forwardedHops\":1}}},\"h\"],
+  [\"x:Action/set\",{\"create\":{\"reload\":{\"@type\":\"ReloadSettings\"}}},\"r\"]]")"
+fail_on_errors "$result"
+
+# Verify by behaviour: with proxy trust active, a malformed header is refused.
+status="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: not-an-address' "${api}/healthz/live")"
+if [ "$status" != "400" ]; then
+  echo "stalwart-setup: X-Forwarded-For trust not active (status ${status})" >&2
+  exit 1
+fi
+echo "stalwart-setup: stdout logging and proxy trust applied"
+
+
+# Share a certificate exported from Caddy. File references keep the private key
+# out of JMAP and RocksDB; Stalwart reads them on settings reload/restart.
+case "${MAIL_TLS_ENABLED:-0}" in
+  0) ;;
+  1)
+    cert=/run/opensuite/tls/fullchain.pem
+    key=/run/opensuite/tls/privkey.pem
+    hostname="${MAIL_HOSTNAME:-localhost}"
+    safe_value MAIL_HOSTNAME "$hostname"
+    [ -s "$cert" ] && [ -s "$key" ] || { echo 'stalwart-setup: TLS certificate or key missing' >&2; exit 1; }
+    openssl x509 -in "$cert" -noout -checkend 86400 >/dev/null &&
+      openssl x509 -in "$cert" -noout -checkhost "$hostname" | grep -Fq 'does match' || { echo 'stalwart-setup: certificate hostname or expiry invalid' >&2; exit 1; }
+    cert_pub="$(openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256)"
+    key_pub="$(openssl pkey -in "$key" -pubout -outform DER | openssl dgst -sha256)"
+    [ "$cert_pub" = "$key_pub" ] || { echo 'stalwart-setup: TLS certificate and key do not match' >&2; exit 1; }
+    certificates="$(jmap '[["x:Certificate/get",{"properties":["id","certificate","privateKey"]},"c"]]')"
+    fail_on_errors "$certificates"
+    if ! printf '%s' "$certificates" | grep -Fq '"filePath":"/run/opensuite/tls/fullchain.pem"'; then
+      result="$(jmap '[["x:Certificate/set",{"create":{"mail":{"certificate":{"@type":"File","filePath":"/run/opensuite/tls/fullchain.pem"},"privateKey":{"@type":"File","filePath":"/run/opensuite/tls/privkey.pem"}}}},"c"],["x:Action/set",{"create":{"reload":{"@type":"ReloadSettings"}}},"r"]]')"
+      fail_on_errors "$result"
+      echo 'stalwart-setup: certificate configured; restart Stalwart and verify TLS before publishing ports'
+    fi
+    ;;
+  *) echo 'stalwart-setup: MAIL_TLS_ENABLED must be 0 or 1' >&2; exit 1 ;;
+esac
 
 blob="$(jmap '[["x:BlobStore/get",{"ids":["singleton"]},"b"]]')"
 fail_on_errors "$blob"
@@ -81,44 +139,20 @@ case "${MAIL_BLOB_STORE:-local}" in
   *) echo 'stalwart-setup: MAIL_BLOB_STORE must be local or s3' >&2; exit 1 ;;
 esac
 
-tracers="$(jmap '[["x:Tracer/get",{},"t"]]')"
-# The image's default file tracer, which cannot write to its log directory.
-log_ids="$(printf '%s' "$tracers" | grep -o '"@type":"Log","id":"[a-z0-9]*"' | sed 's/.*"id":"\([a-z0-9]*\)"/\1/' || true)"
-updates=""
-for id in $log_ids; do
-  updates="${updates:+${updates},}\"${id}\":{\"enable\":false}"
-done
-create='{}'
-if ! printf '%s' "$tracers" | grep -q '"@type":"Stdout"'; then
-  create='{"stdout":{"@type":"Stdout","enable":true,"level":"info"}}'
-fi
-
-result="$(jmap "[[\"x:Tracer/set\",{\"create\":${create},\"update\":{${updates}}},\"t\"],
-  [\"x:Http/set\",{\"update\":{\"singleton\":{\"clientIpSource\":\"xForwardedFor\",\"forwardedHops\":1}}},\"h\"],
-  [\"x:Action/set\",{\"create\":{\"reload\":{\"@type\":\"ReloadSettings\"}}},\"r\"]]")"
-fail_on_errors "$result"
-
-# Verify by behaviour: with proxy trust active, a malformed header is refused.
-status="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: not-an-address' "${api}/healthz/live")"
-if [ "$status" != "400" ]; then
-  echo "stalwart-setup: X-Forwarded-For trust not active (status ${status})" >&2
-  exit 1
-fi
-echo "stalwart-setup: stdout logging and proxy trust applied"
 
 if [ "$changed" = 1 ]; then
   echo 'stalwart-setup: S3 configuration saved; restart Stalwart, then run setup again to probe storage'
 elif [ "${MAIL_BLOB_STORE:-local}" = s3 ]; then
   # A unique upload and download exercises the active backend. The operator
   # must restart after a change before relying on this probe.
-  session="$(curl -fsS -u "admin:${password}" -H "X-Forwarded-For: ${self}" "${api}/jmap/session")"
+  session="$(curl -fsS -K "$auth_dir/curl.conf" -H "X-Forwarded-For: ${self}" "${api}/jmap/session")"
   account="$(printf '%s' "$session" | sed -n 's/.*"primaryAccounts":{"urn:ietf:params:jmap:mail":"\([a-zA-Z0-9]*\)".*/\1/p')"
   [ -n "$account" ] || { echo 'stalwart-setup: no admin mail account' >&2; exit 1; }
   probe="opensuite-storage-probe-$$-$(date +%s)"
-  uploaded="$(printf '%s' "$probe" | curl -fsS -u "admin:${password}" -H "X-Forwarded-For: ${self}" -H 'Content-Type: application/octet-stream' --data-binary @- "${api}/jmap/upload/${account}/")"
+  uploaded="$(printf '%s' "$probe" | curl -fsS -K "$auth_dir/curl.conf" -H "X-Forwarded-For: ${self}" -H 'Content-Type: application/octet-stream' --data-binary @- "${api}/jmap/upload/${account}/")"
   blob_id="$(printf '%s' "$uploaded" | sed -n 's/.*"blobId":"\([a-zA-Z0-9_-]*\)".*/\1/p')"
   [ -n "$blob_id" ] || { echo 'stalwart-setup: upload did not return a blob ID' >&2; exit 1; }
-  readback="$(curl -fsS -u "admin:${password}" -H "X-Forwarded-For: ${self}" "${api}/jmap/download/${account}/${blob_id}/probe?accept=application%2Foctet-stream")"
+  readback="$(curl -fsS -K "$auth_dir/curl.conf" -H "X-Forwarded-For: ${self}" "${api}/jmap/download/${account}/${blob_id}/probe?accept=application%2Foctet-stream")"
   [ "$readback" = "$probe" ] || { echo 'stalwart-setup: storage probe bytes differ' >&2; exit 1; }
   echo 'stalwart-setup: active blob store upload/download succeeded'
 fi

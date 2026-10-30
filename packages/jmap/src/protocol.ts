@@ -42,6 +42,8 @@ export type JmapResult<T> = Result<T, JmapError>;
 export interface TransportOptions {
   readonly authorization: string;
   readonly fetch?: typeof fetch;
+  readonly timeoutMs?: number;
+  readonly rewriteSessionUrlsToOrigin?: string;
 }
 
 export const SessionSchema = z.object({
@@ -73,10 +75,12 @@ export class Transport {
   readonly #authorization: string;
   readonly #fetch: typeof fetch;
   readonly #origin: string;
+  readonly #timeoutMs: number;
   constructor(origin: string, options: TransportOptions) {
     this.#origin = new URL(origin).origin;
     this.#authorization = options.authorization;
     this.#fetch = options.fetch ?? fetch;
+    this.#timeoutMs = options.timeoutMs ?? 120_000;
   }
 
   async request(
@@ -96,11 +100,17 @@ export class Transport {
       });
     try {
       const headers = new Headers(init.headers);
+      const timeout = AbortSignal.timeout(this.#timeoutMs);
+      const signal =
+        init.signal === null || init.signal === undefined
+          ? timeout
+          : AbortSignal.any([init.signal, timeout]);
       headers.set("Authorization", this.#authorization);
       // Discovery may redirect on the same origin; never forward credentials to another origin.
       let response = await this.#fetch(target, {
         ...init,
         headers,
+        signal,
         redirect: "manual",
       });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -119,6 +129,7 @@ export class Transport {
         response = await this.#fetch(next, {
           ...init,
           headers,
+          signal,
           redirect: "manual",
         });
       }
@@ -173,6 +184,7 @@ export class Transport {
     args: object,
     using: readonly string[],
     schema: z.ZodType<T>,
+    followup?: "Email/set",
   ): Promise<JmapResult<T>> {
     const response = await this.json(apiUrl, ResponseSchema, {
       method: "POST",
@@ -182,7 +194,11 @@ export class Transport {
     if (response.isErr()) return err(response.error);
     const calls = response.value.methodResponses;
     const call = calls[0];
-    if (calls.length !== 1 || call === undefined || call[2] !== "0")
+    if (
+      (calls.length !== 1 && !(followup !== undefined && calls.length === 2)) ||
+      call === undefined ||
+      call[2] !== "0"
+    )
       return err({
         kind: "invalidResponse",
         message: "Unexpected method response count or call id",
@@ -198,6 +214,29 @@ export class Transport {
         kind: "invalidResponse",
         message: "Unexpected method response name",
       });
+    if (calls.length === 2) {
+      const extra = calls[1];
+      if (extra === undefined || extra[0] !== followup || extra[2] !== "0")
+        return err({
+          kind: "invalidResponse",
+          message: "Unexpected follow-up response",
+        });
+      const update = z
+        .object({
+          notUpdated: z
+            .record(z.string(), SetErrorSchema)
+            .nullable()
+            .optional(),
+        })
+        .safeParse(extra[1]);
+      if (!update.success)
+        return err({
+          kind: "invalidResponse",
+          message: "Invalid follow-up response",
+        });
+      const failure = setFailure(followup, update.data.notUpdated);
+      if (failure !== undefined) return err(failure);
+    }
     const parsed = schema.safeParse(call[1]);
     return parsed.success
       ? ok(parsed.data)

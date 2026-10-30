@@ -9,6 +9,9 @@
     "apps/web": {
       "entry": ["src/styles.css"]
     },
+    "apps/api": {
+      "entry": ["src/bootstrap.ts"]
+    },
     "apps/drive": {
       "ignoreDependencies": ["@prisma/client"]
     }

@@ -95,6 +95,8 @@ type Alias = z.infer<typeof AliasSchema>;
 type AdminResult<T> = Result<T, JmapError>;
 const using = [JmapCapability.core, JmapCapability.management];
 
+// Connect to the private Stalwart listener with the network-restricted
+// management account. Never pass a public proxy URL or recovery credentials.
 export class StalwartAdmin {
   readonly #transport: Transport;
   readonly #api: string;

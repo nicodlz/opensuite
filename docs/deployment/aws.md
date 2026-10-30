@@ -114,6 +114,7 @@ tofu import -var-file="$VARS" 'aws_ses_domain_identity.domain["'"$DOMAIN"'"]' "$
 tofu import -var-file="$VARS" 'aws_ses_domain_dkim.domain["'"$DOMAIN"'"]' "$DOMAIN"
 tofu import -var-file="$VARS" 'aws_ses_domain_mail_from.domain["'"$DOMAIN"'"]' "$DOMAIN"
 tofu import -var-file="$VARS" aws_s3_bucket.buffer "$BUCKET"
+tofu import -var-file="$VARS" aws_s3_bucket_versioning.buffer "$BUCKET"
 tofu import -var-file="$VARS" aws_s3_bucket_public_access_block.buffer "$BUCKET"
 tofu import -var-file="$VARS" aws_s3_bucket_server_side_encryption_configuration.buffer "$BUCKET"
 tofu import -var-file="$VARS" aws_s3_bucket_lifecycle_configuration.buffer "$BUCKET"
@@ -159,7 +160,7 @@ Back up and restrict metadata separately, test restoring and parsing records,
 reconcile archive records against objects and imports, and alert and act promptly
 on missing records, delivery failures and age. SNS may duplicate records. The Firehose subscription role trusts the SNS service
 and can write only to this stream; restrict who can pass that role and manage
-subscriptions. The SNS topic itself is not KMS-encrypted; do not claim end-to-end encryption of
+subscriptions. The trust policy restricts assumption to the account and inbound topic ARN; verify SNS supplies those context keys in the target environment before relying on delivery. The SNS topic itself is not KMS-encrypted; do not claim end-to-end encryption of
 metadata. S3 uses server-side encryption, not SES's incompatible client-side
 message encryption option.
 
@@ -175,7 +176,16 @@ health, missing metrics, SNS redrive failures, and archive completeness; these
 alarms alone cannot prove preservation. Establish a documented replay process
 that identifies the failed subscription and validates each payload.
 
-The S3 lifecycle rule only applies to `messages/` objects tagged
+The buffer bucket has versioning enabled. Noncurrent `messages/` versions
+expire 30 days after becoming noncurrent, including versions of unconfirmed
+objects that were overwritten or deleted; incomplete multipart uploads across the bucket
+are aborted after 7 days. A delete creates a delete marker, and
+recovery requires restoring the prior version before expiry. Versioning is not
+an immutable backup, and it also applies to `metadata/` objects, whose
+noncurrent versions have no automatic expiry. Budget for retained versions and
+remove delete markers through a controlled reconciliation process.
+
+The current-version S3 lifecycle rule only applies to `messages/` objects tagged
 `opensuite-import=confirmed`, and only after 90 days from object creation by
 default (minimum 30). **Untagged objects never expire via this rule**, including
 unconfirmed and ambiguous imports, even after queue retention ends. The worker

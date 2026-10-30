@@ -123,7 +123,10 @@ export const buildServer = (
         .send({ code: "DRIVE_ERROR", message: error.message });
     if (error instanceof z.ZodError)
       return reply.code(400).send({ code: "BAD_REQUEST" });
-    request.log.error("Drive request failed");
+    const errorName = error instanceof Error ? error.name : "UnknownError";
+    request.log.error({ errorName }, "Drive request failed");
+    if (errorName === "NoSuchKey" || errorName === "NotFound")
+      return reply.code(404).send({ code: "NOT_FOUND" });
     return reply.code(500).send({ code: "INTERNAL_SERVER_ERROR" });
   });
   return app;

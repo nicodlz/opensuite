@@ -53,7 +53,6 @@ export const loadConfig = (
 };
 
 const DatabaseEnvironment = z.object({
-  DATABASE_URL: z.url().optional(),
   POSTGRES_HOST: z.string().min(1).optional(),
   POSTGRES_DB: z.string().min(1).optional(),
   APP_DATABASE_PASSWORD_FILE: z.string().min(1).optional(),
@@ -69,8 +68,6 @@ export const loadApplicationDatabaseUrl = async (
       kind: "invalid_environment",
       issues: ["invalid database configuration"],
     });
-  if (parsed.data.DATABASE_URL !== undefined)
-    return ok(parsed.data.DATABASE_URL);
   const {
     POSTGRES_HOST: host,
     POSTGRES_DB: database,
@@ -98,6 +95,73 @@ export const loadApplicationDatabaseUrl = async (
     return err({
       kind: "invalid_environment",
       issues: ["database secret unavailable"],
+    });
+  }
+};
+
+const AuthEnvironment = z.object({
+  TRUSTED_PROXY_IP: z.ipv4(),
+  AUTH_PUBLIC_ORIGIN: z.url().refine((value) => {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value;
+  }),
+  MAIL_DOMAIN: z
+    .string()
+    .min(1)
+    .regex(
+      /^(?=.{1,253}$)[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?)+$/,
+    ),
+  STALWART_INTERNAL_ORIGIN: z.url().refine((value) => {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && url.origin === value;
+  }),
+  AUTH_SECRET_FILE: z.string().min(1),
+  MAILBOX_KEY_FILE: z.string().min(1),
+  STALWART_ADMIN_PASSWORD_FILE: z.string().min(1),
+});
+
+export const loadAuthConfig = async (
+  env: Readonly<Record<string, string | undefined>>,
+) => {
+  const parsed = AuthEnvironment.safeParse(env);
+  if (!parsed.success)
+    return err<never, ConfigError>({
+      kind: "invalid_environment",
+      issues: ["invalid authentication configuration"],
+    });
+  try {
+    const [secret, mailboxKey, adminPassword] = await Promise.all([
+      readFile(parsed.data.AUTH_SECRET_FILE, "utf8"),
+      readFile(parsed.data.MAILBOX_KEY_FILE, "utf8"),
+      readFile(parsed.data.STALWART_ADMIN_PASSWORD_FILE, "utf8"),
+    ]);
+    const values = z
+      .object({
+        secret: z.string().min(32),
+        mailboxKey: z.string().regex(/^[a-f0-9]{64}$/),
+        adminPassword: z.string().min(32),
+      })
+      .safeParse({
+        secret: secret.trim(),
+        mailboxKey: mailboxKey.trim(),
+        adminPassword: adminPassword.trim(),
+      });
+    if (!values.success)
+      return err<never, ConfigError>({
+        kind: "invalid_environment",
+        issues: ["invalid authentication secrets"],
+      });
+    return ok({
+      publicOrigin: parsed.data.AUTH_PUBLIC_ORIGIN,
+      mailDomain: parsed.data.MAIL_DOMAIN,
+      trustedProxyIp: parsed.data.TRUSTED_PROXY_IP,
+      stalwartOrigin: parsed.data.STALWART_INTERNAL_ORIGIN,
+      ...values.data,
+    });
+  } catch {
+    return err<never, ConfigError>({
+      kind: "invalid_environment",
+      issues: ["authentication secrets unavailable"],
     });
   }
 };

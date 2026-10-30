@@ -1,6 +1,6 @@
 # Managing mail domains
 
-Domain management is an administrative operation. The API's standard startup currently does not wire authentication; until the authentication integration supplies an authenticated administrator, the domain endpoints fail closed. A production deployment also requires mailbox provisioning and inbound delivery to be configured and tested. Do not use the development web client's synthetic domains as operational data.
+Domain management is an administrative operation and requires an authenticated administrator. Configure the API authentication and mailbox provisioning described in the [development guide](../development.md), and test inbound delivery before production use. Do not use the development web client's synthetic domains as operational data.
 
 ## Prepare
 

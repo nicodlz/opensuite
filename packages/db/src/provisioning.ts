@@ -17,9 +17,101 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
   const box = createSecretBox(key);
   if (box.isErr()) return err(box.error);
   return ok({
+    user(userId: string) {
+      return ResultAsync.fromPromise(
+        db.user.findUniqueOrThrow({
+          where: { id: userId },
+          select: { email: true },
+        }),
+        failure,
+      );
+    },
+    pending() {
+      return ResultAsync.fromPromise(
+        db.user.findMany({
+          where: {
+            OR: [
+              {
+                disabled: false,
+                OR: [
+                  { mailbox: null },
+                  { mailbox: { status: { not: "active" } } },
+                ],
+              },
+              {
+                disabled: true,
+                OR: [
+                  { mailbox: { status: "disabling" } },
+                  { mailboxProvision: { state: { not: "active" } } },
+                ],
+              },
+            ],
+          },
+          select: { id: true, disabled: true },
+        }),
+        failure,
+      );
+    },
+    userForAccount(accountId: string) {
+      return ResultAsync.fromPromise(
+        db.mailboxProvision.findFirst({
+          where: { accountId },
+          select: { userId: true },
+        }),
+        failure,
+      ).map((row) => row?.userId ?? null);
+    },
+    sessionAllowed(userId: string) {
+      return ResultAsync.fromPromise(
+        db.user.count({
+          where: { id: userId, disabled: false, mailbox: { status: "active" } },
+        }),
+        failure,
+      ).map((count) => count === 1);
+    },
+    finishDisabled(userId: string) {
+      return ResultAsync.fromPromise(
+        db.$transaction(async (tx) => {
+          await tx.mailboxLink.updateMany({
+            where: { userId },
+            data: { status: "disabled" },
+          });
+          await tx.mailboxProvision.updateMany({
+            where: { userId },
+            data: { state: "active" },
+          });
+        }),
+        failure,
+      );
+    },
     markDisabled(userId: string, actorId: string) {
       return ResultAsync.fromPromise(
         db.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT pg_advisory_xact_lock(1984327101)::text`;
+          const actor = await tx.user.findFirst({
+            where: { id: actorId, role: "admin", disabled: false },
+            select: { id: true },
+          });
+          const target = await tx.user.findUnique({
+            where: { id: userId },
+            select: { id: true, role: true, disabled: true },
+          });
+          if (
+            actor === null ||
+            target === null ||
+            userId === actorId ||
+            (target.role === "admin" &&
+              !target.disabled &&
+              (await tx.user.count({
+                where: { role: "admin", disabled: false },
+              })) <= 1)
+          )
+            return false;
+          await tx.mailboxProvision.upsert({
+            where: { userId },
+            create: { userId },
+            update: { state: "pending" },
+          });
           await tx.user.update({
             where: { id: userId },
             data: { disabled: true },
@@ -36,8 +128,16 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
               detail: { targetUserId: userId },
             },
           });
+          return true;
         }),
         failure,
+      ).andThen((allowed) =>
+        allowed
+          ? ok(undefined)
+          : err<never, { kind: "forbidden"; message: string }>({
+              kind: "forbidden",
+              message: "cannot disable account",
+            }),
       );
     },
     mailboxAccountId(userId: string) {

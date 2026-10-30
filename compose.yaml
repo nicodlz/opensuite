@@ -34,7 +34,20 @@ services:
         }
         generate postgres 999
         generate stalwart-admin 2000
+        generate stalwart-management 2000
         generate app-database 999
+        generate auth 1000
+        mkdir -p /secrets/mailbox-key
+        if [ ! -s /secrets/mailbox-key/password ]; then
+          od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > /secrets/mailbox-key/password
+        fi
+        chown -R 1000:1000 /secrets/mailbox-key
+        chmod 0500 /secrets/mailbox-key
+        chmod 0400 /secrets/mailbox-key/password
+        chown 2000:1000 /secrets/stalwart-admin /secrets/stalwart-admin/password
+        chmod 0550 /secrets/stalwart-admin
+        chmod 0440 /secrets/stalwart-admin/password
+        generate drive-database 999
         chown 999:1000 /secrets/app-database /secrets/app-database/password
         chmod 0550 /secrets/app-database
         chmod 0440 /secrets/app-database/password
@@ -44,9 +57,14 @@ services:
 
   caddy:
     <<: *restart
+    networks:
+      default:
+      api-proxy:
+        ipv4_address: 172.28.254.2
     image: caddy:2.11.7@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8
     environment:
       OPENSUITE_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
+      MAIL_MANAGEMENT_SUBNET: ${MAIL_MANAGEMENT_SUBNET:-172.30.248.0/24}
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
@@ -77,6 +95,10 @@ services:
 
   api:
     <<: *restart
+    networks:
+      default:
+      api-proxy:
+        aliases: [api-proxy]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -89,6 +111,13 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-opensuite}
       APP_DATABASE_PASSWORD_FILE: /run/opensuite/app-database/password
+      TRUSTED_PROXY_IP: 172.28.254.2
+      AUTH_PUBLIC_ORIGIN: https://${OPENSUITE_PUBLIC_HOST:-localhost}
+      MAIL_DOMAIN: ${MAIL_DOMAIN:-localhost.test}
+      STALWART_INTERNAL_ORIGIN: http://stalwart:8080
+      AUTH_SECRET_FILE: /run/opensuite/auth/password
+      MAILBOX_KEY_FILE: /run/opensuite/mailbox-key/password
+      STALWART_ADMIN_PASSWORD_FILE: /run/opensuite/stalwart-admin/password
     volumes:
       - type: volume
         source: secrets
@@ -96,7 +125,27 @@ services:
         read_only: true
         volume:
           subpath: app-database
+      - type: volume
+        source: secrets
+        target: /run/opensuite/auth
+        read_only: true
+        volume:
+          subpath: auth
+      - type: volume
+        source: secrets
+        target: /run/opensuite/mailbox-key
+        read_only: true
+        volume:
+          subpath: mailbox-key
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-admin
+        read_only: true
+        volume:
+          subpath: stalwart-admin
     depends_on:
+      stalwart-setup:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     healthcheck:
@@ -175,9 +224,8 @@ services:
       dockerfile: apps/drive/Dockerfile
     image: opensuite-drive:local
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-opensuite}
       POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
-      POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
+      DRIVE_DATABASE_PASSWORD_FILE: /run/opensuite/drive-database/password
       DRIVE_SESSION_API: ${DRIVE_SESSION_API:-http://api:3000}
       DRIVE_S3_ENDPOINT: ${DRIVE_S3_ENDPOINT:-http://localstack:4566}
       DRIVE_S3_PUBLIC_ENDPOINT: ${DRIVE_S3_PUBLIC_ENDPOINT:-http://localhost:4566}
@@ -191,10 +239,10 @@ services:
     volumes:
       - type: volume
         source: secrets
-        target: /run/opensuite/postgres
+        target: /run/opensuite/drive-database
         read_only: true
         volume:
-          subpath: postgres
+          subpath: drive-database
     depends_on:
       drive-migrate:
         condition: service_completed_successfully
@@ -223,6 +271,8 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-opensuite}
       POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
+      POSTGRES_DB: ${POSTGRES_DB:-opensuite}
+      DRIVE_DATABASE_PASSWORD_FILE: /run/opensuite/drive-database/password
       POSTGRES_HOST: postgres
       POSTGRES_PASSWORD_FILE: /run/opensuite/postgres/password
     volumes:
@@ -232,7 +282,15 @@ services:
         read_only: true
         volume:
           subpath: postgres
+      - type: volume
+        source: secrets
+        target: /run/opensuite/drive-database
+        read_only: true
+        volume:
+          subpath: drive-database
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 
@@ -296,20 +354,15 @@ services:
   stalwart:
     <<: *restart
     image: stalwartlabs/stalwart:v1.0.1@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b
-    # The admin password is generated by `secrets` and never stored in .env.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - STALWART_RECOVERY_ADMIN="admin:$$(cat /run/opensuite/stalwart-admin/password)" exec /usr/local/bin/stalwart --config /etc/stalwart/config.json
+    command: ["--config", "/etc/stalwart/config.json"]
     environment:
       STALWART_HOSTNAME: ${MAIL_HOSTNAME:-localhost}
       STALWART_PUBLIC_URL: https://${OPENSUITE_PUBLIC_HOST:-localhost}
       MAIL_S3_KEY_ID: ${MAIL_S3_KEY_ID:-}
     ports:
-      - "${SMTP_PORT:-25}:25"
-      - "${SUBMISSIONS_PORT:-465}:465"
-      - "${IMAPS_PORT:-993}:993"
-      - "${MANAGESIEVE_PORT:-4190}:4190"
+      - "${MAIL_PROTOCOL_BIND:-127.0.0.1}:${SUBMISSIONS_PORT:-465}:465"
+      - "${MAIL_PROTOCOL_BIND:-127.0.0.1}:${IMAPS_PORT:-993}:993"
+      - "${MAIL_PROTOCOL_BIND:-127.0.0.1}:${MANAGESIEVE_PORT:-4190}:4190"
     volumes:
       # Only the data store location; every other setting lives in the store.
       - ./deploy/stalwart/config.json:/etc/stalwart/config.json:ro
@@ -319,15 +372,20 @@ services:
         target: /run/opensuite/smtp-secret
         read_only: true
       - type: bind
+        source: ${MAIL_TLS_CERT_FILE:-/dev/null}
+        target: /run/opensuite/tls/fullchain.pem
+        read_only: true
+      - type: bind
+        source: ${MAIL_TLS_KEY_FILE:-/dev/null}
+        target: /run/opensuite/tls/privkey.pem
+        read_only: true
+      - type: bind
         source: ${MAIL_S3_SECRET_FILE:-/dev/null}
         target: /run/opensuite/mail-s3-secret
         read_only: true
-      - type: volume
-        source: secrets
-        target: /run/opensuite/stalwart-admin
-        read_only: true
-        volume:
-          subpath: stalwart-admin
+    networks:
+      - default
+      - mail-management
     healthcheck:
       # Stalwart trusts X-Forwarded-For (set by the proxy) and rejects loopback
       # values, so the probe identifies itself with the container address.
@@ -351,6 +409,8 @@ services:
     image: stalwartlabs/stalwart:v1.0.1@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b
     entrypoint: ["/bin/sh", "/opt/opensuite/setup.sh"]
     environment:
+      MAIL_TLS_ENABLED: ${MAIL_TLS_ENABLED:-0}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-localhost}
       MAIL_BLOB_STORE: ${MAIL_BLOB_STORE:-local}
       MAIL_S3_ENDPOINT: ${MAIL_S3_ENDPOINT:-}
       MAIL_S3_REGION: ${MAIL_S3_REGION:-}
@@ -361,15 +421,25 @@ services:
     volumes:
       - ./deploy/stalwart/setup.sh:/opt/opensuite/setup.sh:ro
       - type: bind
+        source: ${MAIL_TLS_CERT_FILE:-/dev/null}
+        target: /run/opensuite/tls/fullchain.pem
+        read_only: true
+      - type: bind
+        source: ${MAIL_TLS_KEY_FILE:-/dev/null}
+        target: /run/opensuite/tls/privkey.pem
+        read_only: true
+      - type: bind
         source: ${MAIL_S3_SECRET_FILE:-/dev/null}
         target: /run/opensuite/mail-s3-secret
         read_only: true
       - type: volume
         source: secrets
-        target: /run/opensuite/stalwart-admin
+        target: /run/opensuite/stalwart-management
         read_only: true
         volume:
-          subpath: stalwart-admin
+          subpath: stalwart-management
+    networks:
+      - mail-management
     depends_on:
       stalwart:
         condition: service_healthy
@@ -399,6 +469,17 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+
+networks:
+  api-proxy:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.254.0/24
+  mail-management:
+    ipam:
+      config:
+        - subnet: ${MAIL_MANAGEMENT_SUBNET:-172.30.248.0/24}
 
 volumes:
   secrets:

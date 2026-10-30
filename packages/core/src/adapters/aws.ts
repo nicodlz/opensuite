@@ -116,11 +116,27 @@ const list = async (
   return page();
 };
 const read = async (client: S3Client, name: string, key: string) => {
+  const signal = AbortSignal.timeout(120_000);
   const response = await client.send(
     new GetObjectCommand({ Bucket: name, Key: key }),
+    { abortSignal: signal },
   );
   if (response.Body === undefined) throw new Error("Missing S3 object body");
-  return response.Body.transformToByteArray();
+  const body = response.Body;
+  const stop = () => {
+    if ("destroy" in body && typeof body.destroy === "function")
+      body.destroy(new Error("S3 body timed out"));
+  };
+  if (signal.aborted) {
+    stop();
+    throw new Error("S3 body timed out");
+  }
+  signal.addEventListener("abort", stop, { once: true });
+  try {
+    return await body.transformToByteArray();
+  } finally {
+    signal.removeEventListener("abort", stop);
+  }
 };
 
 export function awsStorage(

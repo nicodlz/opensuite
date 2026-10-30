@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily OpenSuite backup
+
+[Timer]
+OnCalendar=*-*-* 01:00:00 UTC
+Persistent=true
+Unit=opensuite-backup.service
+
+[Install]
+WantedBy=timers.target

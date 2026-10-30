@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { JmapClient, type Session } from "../src/index.ts";
 
 const session: Session = {
@@ -125,4 +125,129 @@ describe("JMAP errors", () => {
     expect(errorOf(result)).toMatchObject({ kind: "invalidResponse" });
     expect(called).toBe(false);
   });
+});
+
+const submissionReply = (notUpdated: object | null) =>
+  response({
+    methodResponses: [
+      [
+        "EmailSubmission/set",
+        { accountId: "a", created: { item: { id: "submission" } } },
+        "0",
+      ],
+      [
+        "Email/set",
+        {
+          accountId: "a",
+          updated: notUpdated ? null : { email: null },
+          notUpdated,
+        },
+        "0",
+      ],
+    ],
+    sessionState: "s",
+  });
+
+it("accepts and checks the follow-up update returned by submission", async () => {
+  expect(
+    (
+      await clientWith(submissionReply(null)).submit(
+        session,
+        "a",
+        "email",
+        "identity",
+        undefined,
+        "sent",
+      )
+    ).isOk(),
+  ).toBe(true);
+  const failed = await clientWith(
+    submissionReply({ email: { type: "forbidden" } }),
+  ).submit(session, "a", "email", "identity", undefined, "sent");
+  expect(errorOf(failed)).toMatchObject({
+    kind: "set",
+    method: "Email/set",
+    type: "forbidden",
+  });
+});
+
+it("rewrites advertised endpoints only when explicitly enabled", async () => {
+  const advertised = {
+    ...session,
+    apiUrl: "https://public.example/jmap/",
+    uploadUrl: "https://public.example/upload/{accountId}",
+    downloadUrl:
+      "https://public.example/download/{accountId}/{blobId}?accept={type}",
+  };
+  const requests: string[] = [];
+  const client = new JmapClient("http://internal.test:8080", {
+    authorization: "Bearer test",
+    rewriteSessionUrlsToOrigin: "http://internal.test:8080",
+    fetch: async (input) => {
+      requests.push(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+      );
+      return Promise.resolve(response(advertised));
+    },
+  });
+  const discovered = await client.discover();
+  expect(discovered.isOk()).toBe(true);
+  if (discovered.isErr()) throw new Error("discovery failed");
+  expect(discovered.value.apiUrl).toBe("http://internal.test:8080/jmap/");
+  expect(discovered.value.uploadUrl).toBe(
+    "http://internal.test:8080/upload/{accountId}",
+  );
+  await client.mailboxes(discovered.value, "a");
+  expect(requests[1]).toBe("http://internal.test:8080/jmap/");
+  expect(
+    () =>
+      new JmapClient("http://internal.test", {
+        authorization: "x",
+        rewriteSessionUrlsToOrigin: "https://other.test",
+      }),
+  ).toThrow("Session rewrite origin must match the client origin");
+});
+
+it("aborts an import when its response body stalls", async () => {
+  const client = new JmapClient("https://mail.example.test", {
+    authorization: "Bearer test",
+    timeoutMs: 20,
+    fetch: async (_input, init) => {
+      const signal = init?.signal;
+      const stream = new ReadableStream({
+        start(controller) {
+          signal?.addEventListener(
+            "abort",
+            () => controller.error(new Error("timeout")),
+            { once: true },
+          );
+        },
+      });
+      return Promise.resolve(new Response(stream));
+    },
+  });
+  const result = await client.importEmail(session, "a", {
+    blobId: "b",
+    mailboxIds: { inbox: true },
+  });
+  expect(errorOf(result)).toMatchObject({ kind: "invalidResponse" });
+});
+
+it("rejects session URL rewriting in a browser", () => {
+  vi.stubGlobal("window", {});
+  try {
+    expect(
+      () =>
+        new JmapClient("http://internal.test", {
+          authorization: "test",
+          rewriteSessionUrlsToOrigin: "http://internal.test",
+        }),
+    ).toThrow("Session URL rewrite is server-side only");
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

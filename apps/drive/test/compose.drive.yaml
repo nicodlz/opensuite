@@ -1,0 +1,4 @@
+services:
+  localstack:
+    volumes: !override
+      - ./apps/drive/test/localstack:/etc/localstack/init/ready.d:ro

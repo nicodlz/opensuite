@@ -4,9 +4,10 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { okAsync } from "neverthrow";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { PrismaClient } from "../src/db/generated/index.js";
+import { configureDriveRole } from "../src/db/role.ts";
 import { createStorage } from "../src/adapters/storage.ts";
 import { createDrive } from "../src/services/drive.ts";
 import { buildServer } from "../src/server.ts";
@@ -34,6 +35,8 @@ const args = [
   "compose.yaml",
   "-f",
   "compose.test.yaml",
+  "-f",
+  "apps/drive/test/compose.drive.yaml",
 ];
 const compose = async (...cmd: string[]) =>
   (
@@ -102,6 +105,22 @@ beforeAll(async () => {
     url.port = pgPort;
     url.username = "opensuite";
     url.password = password;
+    const admin = new PrismaClient({
+      datasources: { db: { url: url.toString() } },
+    });
+    const drivePassword = "drive-test-password-01234567890123456789";
+    try {
+      await configureDriveRole(
+        admin,
+        drivePassword,
+        "opensuite",
+        "opensuite_drive",
+      );
+    } finally {
+      await admin.$disconnect();
+    }
+    url.username = "opensuite_drive";
+    url.password = drivePassword;
     await run(
       "pnpm",
       ["--filter", "@opensuite/drive", "exec", "prisma", "migrate", "deploy"],
@@ -168,6 +187,9 @@ it("uploads and protects files, shares, links and previews", async () => {
     ).ok,
   ).toBe(true);
   await command("a", { action: "finish", id: begin.id });
+  await expect(storage.get(storage.key(begin.id, true))).rejects.toMatchObject({
+    name: "NoSuchKey",
+  });
   // A previously issued upload URL must not mutate the finalized object.
   expect(
     (
@@ -308,9 +330,9 @@ it("handles multipart and reserves quota before signing", async () => {
   const download = signedPart.parse(
     await command("a", { action: "download", id: begin.id }),
   );
-  expect(Buffer.from(await (await fetch(download.url)).arrayBuffer())).toEqual(
-    bytes,
-  );
+  expect(
+    Buffer.from(await (await fetch(download.url)).arrayBuffer()).equals(bytes),
+  ).toBe(true);
   await command("a", { action: "trash", id: begin.id });
   await command("a", { action: "delete", id: begin.id });
 }, 120_000);
@@ -341,6 +363,9 @@ it("rejects invalid bytes and never previews active content", async () => {
   await expect(
     command("a", { action: "finish", id: begin.id }),
   ).rejects.toThrow(/checksum mismatch/);
+  await expect(
+    command("a", { action: "finish", id: begin.id }),
+  ).rejects.toThrow(/not pending/);
   await command("a", { action: "trash", id: begin.id });
   await command("a", { action: "delete", id: begin.id });
   const safe = signed.parse(
@@ -467,6 +492,30 @@ it("allows a write share to create a file in the owner's folder", async () => {
     ).ok,
   ).toBe(true);
   await command("b", { action: "finish", id: upload.id });
+  await expect(
+    command("b", { action: "move", id: upload.id, parentId: null }),
+  ).rejects.toThrow(/Entry not found/);
+  const destination = resultId.parse(
+    await command("a", {
+      action: "folder",
+      name: "destination",
+      parentId: null,
+    }),
+  );
+  await command("a", {
+    action: "share",
+    id: destination.id,
+    userId: "b",
+    access: "write",
+  });
+  await command("b", {
+    action: "move",
+    id: upload.id,
+    parentId: destination.id,
+  });
+  await command("b", { action: "move", id: upload.id, parentId: folder.id });
+  await command("a", { action: "trash", id: destination.id });
+  await command("a", { action: "delete", id: destination.id });
   const listing = z
     .object({ entries: z.array(resultId) })
     .parse(
@@ -478,4 +527,223 @@ it("allows a write share to create a file in the owner's folder", async () => {
   await command("a", { action: "delete", id: upload.id });
   await command("a", { action: "trash", id: folder.id });
   await command("a", { action: "delete", id: folder.id });
+}, 120_000);
+
+it("isolates the Drive role from the main database", async () => {
+  const rows = z
+    .array(
+      z.object({
+        drive_owner: z.boolean(),
+        main_connect: z.boolean(),
+        superuser: z.boolean(),
+      }),
+    )
+    .parse(
+      await db.$queryRaw`SELECT pg_get_userbyid(d.datdba) = current_user AS drive_owner,
+      has_database_privilege(current_user, 'opensuite', 'CONNECT') AS main_connect,
+      (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser
+      FROM pg_database d WHERE d.datname = current_database()`,
+    );
+  expect(rows).toEqual([
+    { drive_owner: true, main_connect: false, superuser: false },
+  ]);
+}, 120_000);
+
+it("expires reservations, rejects further work and sweeps multipart uploads", async () => {
+  const input: DriveCommand = {
+    action: "upload",
+    name: "pending",
+    parentId: null,
+    size: 6_000_000,
+    checksum: digest(Buffer.alloc(0)),
+    contentType: "application/octet-stream",
+    multipart: true,
+  };
+  const old = signed.parse(await command("expiry-user", input));
+  const pending = await db.entry.findUniqueOrThrow({ where: { id: old.id } });
+  if (pending.uploadId === null) throw new Error("multipart upload missing");
+  await db.entry.update({
+    where: { id: old.id },
+    data: { expiresAt: new Date(0) },
+  });
+  await expect(
+    command("expiry-user", { action: "part", id: old.id, partNumber: 1 }),
+  ).rejects.toThrow(/expired/);
+  await expect(
+    command("expiry-user", { action: "finish", id: old.id, parts: [] }),
+  ).rejects.toThrow(/expired/);
+  const replacement = signed.parse(await command("expiry-user", input));
+  await drive.sweepExpired();
+  expect(await db.entry.findUnique({ where: { id: old.id } })).toBeNull();
+  await expect(
+    storage.complete(old.id, pending.uploadId, [
+      { partNumber: 1, etag: '"none"' },
+    ]),
+  ).rejects.toThrow(/./);
+  await command("expiry-user", { action: "trash", id: replacement.id });
+  await command("expiry-user", { action: "delete", id: replacement.id });
+}, 120_000);
+
+it("keeps staging after a failed commit, retries, and removes copied objects on delete", async () => {
+  const bytes = Buffer.from("retryable");
+  const begin = signed.parse(
+    await command("retry-user", {
+      action: "upload",
+      name: "retry",
+      parentId: null,
+      size: bytes.length,
+      checksum: digest(bytes),
+      contentType: "text/plain",
+      multipart: false,
+    }),
+  );
+  if (begin.url === null) throw new Error("upload URL missing");
+  expect(
+    (
+      await fetch(begin.url, {
+        method: "PUT",
+        headers: { "content-type": "text/plain" },
+        body: bytes,
+      })
+    ).ok,
+  ).toBe(true);
+  const update = vi
+    .spyOn(db.entry, "update")
+    .mockRejectedValueOnce(new Error("database unavailable"));
+  try {
+    await expect(
+      command("retry-user", { action: "finish", id: begin.id }),
+    ).rejects.toThrow(/database unavailable/);
+  } finally {
+    update.mockRestore();
+  }
+  expect(
+    (await db.entry.findUniqueOrThrow({ where: { id: begin.id } })).state,
+  ).toBe("pending");
+  await storage.get(storage.key(begin.id, true));
+  await storage.get(storage.key(begin.id, false));
+  await command("retry-user", { action: "trash", id: begin.id });
+  await command("retry-user", { action: "delete", id: begin.id });
+  await expect(storage.get(storage.key(begin.id, false))).rejects.toMatchObject(
+    { name: "NoSuchKey" },
+  );
+}, 120_000);
+
+it("returns 404 when preview and public objects are missing", async () => {
+  const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const begin = signed.parse(
+    await command("missing-user", {
+      action: "upload",
+      name: "lost.png",
+      parentId: null,
+      size: bytes.length,
+      checksum: digest(bytes),
+      contentType: "image/png",
+      multipart: false,
+    }),
+  );
+  if (begin.url === null) throw new Error("upload URL missing");
+  expect(
+    (
+      await fetch(begin.url, {
+        method: "PUT",
+        headers: { "content-type": "image/png" },
+        body: bytes,
+      })
+    ).ok,
+  ).toBe(true);
+  await command("missing-user", { action: "finish", id: begin.id });
+  const link = z.object({ token: z.string() }).parse(
+    await command("missing-user", {
+      action: "link",
+      id: begin.id,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+  );
+  await storage.remove(begin.id, storage.key(begin.id, false), null);
+  const missingSession: SessionVerifier = {
+    verify: () => okAsync("missing-user"),
+  };
+  const server = buildServer(drive, storage, missingSession);
+  try {
+    expect(
+      (await server.inject({ method: "GET", url: `/v1/preview/${begin.id}` }))
+        .statusCode,
+    ).toBe(404);
+    expect(
+      (await server.inject({ method: "GET", url: `/v1/public/${link.token}` }))
+        .statusCode,
+    ).toBe(404);
+  } finally {
+    await server.close();
+  }
+  await command("missing-user", { action: "trash", id: begin.id });
+  await command("missing-user", { action: "delete", id: begin.id });
+}, 120_000);
+
+it("serializes creating children against trash and restricts orphaning", async () => {
+  const folder = resultId.parse(
+    await command("race-user", {
+      action: "folder",
+      name: "race",
+      parentId: null,
+    }),
+  );
+  const results = await Promise.allSettled([
+    command("race-user", { action: "trash", id: folder.id }),
+    command("race-user", {
+      action: "folder",
+      name: "child",
+      parentId: folder.id,
+    }),
+  ]);
+  expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  const children = await db.entry.findMany({ where: { parentId: folder.id } });
+  const parent = await db.entry.findUniqueOrThrow({ where: { id: folder.id } });
+  expect(parent.trashedAt === null || children.length === 0).toBe(true);
+  await Promise.all(
+    children.map(async (child) => {
+      await command("race-user", { action: "trash", id: child.id });
+      await command("race-user", { action: "delete", id: child.id });
+    }),
+  );
+  if (parent.trashedAt === null)
+    await command("race-user", { action: "trash", id: folder.id });
+  await command("race-user", { action: "delete", id: folder.id });
+}, 120_000);
+
+it("limits repeated finish attempts per user", async () => {
+  await Array.from({ length: 10 }).reduce<Promise<void>>(async (previous) => {
+    await previous;
+    await expect(
+      command("limited-user", { action: "finish", id: "missing" }),
+    ).rejects.toThrow(/Entry not found/);
+  }, Promise.resolve());
+  await expect(
+    command("limited-user", { action: "finish", id: "missing" }),
+  ).rejects.toThrow(/Too many/);
+}, 120_000);
+
+it("restricts database deletion of a folder with children", async () => {
+  const folder = resultId.parse(
+    await command("fk-user", {
+      action: "folder",
+      name: "folder",
+      parentId: null,
+    }),
+  );
+  const child = resultId.parse(
+    await command("fk-user", {
+      action: "folder",
+      name: "child",
+      parentId: folder.id,
+    }),
+  );
+  await expect(db.entry.delete({ where: { id: folder.id } })).rejects.toThrow(
+    /foreign key/i,
+  );
+  await command("fk-user", { action: "trash", id: child.id });
+  await command("fk-user", { action: "delete", id: child.id });
+  await command("fk-user", { action: "trash", id: folder.id });
+  await command("fk-user", { action: "delete", id: folder.id });
 }, 120_000);

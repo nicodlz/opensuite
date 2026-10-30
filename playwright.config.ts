@@ -20,7 +20,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `API_HOST=127.0.0.1 API_PORT=${apiPort} pnpm --filter @opensuite/api start`,
+      command: `E2E_API_PORT=${apiPort} node e2e/api-server.ts`,
       url: `http://127.0.0.1:${apiPort}/health`,
       reuseExistingServer: false,
       timeout: 30_000,

@@ -12,6 +12,8 @@ export function synthetic() {
   const archives = new Map<string, string>();
   const buffers = new Map<string, Uint8Array>();
   const records = new Map<string, LedgerRecipient>();
+  const recordMessages = new Map<string, string>();
+  const recordAddresses = new Map<string, string[]>();
   const imports: {
     destination: string;
     bytes: Uint8Array;
@@ -48,22 +50,42 @@ export function synthetic() {
   };
   const ledger: Ledger = {
     prepare(n, recipients) {
+      const existingKeys = [...recordMessages.entries()]
+        .filter(([, id]) => id === n.mail.messageId)
+        .map(([key]) => key);
+      const recorded = new Set(
+        existingKeys.flatMap((key) => recordAddresses.get(key) ?? []),
+      );
       for (const recipient of recipients) {
+        const addresses = recipient.addresses.filter(
+          (address) => !recorded.has(address),
+        );
+        if (addresses.length === 0) continue;
         const key = recipientKey(
           n.mail.messageId,
           recipient.destination,
           recipient.known,
         );
+        recordMessages.set(key, n.mail.messageId);
+        recordAddresses.set(key, [
+          ...(recordAddresses.get(key) ?? []),
+          ...addresses,
+        ]);
         if (!records.has(key))
-          records.set(key, { key, state: "received", attempts: 0 });
+          records.set(key, {
+            key,
+            state: "received",
+            attempts: 0,
+            destination: recipient.destination,
+            known: recipient.known,
+          });
       }
-      const keys = new Set(
-        recipients.map((r) =>
-          recipientKey(n.mail.messageId, r.destination, r.known),
-        ),
-      );
       return Promise.resolve(
-        ok([...records.values()].filter((r) => keys.has(r.key))),
+        ok(
+          [...records.values()].filter(
+            (r) => recordMessages.get(r.key) === n.mail.messageId,
+          ),
+        ),
       );
     },
     claim(key) {
@@ -71,14 +93,20 @@ export function synthetic() {
       if (r === undefined || !["received", "failed"].includes(r.state))
         return Promise.resolve(ok(false));
       r.state = "importing";
-      r.attempts++;
       return Promise.resolve(ok(true));
     },
-    finish(key, state) {
+    renew(key) {
+      return Promise.resolve(ok(records.get(key)?.state === "importing"));
+    },
+    expireClaims() {
+      return Promise.resolve(ok(undefined));
+    },
+    finish(key, state, _remoteId, _error, _owner, chargeAttempt) {
       const r = records.get(key);
       if (r === undefined)
         return Promise.resolve(err({ message: "Missing recipient" }));
       r.state = state;
+      if (chargeAttempt === true) r.attempts++;
       return Promise.resolve(ok(undefined));
     },
     resetFailures() {
@@ -91,6 +119,11 @@ export function synthetic() {
     },
   };
   const delivery: Delivery = {
+    reconcile() {
+      return Promise.resolve(
+        err({ message: "No matching message", ambiguous: true }),
+      );
+    },
     import(destination, bytes, quarantine) {
       imports.push({ destination, bytes, quarantine });
       return Promise.resolve(ok(`email-${String(imports.length)}`));

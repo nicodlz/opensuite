@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { err, ok, type Result } from "neverthrow";
 import {
   parseNotification,
@@ -8,6 +8,7 @@ import {
 import type {
   Failure,
   IngestDependencies,
+  LedgerRecipient,
   Queue,
   QueueMessage,
 } from "./contracts.ts";
@@ -27,7 +28,11 @@ export class IngestService {
   constructor(deps: IngestDependencies) {
     this.deps = deps;
   }
-  async process(body: string): Promise<Result<void, Failure>> {
+
+  async process(
+    body: string,
+    reconcile = false,
+  ): Promise<Result<void, Failure>> {
     const parsed = parseNotification(body);
     if (parsed.isErr())
       return err({ message: `Invalid notification: ${parsed.error}` });
@@ -41,6 +46,8 @@ export class IngestService {
       return err({ message: "Unexpected bucket or topic" });
     const archive = await storage.archive(`${digest(body)}.json`, body);
     if (archive.isErr()) return archive;
+    const expired = await ledger.expireClaims();
+    if (expired.isErr()) return expired;
     const dynamic = await this.deps.resolveRoutes?.(n.receipt.recipients);
     if (dynamic?.isErr()) return err(dynamic.error);
     const routes = [...this.deps.routes];
@@ -55,176 +62,260 @@ export class IngestService {
     const recipients = resolveRecipients(n.receipt.recipients, routes);
     const prepared = await ledger.prepare(n, recipients);
     if (prepared.isErr()) return err(prepared.error);
-    const outcomes = await Promise.all(
-      recipients.map(async (recipient): Promise<Result<void, Failure>> => {
-        const key = recipientKey(
-          n.mail.messageId,
-          recipient.destination,
-          recipient.known,
-        );
-        const record = prepared.value.find((item) => item.key === key);
-        if (record === undefined)
-          return err({ message: "Ledger omitted recipient" });
-        if (record.state === "importing") {
-          events.emit("ingest_failure", {
-            stage: "importing_requires_reconciliation",
-            messageId: n.mail.messageId,
-          });
-          return err({
-            message: "Import is already in progress or requires reconciliation",
-          });
-        }
-        if (
-          ["imported", "quarantined", "rejected", "uncertain"].includes(
-            record.state,
-          )
-        )
-          return ok(undefined);
-        if (!recipient.known) {
-          const rejected = await ledger.finish(
-            key,
-            "rejected",
-            undefined,
-            "Unknown envelope recipient",
+    let read: Result<Uint8Array, Failure> | undefined;
+    const bytes = async () => {
+      read ??= await storage.readBuffer(
+        n.receipt.action.bucketName,
+        n.receipt.action.objectKey,
+      );
+      return read;
+    };
+    let firstFailure: Failure | undefined;
+    const uploads = new Map<string, string>();
+    const quarantine = verdictPolicy(n) === "quarantine";
+    // Sequential delivery bounds memory and ensures the buffer is read only once.
+    const processRecipient = async (record: LedgerRecipient): Promise<void> => {
+      if (["imported", "quarantined", "rejected"].includes(record.state))
+        return;
+      if (record.state === "importing") {
+        firstFailure ??= { message: "Import is in progress" };
+        return;
+      }
+      if (record.state === "uncertain") {
+        if (reconcile) {
+          const source = await bytes();
+          if (source.isErr()) {
+            firstFailure ??= source.error;
+            return;
+          }
+          const found = await delivery.reconcile(
+            record.destination,
+            source.value,
+            quarantine,
+            n.mail.timestamp,
+            record.key,
           );
-          if (rejected.isErr()) return rejected;
+          if (found.isOk()) {
+            const saved = await ledger.finish(
+              record.key,
+              quarantine ? "quarantined" : "imported",
+              found.value,
+            );
+            if (saved.isErr()) firstFailure ??= saved.error;
+            return;
+          }
+          firstFailure ??= found.error;
+        } else firstFailure ??= { message: "Import requires reconciliation" };
+        events.emit("ingest_failure", {
+          stage: "uncertain",
+          messageId: n.mail.messageId,
+          recipient: record.destination,
+        });
+        return;
+      }
+      if (!record.known) {
+        const rejected = await ledger.finish(
+          record.key,
+          "rejected",
+          undefined,
+          "Unknown envelope recipient",
+        );
+        if (rejected.isErr()) firstFailure ??= rejected.error;
+        else
           events.emit("ingest_rejected", {
             messageId: n.mail.messageId,
-            recipient: recipient.destination,
+            recipient: record.destination,
           });
-          return ok(undefined);
-        }
-        if (record.attempts >= this.deps.maxAttempts) {
-          return err({ message: "Recipient exceeded retry limit" });
-        }
-        const read = await storage.readBuffer(
-          n.receipt.action.bucketName,
-          n.receipt.action.objectKey,
-        );
-        if (read.isErr()) {
-          events.emit("ingest_failure", {
-            stage: "buffer",
-            messageId: n.mail.messageId,
-          });
-          return err(read.error);
-        }
-        const bytes = read.value;
-        const claimed = await ledger.claim(key);
-        if (claimed.isErr()) return err(claimed.error);
-        if (!claimed.value) {
-          return err({ message: "Recipient already claimed" });
-        }
-        const quarantine = verdictPolicy(n) === "quarantine";
-        const imported = await delivery.import(
-          recipient.destination,
-          bytes,
-          quarantine,
-        );
+        return;
+      }
+      if (record.attempts >= this.deps.maxAttempts) {
+        firstFailure ??= { message: "Recipient exceeded retry limit" };
+        return;
+      }
+      const owner = randomUUID();
+      const claimed = await ledger.claim(record.key, owner);
+      if (claimed.isErr()) {
+        firstFailure ??= claimed.error;
+        return;
+      }
+      if (!claimed.value) {
+        firstFailure ??= { message: "Recipient already claimed" };
+        return;
+      }
+      let renewal: Promise<void> = Promise.resolve();
+      const timer = setInterval(() => {
+        renewal = renewal.then(async () => {
+          const result = await ledger.renew(record.key, owner);
+          if (result.isErr() || !result.value)
+            events.emit("ingest_failure", {
+              stage: "lease",
+              messageId: n.mail.messageId,
+            });
+          return undefined;
+        });
+      }, 60_000);
+      try {
+        const source = await bytes();
+        const imported = source.isErr()
+          ? err(source.error)
+          : await delivery.import(
+              record.destination,
+              source.value,
+              quarantine,
+              n.mail.timestamp,
+              record.key,
+              uploads,
+            );
         if (imported.isErr()) {
-          const state =
+          const status =
             imported.error.ambiguous === true ? "uncertain" : "failed";
           const saved = await ledger.finish(
-            key,
-            state,
+            record.key,
+            status,
             undefined,
             imported.error.message,
+            owner,
+            imported.error.permanent === true,
           );
-          if (saved.isErr()) return saved;
+          firstFailure ??= saved.isErr() ? saved.error : imported.error;
           events.emit("ingest_failure", {
-            stage: state,
+            stage: status,
             messageId: n.mail.messageId,
-            recipient: recipient.destination,
+            recipient: record.destination,
           });
-          return state === "failed" ? err(imported.error) : ok(undefined);
+          return;
         }
         const saved = await ledger.finish(
-          key,
+          record.key,
           quarantine ? "quarantined" : "imported",
           imported.value,
+          undefined,
+          owner,
         );
-        if (saved.isErr()) return saved;
+        if (saved.isErr()) {
+          firstFailure ??= saved.error;
+          return;
+        }
         events.emit("ingest_imported", {
           messageId: n.mail.messageId,
-          recipient: recipient.destination,
+          recipient: record.destination,
           delaySeconds: Math.max(
             0,
             (Date.now() - Date.parse(n.mail.timestamp)) / 1000,
           ),
         });
-        return ok(undefined);
-      }),
+      } finally {
+        clearInterval(timer);
+        await renewal;
+      }
+    };
+    await prepared.value.reduce<Promise<void>>(
+      (previous, record) => previous.then(() => processRecipient(record)),
+      Promise.resolve(),
     );
-    const firstFailure = outcomes.find((outcome) => outcome.isErr());
-    // Re-read states, including concurrent claims, before considering source deletion.
     const current = await ledger.prepare(n, recipients);
     if (current.isErr()) return err(current.error);
-    const allImported = current.value.every(
-      (r) => r.state === "imported" || r.state === "quarantined",
+    const complete = current.value.every((r) =>
+      ["imported", "quarantined", "rejected"].includes(r.state),
     );
-    const state = allImported ? "imported" : "failed";
-    const updated = await ledger.messageState(n.mail.messageId, state);
+    const updated = await ledger.messageState(
+      n.mail.messageId,
+      complete ? "imported" : "failed",
+    );
     if (updated.isErr()) return updated;
-    if (allImported) {
+    if (complete && firstFailure === undefined) {
       const deleted = await storage.deleteBuffer(
         n.receipt.action.bucketName,
         n.receipt.action.objectKey,
       );
       if (deleted.isErr()) return deleted;
     }
-    return firstFailure?.isErr() === true
-      ? err(firstFailure.error)
-      : ok(undefined);
+    return firstFailure !== undefined
+      ? err(firstFailure)
+      : complete
+        ? ok(undefined)
+        : err({ message: "Recipients remain incomplete" });
   }
+
   async handle(
     queue: Queue,
     item: QueueMessage,
   ): Promise<Result<void, Failure>> {
-    const result = await this.process(item.body);
+    let heartbeat: Promise<void> = Promise.resolve();
+    const timer = setInterval(() => {
+      heartbeat = heartbeat.then(async () => {
+        const extended = await queue.defer(item.receipt, 300);
+        if (extended.isErr())
+          this.deps.events.emit("ingest_failure", {
+            stage: "visibility_heartbeat",
+            attempts: item.attempts,
+          });
+        return undefined;
+      });
+    }, 60_000);
+    let result: Result<void, Failure>;
+    try {
+      result = await this.process(item.body);
+    } finally {
+      clearInterval(timer);
+      await heartbeat;
+    }
     if (result.isErr()) {
       this.deps.events.emit("ingest_failure", {
         stage: "processing",
         attempts: item.attempts,
       });
-      const delay = Math.min(900, 2 ** Math.min(item.attempts, 9));
+      const delay = Math.min(
+        3600,
+        60 * 2 ** Math.min(Math.max(item.attempts - 1, 0), 6),
+      );
       const deferred = await queue.defer(item.receipt, delay);
       return deferred.isErr() ? deferred : result;
     }
     return queue.delete(item.receipt);
   }
+
   async reconcile(maxAgeSeconds: number): Promise<Result<void, Failure>> {
     const list = await this.deps.storage.archives();
     if (list.isErr()) return err(list.error);
     const keys = await this.deps.storage.bufferKeys();
-    if (keys.isErr()) return err(keys.error);
     const referenced = new Set<string>();
-    const replay = async (index: number): Promise<number> => {
-      const key = list.value[index];
-      if (key === undefined) return 0;
+    let failures = keys.isErr() ? 1 : 0;
+    const replay = async (key: string): Promise<void> => {
       const body = await this.deps.storage.readArchive(key);
-      let success = false;
-      if (body.isOk()) {
-        const n = parseNotification(body.value);
-        if (n.isOk()) {
-          referenced.add(n.value.receipt.action.objectKey);
-          if (
-            Date.now() - Date.parse(n.value.mail.timestamp) >
-              maxAgeSeconds * 1000 &&
-            keys.value.includes(n.value.receipt.action.objectKey)
-          )
-            this.deps.events.emit("ingest_notification_old", {
-              messageId: n.value.mail.messageId,
-            });
-          success = (await this.process(body.value)).isOk();
-        }
+      if (body.isErr()) {
+        failures++;
+        return;
       }
-      return (success ? 0 : 1) + (await replay(index + 1));
+      const n = parseNotification(body.value);
+      if (n.isErr()) {
+        failures++;
+        return;
+      }
+      referenced.add(n.value.receipt.action.objectKey);
+      if (
+        keys.isOk() &&
+        Date.now() - Date.parse(n.value.mail.timestamp) >
+          maxAgeSeconds * 1000 &&
+        keys.value.includes(n.value.receipt.action.objectKey)
+      )
+        this.deps.events.emit("ingest_notification_old", {
+          messageId: n.value.mail.messageId,
+        });
+      if ((await this.process(body.value, true)).isErr()) failures++;
     };
-    const failures = await replay(0);
-    for (const key of keys.value)
-      if (!referenced.has(key))
-        this.deps.events.emit("ingest_buffer_without_notification", { key });
+    await list.value.reduce<Promise<void>>(
+      (previous, key) => previous.then(() => replay(key)),
+      Promise.resolve(),
+    );
+    if (keys.isOk())
+      for (const key of keys.value)
+        if (!referenced.has(key))
+          this.deps.events.emit("ingest_buffer_without_notification", { key });
     return failures > 0
-      ? err({ message: `${String(failures)} archived notifications failed` })
+      ? err({
+          message: `${String(failures)} reconciliation operations failed${keys.isErr() ? `: buffer listing: ${keys.error.message}` : ""}`,
+        })
       : ok(undefined);
   }
 }

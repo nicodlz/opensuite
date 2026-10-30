@@ -14,6 +14,13 @@ services:
     ports: !override
       - "127.0.0.1::443"
   stalwart:
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-management
+        read_only: true
+        volume:
+          subpath: stalwart-management
     ports: !override
       - "127.0.0.1::25"
       - "127.0.0.1::465"

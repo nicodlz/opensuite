@@ -1,15 +1,14 @@
 import { contract } from "@opensuite/contracts";
 import { implement, ORPCError } from "@orpc/server";
 import type { ApiContext } from "./context.ts";
+import { requireAdmin } from "./session.ts";
 import type { DomainService } from "@opensuite/core/services/domains";
 import type { Result } from "neverthrow";
 
 const domains = implement(contract.admin.domains).$context<ApiContext>();
-function authorize(context: ApiContext) {
-  if (context.actor === null) throw new ORPCError("UNAUTHORIZED");
-  if (context.actor.role !== "admin") throw new ORPCError("FORBIDDEN");
+function service(context: ApiContext): DomainService {
   if (context.domains === undefined) throw new ORPCError("SERVICE_UNAVAILABLE");
-  return { actor: context.actor, service: context.domains };
+  return context.domains;
 }
 function value<T>(result: Result<T, { kind: string }>): T {
   if (result.isErr())
@@ -24,31 +23,39 @@ function value<T>(result: Result<T, { kind: string }>): T {
 }
 export type { DomainService };
 export const domainsRouter = domains.router({
-  list: domains.list.handler(async ({ context }) => {
-    const { actor, service } = authorize(context);
-    return value(await service.list(actor));
+  list: domains.list.use(requireAdmin).handler(async ({ context }) => {
+    return value(await service(context).list(context.actor));
   }),
-  add: domains.add.handler(async ({ context, input }) => {
-    const { actor, service } = authorize(context);
-    return value(await service.add(actor, input.name));
+  add: domains.add.use(requireAdmin).handler(async ({ context, input }) => {
+    return value(await service(context).add(context.actor, input.name));
   }),
-  remove: domains.remove.handler(async ({ context, input }) => {
-    const { actor, service } = authorize(context);
-    value(await service.remove(actor, input.domainId));
-    return { removed: true };
-  }),
-  recheck: domains.recheck.handler(async ({ context, input }) => {
-    const { actor, service } = authorize(context);
-    return value(await service.recheck(actor, input.domainId));
-  }),
-  addAddress: domains.addAddress.handler(async ({ context, input }) => {
-    const { actor, service } = authorize(context);
-    return value(await service.addAddress(actor, input));
-  }),
-  removeAddress: domains.removeAddress.handler(async ({ context, input }) => {
-    const { actor, service } = authorize(context);
-    return value(
-      await service.removeAddress(actor, input.domainId, input.addressId),
-    );
-  }),
+  remove: domains.remove
+    .use(requireAdmin)
+    .handler(async ({ context, input }) => {
+      value(await service(context).remove(context.actor, input.domainId));
+      return { removed: true };
+    }),
+  recheck: domains.recheck
+    .use(requireAdmin)
+    .handler(async ({ context, input }) => {
+      return value(
+        await service(context).recheck(context.actor, input.domainId),
+      );
+    }),
+  addAddress: domains.addAddress
+    .use(requireAdmin)
+    .handler(async ({ context, input }) => {
+      return value(await service(context).addAddress(context.actor, input));
+    }),
+  removeAddress: domains.removeAddress
+    .use(requireAdmin)
+    .handler(async ({ context, input }) => {
+      return value(
+        await service(context).removeAddress(
+          context.actor,
+          input.domainId,
+          input.addressId,
+        ),
+      );
+    }),
 });

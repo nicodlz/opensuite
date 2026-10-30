@@ -19,6 +19,7 @@ const name = z
   .max(255)
   .refine(
     (s) =>
+      s.isWellFormed() &&
       !s.split("").some((c) => c.charCodeAt(0) < 32 || c === "/" || c === "\\"),
   );
 const parentId = id.nullable();

@@ -78,7 +78,7 @@ pnpm build         # static web client
 pnpm test:e2e      # Vite preview and a local API; install Chromium first
 pnpm exec vitest run --project stalwart  # real server; Docker required
 pnpm exec vitest run --project drive     # disposable PostgreSQL and LocalStack
-CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
+OPENSUITE_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
 Vitest projects are selected by file suffix: `*.test.ts` runs in `unit`;

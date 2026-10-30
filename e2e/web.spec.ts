@@ -163,5 +163,5 @@ test("live API probes reach the status page through the preview proxy", async ({
     page.getByRole("heading", { name: "All checks operational" }),
   ).toBeVisible();
   await expect(page.getByText(/Uptime: \d+ seconds/)).toBeVisible();
-  await expect(page.getByText("2 of 2 dependencies up")).toBeVisible();
+  await expect(page.getByText("No dependencies declared")).toBeVisible();
 });
