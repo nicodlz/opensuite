@@ -20,7 +20,7 @@ services:
       - "127.0.0.1::443"
   pass:
     environment:
-      DOMAIN: https://pass.localhost
+      DOMAIN: ${PASS_TEST_DOMAIN:-https://pass.localhost}
       IP_HEADER_TRUSTED_PROXIES: ${PASS_TEST_PROXY_IP}
     ports: !override
       - "127.0.0.1::80"

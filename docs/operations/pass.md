@@ -5,8 +5,9 @@ of the OpenSuite application accounts. It shares PostgreSQL and Caddy, but does
 not require the API, Drive, ingestion or Stalwart. Vault records and metadata
 are in the separate `opensuite_pass` database; attachments, signing keys and
 other Vaultwarden data are in the `vaultwarden-data` volume. Attachments do not
-use S3/B2. The compatible clients, external relay and complete recovery process
-have not been verified here; this integration is not a security audit.
+use S3/B2. Client verification is limited to the cases and versions in the
+[compatibility guide](../user/pass-clients.md); the external relay and complete
+recovery process have not been verified. This integration is not a security audit.
 
 ## Enable and first administrator
 
@@ -140,3 +141,14 @@ For rollback stop Pass, restore the pre-upgrade database **and** matching data
 volume and secrets into an isolated environment, then restore the previous
 image pin. Do not point an older image at a migrated database without upstream
 confirmation. Test recovery before reconnecting users.
+
+For client setup, version-specific evidence and manual checks, see the
+[Pass client compatibility guide](../user/pass-clients.md). Run
+`pnpm exec vitest run --project pass` against a local Docker Compose daemon
+when changing the Pass stack or pinned CLI. Install the Playwright Chromium
+build with `pnpm exec playwright install chromium` first. These tests use
+disposable projects, accounts, ports and volumes; they do not establish
+production recovery or audit the deployment. The CLI trusts the disposable
+Caddy CA via `NODE_EXTRA_CA_CERTS`; registration pins the test certificate in
+Chromium after checking its CA chain and hostname. The suite reports the known
+raw API denial-status mismatch described in the compatibility guide.
