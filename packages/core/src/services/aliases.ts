@@ -1,31 +1,16 @@
-import {
-  createHash,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-} from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { AliasPrefix, AliasWebsite } from "@opensuite/contracts";
-import type { Prisma, PrismaClient } from "@opensuite/db";
+import type { AliasStore, AliasStoreFailure } from "@opensuite/db";
 import { err, ok, type Result } from "neverthrow";
+import { z } from "zod";
 
-type FailureKind =
-  "invalid" | "not_found" | "conflict" | "limit" | "unavailable";
-type Failure = { kind: FailureKind };
+type Failure = AliasStoreFailure | { kind: "busy" };
 type Output<T> = Promise<Result<T, Failure>>;
-type Row = {
-  id: string;
-  userId: string;
-  address: string;
-  localPart: string;
-  domainId: string;
-  website: string | null;
-  note: string | null;
-  enabled: boolean;
-  ready: boolean;
-  detachedByDomain: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-};
+type StoreRow = NonNullable<
+  Awaited<ReturnType<AliasStore["get"]>> extends Result<infer T, unknown>
+    ? T
+    : never
+>;
 type Key = {
   id: string;
   name: string;
@@ -34,7 +19,7 @@ type Key = {
   lastUsedAt: Date | null;
   revokedAt: Date | null;
 };
-const view = (row: Row) => ({
+const view = (row: StoreRow) => ({
   id: row.id,
   address: row.address,
   localPart: row.localPart,
@@ -44,6 +29,7 @@ const view = (row: Row) => ({
   enabled: row.enabled,
   ready: row.ready,
   detachedByDomain: row.detachedByDomain,
+  suspended: row.suspended,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
@@ -55,7 +41,7 @@ const keyView = (row: Key) => ({
   lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
   revokedAt: row.revokedAt?.toISOString() ?? null,
 });
-const failure = (kind: FailureKind): Failure => ({ kind });
+const failure = (kind: Failure["kind"]): Failure => ({ kind });
 const hash = (secret: string) =>
   createHash("sha256").update(secret).digest("hex");
 export const generateAliasLocalPart = (prefix?: string) =>
@@ -84,53 +70,17 @@ const run = async <T>(work: () => Promise<Result<T, Failure>>): Output<T> => {
     return err(failure("unavailable"));
   }
 };
-const validDomain = async (tx: Prisma.TransactionClient, domainId: string) =>
-  tx.domain.findFirst({
-    where: {
-      id: domainId,
-      status: "verified",
-      stalwartId: { not: null },
-    },
-  });
 export function createAliasService(
-  db: PrismaClient,
+  store: AliasStore,
   mail: AliasMail,
   cap: number,
 ) {
-  const locked = async <T>(
-    userId: string,
-    work: (tx: Prisma.TransactionClient) => Promise<T>,
-  ): Promise<T> =>
-    db.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 427391))`;
-        return work(tx);
-      },
-      { timeout: 10_000, maxWait: 5_000 },
-    );
-  const sync = async (
-    userId: string,
-    id: string,
-  ): Output<ReturnType<typeof view>> =>
+  const sync = (userId: string, id: string): Output<ReturnType<typeof view>> =>
     run(async () => {
-      const token = randomUUID();
-      const now = new Date();
-      const claim = await db.user.updateMany({
-        where: {
-          id: userId,
-          OR: [{ aliasSyncUntil: null }, { aliasSyncUntil: { lt: now } }],
-        },
-        data: {
-          aliasSyncToken: token,
-          aliasSyncUntil: new Date(now.getTime() + 120_000),
-        },
-      });
-      if (!claim.count) return err(failure("unavailable"));
-      try {
-        const row = await db.emailAlias.findFirst({
-          where: { id, userId },
-          include: { domain: true, user: { include: { mailbox: true } } },
-        });
+      const leased = await store.withUserLease(userId, async (token) => {
+        const found = await store.snapshot(userId, id);
+        if (found.isErr()) return err(found.error);
+        const row = found.value;
         if (!row) return err(failure("not_found"));
         const mailbox = row.user.mailbox;
         if (!mailbox || !row.domain.stalwartId)
@@ -139,12 +89,15 @@ export function createAliasService(
           row.enabled &&
           row.deletedAt === null &&
           row.domain.status !== "verified";
+        const suspended =
+          row.enabled &&
+          row.deletedAt === null &&
+          (row.user.disabled || mailbox.status !== "active");
         const enabled =
           row.enabled &&
           row.deletedAt === null &&
           !detachedByDomain &&
-          !row.user.disabled &&
-          mailbox.status === "active";
+          !suspended;
         const result = await mail.set(
           mailbox.accountId,
           row.localPart,
@@ -153,98 +106,36 @@ export function createAliasService(
           userId,
           enabled,
         );
-        if (result.isErr()) {
-          await db.emailAlias.updateMany({
-            where: { id, userId, revision: row.revision },
-            data: { updatedAt: new Date() },
-          });
+        if (result.isErr()) return err(failure("unavailable"));
+        const saved = await store.finish(userId, id, token, row, {
+          ready: true,
+          detachedByDomain,
+          suspended,
+        });
+        if (saved.isErr()) return err(saved.error);
+        if (!saved.value) {
+          await store.dirty(userId, id);
           return err(failure("unavailable"));
         }
-        const saved = await db.emailAlias.updateMany({
-          where: {
-            id,
-            userId,
-            revision: row.revision,
-            domain: { status: row.domain.status },
-            user: {
-              aliasSyncToken: token,
-              disabled: row.user.disabled,
-              mailbox: { status: mailbox.status },
-            },
-          },
-          data: {
-            ready:
-              !row.enabled ||
-              row.deletedAt !== null ||
-              enabled ||
-              detachedByDomain,
-            detachedByDomain,
-          },
-        });
-        if (!saved.count) {
-          await db.emailAlias.updateMany({
-            where: { id, userId },
-            data: { ready: false },
-          });
-          return err(failure("unavailable"));
-        }
-        const current = await db.emailAlias.findFirstOrThrow({
-          where: { id, userId },
-        });
-        if (current.enabled && !enabled && !detachedByDomain)
-          return err(failure("unavailable"));
-        return ok(view(current));
-      } finally {
-        await db.user.updateMany({
-          where: { id: userId, aliasSyncToken: token },
-          data: { aliasSyncToken: null, aliasSyncUntil: null },
-        });
+        const current = await store.get(userId, id);
+        if (current.isErr()) return err(current.error);
+        return current.value
+          ? ok(view(current.value))
+          : err(failure("not_found"));
+      });
+      if (leased.isErr()) {
+        await store.touch(userId, id);
+        return err(failure(leased.error.kind));
       }
+      if (leased.value.isErr()) await store.touch(userId, id);
+      return leased.value;
     });
   return {
-    findRequest: (userId: string, requestId: string) =>
-      run(async () => {
-        const row = await db.emailAlias.findUnique({
-          where: { userId_requestId: { userId, requestId } },
-        });
-        return ok(row !== null);
-      }),
-    domains: () =>
-      run(async () =>
-        ok(
-          await db.domain.findMany({
-            where: {
-              status: "verified",
-              stalwartId: { not: null },
-            },
-            select: { id: true, name: true },
-            orderBy: { name: "asc" },
-          }),
-        ),
-      ),
-    list: (userId: string, search?: string) =>
-      run(async () =>
-        ok(
-          (
-            await db.emailAlias.findMany({
-              where: {
-                userId,
-                deletedAt: null,
-                ...(search
-                  ? {
-                      OR: [
-                        { address: { contains: search, mode: "insensitive" } },
-                        { website: { contains: search, mode: "insensitive" } },
-                        { note: { contains: search, mode: "insensitive" } },
-                      ],
-                    }
-                  : {}),
-              },
-              orderBy: { createdAt: "desc" },
-            })
-          ).map(view),
-        ),
-      ),
+    findRequest: async (userId: string, requestId: string) =>
+      (await store.findRequest(userId, requestId)).map((row) => row !== null),
+    domains: async () => store.domains(),
+    list: async (userId: string, search?: string) =>
+      (await store.list(userId, search)).map((rows) => rows.map(view)),
     create: (
       userId: string,
       input: AliasCreate,
@@ -261,202 +152,86 @@ export function createAliasService(
             input.note.length > 500)
         )
           return err(failure("invalid"));
-        const reserved = await locked(userId, async (tx) => {
-          if (input.requestId) {
-            const prior = await tx.emailAlias.findUnique({
-              where: {
-                userId_requestId: { userId, requestId: input.requestId },
-              },
-            });
-            if (prior)
-              return prior.deletedAt ? err(failure("conflict")) : ok(prior);
-          }
-          const user = await tx.user.findFirst({
-            where: {
-              id: userId,
-              disabled: false,
-              mailbox: { status: "active" },
-            },
-            select: { defaultAliasDomainId: true },
-          });
-          const domainId = input.domainId ?? user?.defaultAliasDomainId;
-          if (!user || !domainId) return err(failure("invalid"));
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, 9876))`;
-          const domain = await validDomain(tx, domainId);
-          if (!domain) return err(failure("invalid"));
-          if (
-            (await tx.emailAlias.count({
-              where: { userId, deletedAt: null },
-            })) >= cap
-          )
-            return err(failure("limit"));
-          const localPart = generateAliasLocalPart(input.prefix);
-          const address = `${localPart}@${domain.name}`;
-          const record = await tx.address.create({
-            data: { userId, domainId, localPart, isAlias: true },
-          });
-          const alias = await tx.emailAlias.create({
-            data: {
-              userId,
-              domainId,
-              addressId: record.id,
-              address,
-              localPart,
-              website: input.website?.toLowerCase() ?? null,
-              note: input.note ?? null,
-              requestId: input.requestId ?? null,
-            },
-          });
-          return ok(alias);
-        });
+        const reserved = await store.reserve(
+          userId,
+          input,
+          generateAliasLocalPart(input.prefix),
+          cap,
+        );
         if (reserved.isErr()) return err(reserved.error);
         if (reserved.value.ready)
-          return reserved.value.detachedByDomain
+          return reserved.value.detachedByDomain || reserved.value.suspended
             ? err(failure("unavailable"))
             : ok(view(reserved.value));
         const result = await sync(userId, reserved.value.id);
-        return result.isOk() && result.value.detachedByDomain
+        if (result.isErr() && result.error.kind === "busy")
+          return ok(view(reserved.value));
+        if (result.isErr()) return err(result.error);
+        return result.value.detachedByDomain || result.value.suspended
           ? err(failure("unavailable"))
           : result;
       }),
-    update: (
+    update: async (
       userId: string,
       id: string,
       data: {
         website?: string | null | undefined;
         note?: string | null | undefined;
       },
-    ) =>
-      run(async () => {
-        if (
-          (data.website !== null &&
-            data.website !== undefined &&
-            !AliasWebsite.safeParse(data.website).success) ||
-          (data.note !== null &&
-            data.note !== undefined &&
-            data.note.length > 500)
-        )
-          return err(failure("invalid"));
-        const result = await db.emailAlias.updateMany({
-          where: { id, userId, deletedAt: null },
-          data: {
-            ...(data.website === undefined
-              ? {}
-              : { website: data.website?.toLowerCase() ?? null }),
-            ...(data.note === undefined ? {} : { note: data.note }),
-          },
-        });
-        if (!result.count) return err(failure("not_found"));
-        const row = await db.emailAlias.findFirstOrThrow({
-          where: { id, userId, deletedAt: null },
-        });
-        return ok(view(row));
-      }),
+    ) => {
+      if (
+        (data.website !== null &&
+          data.website !== undefined &&
+          !AliasWebsite.safeParse(data.website).success) ||
+        (data.note !== null &&
+          data.note !== undefined &&
+          data.note.length > 500)
+      )
+        return err(failure("invalid"));
+      return (await store.update(userId, id, data)).map(view);
+    },
     transition: (
       userId: string,
       id: string,
       desired: "enable" | "disable" | "delete",
     ) =>
       run(async () => {
-        const changed = await locked(userId, async (tx) => {
-          const row = await tx.emailAlias.findFirst({ where: { id, userId } });
-          if (!row || (row.deletedAt && desired !== "delete"))
-            return err(failure("not_found"));
-          if (desired === "enable" && !(await validDomain(tx, row.domainId)))
-            return err(failure("invalid"));
-          await tx.emailAlias.update({
-            where: { id },
-            data: {
-              enabled: desired === "enable",
-              ready: false,
-              detachedByDomain: false,
-              revision: { increment: 1 },
-              ...(desired === "delete" && !row.deletedAt
-                ? { deletedAt: new Date() }
-                : {}),
-            },
-          });
-          return ok(undefined);
-        });
-        if (changed.isErr()) return err(changed.error);
-        return sync(userId, id);
+        const changed = await store.transition(userId, id, desired);
+        return changed.isErr() ? err(changed.error) : sync(userId, id);
       }),
-    match: (userId: string, addresses: string[]) =>
-      run(async () =>
-        ok(
-          (
-            await db.emailAlias.findMany({
-              where: {
-                userId,
-                address: { in: addresses.map((v) => v.toLowerCase()) },
-              },
-            })
-          ).map(view),
-        ),
-      ),
-    setDefault: (userId: string, domainId: string) =>
-      run(() =>
-        locked(userId, async (tx) => {
-          if (!(await validDomain(tx, domainId)))
-            return err(failure("invalid"));
-          await tx.user.update({
-            where: { id: userId },
-            data: { defaultAliasDomainId: domainId },
-          });
-          return ok({ domainId });
-        }),
-      ),
-    getDefault: (userId: string) =>
-      run(async () =>
-        ok({
-          domainId: (
-            await db.user.findUniqueOrThrow({
-              where: { id: userId },
-              select: { defaultAliasDomainId: true },
-            })
-          ).defaultAliasDomainId,
-        }),
-      ),
+    match: async (userId: string, addresses: string[]) => {
+      const valid = addresses.flatMap((entry) => {
+        const candidate = /<([^<>]+)>\s*$/.exec(entry)?.[1] ?? entry;
+        const parsed = z.email().safeParse(candidate.trim().toLowerCase());
+        return parsed.success ? [parsed.data] : [];
+      });
+      return (await store.match(userId, valid)).map((rows) => rows.map(view));
+    },
+    setDefault: async (userId: string, domainId: string) =>
+      store.setDefault(userId, domainId),
+    getDefault: async (userId: string) => store.getDefault(userId),
     createKey: (userId: string, name: string) =>
       run(async () => {
         const prefix = randomBytes(9).toString("base64url");
         const secret = `osa_${prefix}_${randomBytes(32).toString("base64url")}`;
-        const row = await db.aliasApiKey.create({
-          data: { userId, name, prefix, secretHash: hash(secret) },
-        });
-        return ok({ ...keyView(row), secret });
+        const row = await store.createKey(userId, name, prefix, hash(secret));
+        return row.isErr()
+          ? err(row.error)
+          : ok({ ...keyView(row.value), secret });
       }),
-    listKeys: (userId: string) =>
-      run(async () =>
-        ok(
-          (
-            await db.aliasApiKey.findMany({
-              where: { userId },
-              orderBy: { createdAt: "desc" },
-            })
-          ).map(keyView),
-        ),
-      ),
-    revokeKey: (userId: string, id: string) =>
-      run(async () => {
-        const result = await db.aliasApiKey.updateMany({
-          where: { id, userId, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
-        return result.count
-          ? ok({ revoked: true as const })
-          : err(failure("not_found"));
-      }),
+    listKeys: async (userId: string) =>
+      (await store.listKeys(userId)).map((rows) => rows.map(keyView)),
+    revokeKey: async (userId: string, id: string) =>
+      store.revokeKey(userId, id),
     authenticate: (secret: string) =>
       run(async () => {
         const match = /^osa_([A-Za-z0-9_-]{12})_[A-Za-z0-9_-]{43}$/.exec(
           secret,
         );
         if (!match?.[1]) return err(failure("invalid"));
-        const row = await db.aliasApiKey.findUnique({
-          where: { prefix: match[1] },
-          include: { user: true },
-        });
+        const found = await store.keyForPrefix(match[1]);
+        if (found.isErr()) return err(found.error);
+        const row = found.value;
         const actual = Buffer.from(hash(secret), "hex");
         const expected = Buffer.from(row?.secretHash ?? "0".repeat(64), "hex");
         if (
@@ -466,27 +241,29 @@ export function createAliasService(
           row.user.disabled
         )
           return err(failure("invalid"));
-        const used = await db.aliasApiKey.updateMany({
-          where: { id: row.id, revokedAt: null, user: { disabled: false } },
-          data: { lastUsedAt: new Date() },
-        });
-        return used.count
+        const used = await store.useKey(row.id);
+        if (used.isErr()) return err(used.error);
+        return used.value
           ? ok({ userId: row.userId, keyId: row.id })
           : err(failure("invalid"));
       }),
     reconcile: () =>
       run(async () => {
-        const pending = await db.emailAlias.findMany({
-          where: { ready: false },
-          select: { userId: true, id: true },
-          take: 100,
-          orderBy: { updatedAt: "asc" },
-        });
+        const pending = await store.pending();
+        if (pending.isErr()) return err(pending.error);
         let failures = 0;
-        for (const row of pending)
+        for (const row of pending.value)
           if ((await sync(row.userId, row.id)).isErr()) failures++;
         return ok(failures);
       }),
+    canSendAs: async (userId: string, address: string) =>
+      (await store.canSendAs(userId, address)).map((row) => row !== null),
+    auditSubmission: async (userId: string, address: string) => {
+      const alias = await store.canSendAs(userId, address);
+      if (alias.isErr()) return err(alias.error);
+      if (!alias.value) return err(failure("not_found"));
+      return store.auditSubmission(userId, alias.value.id);
+    },
   };
 }
 export type AliasService = ReturnType<typeof createAliasService>;

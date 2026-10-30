@@ -186,8 +186,14 @@ export function createDomainService(
       const row = await store.get(id);
       if (row.isErr()) return err(unavailable());
       if (row.value.addresses.length > 0) return err(invalid());
+      const reserved = await store.beginRemoval(id);
+      if (reserved.isErr()) return err(unavailable());
+      if (!reserved.value) return err(invalid());
       const result = await provider.receipt(row.value.name, false);
-      if (result.isErr()) return err(unavailable());
+      if (result.isErr()) {
+        await store.cancelRemoval(id);
+        return err(unavailable());
+      }
       const removed = await store.remove(actor.id, id);
       return removed.isErr() ? err(unavailable()) : ok(undefined);
     },
@@ -257,7 +263,7 @@ export function createDomainService(
           );
           if (alias.isErr()) return err(unavailable());
         }
-        return result.isErr() ? err(unavailable()) : ok(result.value);
+        return ok(result.value);
       });
       return lease.isErr() ? err(unavailable()) : lease.value;
     },

@@ -96,7 +96,7 @@ const errors = {
   FORBIDDEN: { status: 403, message: "Access denied" },
   VALIDATION: { status: 400, message: "Invalid mail data" },
   CONFLICT: { status: 409, message: "Mail item changed" },
-  TOO_MANY_REQUESTS: { status: 429, message: "Too many alias submissions" },
+  TOO_MANY_REQUESTS: { status: 429, message: "Too many requests" },
   UPSTREAM_UNAVAILABLE: { status: 503, message: "Mail service unavailable" },
 };
 const procedure = oc.errors(errors);

@@ -2,7 +2,7 @@ import type { DomainService } from "./routes/domains.ts";
 import { randomBytes } from "node:crypto";
 import { createAliasLimiter } from "./auth/alias-limits.ts";
 import type { AliasService } from "@opensuite/core/services/aliases";
-import { AliasWebsite } from "@opensuite/contracts";
+import { registerAliasCompat } from "./routes/alias-compat.ts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
@@ -101,20 +101,7 @@ export const buildServer = async (
   app.addHook("onRequest", async (request, reply) => {
     const identity = dependencies.identity;
     const rawPath = request.url.split("?")[0] ?? "";
-    if (rawPath === "/alias/random/new") {
-      reply.header("Access-Control-Allow-Origin", "*");
-      reply.header("Cache-Control", "no-store");
-      if (request.method === "OPTIONS")
-        return reply
-          .header("Access-Control-Allow-Methods", "POST, OPTIONS")
-          .header(
-            "Access-Control-Allow-Headers",
-            "Authentication, Content-Type",
-          )
-          .code(204)
-          .send();
-      return undefined;
-    }
+    if (rawPath === "/alias/random/new") return undefined;
     if (
       identity !== undefined &&
       (rawPath.startsWith("/auth/") || rawPath.startsWith("/api/auth/"))
@@ -315,70 +302,10 @@ export const buildServer = async (
 
   app.get("/openapi.json", () => openapi);
 
-  app.post(
-    "/alias/random/new",
-    {
-      errorHandler(error, _request, reply) {
-        const status = error.statusCode ?? 500;
-        void reply.code(status >= 400 && status < 500 ? status : 503).send({
-          error:
-            status >= 400 && status < 500
-              ? "Invalid request"
-              : "Service unavailable",
-        });
-      },
-    },
-    async (request, reply) => {
-      if (!aliasLimits.ip(request.ip))
-        return reply.code(429).send({ error: "Too many requests" });
-      const secret = request.headers["authentication"];
-      if (
-        typeof secret !== "string" ||
-        secret.length > 128 ||
-        dependencies.aliases === undefined
-      )
-        return reply.code(401).send({ error: "Invalid API key" });
-      const actor = await dependencies.aliases.authenticate(secret);
-      if (actor.isErr())
-        return reply.code(401).send({ error: "Invalid API key" });
-      if (!aliasLimits.key(actor.value.keyId))
-        return reply.code(429).send({ error: "Too many requests" });
-      const parsed = z
-        .object({ hostname: AliasWebsite.optional() })
-        .strict()
-        .safeParse(request.query);
-      const body = z
-        .object({ note: z.string().max(500).optional() })
-        .strict()
-        .safeParse(request.body);
-      if (!parsed.success || !body.success)
-        return reply.code(400).send({ error: "Invalid request" });
-      if (!aliasLimits.user(actor.value.userId))
-        return reply.code(429).send({ error: "Too many requests" });
-      const result = await dependencies.aliases.create(actor.value.userId, {
-        ...(parsed.data.hostname === undefined
-          ? {}
-          : { website: parsed.data.hostname }),
-        ...(body.data.note === undefined ? {} : { note: body.data.note }),
-      });
-      if (result.isErr())
-        return reply
-          .code(
-            result.error.kind === "limit"
-              ? 429
-              : result.error.kind === "invalid"
-                ? 400
-                : 503,
-          )
-          .send({
-            error:
-              result.error.kind === "limit"
-                ? "Alias cap reached"
-                : "Could not create alias",
-          });
-      return reply.code(201).send({ alias: result.value.address });
-    },
-  );
+  await app.register(registerAliasCompat, {
+    aliases: dependencies.aliases,
+    limiter: aliasLimits,
+  });
 
   if (dependencies.identity !== undefined) {
     const identity = dependencies.identity;
@@ -633,6 +560,7 @@ export const buildServer = async (
         domains: dependencies.domains,
         aliases: dependencies.aliases,
         aliasCreationLimit: (userId) => aliasLimits.user(userId),
+        aliasMutationLimit: (userId) => aliasLimits.mutate(userId),
         log: request.log,
         readiness: dependencies.readiness,
         uptimeSeconds: () =>

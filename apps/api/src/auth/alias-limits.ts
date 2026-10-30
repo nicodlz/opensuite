@@ -1,3 +1,4 @@
+import { createFixedWindow } from "./fixed-window.ts";
 import { isIP } from "node:net";
 
 export function networkBucket(ip: string): string {
@@ -23,28 +24,16 @@ export function createAliasLimiter(
   now: () => number = Date.now,
   capacity = 10_000,
 ) {
-  const anonymous = new Map<string, { count: number; expires: number }>();
-  const authenticated = new Map<string, { count: number; expires: number }>();
-  const consume = (buckets: typeof anonymous, key: string, max: number) => {
-    const time = now();
-    const existing = buckets.get(key);
-    const bucket =
-      !existing || existing.expires <= time
-        ? { count: 0, expires: time + 60_000 }
-        : existing;
-    bucket.count++;
-    buckets.delete(key);
-    if (buckets.size >= capacity) {
-      const oldest = buckets.keys().next().value;
-      if (oldest !== undefined) buckets.delete(oldest);
-    }
-    buckets.set(key, bucket);
-    return bucket.count <= max;
-  };
+  const anonymous = createFixedWindow(now, capacity, true);
+  const keys = createFixedWindow(now, capacity);
+  const users = createFixedWindow(now, capacity);
+  const sends = createFixedWindow(now, capacity);
+  const mutations = createFixedWindow(now, capacity);
   return {
-    ip: (ip: string) => consume(anonymous, networkBucket(ip), 60),
-    key: (id: string) => consume(authenticated, `key:${id}`, 20),
-    user: (id: string) => consume(authenticated, `user:${id}`, 20),
-    send: (id: string) => consume(authenticated, `send:${id}`, 30),
+    ip: (ip: string) => anonymous.consume(networkBucket(ip), 60) === undefined,
+    key: (id: string) => keys.consume(id, 20) === undefined,
+    user: (id: string) => users.consume(id, 20) === undefined,
+    send: (id: string) => sends.consume(id, 30) === undefined,
+    mutate: (id: string) => mutations.consume(id, 60) === undefined,
   };
 }

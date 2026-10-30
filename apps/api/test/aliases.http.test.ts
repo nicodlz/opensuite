@@ -8,6 +8,7 @@ import {
 } from "@opensuite/core/services/aliases";
 import {
   createDatabase,
+  createAliasStore,
   createDomainStore,
   type PrismaClient,
 } from "@opensuite/db";
@@ -15,7 +16,7 @@ import type { FastifyInstance } from "fastify";
 import { err, ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.ts";
-import { createAliasSendGuard } from "../src/routes/alias-mail.ts";
+import { createAliasSendGuard } from "../src/adapters/alias-mail.ts";
 
 const run = promisify(execFile);
 const container = `opensuite-alias-test-${randomUUID().slice(0, 8)}`;
@@ -121,7 +122,7 @@ beforeAll(async () => {
     ).id;
     await db.user.updateMany({ data: { defaultAliasDomainId: domainId } });
     aliases = createAliasService(
-      db,
+      createAliasStore(db),
       {
         set: async () => {
           mailCalls++;
@@ -188,6 +189,15 @@ describe("alias API", () => {
     expect(bob.statusCode).toBe(200);
     const a = alice.json<{ id: string; address: string }>();
     const b = bob.json<{ id: string; address: string }>();
+    const ownMatch = await app.inject({
+      method: "POST",
+      url: "/aliases/match",
+      headers: headers("alice"),
+      payload: { addresses: [`Alice <${a.address}>`, "broken address"] },
+    });
+    expect(ownMatch.json<{ id: string }[]>().map((row) => row.id)).toEqual([
+      a.id,
+    ]);
     const cases: { user: string; target: string; address: string }[] = [
       { user: "alice", target: b.id, address: b.address },
       { user: "bob", target: a.id, address: a.address },
@@ -382,7 +392,9 @@ describe("alias API", () => {
     const wrong = await app.inject({
       method: "POST",
       url: "/alias/random/new",
-      headers: { authentication: `${key.secret}wrong` },
+      headers: {
+        authentication: `${key.secret.slice(0, -1)}${key.secret.endsWith("A") ? "B" : "A"}`,
+      },
       payload: {},
     });
     expect(wrong.statusCode).toBe(401);
@@ -609,7 +621,7 @@ describe("alias API", () => {
     const row = await db.emailAlias.findFirstOrThrow({
       where: { userId: "bob", enabled: true, ready: true, deletedAt: null },
     });
-    const guard = createAliasSendGuard(db);
+    const guard = createAliasSendGuard(aliases);
     const results = await Promise.all(
       Array.from({ length: 31 }, () => guard("bob", row.address)),
     );
@@ -625,23 +637,167 @@ describe("alias API", () => {
       ),
     ).toBe(true);
   });
-  it("keeps an alias pending while its owner is disabled and restores it afterwards", async () => {
+  it("suspends an alias while its owner is disabled and restores it afterwards", async () => {
     const row = await db.emailAlias.findFirstOrThrow({
       where: { userId: "bob", enabled: true, deletedAt: null },
     });
     await db.user.update({ where: { id: "bob" }, data: { disabled: true } });
-    await db.emailAlias.update({
-      where: { id: row.id },
-      data: { ready: false },
-    });
     await aliases.reconcile();
-    expect(
-      (await db.emailAlias.findUniqueOrThrow({ where: { id: row.id } })).ready,
-    ).toBe(false);
+    const suspended = await db.emailAlias.findUniqueOrThrow({
+      where: { id: row.id },
+    });
+    expect(suspended.ready && suspended.suspended).toBe(true);
+    const calls = mailCalls;
+    await aliases.reconcile();
+    expect(mailCalls).toBe(calls);
     await db.user.update({ where: { id: "bob" }, data: { disabled: false } });
     await aliases.reconcile();
     expect(
       (await db.emailAlias.findUniqueOrThrow({ where: { id: row.id } })).ready,
     ).toBe(true);
+  });
+  it("returns a reserved alias when the sync lease is busy", async () => {
+    const rows = await db.emailAlias.findMany({
+      where: { userId: "bob", deletedAt: null },
+    });
+    const first = rows[0];
+    if (rows.length >= 2 && first !== undefined)
+      await aliases.transition("bob", first.id, "delete");
+    const key = (
+      await app.inject({
+        method: "POST",
+        url: "/aliases/keys",
+        headers: headers("bob"),
+        payload: { name: "busy" },
+      })
+    ).json<{ secret: string }>();
+    await db.user.update({
+      where: { id: "bob" },
+      data: {
+        aliasSyncToken: "occupied",
+        aliasSyncUntil: new Date(Date.now() + 60_000),
+      },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/alias/random/new?hostname=localhost",
+      headers: {
+        authentication: key.secret,
+        "content-type": "application/json",
+      },
+      payload: "",
+    });
+    expect(response.statusCode).toBe(201);
+    const row = await db.emailAlias.findUniqueOrThrow({
+      where: { address: response.json<{ alias: string }>().alias },
+    });
+    expect(row.ready).toBe(false);
+    expect(row.website).toBeNull();
+    await db.user.update({
+      where: { id: "bob" },
+      data: { aliasSyncToken: null, aliasSyncUntil: null },
+    });
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    expect(
+      (await db.emailAlias.findUniqueOrThrow({ where: { id: row.id } })).ready,
+    ).toBe(true);
+  });
+  it("caps active keys and audits alias and key operations", async () => {
+    const active = await db.aliasApiKey.count({
+      where: { userId: "bob", revokedAt: null },
+    });
+    const attempts = await Promise.all(
+      Array.from({ length: 21 - active }, (_, index) =>
+        app.inject({
+          method: "POST",
+          url: "/aliases/keys",
+          headers: headers("bob"),
+          payload: { name: `key-${index}` },
+        }),
+      ),
+    );
+    expect(
+      attempts.filter((response) => response.statusCode === 429),
+    ).toHaveLength(1);
+    expect(
+      attempts
+        .find((response) => response.statusCode === 429)
+        ?.json<{ code: string }>().code,
+    ).toBe("ALIAS_KEY_CAP_REACHED");
+    const first = attempts.find((response) => response.statusCode === 200);
+    if (!first) throw new Error("No key created");
+    const id = first.json<{ id: string }>().id;
+    expect(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: `/aliases/keys/${id}`,
+          headers: headers("bob"),
+        })
+      ).statusCode,
+    ).toBe(200);
+    const actions = (
+      await db.auditEvent.findMany({
+        where: { userId: "bob" },
+        select: { action: true },
+      })
+    ).map((event) => event.action);
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        "alias.create",
+        "alias.enable",
+        "alias.disable",
+        "alias.delete",
+        "alias.key.create",
+        "alias.key.revoke",
+      ]),
+    );
+  });
+  it("counts tombstones toward the lifetime alias cap", async () => {
+    const userId = "lifetime-owner";
+    await db.user.create({
+      data: {
+        id: userId,
+        email: "lifetime@example.test",
+        name: "Lifetime",
+        defaultAliasDomainId: domainId,
+      },
+    });
+    await db.mailboxLink.create({
+      data: {
+        userId,
+        accountId: "lifetime-account",
+        address: "lifetime@example.test",
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    await Promise.all(
+      Array.from({ length: 10 }, async (_, index) => {
+        const localPart = `tombstone-${index}`;
+        const address = await db.address.create({
+          data: { userId, domainId, localPart, isAlias: true },
+        });
+        await db.emailAlias.create({
+          data: {
+            userId,
+            domainId,
+            addressId: address.id,
+            address: `${localPart}@example.test`,
+            localPart,
+            enabled: false,
+            ready: true,
+            deletedAt: new Date(),
+          },
+        });
+      }),
+    );
+    const limited = createAliasService(
+      createAliasStore(db),
+      { set: () => Promise.resolve(ok(undefined)) },
+      1,
+    );
+    const result = await limited.create(userId, { requestId: "new" });
+    expect(result.isErr() && result.error.kind).toBe("limit");
   });
 });

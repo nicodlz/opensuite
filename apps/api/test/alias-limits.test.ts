@@ -26,4 +26,20 @@ describe("alias limits", () => {
     now = 60_001;
     expect(limits.ip("2001:db8:ffff:1::4")).toBe(true);
   });
+  it("does not evict a live user's limit when other buckets fill", () => {
+    let now = 0;
+    const limits = createAliasLimiter(() => now, 2);
+    for (let i = 0; i < 20; i++) expect(limits.user("victim")).toBe(true);
+    expect(limits.user("attacker")).toBe(true);
+    for (let i = 0; i < 100; i++) limits.user(`other-${i}`);
+    expect(limits.user("victim")).toBe(false);
+    now = 60_001;
+    expect(limits.user("victim")).toBe(true);
+  });
+  it("limits alias lifecycle changes per user", () => {
+    const limits = createAliasLimiter();
+    for (let i = 0; i < 60; i++) expect(limits.mutate("user")).toBe(true);
+    expect(limits.mutate("user")).toBe(false);
+    expect(limits.mutate("another")).toBe(true);
+  });
 });

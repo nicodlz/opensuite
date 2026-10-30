@@ -15,6 +15,12 @@ const value = async <T>(
 ): Promise<T> => {
   const result = await promise;
   if (result.isOk()) return result.value;
+  if (result.error.kind === "key_limit")
+    throw new ORPCError("ALIAS_KEY_CAP_REACHED", {
+      status: 429,
+      defined: true,
+      message: "Alias key cap reached",
+    });
   if (result.error.kind === "limit")
     throw new ORPCError("ALIAS_CAP_REACHED", {
       status: 429,
@@ -28,9 +34,7 @@ const value = async <T>(
         ? "NOT_FOUND"
         : result.error.kind === "conflict"
           ? "CONFLICT"
-          : result.error.kind === "limit"
-            ? "TOO_MANY_REQUESTS"
-            : "SERVICE_UNAVAILABLE";
+          : "SERVICE_UNAVAILABLE";
   throw new ORPCError(code);
 };
 export const aliasesRouter = aliases.router({
@@ -61,16 +65,26 @@ export const aliasesRouter = aliases.router({
   enable: aliases.enable
     .use(requireSession)
     .handler(({ context, input }) =>
-      value(service(context).transition(context.actor.id, input.id, "enable")),
+      context.aliasMutationLimit(context.actor.id)
+        ? value(
+            service(context).transition(context.actor.id, input.id, "enable"),
+          )
+        : Promise.reject(new ORPCError("TOO_MANY_REQUESTS")),
     ),
   disable: aliases.disable
     .use(requireSession)
     .handler(({ context, input }) =>
-      value(service(context).transition(context.actor.id, input.id, "disable")),
+      context.aliasMutationLimit(context.actor.id)
+        ? value(
+            service(context).transition(context.actor.id, input.id, "disable"),
+          )
+        : Promise.reject(new ORPCError("TOO_MANY_REQUESTS")),
     ),
   delete: aliases.delete
     .use(requireSession)
     .handler(async ({ context, input }) => {
+      if (!context.aliasMutationLimit(context.actor.id))
+        throw new ORPCError("TOO_MANY_REQUESTS");
       await value(
         service(context).transition(context.actor.id, input.id, "delete"),
       );

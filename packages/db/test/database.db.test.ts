@@ -526,6 +526,22 @@ describe("alias reservations", () => {
         status: "verified",
       },
     });
+    const { createDomainStore } = await import("../src/index.ts");
+    const store = createDomainStore(db);
+    await db.user.update({
+      where: { id: other },
+      data: { defaultAliasDomainId: domain.id },
+    });
+    const blocked = await store.beginRemoval(domain.id);
+    expect(blocked.isOk() && blocked.value).toBe(false);
+    expect(
+      (await db.domain.findUniqueOrThrow({ where: { id: domain.id } }))
+        .removalPending,
+    ).toBe(false);
+    await db.user.update({
+      where: { id: other },
+      data: { defaultAliasDomainId: null },
+    });
     await db.mailboxLink.create({
       data: {
         userId: owner,
@@ -554,8 +570,6 @@ describe("alias reservations", () => {
         ready: true,
       },
     });
-    const { createDomainStore } = await import("../src/index.ts");
-    const store = createDomainStore(db);
     const active = await store.routes([full]);
     expect(active.isOk() && active.value).toEqual([
       { address: full, destination: suffix },
@@ -566,6 +580,8 @@ describe("alias reservations", () => {
     });
     const inactive = await store.routes([full]);
     expect(inactive.isOk() && inactive.value).toEqual([]);
+    const tombstoneBlocked = await store.beginRemoval(domain.id);
+    expect(tombstoneBlocked.isOk() && tombstoneBlocked.value).toBe(false);
     await expect(
       db.address.delete({ where: { id: address.id } }),
     ).rejects.toThrow("EmailAlias_addressId_fkey");

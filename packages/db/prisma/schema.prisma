@@ -121,6 +121,7 @@ model Domain {
   name      String    @unique
   stalwartId String?
   status String @default("pending")
+  removalPending Boolean @default(false)
   records Json @default("[]")
   checkedAt DateTime?
   createdAt DateTime  @default(now())
@@ -162,6 +163,7 @@ model EmailAlias {
   enabled Boolean @default(true)
   ready Boolean @default(false)
   detachedByDomain Boolean @default(false)
+  suspended Boolean @default(false)
   revision Int @default(0)
   requestId String?
   createdAt DateTime @default(now())

@@ -1,8 +1,8 @@
+import { createFixedWindow } from "./fixed-window.ts";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { authCookiePrefix } from "./identity.ts";
 
-type Bucket = { count: number; until: number };
 const EmailBody = z.object({ email: z.email() });
 const emailFromBody = (body: unknown): string | undefined => {
   const parsed = EmailBody.safeParse(body);
@@ -44,25 +44,9 @@ export const legacyAuthCookies = (cookie: string | undefined) => [
 
 /** In-memory single-node limits. State resets on restart and is not shared. */
 export const createAuthLimiter = (now: () => number = Date.now) => {
-  const buckets = new Map<string, Bucket>();
+  const buckets = createFixedWindow(now);
   const challenges = new Map<string, { email: string; until: number }>();
-  const windowMs = 60_000;
-  const consume = (key: string, max: number) => {
-    const current = now();
-    const existing = buckets.get(key);
-    const bucket =
-      existing === undefined || existing.until <= current
-        ? { count: 0, until: current + windowMs }
-        : existing;
-    bucket.count += 1;
-    buckets.set(key, bucket);
-    return bucket.count > max
-      ? {
-          retryAfter: Math.max(1, Math.ceil((bucket.until - current) / 1000)),
-          first: bucket.count === max + 1,
-        }
-      : undefined;
-  };
+  const consume = buckets.consume;
   return {
     hasDuplicateChallenge: (cookie: string | undefined) =>
       challengeValues(cookie).length > 1,
@@ -81,8 +65,6 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
         path === "/auth/two-factor/verify-totp" ||
         path === "/auth/two-factor/verify-backup-code";
       const current = now();
-      for (const [key, value] of buckets)
-        if (value.until <= current) buckets.delete(key);
       for (const [key, value] of challenges)
         if (value.until <= current) challenges.delete(key);
       const token = challengeCookie(cookie);

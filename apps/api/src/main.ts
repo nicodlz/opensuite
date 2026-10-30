@@ -1,10 +1,14 @@
 import { createAliasService } from "@opensuite/core/services/aliases";
-import { createAliasMail, createAliasSendGuard } from "./routes/alias-mail.ts";
+import {
+  createAliasMail,
+  createAliasSendGuard,
+} from "./adapters/alias-mail.ts";
 import { createReadinessService, httpProbe } from "@opensuite/core";
 import {
   createDatabase,
   createDatabaseProbe,
   createDomainStore,
+  createAliasStore,
   createMailboxStore,
 } from "@opensuite/db";
 import { createCalendarService } from "@opensuite/core/services/calendar";
@@ -72,30 +76,9 @@ if (store.isErr()) {
   process.exit(1);
 }
 const mailboxStore = store.value;
-const mail = createMailService({
-  store: {
-    getForOwner: async (userId, accountId) =>
-      mailboxStore.getForOwner(userId, accountId),
-  },
-  origin: authConfig.value.stalwartOrigin,
-  canSendAs: async (userId, address) =>
-    Boolean(
-      await database.value.emailAlias.findFirst({
-        where: {
-          userId,
-          address,
-          enabled: true,
-          ready: true,
-          deletedAt: null,
-          domain: { status: "verified" },
-        },
-        select: { id: true },
-      }),
-    ),
-  beforeAliasSend: createAliasSendGuard(database.value),
-});
+const aliasStore = createAliasStore(database.value);
 const aliases = createAliasService(
-  database.value,
+  aliasStore,
   createAliasMail(
     {
       origin: authConfig.value.stalwartOrigin,
@@ -111,6 +94,18 @@ const aliases = createAliasService(
   ),
   config.value.aliasPerUserCap,
 );
+const mail = createMailService({
+  store: {
+    getForOwner: async (userId, accountId) =>
+      mailboxStore.getForOwner(userId, accountId),
+  },
+  origin: authConfig.value.stalwartOrigin,
+  canSendAs: async (userId, address) => {
+    const result = await aliases.canSendAs(userId, address);
+    return result.isOk() && result.value;
+  },
+  beforeAliasSend: createAliasSendGuard(aliases),
+});
 const calendar = createCalendarService({
   store: {
     getForOwner: async (userId, accountId) =>

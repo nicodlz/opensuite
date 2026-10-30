@@ -25,7 +25,6 @@
     "@opensuite/typescript-config": "workspace:*",
     "@playwright/test": "catalog:",
     "@types/node": "catalog:",
-    "fastify": "catalog:",
     "knip": "catalog:",
     "neverthrow": "catalog:",
     "oxlint": "catalog:",

@@ -1,33 +1,17 @@
+import { timedFetch } from "./timed-fetch.ts";
 import { JmapCapability, JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
-import type { AliasMail } from "@opensuite/core/services/aliases";
+import type { AliasMail, AliasService } from "@opensuite/core/services/aliases";
 import type { MailCredentialStore } from "@opensuite/core/services/jmap-access";
 import { err, ok } from "neverthrow";
-import type { PrismaClient } from "@opensuite/db";
 import { createAliasLimiter } from "../auth/alias-limits.ts";
 
-export function createAliasSendGuard(db: PrismaClient) {
+export function createAliasSendGuard(service: AliasService) {
   const limits = createAliasLimiter();
   return async (userId: string, address: string) => {
     if (!limits.send(userId)) return false;
-    const alias = await db.emailAlias.findFirstOrThrow({
-      where: {
-        userId,
-        address,
-        enabled: true,
-        ready: true,
-        deletedAt: null,
-        domain: { status: "verified" },
-      },
-      select: { id: true },
-    });
-    await db.auditEvent.create({
-      data: {
-        userId,
-        action: "alias.submission.attempt",
-        detail: { aliasId: alias.id },
-      },
-    });
+    const audited = await service.auditSubmission(userId, address);
+    if (audited.isErr()) throw new Error("alias audit unavailable");
     return true;
   };
 }
@@ -48,17 +32,11 @@ export function createAliasMail(
       password: config.password,
     },
     {
-      fetch: (input, init) =>
-        fetch(input, {
-          ...init,
-          headers: {
-            ...Object.fromEntries(new Headers(init?.headers)),
-            ...(config.managementClientIp
-              ? { "X-Forwarded-For": config.managementClientIp }
-              : {}),
-          },
-          signal: AbortSignal.timeout(10_000),
-        }),
+      fetch: timedFetch(
+        config.managementClientIp
+          ? { "X-Forwarded-For": config.managementClientIp }
+          : {},
+      ),
     },
   );
   return {

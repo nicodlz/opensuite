@@ -1,3 +1,4 @@
+import { timedFetch } from "../adapters/timed-fetch.ts";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
@@ -40,8 +41,7 @@ export async function configureDomains(
       password,
     },
     {
-      fetch: (input, init) =>
-        fetch(input, { ...init, signal: AbortSignal.timeout(10_000) }),
+      fetch: timedFetch(),
     },
   );
   const mail: DomainMail = {

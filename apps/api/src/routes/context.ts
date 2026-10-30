@@ -33,6 +33,7 @@ export interface ApiContext {
   readonly domains: DomainService | undefined;
   readonly aliases: AliasService | undefined;
   readonly aliasCreationLimit: (userId: string) => boolean;
+  readonly aliasMutationLimit: (userId: string) => boolean;
   readonly audit:
     | ((event: { userId: string | null; action: string }) => Promise<void>)
     | undefined;

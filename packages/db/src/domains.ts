@@ -1,5 +1,5 @@
 import { ResultAsync } from "neverthrow";
-import { randomUUID } from "node:crypto";
+import { ALIAS_DOMAIN_LOCK_SEED, withUserLease } from "./alias-locks.ts";
 import { z } from "zod";
 import type { PrismaClient } from "./generated/index.js";
 
@@ -43,30 +43,34 @@ const convert = (row: {
 });
 export const createDomainStore = (db: PrismaClient) => ({
   withUserLease<T>(userId: string, work: () => Promise<T>) {
+    return withUserLease(db, userId, work);
+  },
+  beginRemoval(domainId: string) {
     return ResultAsync.fromPromise(
-      (async () => {
-        const token = randomUUID();
-        const now = new Date();
-        const claimed = await db.user.updateMany({
-          where: {
-            id: userId,
-            OR: [{ aliasSyncUntil: null }, { aliasSyncUntil: { lt: now } }],
-          },
-          data: {
-            aliasSyncToken: token,
-            aliasSyncUntil: new Date(now.getTime() + 120_000),
-          },
+      db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+        const [addresses, defaults] = await Promise.all([
+          tx.address.count({ where: { domainId } }),
+          tx.user.count({ where: { defaultAliasDomainId: domainId } }),
+        ]);
+        if (addresses || defaults) return false;
+        await tx.domain.update({
+          where: { id: domainId },
+          data: { removalPending: true },
         });
-        if (!claimed.count) throw new Error("address operation busy");
-        try {
-          return await work();
-        } finally {
-          await db.user.updateMany({
-            where: { id: userId, aliasSyncToken: token },
-            data: { aliasSyncToken: null, aliasSyncUntil: null },
-          });
-        }
-      })(),
+        return true;
+      }),
+      failure,
+    );
+  },
+  cancelRemoval(domainId: string) {
+    return ResultAsync.fromPromise(
+      db.domain
+        .updateMany({
+          where: { id: domainId },
+          data: { removalPending: false },
+        })
+        .then(() => undefined),
       failure,
     );
   },
@@ -149,7 +153,7 @@ export const createDomainStore = (db: PrismaClient) => ({
   ) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${id}, 9876))`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${id}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
         const previous = await tx.domain.findUniqueOrThrow({
           where: { id },
           select: { status: true },
@@ -210,6 +214,11 @@ export const createDomainStore = (db: PrismaClient) => ({
   ) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+        const domain = await tx.domain.findUniqueOrThrow({
+          where: { id: domainId },
+        });
+        if (domain.removalPending) throw new Error("domain removal pending");
         await tx.address.create({
           data: { domainId, userId, localPart, isAlias },
         });
