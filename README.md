@@ -23,6 +23,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   backend for new or migrated installations. The
   [object storage guide](docs/operations/object-storage.md) covers restart,
   migration, backup and recovery requirements.
+- **Outbound mail:** server-only Stalwart relay configuration and DKIM DNS records; see [outbound operations](docs/operations/outbound.md) for SES, queue limits and deployment steps.
 - **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).

@@ -1,0 +1,5 @@
+# Temporary loopback-only access for the trusted outbound management command.
+services:
+  stalwart:
+    ports:
+      - "127.0.0.1:18080:8080"

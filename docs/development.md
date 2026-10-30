@@ -51,6 +51,7 @@ healthy and applies idempotent settings through the Stalwart management API:
 - logs go to standard output (`docker compose logs stalwart`);
 - the client address is taken from `X-Forwarded-For`, which Caddy sets
   (exactly one proxy hop). Caddy replaces any value a client sends.
+- outbound relay configuration is applied separately through the server-only management adapter; see [outbound operations](operations/outbound.md).
 - blobs remain local by default. For S3-compatible storage, follow
   [object storage operations](operations/object-storage.md), including the
   explicit switch guard, restart, probe and migration precautions.
@@ -108,8 +109,7 @@ container, network and volume after the suite, including setup and test failures
 Docker and the Compose plugin are required. The direct-listener fixture maps
 Stalwart's advertised internal endpoint paths to the published loopback port;
 production clients use the advertised URLs and require the same origin as the
-discovery endpoint. The fixture tests mail submission and delivery locally,
-not external DNS, SMTP relays, TLS or the production proxy.
+discovery endpoint. The fixtures test local submission and delivery and an authenticated fake SMTP relay. They do not verify external DNS, real relay TLS or the production proxy.
 
 The regular `@opensuite/jmap` entry point accepts an authorization header from
 its caller. `@opensuite/jmap/admin` is a Node-only entry point: instantiate it
@@ -124,8 +124,7 @@ change or verify its password. See [JMAP behaviour](architecture/jmap-behaviour.
 Run `node scripts/iac-validate.mjs` to check formatting and validate the pinned
 OpenTofu module in Docker without AWS credentials or a backend. Only provider
 download uses networking. See [AWS deployment](deployment/aws.md) for operator
-setup and the limits of offline validation. The ingestion worker and SES relay
-remain unimplemented.
+setup and the limits of offline validation. The SES relay has not been tested against AWS.
 
 For the pinned Stalwart and disposable MinIO S3 integration test:
 
@@ -144,14 +143,13 @@ real object-storage providers. Docker is required.
 - **TLS for mail protocols:** the mail server has no certificate yet, so TLS
   handshakes on 465 and 993 do not succeed. Certificate provisioning for mail
   is planned with domain onboarding. HTTPS through Caddy works.
-- **Mail delivery:** no domain or mailbox is provisioned by default. Local
-  JMAP submission and delivery are tested; external delivery is not.
+- **Mail delivery:** no domain or mailbox is provisioned by default. Local JMAP submission and delivery and a fake SMTP relay are tested; real SES delivery is not.
 - **Outbound access:** the mail server downloads public network data
   (ASN/geolocation) from GitHub at startup.
 
 ## Planned, not implemented
 
-The production mail API, calendar, contacts and drive interfaces, authentication, production SES provider proof, outbound relays, the file storage service, the setup wizard and
+The production mail API, calendar, contacts and drive interfaces, authentication, production SES provider proof, the file storage service, the setup wizard and
 backups.
 
 ## Ingestion
