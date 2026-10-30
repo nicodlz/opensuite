@@ -28,6 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { operatorCommand } from "../../../apps/ingest/src/operator.ts";
 import { awsQueue, awsRecovery, awsStorage } from "../src/adapters/aws.ts";
 import { databaseLedger } from "../src/adapters/database.ts";
+import { archiveKey } from "../src/ingest/recovery.ts";
 import { jmapDelivery } from "../src/adapters/jmap.ts";
 import {
   parseNotification,
@@ -1016,14 +1017,10 @@ describe("local ingestion pipeline", () => {
       "notifications/",
       "",
     );
-    unwrap(
-      await storage.archive(
-        "external-large.json",
-        JSON.stringify(
-          notification(["alice@example.test"], "PASS", "ses-large"),
-        ),
-      ),
+    const archived = JSON.stringify(
+      notification(["alice@example.test"], "PASS", "ses-large"),
     );
+    unwrap(await storage.archive(archiveKey(archived), archived));
     expect((await service.reconcile(1)).isOk()).toBe(true);
     const alice = clients.get("alice");
     if (alice === undefined) throw new Error("Missing Alice");

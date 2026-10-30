@@ -747,9 +747,7 @@ ingestion and subscription DLQs before their 14 days run out.
    administration machine, the B2 account (master) key and any other
    application key with write access to the bucket. The lock and container
    check below only fence this host. Before a fenced run, stop the worker
-   and wait for its drain, stop the replay and backup timers, list the B2
-   application keys able to write to the bucket (B2 console or `b2 key
-list`) and make sure none of them is used meanwhile, then hold the lock
+   and wait for its drain, stop the replay and backup timers, list the B2 application keys able to write to the bucket (B2 console or `b2 key list`, with the account or a key holding `listKeys`, which the archive key lacks) and make sure none of them is used meanwhile, then hold the lock
    replay and backup share for the whole run:
 
    ```sh
