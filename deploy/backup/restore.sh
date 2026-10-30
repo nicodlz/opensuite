@@ -48,7 +48,7 @@ fi
 export DRIVE_S3_ENDPOINT DRIVE_S3_PUBLIC_ENDPOINT DRIVE_S3_BUCKET DRIVE_S3_REGION DRIVE_S3_ACCESS_KEY DRIVE_S3_SECRET_FILE
 # Verify empty named volumes before downloading or modifying anything.
 if [ "$force" = 0 ]; then
-  compose run --rm --no-deps -T backup-volumes '[ -z "$(ls -A /secrets)" ] && [ -z "$(ls -A /stalwart)" ] && [ -z "$(ls -A /postgres)" ] && [ -z "$(ls -A /caddy-data)" ] && [ -z "$(ls -A /caddy-config)" ] && [ -z "$(ls -A /pass-data)" ]' >&2 || { echo 'restore: target volumes are not empty; use --force only on an isolated target' >&2; exit 1; }
+  compose run --rm --no-deps -T backup-volumes '[ -z "$(ls -A /secrets)" ] && [ -z "$(ls -A /stalwart)" ] && [ -z "$(ls -A /postgres)" ] && [ -z "$(ls -A /caddy-data)" ] && [ -z "$(ls -A /caddy-config)" ] && [ -z "$(ls -A /vault-data)" ]' >&2 || { echo 'restore: target volumes are not empty; use --force only on an isolated target' >&2; exit 1; }
 else
   services=$(compose ps --services --filter status=running)
   [ -z "$services" ] || { echo 'restore: stop all target services before --force' >&2; exit 1; }
@@ -64,10 +64,10 @@ if [ "$force" = 1 ]; then
   saved_project=$(env_project "$BACKUP_STAGE/data/config/env")
   protect_project "$saved_project"
 fi
-pass_restore=0
-if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
-  pass_restore=1
-  [ -s "$BACKUP_STAGE/data/postgres/opensuite_pass.dump" ] && [ -s "$BACKUP_STAGE/data/pass-volume.tar" ] || { echo 'restore: Pass snapshot is incomplete' >&2; exit 1; }
+vault_restore=0
+if [ -f "$BACKUP_STAGE/data/config/vault-enabled" ]; then
+  vault_restore=1
+  [ -s "$BACKUP_STAGE/data/postgres/opensuite_vault.dump" ] && [ -s "$BACKUP_STAGE/data/vault-volume.tar" ] || { echo 'restore: Vault snapshot is incomplete' >&2; exit 1; }
 fi
 # Read the saved configuration in memory for preflight; do not replace .env or
 # any local state before both object destinations have been checked.
@@ -80,13 +80,13 @@ if [ -n "$target_project" ]; then
 elif [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
   echo 'restore: saved project name requires an explicit isolated COMPOSE_PROJECT_NAME' >&2; exit 1
 fi
-if [ "$pass_restore" = 1 ]; then
+if [ "$vault_restore" = 1 ]; then
   while IFS= read -r item; do
     name=${item%%:*}; path=${item#*:}
     [ "$path" = /dev/null ] || [ -s "$BACKUP_STAGE/data/config/$name" ] || { echo "restore: snapshot is missing $name" >&2; exit 1; }
-  done <<PASS_SECRETS
-$(pass_secret_files)
-PASS_SECRETS
+  done <<VAULT_SECRETS
+$(vault_secret_files)
+VAULT_SECRETS
 fi
 saved_drive_secret=${DRIVE_S3_SECRET_FILE:?}
 saved_mail_secret=${MAIL_S3_SECRET_FILE:-/dev/null}
@@ -99,7 +99,7 @@ log restore_preflight_ok
 DRIVE_S3_SECRET_FILE=$saved_drive_secret MAIL_S3_SECRET_FILE=$saved_mail_secret
 export DRIVE_S3_SECRET_FILE MAIL_S3_SECRET_FILE
 if [ "$force" = 1 ]; then
-  compose run --rm --no-deps -T backup-volumes 'for dir in /secrets /stalwart /postgres /caddy-data /caddy-config /pass-data; do find "$dir" -mindepth 1 -delete; done' >&2
+  compose run --rm --no-deps -T backup-volumes 'for dir in /secrets /stalwart /postgres /caddy-data /caddy-config /vault-data; do find "$dir" -mindepth 1 -delete; done' >&2
 fi
 cp "$BACKUP_STAGE/data/config/env" .env
 restore_file() { # captured name, original destination, uid
@@ -123,13 +123,13 @@ restore_file observe "${OBSERVE_ENV_FILE:-./deploy/observe.env}" "$(id -u)"
 restore_file relay "${MAIL_RELAY_SECRET_FILE:-/dev/null}" 2000
 restore_file tls-cert "${MAIL_TLS_CERT_FILE:-/dev/null}" 2000
 restore_file tls-key "${MAIL_TLS_KEY_FILE:-/dev/null}" 2000
-if [ "$pass_restore" = 1 ]; then
+if [ "$vault_restore" = 1 ]; then
   while IFS= read -r item; do
     name=${item%%:*}; path=${item#*:}
     restore_file "$name" "$path" 1000
-  done <<PASS_SECRETS
-$(pass_secret_files)
-PASS_SECRETS
+  done <<VAULT_SECRETS
+$(vault_secret_files)
+VAULT_SECRETS
 fi
 if [ "${MAIL_BLOB_STORE:-local}" = s3 ]; then
   restore_file mail-s3-secret "${MAIL_S3_SECRET_FILE:?}" 2000
@@ -148,8 +148,8 @@ docker run --rm --network none --mount "type=bind,src=$ROOT/deploy/postgres/init
 objects restore mail "$force"
 objects restore drive "$force"
 compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/volumes.tar -C /' >&2
-if [ "$pass_restore" = 1 ]; then
-  compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/pass-volume.tar -C / && chown -R 1000:1000 /pass-data && chmod 0700 /pass-data && [ -s /pass-data/rsa_key.pem ] && [ -s /secrets/pass-database/password ]' >&2
+if [ "$vault_restore" = 1 ]; then
+  compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/vault-volume.tar -C / && chown -R 1000:1000 /vault-data && chmod 0700 /vault-data && [ -s /vault-data/rsa_key.pem ] && [ -s /secrets/vault-database/password ]' >&2
 fi
 # Start only postgres; no application can migrate or write during the restore.
 compose up -d --no-deps --wait --wait-timeout 180 postgres >&2
@@ -161,10 +161,10 @@ sed "/^CREATE ROLE $POSTGRES_USER;$/d" "$BACKUP_STAGE/data/postgres/globals.sql"
 for db in "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do
   compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d "$db" --exit-on-error < "$BACKUP_STAGE/data/postgres/$db.dump" >&2
 done
-if [ "$pass_restore" = 1 ]; then
+if [ "$vault_restore" = 1 ]; then
   # Provision the dedicated database with the restored credential, then load
   # objects with their original ownership. The service itself stays stopped.
-  compose run --rm --no-deps -T pass-provision >&2
-  compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d opensuite_pass --exit-on-error < "$BACKUP_STAGE/data/postgres/opensuite_pass.dump" >&2
+  compose run --rm --no-deps -T vault-provision >&2
+  compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d opensuite_vault --exit-on-error < "$BACKUP_STAGE/data/postgres/opensuite_vault.dump" >&2
 fi
 log restore_data_ready

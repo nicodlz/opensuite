@@ -13,10 +13,10 @@ test_subnet="10.238.$octet.0/24"
 test_ip="10.238.$octet.10"
 fixture_port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()})')
 rclone='rclone/rclone:1.71.2@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51'
-pass_drill=${PASS_BACKUP_DRILL:-0}
-. "$root/scripts/pass-drill.sh"
+vault_drill=${VAULT_BACKUP_DRILL:-0}
+. "$root/scripts/vault-drill.sh"
 admin_hash='$argon2id$v=19$m=65536,t=3,p=4$ZGlzcG9zYWJsZS1zYWx0IQ$RsDLAAOjuY6ic36ncF+H4SzvxmYg8tdhdel1GSA9GTo'
-case_done() { [ "$pass_drill" = 0 ] || printf '%s\n' "$1" >> "$PASS_DRILL_CASES"; }
+case_done() { [ "$vault_drill" = 0 ] || printf '%s\n' "$1" >> "$VAULT_DRILL_CASES"; }
 cleanup() {
   rc=$?
   trap - EXIT HUP INT TERM
@@ -99,7 +99,7 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
   backup-objects:
     extra_hosts: ["host.docker.internal:host-gateway"]
-  pass:
+  vault:
     environment:
       SIGNUPS_ALLOWED: "true"
       DOMAIN: https://127.0.0.1:$fixture_port
@@ -114,14 +114,14 @@ services:
     networks:
       api-proxy:
         ipv4_address: 10.240.$octet.2
-      pass-network:
+      vault-network:
         ipv4_address: 10.241.$octet.2
 networks:
   api-proxy:
     ipam:
       config: !override
         - subnet: 10.240.$octet.0/24
-  pass-network:
+  vault-network:
     ipam:
       config: !override
         - subnet: 10.241.$octet.0/24
@@ -133,16 +133,16 @@ cat > "$work/caddy-test" <<'CADDY'
 }
 https://127.0.0.1 {
   tls internal
-  reverse_proxy pass-vault:8080
+  reverse_proxy vault:8080
 }
 CADDY
 cat > "$work/source/.env" <<CONFIG
 POSTGRES_USER=opensuite
 POSTGRES_DB=opensuite
 POSTGRES_DRIVE_DB=opensuite_drive
-PASS_NETWORK_SUBNET=10.241.$octet.0/24
-PASS_NETWORK_IP_RANGE=10.241.$octet.128/25
-PASS_CADDY_IP=10.241.$octet.2
+VAULT_NETWORK_SUBNET=10.241.$octet.0/24
+VAULT_NETWORK_IP_RANGE=10.241.$octet.128/25
+VAULT_CADDY_IP=10.241.$octet.2
 MAIL_MANAGEMENT_SUBNET=$test_subnet
 MAIL_MANAGEMENT_API_IP=$test_ip
 MAIL_MANAGEMENT_STALWART_IP=10.238.$octet.20
@@ -172,11 +172,11 @@ DRIVE_S3_ACCESS_KEY=fixture-access
 DRIVE_S3_SECRET_FILE=$work/secrets/drive
 OBSERVE_BACKUP_DIR=$work/source/deploy/backup-status
 CONFIG
-if [ "$pass_drill" = 1 ]; then
-  printf '%s\n' "$admin_hash" > "$work/secrets/pass-admin"
+if [ "$vault_drill" = 1 ]; then
+  printf '%s\n' "$admin_hash" > "$work/secrets/vault-admin"
   cat >> "$work/source/.env" <<CONFIG
-PASS_ADMIN_TOKEN_FILE=$work/secrets/pass-admin
-PASS_SIGNUPS_ALLOWED=true
+VAULT_ADMIN_TOKEN_FILE=$work/secrets/vault-admin
+VAULT_SIGNUPS_ALLOWED=true
 CONFIG
 fi
 export BACKUP_CONFIG="$work/backup.conf" BACKUP_COMPOSE_OVERRIDE="$work/overlay.yaml" COMPOSE_PROJECT_NAME="$old" BACKUP_STAGE="$work/scratch"
@@ -210,9 +210,9 @@ printf 'From: sender@example.invalid\r\nTo: recipient@example.invalid\r\nSubject
 blob=$(request -H 'Content-Type: message/rfc822' --data-binary "@$work/message" "$base/jmap/upload/$account/" | jq -er .blobId)
 response=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Email/import\",{\"accountId\":\"$account\",\"emails\":{\"fixture\":{\"blobId\":\"$blob\",\"mailboxIds\":{\"$inbox\":true}}}},\"a\"]]}")
 email=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].created.fixture.id')
-[ "$pass_drill" = 0 ] || pass_case_create
+[ "$vault_drill" = 0 ] || vault_case_create
 ./deploy/backup/init.sh
-if [ "$pass_drill" = 1 ]; then pass_case_failure; pass_case_missing_key; fi
+if [ "$vault_drill" = 1 ]; then vault_case_failure; vault_case_missing_key; fi
 # A scratch area too small for the objects is refused before any service stops.
 services=$(compose ps --services --filter status=running)
 before=$(printf '%s\n' "$services" | sort)
@@ -226,19 +226,19 @@ services=$(compose ps --services --filter status=running)
 ./deploy/backup/backup.sh
 [ -s "$work/source/deploy/backup-status/last-success" ]
 [ "$(stat -c %a "$work/source/deploy/backup-status/last-success")" = 644 ]
-[ "$pass_drill" = 0 ] || pass_case_backup
+[ "$vault_drill" = 0 ] || vault_case_backup
 # Delete live application state and object copies while retaining the backup bucket.
 compose --profile '*' down --volumes --remove-orphans --timeout 10
 rclone_local purge store:mail-fixture/mail
 rclone_local purge store:drive-fixture/drive
 rm "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$work/secrets/tls-cert" "$work/secrets/tls-key"
-if [ "$pass_drill" = 1 ]; then rm "$work/secrets/pass-admin"; rm -rf "$work/cli-create"; fi
+if [ "$vault_drill" = 1 ]; then rm "$work/secrets/vault-admin"; rm -rf "$work/cli-create"; fi
 export COMPOSE_PROJECT_NAME="$new"
 cd "$work/target"
 ./deploy/backup/restore.sh
-if [ "$pass_drill" = 1 ]; then
-  pass_case_refusal; pass_case_restore; pass_case_verify
-  pass_case_force_preflight; pass_case_partial_restore; pass_case_retry
+if [ "$vault_drill" = 1 ]; then
+  vault_case_refusal; vault_case_restore; vault_case_verify
+  vault_case_force_preflight; vault_case_partial_restore; vault_case_retry
 fi
 [ "$(cat deploy/ingest.env)" = INGEST_FIXTURE=present ]
 [ "$(cat deploy/observe.env)" = OBSERVE_FIXTURE=present ]

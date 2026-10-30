@@ -72,9 +72,9 @@ const CalendarPage = lazy(() =>
     default: module.CalendarPage,
   })),
 );
-const PassPage = lazy(() =>
-  import("./pass/pass-page.tsx").then((module) => ({
-    default: module.PassPage,
+const VaultPage = lazy(() =>
+  import("./vault/vault-page.tsx").then((module) => ({
+    default: module.VaultPage,
   })),
 );
 const SetupPage = lazy(() =>
@@ -491,46 +491,46 @@ const driveRoute = createRoute({
     </Protected>
   ),
 });
-const passRoute = createRoute({
+const vaultRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/pass",
+  path: "/vault",
   component: () => (
     <Protected>
       <Lazy>
-        <PassPage page="home" />
+        <VaultPage page="home" />
       </Lazy>
     </Protected>
   ),
 });
-const passGeneratorRoute = createRoute({
+const vaultGeneratorRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/pass/generator",
+  path: "/vault/generator",
   component: () => (
     <Protected>
       <Lazy>
-        <PassPage page="generator" />
+        <VaultPage page="generator" />
       </Lazy>
     </Protected>
   ),
 });
-const passClientsRoute = createRoute({
+const vaultClientsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/pass/clients",
+  path: "/vault/clients",
   component: () => (
     <Protected>
       <Lazy>
-        <PassPage page="clients" />
+        <VaultPage page="clients" />
       </Lazy>
     </Protected>
   ),
 });
-const passAliasesRoute = createRoute({
+const vaultAliasesRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/pass/aliases",
+  path: "/vault/aliases",
   component: () => (
     <Protected>
       <Lazy>
-        <PassPage page="aliases" />
+        <VaultPage page="aliases" />
       </Lazy>
     </Protected>
   ),
@@ -574,10 +574,10 @@ const router = createRouter({
     calendarRoute,
     contactsRoute,
     driveRoute,
-    passRoute,
-    passGeneratorRoute,
-    passClientsRoute,
-    passAliasesRoute,
+    vaultRoute,
+    vaultGeneratorRoute,
+    vaultClientsRoute,
+    vaultAliasesRoute,
     domainsRoute,
     setupRoute,
   ]),

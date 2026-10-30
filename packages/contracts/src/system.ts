@@ -32,7 +32,7 @@ export const ProductOriginsSchema = z.object({
   mail: z.url().optional(),
   drive: z.url().optional(),
   calendar: z.url().optional(),
-  pass: z
+  vault: z
     .url()
     .refine((value) => {
       const url = new URL(value);

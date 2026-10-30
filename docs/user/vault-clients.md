@@ -1,9 +1,9 @@
-# Pass client compatibility
+# Vault client compatibility
 
-Pass uses Vaultwarden with official Bitwarden clients. Compatibility is specific
-to each client version and deployment; it is not a security audit. Pass accounts
-are independent of Esuno accounts. Use your dedicated HTTPS Pass origin (for
-example `https://pass.example.org`) and an invited account.
+Vault uses Vaultwarden with official Bitwarden clients. Compatibility is specific
+to each client version and deployment; it is not a security audit. Vault accounts
+are independent of Esuno accounts. Use your dedicated HTTPS Vault origin (for
+example `https://vault.example.org`) and an invited account.
 
 ## Server selection and evidence
 
@@ -11,16 +11,16 @@ On the login or registration screen, choose the self-hosted server and save the
 full HTTPS origin before logging in. See Bitwarden's [client setup
 instructions](https://bitwarden.com/help/change-client-environment/).
 
-| Client            | Set the server                                                                                                                                                                               | Evidence                                                                                                  |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| CLI               | Log out, then `bw config server https://pass.example.org`. For a local CA, use `NODE_EXTRA_CA_CERTS` with its PEM certificate; see [Bitwarden's CLI guide](https://bitwarden.com/help/cli/). | 2026.9.0: see automated results below.                                                                    |
-| Chrome extension  | Logging in on → Self-hosted → Server URL → Save.                                                                                                                                             | Not verified.                                                                                             |
-| Firefox extension | Logging in on → Self-hosted → Server URL → Save.                                                                                                                                             | Not verified.                                                                                             |
-| Safari extension  | Logging in on → Self-hosted → Server URL → Save.                                                                                                                                             | Not verified.                                                                                             |
-| Desktop           | Accessing → Self-hosted → Server URL → Save.                                                                                                                                                 | Not verified.                                                                                             |
-| Android           | Logging in on → Self-hosted → Server URL → Save; install the CA if needed.                                                                                                                   | Not verified.                                                                                             |
-| iOS               | Logging in on → Self-hosted → Server URL → Save; install and trust the CA if needed.                                                                                                         | Not verified.                                                                                             |
-| Bundled web vault | Open the Pass HTTPS origin directly.                                                                                                                                                         | 2026.7.0: invitation registration only, 2026-10-30; login and sync with an item need manual verification. |
+| Client            | Set the server                                                                                                                                                                                | Evidence                                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| CLI               | Log out, then `bw config server https://vault.example.org`. For a local CA, use `NODE_EXTRA_CA_CERTS` with its PEM certificate; see [Bitwarden's CLI guide](https://bitwarden.com/help/cli/). | 2026.9.0: see automated results below.                                                                    |
+| Chrome extension  | Logging in on → Self-hosted → Server URL → Save.                                                                                                                                              | Not verified.                                                                                             |
+| Firefox extension | Logging in on → Self-hosted → Server URL → Save.                                                                                                                                              | Not verified.                                                                                             |
+| Safari extension  | Logging in on → Self-hosted → Server URL → Save.                                                                                                                                              | Not verified.                                                                                             |
+| Desktop           | Accessing → Self-hosted → Server URL → Save.                                                                                                                                                  | Not verified.                                                                                             |
+| Android           | Logging in on → Self-hosted → Server URL → Save; install the CA if needed.                                                                                                                    | Not verified.                                                                                             |
+| iOS               | Logging in on → Self-hosted → Server URL → Save; install and trust the CA if needed.                                                                                                          | Not verified.                                                                                             |
+| Bundled web vault | Open the Vault HTTPS origin directly.                                                                                                                                                         | 2026.7.0: invitation registration only, 2026-10-30; login and sync with an item need manual verification. |
 
 On 2026-10-30, the CLI 2026.9.0 against Vaultwarden 1.37.4 behind Caddy
 2.11.7 passed invited-account login and sync, login items with URI and TOTP,
@@ -30,8 +30,8 @@ search of the database dump, data volume and available logs, and failed-login
 rate limiting with forged IP headers. File Send creation and receipt also
 passed with byte-for-byte comparison. The test uses disposable local data; it
 does not prove security for every deployment.
-The merged configuration uses warning-level Pass logs; the rerun found no test
-marker in Pass or Caddy logs. Repeat the test after configuration changes and
+The merged configuration uses warning-level Vault logs; the rerun found no test
+marker in Vault or Caddy logs. Repeat the test after configuration changes and
 avoid debug or trace logging.
 
 The second user could not list or fetch the first user's item or attachment
@@ -88,4 +88,4 @@ Record actual results rather than assuming feature parity. Login to Vaultwarden
 with a passkey is not promised; a passkey stored for a third-party site and a
 WebAuthn second factor are separate features. Mobile push requires the external
 Bitwarden push relay and installation credentials; websocket sync is distinct.
-See [Pass operations](../operations/pass.md) for configuration and limitations.
+See [Vault operations](../operations/vault.md) for configuration and limitations.

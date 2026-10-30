@@ -1,7 +1,7 @@
-# Pass storage evaluation
+# Vault storage evaluation
 
 This is a disposable evaluation, not production configuration. The decision is
-in [ADR 0003](../adr/0003-pass.md). Production keeps Vaultwarden's data volume
+in [ADR 0003](../adr/0003-vault.md). Production keeps Vaultwarden's data volume
 and encrypted restic backups to a separate private B2 location, plus coordinated
 PostgreSQL-native backups and recovery testing.
 
@@ -14,7 +14,7 @@ and the Playwright Chromium installed for the repository's pinned version
 ```sh
 pnpm install --frozen-lockfile
 ./deploy/vaultwarden-s3-poc/build.sh
-node scripts/pass-storage-poc.mjs --report /tmp/pass-storage-proof.json
+node scripts/vault-storage-poc.mjs --report /tmp/vault-storage-proof.json
 ```
 
 The build script checks out upstream tag 1.37.4 at commit
@@ -26,7 +26,7 @@ upstream's web vault and cross-build helper are already pinned. Source files
 are not changed. OS packages are still fetched from mutable Debian repositories;
 this is not a reproducible or attested supply-chain build. The image is named
 `esuno-vaultwarden-s3-poc-not-for-production:1.37.4` and must not be deployed.
-Production `PASS_IMAGE` must be the digest-pinned official Vaultwarden image.
+Production `VAULT_IMAGE` must be the digest-pinned official Vaultwarden image.
 
 The runner creates a unique Compose project and prefix, random loopback ports,
 a loopback HTTPS proxy with a temporary self-signed certificate, a temporary
@@ -58,17 +58,17 @@ nonempty test prefix. Obtain the test key securely, keep it out of shell
 history, and export it in the operator's environment before running:
 
 ```sh
-export PASS_B2_TEST_ENDPOINT='https://s3.<region>.backblazeb2.com'
-export PASS_B2_TEST_BUCKET='<test-bucket>'
-export PASS_B2_TEST_PREFIX='pass-storage-tests/'
+export VAULT_B2_TEST_ENDPOINT='https://s3.<region>.backblazeb2.com'
+export VAULT_B2_TEST_BUCKET='<test-bucket>'
+export VAULT_B2_TEST_PREFIX='vault-storage-tests/'
 # Read the prefix-restricted test credentials without putting them in history.
-read -r -s -p 'Test key ID: ' PASS_B2_TEST_KEY_ID; printf '\n'
-read -r -s -p 'Test application key: ' PASS_B2_TEST_APP_KEY; printf '\n'
-export PASS_B2_TEST_KEY_ID PASS_B2_TEST_APP_KEY
-node scripts/pass-storage-poc.mjs --report /tmp/pass-storage-proof.json
+read -r -s -p 'Test key ID: ' VAULT_B2_TEST_KEY_ID; printf '\n'
+read -r -s -p 'Test application key: ' VAULT_B2_TEST_APP_KEY; printf '\n'
+export VAULT_B2_TEST_KEY_ID VAULT_B2_TEST_APP_KEY
+node scripts/vault-storage-poc.mjs --report /tmp/vault-storage-proof.json
 ```
 
-`PASS_B2_TEST_REGION` is optional for a standard B2 hostname and required if
+`VAULT_B2_TEST_REGION` is optional for a standard B2 hostname and required if
 the region cannot be inferred. Prefix must end in `/`; the runner appends a
 random project ID and removes only that unique subprefix. The key must allow
 list, read, write, deletion of objects and their versions/delete markers, and

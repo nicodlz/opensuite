@@ -123,9 +123,9 @@ export function AliasesPage() {
   const loadError =
     list.error ?? domains.error ?? defaultDomain.error ?? keys.error;
   return (
-    <div className="content-wrap pass-content">
+    <div className="content-wrap vault-content">
       <div className="page-breadcrumb">
-        PASS <span>/</span> ALIASES
+        VAULT <span>/</span> ALIASES
       </div>
       <div className="page-header alias-heading">
         <div>
@@ -165,7 +165,7 @@ export function AliasesPage() {
           </Button>
         </div>
       )}
-      <section className="pass-card">
+      <section className="vault-card">
         <div className="alias-toolbar">
           <label>
             Search aliases
@@ -264,7 +264,7 @@ export function AliasesPage() {
           </ul>
         )}
       </section>
-      <section className="pass-card">
+      <section className="vault-card">
         <h2>Default alias domain</h2>
         <p>Bitwarden uses this domain when generating an alias.</p>
         {domains.data?.length ? (
@@ -299,7 +299,7 @@ export function AliasesPage() {
           </p>
         )}
       </section>
-      <section className="pass-card">
+      <section className="vault-card">
         <div className="alias-section-heading">
           <div>
             <h2>Alias API keys</h2>
@@ -353,7 +353,7 @@ export function AliasesPage() {
           </ul>
         )}
       </section>
-      <section className="pass-card">
+      <section className="vault-card">
         <h2>Use with Bitwarden</h2>
         <ol className="alias-instructions">
           <li>
@@ -384,7 +384,7 @@ export function AliasesPage() {
           <form className="alias-form" onSubmit={create}>
             <fieldset>
               <legend>Address</legend>
-              <div className="pass-options">
+              <div className="vault-options">
                 <label>
                   <input
                     type="radio"

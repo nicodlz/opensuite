@@ -18,7 +18,7 @@ import Fastify, {
   type FastifyRequest,
 } from "fastify";
 import type { ApiConfig } from "./config.ts";
-import { createPassStatus } from "./routes/pass-status.ts";
+import { createVaultStatus } from "./routes/vault-status.ts";
 import { createHandoffRegistry } from "./auth/handoff.ts";
 import {
   createAuthLimiter,
@@ -32,8 +32,8 @@ export interface ServerDependencies {
   readonly config: Pick<ApiConfig, "logLevel"> & {
     readonly trustProxy?: string;
   };
-  readonly passOrigin?: string;
-  readonly passStatusOptions?: Parameters<typeof createPassStatus>[1];
+  readonly vaultOrigin?: string;
+  readonly vaultStatusOptions?: Parameters<typeof createVaultStatus>[1];
   readonly readiness: ReadinessService;
   readonly monotonicMs: () => number;
   readonly identity?: {
@@ -310,11 +310,11 @@ export const buildServer = async (
     limiter: aliasLimits,
   });
 
-  const passStatus = createPassStatus(
-    dependencies.passOrigin,
-    dependencies.passStatusOptions,
+  const vaultStatus = createVaultStatus(
+    dependencies.vaultOrigin,
+    dependencies.vaultStatusOptions,
   );
-  app.get("/pass/status", async (request, reply) => {
+  app.get("/vault/status", async (request, reply) => {
     reply.header("cache-control", "no-store");
     const headers = new Headers();
     for (const [name, value] of Object.entries(request.headers)) {
@@ -324,7 +324,7 @@ export const buildServer = async (
       else headers.set(name, value);
     }
     const actor = (await dependencies.identity?.actor?.(headers)) ?? null;
-    const { version, ...status } = await passStatus();
+    const { version, ...status } = await vaultStatus();
     return actor === null
       ? { enabled: status.enabled, reachable: status.reachable }
       : { ...status, version };
@@ -584,7 +584,7 @@ export const buildServer = async (
         mail: dependencies.mail,
         calendar: dependencies.calendar,
         productOrigins: dependencies.identity?.productOrigins ?? {},
-        passOrigin: dependencies.passOrigin,
+        vaultOrigin: dependencies.vaultOrigin,
         downloads,
         accounts: dependencies.accounts,
         domains: dependencies.domains,

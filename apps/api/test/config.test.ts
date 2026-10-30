@@ -83,11 +83,11 @@ it("requires valid mail configuration and derives readiness from the internal or
       ...env,
       STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
       AUTH_PRODUCT_ORIGINS:
-        "drive=https://drive.example.test,pass=https://pass.example.test",
-      PASS_PUBLIC_HOST: "pass.example.test",
+        "drive=https://drive.example.test,vault=https://vault.example.test",
+      VAULT_PUBLIC_HOST: "vault.example.test",
     });
     expect(config.isOk() && config.value).toMatchObject({
-      passOrigin: "https://pass.example.test",
+      vaultOrigin: "https://vault.example.test",
       productOrigins: {
         mail: "https://suite.example.test",
         drive: "https://drive.example.test",
@@ -101,8 +101,8 @@ it("requires valid mail configuration and derives readiness from the internal or
         await loadAuthConfig({
           ...env,
           STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
-          AUTH_PRODUCT_ORIGINS: "pass=https://other.example.test",
-          PASS_PUBLIC_HOST: "pass.example.test",
+          AUTH_PRODUCT_ORIGINS: "vault=https://other.example.test",
+          VAULT_PUBLIC_HOST: "vault.example.test",
         })
       ).isErr(),
     ).toBe(true);
@@ -136,8 +136,9 @@ describe("application origins", () => {
     expect(parseProductOrigins(hub, undefined)).toEqual({ mail: hub });
   });
   it.each([
-    "pass=http://pass.example.test",
-    "pass=https://mail.example.test",
+    "pass=https://vault.example.test",
+    "vault=http://vault.example.test",
+    "vault=https://mail.example.test",
     "drive=http://drive.example.test",
     "drive=https://drive.example.test/",
     "drive=https://*.example.test",

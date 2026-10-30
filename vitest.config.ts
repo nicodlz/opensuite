@@ -5,7 +5,7 @@ import { defineConfig } from "vitest/config";
  * select the project: `*.test.ts` runs in `unit`, `*.<project>.test.ts` in
  * the matching project.
  */
-const suites = ["db", "http", "stalwart", "ingest", "drive", "pass"] as const;
+const suites = ["db", "http", "stalwart", "ingest", "drive", "vault"] as const;
 const roots = ["apps/*/test", "packages/*/test"];
 
 export default defineConfig({
@@ -26,10 +26,10 @@ export default defineConfig({
           ...(suite === "http"
             ? { testTimeout: 30_000, hookTimeout: 120_000 }
             : {}),
-          ...(suite === "pass" ? { fileParallelism: false } : {}),
+          ...(suite === "vault" ? { fileParallelism: false } : {}),
           include: [
             ...roots.map((root) => `${root}/**/*.${suite}.test.ts`),
-            ...(suite === "stalwart" || suite === "pass"
+            ...(suite === "stalwart" || suite === "vault"
               ? [`test-support/**/*.${suite}.test.ts`]
               : []),
           ],

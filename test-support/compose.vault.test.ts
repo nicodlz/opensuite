@@ -22,7 +22,7 @@ const config = async (profile: boolean) => {
     "-f",
     "compose.yaml",
   ];
-  if (profile) args.push("--profile", "pass");
+  if (profile) args.push("--profile", "vault");
   const { stdout } = await run(
     "docker",
     [...args, "config", "--format", "json"],
@@ -39,18 +39,18 @@ const config = async (profile: boolean) => {
     })
     .parse(JSON.parse(stdout));
 };
-test("Compose profiles and Pass dependencies", async () => {
+test("Compose profiles and Vault dependencies", async () => {
   const normal = await config(false);
   const enabled = await config(true);
-  expect(normal.services["pass"]).toBeUndefined();
-  expect(normal.services["pass-provision"]).toBeUndefined();
-  const pass = enabled.services["pass"];
-  const provision = enabled.services["pass-provision"];
+  expect(normal.services["vault"]).toBeUndefined();
+  expect(normal.services["vault-provision"]).toBeUndefined();
+  const vault = enabled.services["vault"];
+  const provision = enabled.services["vault-provision"];
   const postgres = enabled.services["postgres"];
-  expect(Object.keys(pass?.depends_on ?? {}).toSorted()).toEqual([
-    "pass-provision",
+  expect(Object.keys(vault?.depends_on ?? {}).toSorted()).toEqual([
     "postgres",
     "secrets",
+    "vault-provision",
   ]);
   expect(Object.keys(provision?.depends_on ?? {}).toSorted()).toEqual([
     "postgres",

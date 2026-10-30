@@ -70,7 +70,7 @@
 
 # A separate origin keeps the web vault outside the application SPA. Caddy
 # overwrites the client IP header; only its proxy address is trusted upstream.
-{$PASS_SITE_ADDRESS:pass.localhost} {
+{$VAULT_SITE_ADDRESS:vault.localhost} {
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options nosniff
@@ -79,7 +79,7 @@
 	}
 	@admin path /admin /admin/*
 	respond @admin 404
-	reverse_proxy pass-vault:8080 {
+	reverse_proxy vault:8080 {
 		header_up X-Real-IP {remote_host}
 	}
 }

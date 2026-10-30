@@ -10,7 +10,7 @@ their configuration and DNS cutover remain deployment steps.
 > complete production recovery process still require operator verification.
 > Calendar lacks invitations, reminders and sharing; Contacts is a placeholder. The setup wizard
 > and administrator account controls are available; see the [admin guide](docs/admin/index.md)
-> for their current limitations. Pass is not production-ready until security
+> for their current limitations. Vault is not production-ready until security
 > and recovery are verified.
 
 ## Release status
@@ -34,7 +34,7 @@ This first release is an early, single-server baseline. The repository contains:
   migration, backup and recovery requirements.
 - **Outbound mail:** server-only Stalwart relay configuration and DKIM DNS records; see [outbound operations](docs/operations/outbound.md) for SES, queue limits and deployment steps.
 - **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
-- **Pass** (optional `pass` Compose profile): Vaultwarden on a dedicated origin, a separate PostgreSQL database, a launcher and hide-my-email aliases. Local automated coverage exists, but security, real-provider recovery and client compatibility remain unverified. See [Pass operations and readiness](docs/operations/pass.md).
+- **Esuno Vault, built on Vaultwarden** (optional `vault` Compose profile): a dedicated origin, a separate PostgreSQL database, a launcher and hide-my-email aliases. Local automated coverage exists, but security, real-provider recovery and client compatibility remain unverified. See [Vault operations and readiness](docs/operations/vault.md).
 - **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. See [development](docs/development.md#drive).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).

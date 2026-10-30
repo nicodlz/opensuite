@@ -234,38 +234,38 @@ the networks are unchanged. The API then returns to a dynamic address on the
 API proxy network, which reintroduces the original start-order risk: re-apply
 the manual endpoint reservation, or always start Caddy before the API.
 
-## Optional Pass
+## Optional Vault
 
-Pass is optional and is not production-ready until security and recovery have
+Vault is optional and is not production-ready until security and recovery have
 been verified. It can run without the mail and application services, but shares
-Caddy, PostgreSQL and the server. Use the ordered [Pass setup and operations
-procedure](../operations/pass.md#enable-and-first-administrator) for the
+Caddy, PostgreSQL and the server. Use the ordered [Vault setup and operations
+procedure](../operations/vault.md#enable-and-first-administrator) for the
 following steps:
 
-1. Create the `pass.example.com` A record yourself, and an AAAA record only if
+1. Create the `vault.example.com` A record yourself, and an AAAA record only if
    IPv6 works. Esuno and Compose never create it. Allow 80/443 for Caddy to
    obtain and renew a publicly trusted TLS certificate. Use a dedicated origin.
-2. Set `PASS_PUBLIC_HOST=pass.example.com` in `.env`; Compose derives Caddy's
-   `PASS_SITE_ADDRESS` and Vaultwarden's HTTPS `DOMAIN` from it. Set
-   `COMPOSE_PROFILES=pass` so ordinary Compose upgrades include the profile.
-   Keep `PASS_IMAGE` pinned to the official version and digest, and choose
-   non-overlapping `PASS_NETWORK_SUBNET`, `PASS_NETWORK_IP_RANGE` and
-   `PASS_CADDY_IP` together. See the [environment template](../../deploy/env.example)
+2. Set `VAULT_PUBLIC_HOST=vault.example.com` in `.env`; Compose derives Caddy's
+   `VAULT_SITE_ADDRESS` and Vaultwarden's HTTPS `DOMAIN` from it. Set
+   `COMPOSE_PROFILES=vault` so ordinary Compose upgrades include the profile.
+   Keep `VAULT_IMAGE` pinned to the official version and digest, and choose
+   non-overlapping `VAULT_NETWORK_SUBNET`, `VAULT_NETWORK_IP_RANGE` and
+   `VAULT_CADDY_IP` together. See the [environment template](../../deploy/env.example)
    for defaults and the setup guide for required Drive configuration and builds.
 3. Configure the protected admin token file and SES SMTP on port 2587 with
    STARTTLS. Open the loopback admin port locally or through SSH, invite the
-   first vault user, and choose `PASS_ORG_CREATION_USERS` as described in the
-   [setup guide](../operations/pass.md#enable-and-first-administrator). Mobile
+   first vault user, and choose `VAULT_ORG_CREATION_USERS` as described in the
+   [setup guide](../operations/vault.md#enable-and-first-administrator). Mobile
    push is optional and requires the external relay and protected installation
-   key; see [SMTP and notifications](../operations/pass.md#smtp-and-notifications).
-4. Add `pass=https://pass.example.com` to `AUTH_PRODUCT_ORIGINS` and recreate
-   the API to enable the Esuno launcher. See [shell status](../operations/pass.md#esuno-shell-status).
+   key; see [SMTP and notifications](../operations/vault.md#smtp-and-notifications).
+4. Add `vault=https://vault.example.com` to `AUTH_PRODUCT_ORIGINS` and recreate
+   the API to enable the Esuno launcher. See [shell status](../operations/vault.md#esuno-shell-status).
    For alias API keys and Bitwarden's username generator, follow the
    [alias setup](../architecture/aliases.md#api-and-bitwarden).
-5. Set `BACKUP_PASS_ENABLED=1`, configure the scheduled encrypted backup and
-   complete the [independent recovery test](../operations/pass-recovery.md#independent-recovery-tests-and-expected-loss).
-   The scheduled backup includes the Pass database and data volume when enabled.
-   Use the [upgrade and rollback procedure](../operations/pass.md#upgrade-and-rollback)
+5. Set `BACKUP_VAULT_ENABLED=1`, configure the scheduled encrypted backup and
+   complete the [independent recovery test](../operations/vault-recovery.md#independent-recovery-tests-and-expected-loss).
+   The scheduled backup includes the Vault database and data volume when enabled.
+   Use the [upgrade and rollback procedure](../operations/vault.md#upgrade-and-rollback)
    before changing the pinned image.
 
 ## First administrator

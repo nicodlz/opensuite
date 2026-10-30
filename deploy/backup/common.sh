@@ -41,8 +41,8 @@ sweep_stale() {
     log stale_scratch_removed
   done
 }
-pass_secret_files() {
-  printf '%s\n' "pass-admin:${PASS_ADMIN_TOKEN_FILE:-/dev/null}" "pass-smtp:${PASS_SMTP_SECRET_FILE:-/dev/null}" "pass-push:${PASS_PUSH_KEY_FILE:-/dev/null}"
+vault_secret_files() {
+  printf '%s\n' "vault-admin:${VAULT_ADMIN_TOKEN_FILE:-/dev/null}" "vault-smtp:${VAULT_SMTP_SECRET_FILE:-/dev/null}" "vault-push:${VAULT_PUSH_KEY_FILE:-/dev/null}"
 }
 log() { printf '{"component":"backup","event":"%s","time":"%s"}\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }
 # Docker operators may not be able to read uid-restricted restored secrets on

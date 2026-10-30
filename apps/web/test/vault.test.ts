@@ -7,8 +7,8 @@ import {
   generatePassphrase,
   generatePassword,
   randomIndex,
-} from "../src/pass/generator.ts";
-import { words } from "../src/pass/words.ts";
+} from "../src/vault/generator.ts";
+import { words } from "../src/vault/words.ts";
 
 describe("local generator", () => {
   it("uses the selected classes and requested length", () => {
@@ -42,16 +42,16 @@ describe("local generator", () => {
     expect(parts.every((word) => words.includes(word))).toBe(true);
     expect(generatePassphrase(3, " ").split(" ")).toHaveLength(3);
   });
-  it("does not use storage, console or analytics in Pass source", () => {
+  it("does not use storage, console or analytics in Vault source", () => {
     const files = globSync("**/*", {
-      cwd: fileURLToPath(new URL("../src/pass/", import.meta.url)),
+      cwd: fileURLToPath(new URL("../src/vault/", import.meta.url)),
     }).filter((file) =>
-      statSync(new URL(`../src/pass/${file}`, import.meta.url)).isFile(),
+      statSync(new URL(`../src/vault/${file}`, import.meta.url)).isFile(),
     );
     expect(files).not.toHaveLength(0);
     for (const file of files) {
       const source = readFileSync(
-        new URL(`../src/pass/${file}`, import.meta.url),
+        new URL(`../src/vault/${file}`, import.meta.url),
         "utf8",
       );
       expect(source).not.toMatch(

@@ -1,4 +1,4 @@
-# Disposable Pass-only integration fixture; no real external resources.
+# Disposable Vault-only integration fixture; no real external resources.
 services:
   caddy:
     entrypoint:
@@ -14,24 +14,24 @@ services:
       OPENSUITE_SITE_ADDRESS: localhost
     networks:
       api-proxy:
-        ipv4_address: ${PASS_TEST_API_IP}
-      pass-network:
-        ipv4_address: ${PASS_TEST_PROXY_IP}
+        ipv4_address: ${VAULT_TEST_API_IP}
+      vault-network:
+        ipv4_address: ${VAULT_TEST_PROXY_IP}
     ports: !override
       - "127.0.0.1::443"
-  pass:
+  vault:
     environment:
-      DOMAIN: ${PASS_TEST_DOMAIN:-https://pass.localhost}
-      IP_HEADER_TRUSTED_PROXIES: ${PASS_TEST_PROXY_IP}
+      DOMAIN: ${VAULT_TEST_DOMAIN:-https://vault.localhost}
+      IP_HEADER_TRUSTED_PROXIES: ${VAULT_TEST_PROXY_IP}
     ports: !override
       - "127.0.0.1::8080"
 networks:
   api-proxy:
     ipam:
       config: !override
-        - subnet: ${PASS_TEST_API_SUBNET}
-  pass-network:
+        - subnet: ${VAULT_TEST_API_SUBNET}
+  vault-network:
     ipam:
       config: !override
-        - subnet: ${PASS_TEST_SUBNET}
-          ip_range: ${PASS_TEST_DYNAMIC_RANGE}
+        - subnet: ${VAULT_TEST_SUBNET}
+          ip_range: ${VAULT_TEST_DYNAMIC_RANGE}

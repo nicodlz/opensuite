@@ -17,7 +17,7 @@ const hubPaths = [
   "/setup",
   "/domains",
   "/contacts",
-  "/pass",
+  "/vault",
 ];
 
 export type OriginLayout = {

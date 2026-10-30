@@ -25,7 +25,7 @@ const run = promisify(execFile);
 const { values } = parseArgs({ options: { report: { type: "string" } } });
 if (!values.report) {
   process.stderr.write(
-    "usage: node scripts/pass-storage-poc.mjs --report PATH\n",
+    "usage: node scripts/vault-storage-poc.mjs --report PATH\n",
   );
   process.exit(2);
 }
@@ -42,10 +42,10 @@ async function writeReport() {
   );
 }
 const requiredB2 = [
-  "PASS_B2_TEST_ENDPOINT",
-  "PASS_B2_TEST_BUCKET",
-  "PASS_B2_TEST_KEY_ID",
-  "PASS_B2_TEST_APP_KEY",
+  "VAULT_B2_TEST_ENDPOINT",
+  "VAULT_B2_TEST_BUCKET",
+  "VAULT_B2_TEST_KEY_ID",
+  "VAULT_B2_TEST_APP_KEY",
 ];
 const b2SetCount = requiredB2.filter((name) =>
   Boolean(process.env[name]),
@@ -255,7 +255,7 @@ function serverPort(server) {
 }
 
 const repo = process.cwd();
-const composeFile = path.join(repo, "test-support/pass-storage/compose.yaml");
+const composeFile = path.join(repo, "test-support/vault-storage/compose.yaml");
 const bwPath = path.join(repo, "node_modules/.bin/bw");
 /** @type {() => Promise<void | boolean>} */
 let activeCleanup = async () => {};
@@ -285,11 +285,11 @@ for (const sig of ["SIGINT", "SIGTERM"])
 
 /** @param {"official" | "localstack" | "b2"} mode */
 async function executeMode(mode) {
-  const project = `pass-storage-${stamp()}`;
+  const project = `vault-storage-${stamp()}`;
   const prefixBase =
     mode === "b2"
-      ? process.env["PASS_B2_TEST_PREFIX"] || "pass-storage-tests/"
-      : "pass-storage-tests/";
+      ? process.env["VAULT_B2_TEST_PREFIX"] || "vault-storage-tests/"
+      : "vault-storage-tests/";
   check(
     /^[A-Za-z0-9][A-Za-z0-9._/-]*\/$/.test(prefixBase) &&
       !prefixBase.includes("..") &&
@@ -298,12 +298,14 @@ async function executeMode(mode) {
   );
   const prefix = `${prefixBase}${project}/`;
   const bucket =
-    mode === "b2" ? process.env["PASS_B2_TEST_BUCKET"] : "opensuite-pass-proof";
-  const key = mode === "b2" ? process.env["PASS_B2_TEST_KEY_ID"] : "test";
-  const secret = mode === "b2" ? process.env["PASS_B2_TEST_APP_KEY"] : "test";
+    mode === "b2"
+      ? process.env["VAULT_B2_TEST_BUCKET"]
+      : "opensuite-vault-proof";
+  const key = mode === "b2" ? process.env["VAULT_B2_TEST_KEY_ID"] : "test";
+  const secret = mode === "b2" ? process.env["VAULT_B2_TEST_APP_KEY"] : "test";
   const endpoint =
     mode === "b2"
-      ? process.env["PASS_B2_TEST_ENDPOINT"]
+      ? process.env["VAULT_B2_TEST_ENDPOINT"]
       : "http://localstack:4566";
   check(
     bucket && key && secret && endpoint,
@@ -320,11 +322,11 @@ async function executeMode(mode) {
   );
   const region =
     mode === "b2"
-      ? process.env["PASS_B2_TEST_REGION"] ||
+      ? process.env["VAULT_B2_TEST_REGION"] ||
         /^s3\.([^.]+)\.backblazeb2\.com$/.exec(url.hostname)?.[1]
       : "us-east-1";
-  check(region, "cannot infer B2 region; set PASS_B2_TEST_REGION");
-  const temp = await mkdtemp(path.join(os.tmpdir(), "pass-storage-"));
+  check(region, "cannot infer B2 region; set VAULT_B2_TEST_REGION");
+  const temp = await mkdtemp(path.join(os.tmpdir(), "vault-storage-"));
   const params = new URLSearchParams({
     endpoint,
     region,
@@ -688,7 +690,7 @@ async function executeMode(mode) {
         ...hostEnv,
         BITWARDENCLI_APPDATA_DIR: path.join(temp, "cli"),
         NODE_EXTRA_CA_CERTS: certPath,
-        PASS_FIXTURE_PASSWORD: password,
+        VAULT_FIXTURE_PASSWORD: password,
       };
       phase = "web vault signup";
       browser = await chromium.launch({
@@ -724,7 +726,7 @@ async function executeMode(mode) {
         "login",
         email,
         "--passwordenv",
-        "PASS_FIXTURE_PASSWORD",
+        "VAULT_FIXTURE_PASSWORD",
         "--raw",
       );
       const template = {

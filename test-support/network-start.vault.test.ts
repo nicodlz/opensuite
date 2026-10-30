@@ -7,14 +7,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
 import { z } from "zod";
-import { createPassFixture } from "./pass-fixture.js";
+import { createVaultFixture } from "./vault-fixture.js";
 
 const run = promisify(execFile);
 const alpine =
   "alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a";
 
 test("API before Caddy and one-off management containers retain distinct addresses", async () => {
-  const fixture = createPassFixture("network");
+  const fixture = createVaultFixture("network");
   const directory = await mkdtemp(join(tmpdir(), "opensuite-network-"));
   const overlay = join(directory, "compose.yaml");
   Object.assign(fixture.env, {

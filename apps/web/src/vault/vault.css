@@ -1,66 +1,66 @@
-.pass-content {
+.vault-content {
   max-width: 1050px;
 }
-.pass-sidebar-placeholder {
+.vault-sidebar-placeholder {
   display: block;
   padding: 10px 12px;
   color: var(--muted-light);
   font-size: 13px;
 }
-.pass-hero,
-.pass-card {
+.vault-hero,
+.vault-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   padding: 24px;
 }
-.pass-hero {
+.vault-hero {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
   background: var(--accent-soft);
 }
-.pass-hero img {
+.vault-hero img {
   width: 100px;
   height: 100px;
   flex: none;
 }
-.pass-hero h2,
-.pass-card h2 {
+.vault-hero h2,
+.vault-card h2 {
   font-size: 21px;
 }
-.pass-hero p:not(.eyebrow),
-.pass-card p {
+.vault-hero p:not(.eyebrow),
+.vault-card p {
   color: var(--muted);
   margin-top: 8px;
   line-height: 1.5;
 }
-.pass-hero .button {
+.vault-hero .button {
   margin-top: 22px;
 }
-.pass-card {
+.vault-card {
   margin-top: 14px;
 }
-.pass-status-head {
+.vault-status-head {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   align-items: center;
 }
-.pass-card > .button {
+.vault-card > .button {
   margin-top: 16px;
 }
-.pass-cards {
+.vault-cards {
   margin-top: 14px;
 }
-.pass-cards .pass-card {
+.vault-cards .vault-card {
   margin: 0;
 }
-.pass-cards .check-icon {
+.vault-cards .check-icon {
   margin-bottom: 16px;
 }
-.pass-link {
+.vault-link {
   display: inline-block;
   margin-top: 14px;
   color: var(--accent);
@@ -68,40 +68,40 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-.pass-generator {
+.vault-generator {
   max-width: 720px;
 }
-.pass-generator fieldset {
+.vault-generator fieldset {
   border: 0;
   padding: 0;
   margin: 0 0 22px;
 }
-.pass-generator legend,
-.pass-field,
-.pass-result label {
+.vault-generator legend,
+.vault-field,
+.vault-result label {
   font-weight: 700;
 }
-.pass-options {
+.vault-options {
   display: flex;
   gap: 12px 24px;
   flex-wrap: wrap;
   margin-top: 10px;
 }
-.pass-options label {
+.vault-options label {
   display: inline-flex;
   gap: 7px;
   align-items: center;
 }
-.pass-field {
+.vault-field {
   display: flex;
   flex-direction: column;
   gap: 8px;
   max-width: 200px;
   margin-bottom: 22px;
 }
-.pass-field input,
-.pass-field select,
-.pass-result textarea {
+.vault-field input,
+.vault-field select,
+.vault-result textarea {
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
@@ -109,47 +109,47 @@
   color: var(--foreground);
   font: inherit;
 }
-.pass-result {
+.vault-result {
   margin-top: 24px;
 }
-.pass-result textarea {
+.vault-result textarea {
   display: block;
   width: 100%;
   resize: vertical;
   margin: 8px 0 12px;
   overflow-wrap: anywhere;
 }
-.pass-result-actions,
-.pass-url {
+.vault-result-actions,
+.vault-url {
   display: flex;
   gap: 12px;
   align-items: center;
   flex-wrap: wrap;
 }
-.pass-url {
+.vault-url {
   margin-top: 16px;
 }
-.pass-url code {
+.vault-url code {
   overflow-wrap: anywhere;
 }
-.pass-copy-message,
-.pass-note {
+.vault-copy-message,
+.vault-note {
   color: var(--muted);
   font-size: 13px;
 }
-.pass-note {
+.vault-note {
   margin-top: 24px;
   line-height: 1.5;
 }
 @media (max-width: 600px) {
-  .pass-hero img {
+  .vault-hero img {
     width: 60px;
     height: 60px;
   }
-  .pass-hero {
+  .vault-hero {
     align-items: flex-start;
   }
-  .pass-status-head {
+  .vault-status-head {
     align-items: flex-start;
   }
 }

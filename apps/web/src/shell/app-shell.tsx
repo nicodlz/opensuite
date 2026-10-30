@@ -17,7 +17,7 @@ import { activeLayout, hubHref, isExternal, productHref } from "../origins.ts";
 import { setTheme, useTheme } from "./theme.ts";
 
 export type Product =
-  "mail" | "calendar" | "contacts" | "drive" | "pass" | "admin";
+  "mail" | "calendar" | "contacts" | "drive" | "vault" | "admin";
 
 const products: {
   id: Product;
@@ -38,7 +38,7 @@ const products: {
     mark: "/calendar-mark.svg",
   },
   { id: "contacts", label: "Contacts", icon: "contacts" },
-  { id: "pass", label: "Pass", icon: "pass", mark: "/vault-mark.svg" },
+  { id: "vault", label: "Vault", icon: "vault", mark: "/vault-mark.svg" },
   {
     id: "drive",
     label: "Drive",
@@ -82,13 +82,13 @@ function AppLink({
   );
 }
 const hrefOf = (product: Product) =>
-  product === "admin" || product === "contacts" || product === "pass"
+  product === "admin" || product === "contacts" || product === "vault"
     ? hubHref(
         activeLayout(),
         product === "admin"
           ? "/status"
-          : product === "pass"
-            ? "/pass"
+          : product === "vault"
+            ? "/vault"
             : "/contacts",
       )
     : productHref(activeLayout(), product);

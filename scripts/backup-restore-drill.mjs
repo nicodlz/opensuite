@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const cases = execFileSync(
   "sh",
-  [fileURLToPath(new URL("./pass-drill.sh", import.meta.url)), "--list"],
+  [fileURLToPath(new URL("./vault-drill.sh", import.meta.url)), "--list"],
   { encoding: "utf8" },
 )
   .trim()
@@ -42,7 +42,7 @@ try {
     ["package.json", "package-lock.json"].map((file) =>
       copyFile(
         fileURLToPath(
-          new URL(`../test-support/pass-drill-cli/${file}`, import.meta.url),
+          new URL(`../test-support/vault-drill-cli/${file}`, import.meta.url),
         ),
         join(work, file),
       ),
@@ -58,9 +58,9 @@ try {
   child = spawn(script, [], {
     env: {
       ...process.env,
-      PASS_BACKUP_DRILL: "1",
-      PASS_DRILL_CASES: results,
-      PASS_DRILL_BW: join(work, "node_modules/.bin/bw"),
+      VAULT_BACKUP_DRILL: "1",
+      VAULT_DRILL_CASES: results,
+      VAULT_DRILL_BW: join(work, "node_modules/.bin/bw"),
     },
     stdio: ["ignore", "inherit", "inherit"],
   });
@@ -95,6 +95,6 @@ try {
 }
 if (error) process.stderr.write(`${error}\n`);
 process.stdout.write(
-  `Backup restore drill: ${cases.length - missing.length}/${cases.length} Pass cases completed; report: ${args[1]}\n`,
+  `Backup restore drill: ${cases.length - missing.length}/${cases.length} Vault cases completed; report: ${args[1]}\n`,
 );
 if (failed) process.exitCode = 1;

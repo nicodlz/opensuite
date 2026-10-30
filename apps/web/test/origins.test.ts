@@ -23,7 +23,7 @@ describe("origin layout", () => {
     expect(rewriteFor(layout)).toBeUndefined();
     expect(resolveLayout({}, "http://localhost:5173").split).toBe(false);
     expect(
-      resolveLayout({ mail, pass: "https://pass.example.test" }, mail).split,
+      resolveLayout({ mail, vault: "https://vault.example.test" }, mail).split,
     ).toBe(false);
   });
   it("serves each application at the root of its own origin", () => {
@@ -58,8 +58,8 @@ describe("origin layout", () => {
     expect(redirectFor(hub, "/drive-notes", "")).toBeNull();
     const sibling = resolveLayout(origins, drive);
     expect(redirectFor(sibling, "/login", "")).toBe(`${mail}/login`);
-    expect(redirectFor(sibling, "/pass/generator", "?x=1")).toBe(
-      `${mail}/pass/generator?x=1`,
+    expect(redirectFor(sibling, "/vault/generator", "?x=1")).toBe(
+      `${mail}/vault/generator?x=1`,
     );
     expect(redirectFor(sibling, "/setup", "?step=2")).toBe(
       `${mail}/setup?step=2`,
@@ -93,11 +93,11 @@ describe("origin map loading", () => {
     expect(await loadOrigins(offline)).toEqual({});
     expect(await loadOrigins(answer({ error: true }, 503))).toEqual({});
     expect(await loadOrigins(answer({ drive: "not a url" }))).toEqual({});
-    expect(await loadOrigins(answer({ pass: "javascript:alert(1)" }))).toEqual(
+    expect(await loadOrigins(answer({ vault: "javascript:alert(1)" }))).toEqual(
       {},
     );
     expect(
-      await loadOrigins(answer({ pass: "https://pass.example.test/path" })),
+      await loadOrigins(answer({ vault: "https://vault.example.test/path" })),
     ).toEqual({});
   });
   it("keeps the app on this origin without a map", () => {

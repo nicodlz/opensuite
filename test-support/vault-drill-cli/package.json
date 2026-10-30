@@ -1,5 +1,5 @@
 {
-  "name": "opensuite-pass-drill-cli",
+  "name": "opensuite-vault-drill-cli",
   "private": true,
   "version": "1.0.0",
   "description": "Pinned disposable recovery-drill client",

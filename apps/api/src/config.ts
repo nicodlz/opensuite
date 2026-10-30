@@ -117,17 +117,17 @@ const AuthEnvironment = z.object({
   }),
   STALWART_MANAGEMENT_CLIENT_IP: z.ipv4().optional(),
   AUTH_PRODUCT_ORIGINS: z.string().optional(),
-  PASS_PUBLIC_HOST: z.string().default("pass.localhost"),
+  VAULT_PUBLIC_HOST: z.string().default("vault.localhost"),
   AUTH_SECRET_FILE: z.string().min(1),
   MAILBOX_KEY_FILE: z.string().min(1),
   STALWART_MANAGEMENT_PASSWORD_FILE: z.string().min(1),
 });
 
-const productNames = ["mail", "drive", "calendar", "pass"] as const;
+const productNames = ["mail", "drive", "calendar", "vault"] as const;
 export type ProductName = (typeof productNames)[number];
 /**
- * Parses application origins and the optional `pass=https://pass.example` vault.
- * Pass is separated before configuring authentication and handoffs.
+ * Parses application origins and the optional `vault=https://vault.example` vault.
+ * Vault is separated before configuring authentication and handoffs.
  * Mail is always served by the public authentication origin. Every origin
  * must be an exact HTTPS origin; wildcards and parent domains are refused.
  */
@@ -205,19 +205,19 @@ export const loadAuthConfig = async (
         kind: "invalid_environment",
         issues: ["invalid product origins"],
       });
-    const { pass: passOrigin, ...appOrigins } = productOrigins;
+    const { vault: vaultOrigin, ...appOrigins } = productOrigins;
     if (
-      passOrigin !== undefined &&
-      passOrigin !== `https://${parsed.data.PASS_PUBLIC_HOST.toLowerCase()}`
+      vaultOrigin !== undefined &&
+      vaultOrigin !== `https://${parsed.data.VAULT_PUBLIC_HOST.toLowerCase()}`
     )
       return err<never, ConfigError>({
         kind: "invalid_environment",
-        issues: ["Pass origin must match PASS_PUBLIC_HOST"],
+        issues: ["Vault origin must match VAULT_PUBLIC_HOST"],
       });
     return ok({
       publicOrigin: parsed.data.AUTH_PUBLIC_ORIGIN,
       productOrigins: appOrigins,
-      ...(passOrigin === undefined ? {} : { passOrigin }),
+      ...(vaultOrigin === undefined ? {} : { vaultOrigin }),
       mailDomain: parsed.data.MAIL_DOMAIN,
       trustedProxyIp: parsed.data.TRUSTED_PROXY_IP,
       stalwartOrigin: parsed.data.STALWART_INTERNAL_ORIGIN,

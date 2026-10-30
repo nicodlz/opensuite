@@ -49,23 +49,23 @@ for ident in "$POSTGRES_USER" "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do
 done
 [ "$POSTGRES_DB" != "$POSTGRES_DRIVE_DB" ] || exit 1
 compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >&2
-# A stopped Pass container or a provisioned database still needs protection.
-case "${BACKUP_PASS_ENABLED:-0}" in 0|1) ;; *) echo 'backup: BACKUP_PASS_ENABLED must be 0 or 1' >&2; exit 1;; esac
-case "${BACKUP_PASS_EXCLUDE:-0}" in 0|1) ;; *) echo 'backup: BACKUP_PASS_EXCLUDE must be 0 or 1' >&2; exit 1;; esac
-pass_db=$(compose exec -T postgres psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname='opensuite_pass'")
+# A stopped Vault container or a provisioned database still needs protection.
+case "${BACKUP_VAULT_ENABLED:-0}" in 0|1) ;; *) echo 'backup: BACKUP_VAULT_ENABLED must be 0 or 1' >&2; exit 1;; esac
+case "${BACKUP_VAULT_EXCLUDE:-0}" in 0|1) ;; *) echo 'backup: BACKUP_VAULT_EXCLUDE must be 0 or 1' >&2; exit 1;; esac
+vault_db=$(compose exec -T postgres psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname='opensuite_vault'")
 services=$(compose ps -a --services)
-pass_container=$(printf '%s\n' "$services" | awk '$0 == "pass" {print}')
-pass_enabled=${BACKUP_PASS_ENABLED:-0}
-[ "$pass_db" = 0 ] || pass_enabled=1
-[ -z "$pass_container" ] || pass_enabled=1
-case ",${COMPOSE_PROFILES:-}," in *,pass,*|*,\*,*) pass_enabled=1;; esac
-if [ "${BACKUP_PASS_EXCLUDE:-0}" = 1 ]; then
-  log pass_explicitly_excluded
-  pass_enabled=0
+vault_container=$(printf '%s\n' "$services" | awk '$0 == "vault" {print}')
+vault_enabled=${BACKUP_VAULT_ENABLED:-0}
+[ "$vault_db" = 0 ] || vault_enabled=1
+[ -z "$vault_container" ] || vault_enabled=1
+case ",${COMPOSE_PROFILES:-}," in *,vault,*|*,\*,*) vault_enabled=1;; esac
+if [ "${BACKUP_VAULT_EXCLUDE:-0}" = 1 ]; then
+  log vault_explicitly_excluded
+  vault_enabled=0
 fi
-if [ "$pass_enabled" = 1 ]; then phase=pass; fi
-if [ "$pass_enabled" = 1 ] && [ "$pass_db" != 1 ]; then
-  echo 'backup: Pass is enabled but its database is missing' >&2; exit 1
+if [ "$vault_enabled" = 1 ]; then phase=vault; fi
+if [ "$vault_enabled" = 1 ] && [ "$vault_db" != 1 ]; then
+  echo 'backup: Vault is enabled but its database is missing' >&2; exit 1
 fi
 phase=backup
 # The saved registry, not .env, is authoritative for the active blob store.
@@ -101,7 +101,7 @@ if [ "$needed" -gt "$available" ]; then
 fi
 log scratch_checked
 services=$(compose ps --services --filter status=running)
-running=$(printf '%s\n' "$services" | awk '/^(caddy|api|drive|stalwart|ingest|observe|pass)$/ {print}')
+running=$(printf '%s\n' "$services" | awk '/^(caddy|api|drive|stalwart|ingest|observe|vault)$/ {print}')
 # Stop clients and workers before any snapshot; operators must stop external writers.
 [ -z "$running" ] || compose stop $running >&2
 log quiesced
@@ -132,29 +132,29 @@ compose exec -T postgres sh -ec 'export PGPASSWORD="$(cat /run/opensuite/postgre
 for db in "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do
   compose exec -T postgres sh -ec 'export PGPASSWORD="$(cat /run/opensuite/postgres/password)"; exec pg_dump -h localhost -U "$1" -Fc -d "$2"' sh "$POSTGRES_USER" "$db" > "$BACKUP_STAGE/data/postgres/$db.dump"
 done
-if [ "$pass_enabled" = 1 ]; then
-  phase=pass
-  log pass_capture_start
-  compose exec -T postgres sh -ec 'export PGPASSWORD="$(cat /run/opensuite/postgres/password)"; exec pg_dump -h localhost -U "$1" -Fc -d opensuite_pass' sh "$POSTGRES_USER" > "$BACKUP_STAGE/data/postgres/opensuite_pass.dump"
-  compose exec -T postgres pg_restore --list < "$BACKUP_STAGE/data/postgres/opensuite_pass.dump" > /dev/null
+if [ "$vault_enabled" = 1 ]; then
+  phase=vault
+  log vault_capture_start
+  compose exec -T postgres sh -ec 'export PGPASSWORD="$(cat /run/opensuite/postgres/password)"; exec pg_dump -h localhost -U "$1" -Fc -d opensuite_vault' sh "$POSTGRES_USER" > "$BACKUP_STAGE/data/postgres/opensuite_vault.dump"
+  compose exec -T postgres pg_restore --list < "$BACKUP_STAGE/data/postgres/opensuite_vault.dump" > /dev/null
   # Capture the entire stopped volume, not PostgreSQL's live data files.
   compose run --rm --no-deps -T backup-volumes '
-    [ -s /secrets/pass-database/password ] && [ -r /secrets/pass-database/password ] &&
-    [ -s /pass-data/rsa_key.pem ] && [ -r /pass-data/rsa_key.pem ] &&
-    tar --exclude="pass-data/db.sqlite3*" -cpf /stage/data/pass-volume.tar -C / pass-data
-  ' >&2 || { echo 'backup: Pass data or database credential is missing or unreadable' >&2; exit 1; }
+    [ -s /secrets/vault-database/password ] && [ -r /secrets/vault-database/password ] &&
+    [ -s /vault-data/rsa_key.pem ] && [ -r /vault-data/rsa_key.pem ] &&
+    tar --exclude="vault-data/db.sqlite3*" -cpf /stage/data/vault-volume.tar -C / vault-data
+  ' >&2 || { echo 'backup: Vault data or database credential is missing or unreadable' >&2; exit 1; }
   while IFS= read -r item; do
     name=${item%%:*}; path=${item#*:}
     if [ "$path" != /dev/null ]; then
       read_secret "$path" > "$BACKUP_STAGE/data/config/$name" && [ -s "$BACKUP_STAGE/data/config/$name" ] || { echo "backup: $name file missing or unreadable" >&2; exit 1; }
     fi
-  done <<PASS_SECRETS
-$(pass_secret_files)
-PASS_SECRETS
-  [ -z "${PASS_SMTP_USERNAME:-}" ] || [ -s "$BACKUP_STAGE/data/config/pass-smtp" ] || { echo 'backup: Pass SMTP secret missing' >&2; exit 1; }
-  [ "${PASS_PUSH_ENABLED:-false}" != true ] || [ -s "$BACKUP_STAGE/data/config/pass-push" ] || { echo 'backup: Pass push key missing' >&2; exit 1; }
-  printf '1\n' > "$BACKUP_STAGE/data/config/pass-enabled"
-  log pass_captured
+  done <<VAULT_SECRETS
+$(vault_secret_files)
+VAULT_SECRETS
+  [ -z "${VAULT_SMTP_USERNAME:-}" ] || [ -s "$BACKUP_STAGE/data/config/vault-smtp" ] || { echo 'backup: Vault SMTP secret missing' >&2; exit 1; }
+  [ "${VAULT_PUSH_ENABLED:-false}" != true ] || [ -s "$BACKUP_STAGE/data/config/vault-push" ] || { echo 'backup: Vault push key missing' >&2; exit 1; }
+  printf '1\n' > "$BACKUP_STAGE/data/config/vault-enabled"
+  log vault_captured
   phase=backup
 fi
 compose run --rm --no-deps -T backup-volumes 'tar -cpf /stage/data/volumes.tar -C / secrets stalwart caddy-data caddy-config' >&2

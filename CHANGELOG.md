@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-- Added optional Esuno Pass with a digest-pinned Vaultwarden service, separate
+- Pass renamed to Vault.
+
+- Added optional Esuno Vault with a digest-pinned Vaultwarden service, separate
   database, launcher and local generator, and hide-my-email aliases. Coordinated
   encrypted backup and restore tooling and local compatibility tests are included.
-  Pass is not production-ready until security and recovery are verified; see
-  [Pass readiness and evidence](docs/operations/pass.md#production-readiness-gaps).
+  Vault is not production-ready until security and recovery are verified; see
+  [Vault readiness and evidence](docs/operations/vault.md#production-readiness-gaps).
 
 ## First release — unreleased
 

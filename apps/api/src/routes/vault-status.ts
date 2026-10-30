@@ -1,7 +1,7 @@
 import type { ReadableStreamReadResult } from "node:stream/web";
 
 /** Read only the two public health endpoints. Never forward browser requests. */
-export function createPassStatus(
+export function createVaultStatus(
   origin: string | undefined,
   options: {
     timeoutMs?: number;

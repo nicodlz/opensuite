@@ -36,7 +36,7 @@ export const makeSources = (config: Config): Sources => {
     async backupFailure() {
       try {
         const failure = (await readFile("/backup/last-failure", "utf8")).trim();
-        return failure === "pass" ? "pass" : "backup";
+        return failure === "vault" ? "vault" : "backup";
       } catch (error) {
         if (
           error instanceof Error &&

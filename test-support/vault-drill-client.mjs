@@ -11,7 +11,7 @@ import {
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const [mode, origin, work] = process.argv.slice(2);
-const cli = process.env.PASS_DRILL_BW;
+const cli = process.env.VAULT_DRILL_BW;
 if (!cli) throw new Error("Missing pinned drill CLI");
 const email = "recovery-fixture@example.invalid";
 const password = "disposable-master-password-only";

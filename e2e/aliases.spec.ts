@@ -137,7 +137,7 @@ test("manage aliases, default domain and one-time keys", async ({
 }) => {
   await mockAliases(page);
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.goto("/pass/aliases");
+  await page.goto("/vault/aliases");
   await expect(page.getByText("friday@example.test")).toBeVisible();
   await page.getByLabel("Filter").selectOption("suspended");
   await expect(page.getByText("suspended@example.test")).toBeVisible();
@@ -246,7 +246,7 @@ for (const theme of ["light", "dark"] as const)
     await mockAliases(page);
     await page.emulateMedia({ colorScheme: theme });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/pass/aliases");
+    await page.goto("/vault/aliases");
     await expect(page.getByText("friday@example.test")).toBeVisible();
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     await page

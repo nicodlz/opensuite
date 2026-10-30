@@ -6,7 +6,7 @@ const system = implement(contract.system).$context<ApiContext>();
 
 export const systemRouter = system.router({
   origins: system.origins.handler(({ context }) => ({
-    ...(context.passOrigin ? { pass: context.passOrigin } : {}),
+    ...(context.vaultOrigin ? { vault: context.vaultOrigin } : {}),
     ...(context.productOrigins["mail"]
       ? { mail: context.productOrigins["mail"] }
       : {}),

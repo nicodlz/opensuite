@@ -1,10 +1,10 @@
-# Pass recovery after server loss
+# Vault recovery after server loss
 
-Pass uses the shared Esuno restic repository. Each successful capture stops
-Pass, takes a custom PostgreSQL dump and copies its local volume while it is
+Vault uses the shared Esuno restic repository. Each successful capture stops
+Vault, takes a custom PostgreSQL dump and copies its local volume while it is
 still stopped. This preserves `rsa_key*`, `config.json` when present,
 attachments, Sends and the optional icon cache; no live PostgreSQL or SQLite
-files are copied. The generated Pass database credential is in the Compose
+files are copied. The generated Vault database credential is in the Compose
 secrets archive; the configured admin hash and optional SMTP/push files are
 captured separately. Configured files must be readable and nonempty. The
 snapshot also includes sensitive configuration, database metadata, keys and
@@ -12,7 +12,7 @@ ciphertext, so restrict access to the repository and encrypted scratch.
 
 ## Prepare before a disaster
 
-Set `BACKUP_PASS_ENABLED=1` in `/etc/opensuite/backup.conf`, enable the timer
+Set `BACKUP_VAULT_ENABLED=1` in `/etc/opensuite/backup.conf`, enable the timer
 and verify a successful snapshot and alerts as described in [backup
 operations](backup.md). Keep the restic password and B2 application key
 **off-server**, along with the repository URL, region, backup configuration,
@@ -20,7 +20,7 @@ recorded Git revision, image pins, provider account recovery information and
 this procedure. Escrow separate copies in an access-controlled offline medium
 and a separate password manager or organizational recovery vault; arrange
 access for more than one authorized operator and test retrieval. Never store the
-restic password or B2 key only in this Pass instance. Escrow the plaintext admin
+restic password or B2 key only in this Vault instance. Escrow the plaintext admin
 token separately as well as its backed-up hash. Protect the
 master passwords and user recovery factors separately: the server backup cannot
 recover a forgotten master password.
@@ -66,7 +66,7 @@ provider-specific retention and lock behavior before relying on it.
    ```
 
    The controller restores configuration and secrets, the volume and the
-   dedicated `opensuite_pass` role/database, then leaves Pass stopped. For an
+   dedicated `opensuite_vault` role/database, then leaves Vault stopped. For an
    isolated partial target, stop all project services and use the following
    command to replace local state:
 
@@ -91,7 +91,7 @@ provider-specific retention and lock behavior before relying on it.
 
 3. Check the saved image version, `.env`, file permissions and effective
    `config.json`, and ensure the intended hostname/TLS and SMTP settings are
-   correct. Start Pass with `docker compose --profile pass up -d pass caddy`.
+   correct. Start Vault with `docker compose --profile vault up -d vault caddy`.
    In an isolated network, sign in with the same master password and verify a
    known item, an attachment and the server RSA key against independently
    recorded evidence. Exercise MFA and invitation/recovery workflows if used.
@@ -129,9 +129,9 @@ backup should perform and record this drill where practical:
 No independent real-VPS or real-B2 drill is recorded for this project.
 
 The automated check `node scripts/backup-restore-drill.mjs --report
-/tmp/pass-drill.xml` tests a local substitute, not real B2 or a production-sized
+/tmp/vault-drill.xml` tests a local substitute, not real B2 or a production-sized
 restore. The daily schedule has a nominal loss window of up to 24 hours plus
-capture time. All Pass changes since the last successful coordinated snapshot
+capture time. All Vault changes since the last successful coordinated snapshot
 may be lost; failed or missed runs extend that window. There is no continuous
 backup or PostgreSQL point-in-time recovery. Measure actual recovery time with
 a representative independent restore.

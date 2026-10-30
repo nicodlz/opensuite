@@ -36,7 +36,7 @@ export interface QueueStats {
 export interface Sources {
   ready(service: string): Promise<boolean>;
   backupAge(): Promise<number>;
-  backupFailure(): Promise<"pass" | "backup" | null>;
+  backupFailure(): Promise<"vault" | "backup" | null>;
   diskPercent(): Promise<number>;
   certificateDays(service: "https" | "submission" | "imaps"): Promise<number>;
   setupOk(): Promise<boolean>;
@@ -84,7 +84,8 @@ export async function inspect(
         const failure = await sources.backupFailure();
         if (failure !== null)
           alerts.push({
-            code: failure === "pass" ? "backup_pass_failure" : "backup_failure",
+            code:
+              failure === "vault" ? "backup_vault_failure" : "backup_failure",
           });
       } catch {
         alerts.push({ code: "backup_failure_status_unavailable" });

@@ -37,13 +37,13 @@ describe("observations", () => {
       dlq_depth: 0,
     });
   });
-  it("reports a Pass backup failure without disclosing details", async () => {
+  it("reports a Vault backup failure without disclosing details", async () => {
     const report = await run({
       ...healthy,
-      backupFailure: () => Promise.resolve("pass"),
+      backupFailure: () => Promise.resolve("vault"),
     });
     expect(report.alerts.map((alert) => alert.code)).toEqual([
-      "backup_pass_failure",
+      "backup_vault_failure",
     ]);
   });
   it("reports independent failures and thresholds without exception details", async () => {

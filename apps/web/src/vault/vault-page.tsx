@@ -14,7 +14,7 @@ import {
   type CharacterClass,
 } from "./generator.ts";
 // oxlint-disable-next-line import/no-unassigned-import
-import "./pass.css";
+import "./vault.css";
 
 const Status = z.object({
   enabled: z.boolean(),
@@ -23,7 +23,7 @@ const Status = z.object({
   checkedAt: z.iso.datetime().nullable().optional(),
 });
 async function getStatus() {
-  const response = await fetch("/api/pass/status", {
+  const response = await fetch("/api/vault/status", {
     credentials: "same-origin",
     cache: "no-store",
     signal: AbortSignal.timeout(4000),
@@ -73,39 +73,40 @@ function CopyButton({
       >
         {label}
       </Button>
-      <output className="pass-copy-message">{message}</output>
+      <output className="vault-copy-message">{message}</output>
     </>
   );
 }
 
-export function PassPage({ page }: { page: Page }) {
-  const origin = activeLayout().origins.pass;
+export function VaultPage({ page }: { page: Page }) {
+  const origin = activeLayout().origins.vault;
   return (
     <AppShell
-      product="pass"
+      product="vault"
+      productLabel="Esuno Vault"
       sidebar={
         <>
-          <p className="shell-nav-heading">Pass</p>
+          <p className="shell-nav-heading">Vault</p>
           <SidebarLink
-            to="/pass"
-            icon="pass"
+            to="/vault"
+            icon="vault"
             label="Overview"
             active={page === "home"}
           />
           <SidebarLink
-            to="/pass/generator"
+            to="/vault/generator"
             icon="sparkle"
             label="Generator"
             active={page === "generator"}
           />
           <SidebarLink
-            to="/pass/clients"
+            to="/vault/clients"
             icon="settings"
             label="Apps and extensions"
             active={page === "clients"}
           />
           <SidebarLink
-            to="/pass/aliases"
+            to="/vault/aliases"
             icon="mail"
             label="Aliases"
             active={page === "aliases"}
@@ -127,19 +128,19 @@ export function PassPage({ page }: { page: Page }) {
 }
 function Home({ origin }: { origin: string | undefined }) {
   const status = useQuery({
-    queryKey: ["pass-status"],
+    queryKey: ["vault-status"],
     queryFn: getStatus,
     refetchInterval: 30_000,
   });
   return (
-    <div className="content-wrap pass-content">
+    <div className="content-wrap vault-content">
       <div className="page-breadcrumb">
-        WORKSPACE <span>/</span> PASS
+        WORKSPACE <span>/</span> VAULT
       </div>
       <div className="page-header">
         <div>
           <p className="eyebrow">YOUR PASSWORD MANAGER</p>
-          <h1>Pass</h1>
+          <h1>Esuno Vault</h1>
           <p className="page-subtitle">Your vault, on your own server.</p>
         </div>
       </div>
@@ -148,21 +149,21 @@ function Home({ origin }: { origin: string | undefined }) {
           <div className="check-icon" aria-hidden="true">
             ◇
           </div>
-          <h2>Pass is not enabled</h2>
+          <h2>Vault is not enabled</h2>
           <p>
-            Ask your administrator to configure the Pass origin and start the
-            optional Pass profile. The generator is available on this device.
+            Ask your administrator to configure the Vault origin and start the
+            optional Vault profile. The generator is available on this device.
           </p>
           <p>
-            Operators: set PASS_PUBLIC_HOST and add the matching HTTPS origin as
-            pass= in AUTH_PRODUCT_ORIGINS, then start the Compose pass profile
-            and recreate the API. See docs/operations/pass.md on the server for
-            setup.
+            Operators: set VAULT_PUBLIC_HOST and add the matching HTTPS origin
+            as vault= in AUTH_PRODUCT_ORIGINS, then start the Compose vault
+            profile and recreate the API. See docs/operations/vault.md on the
+            server for setup.
           </p>
         </section>
       ) : (
         <>
-          <section className="pass-hero">
+          <section className="vault-hero">
             <div>
               <p className="eyebrow">YOUR VAULT</p>
               <h2>Everything in one secure place</h2>
@@ -178,8 +179,8 @@ function Home({ origin }: { origin: string | undefined }) {
             </div>
             <img src="/vault-mark.svg" alt="" />
           </section>
-          <section className="pass-card">
-            <div className="pass-status-head">
+          <section className="vault-card">
+            <div className="vault-status-head">
               <div>
                 <p className="eyebrow">CONNECTION STATUS</p>
                 <h2 aria-live="polite">
@@ -218,8 +219,8 @@ function Home({ origin }: { origin: string | undefined }) {
           </section>
         </>
       )}
-      <div className="checks-grid pass-cards">
-        <section className="pass-card">
+      <div className="checks-grid vault-cards">
+        <section className="vault-card">
           <div className="check-icon" aria-hidden="true">
             ◇
           </div>
@@ -229,24 +230,24 @@ function Home({ origin }: { origin: string | undefined }) {
             is never sent to Esuno.
           </p>
         </section>
-        <section className="pass-card">
+        <section className="vault-card">
           <div className="check-icon" aria-hidden="true">
             ↗
           </div>
-          <h2>Take Pass with you</h2>
+          <h2>Take Vault with you</h2>
           <p>
             Connect the official browser, desktop, mobile and CLI clients to
             your server.
           </p>
-          <Link className="pass-link" to="/pass/clients">
+          <Link className="vault-link" to="/vault/clients">
             Set up your clients →
           </Link>
         </section>
       </div>
-      <section className="pass-card pass-alias">
+      <section className="vault-card vault-alias">
         <h2>Hide-my-email aliases</h2>
         <p>Create addresses that forward to your mailbox.</p>
-        <Link className="pass-link" to="/pass/aliases">
+        <Link className="vault-link" to="/vault/aliases">
           Manage aliases →
         </Link>
       </section>
@@ -293,9 +294,9 @@ function Generator() {
     );
   }
   return (
-    <div className="content-wrap pass-content">
+    <div className="content-wrap vault-content">
       <div className="page-breadcrumb">
-        PASS <span>/</span> GENERATOR
+        VAULT <span>/</span> GENERATOR
       </div>
       <div className="page-header">
         <div>
@@ -306,10 +307,10 @@ function Generator() {
           </p>
         </div>
       </div>
-      <section className="pass-card pass-generator">
+      <section className="vault-card vault-generator">
         <fieldset>
           <legend>Type</legend>
-          <div className="pass-options">
+          <div className="vault-options">
             <label>
               <input
                 type="radio"
@@ -338,7 +339,7 @@ function Generator() {
         </fieldset>
         {mode === "password" ? (
           <>
-            <label className="pass-field">
+            <label className="vault-field">
               Length{" "}
               <input
                 type="number"
@@ -350,7 +351,7 @@ function Generator() {
             </label>
             <fieldset>
               <legend>Character classes</legend>
-              <div className="pass-options">
+              <div className="vault-options">
                 {classNames.map((name) => (
                   <label key={name}>
                     <input
@@ -372,7 +373,7 @@ function Generator() {
           </>
         ) : (
           <>
-            <label className="pass-field">
+            <label className="vault-field">
               Words{" "}
               <input
                 type="number"
@@ -382,7 +383,7 @@ function Generator() {
                 onChange={(event) => setCount(Number(event.target.value))}
               />
             </label>
-            <label className="pass-field">
+            <label className="vault-field">
               Separator{" "}
               <select
                 value={separator}
@@ -409,16 +410,16 @@ function Generator() {
           Generate
         </Button>
         {value && (
-          <div className="pass-result">
-            <label htmlFor="pass-generated">Generated {mode}</label>
+          <div className="vault-result">
+            <label htmlFor="vault-generated">Generated {mode}</label>
             <textarea
-              id="pass-generated"
+              id="vault-generated"
               value={value}
               readOnly
               rows={3}
               spellCheck={false}
             />
-            <div className="pass-result-actions">
+            <div className="vault-result-actions">
               <CopyButton value={value} clear label="Copy generated value" />
               <span>
                 Strength:{" "}
@@ -433,7 +434,7 @@ function Generator() {
             </div>
           </div>
         )}
-        <p className="pass-note">
+        <p className="vault-note">
           Generated values stay in this page. Clipboard clearing after 30
           seconds is best effort when this page has focus.
         </p>
@@ -443,9 +444,9 @@ function Generator() {
 }
 function Clients({ origin }: { origin: string | undefined }) {
   return (
-    <div className="content-wrap pass-content">
+    <div className="content-wrap vault-content">
       <div className="page-breadcrumb">
-        PASS <span>/</span> APPS AND EXTENSIONS
+        VAULT <span>/</span> APPS AND EXTENSIONS
       </div>
       <div className="page-header">
         <div>
@@ -456,7 +457,7 @@ function Clients({ origin }: { origin: string | undefined }) {
           </p>
         </div>
       </div>
-      <section className="pass-card">
+      <section className="vault-card">
         <h2>Server URL</h2>
         {origin ? (
           <>
@@ -464,20 +465,20 @@ function Clients({ origin }: { origin: string | undefined }) {
               In the client, open Settings → self-hosted and enter this server
               URL:
             </p>
-            <div className="pass-url">
+            <div className="vault-url">
               <code>{origin}</code>
               <CopyButton value={origin} label="Copy server URL" />
             </div>
           </>
         ) : (
           <p>
-            Pass is not enabled. Ask your administrator to configure the server
+            Vault is not enabled. Ask your administrator to configure the server
             URL.
           </p>
         )}
       </section>
-      <div className="checks-grid pass-cards">
-        <section className="pass-card">
+      <div className="checks-grid vault-cards">
+        <section className="vault-card">
           <h2>Browser extensions</h2>
           <p>
             Install the official Bitwarden extension. Before signing in, open
@@ -485,7 +486,7 @@ function Clients({ origin }: { origin: string | undefined }) {
             and save. Then sign in to your vault.
           </p>
         </section>
-        <section className="pass-card">
+        <section className="vault-card">
           <h2>Desktop</h2>
           <p>
             Open the official Bitwarden desktop app. Before signing in, open the
@@ -493,7 +494,7 @@ function Clients({ origin }: { origin: string | undefined }) {
             Then sign in to your vault.
           </p>
         </section>
-        <section className="pass-card">
+        <section className="vault-card">
           <h2>Android</h2>
           <p>
             Install the official Bitwarden app. On the sign-in screen, choose
@@ -501,7 +502,7 @@ function Clients({ origin }: { origin: string | undefined }) {
             save, then sign in.
           </p>
         </section>
-        <section className="pass-card">
+        <section className="vault-card">
           <h2>iOS</h2>
           <p>
             Install the official Bitwarden app. On the sign-in screen, choose
@@ -509,7 +510,7 @@ function Clients({ origin }: { origin: string | undefined }) {
             save, then sign in.
           </p>
         </section>
-        <section className="pass-card">
+        <section className="vault-card">
           <h2>CLI</h2>
           <p>
             Install the official Bitwarden CLI. Run{" "}

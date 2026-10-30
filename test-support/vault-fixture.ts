@@ -6,7 +6,7 @@ import { z } from "zod";
 const run = promisify(execFile);
 const ipNumber = (ip: string) =>
   ip.split(".").reduce((value, part) => value * 256 + Number(part), 0);
-export function createPassFixture(label: string) {
+export function createVaultFixture(label: string) {
   const suffix = (process.env["OPENSUITE_RUN_ID"] ?? "local")
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
@@ -23,16 +23,16 @@ export function createPassFixture(label: string) {
     DRIVE_S3_REGION: "fixture",
     DRIVE_S3_ACCESS_KEY: "fixture",
     DRIVE_S3_SECRET_FILE: "/dev/null",
-    PASS_PUBLIC_HOST: "pass.localhost",
-    PASS_ADMIN_TOKEN_FILE: "/dev/null",
-    PASS_ALLOW_SAVED_SIGNUPS: "false",
-    PASS_CADDY_IP: `10.239.${String(octet)}.2`,
-    PASS_TEST_DOMAIN: "https://pass.localhost",
-    PASS_SIGNUPS_ALLOWED: "false",
-    PASS_INVITATIONS_ALLOWED: "true",
-    PASS_SMTP_HOST: "",
-    PASS_TEST_API_SUBNET: `10.240.${String(octet)}.0/24`,
-    PASS_TEST_API_IP: `10.240.${String(octet)}.2`,
+    VAULT_PUBLIC_HOST: "vault.localhost",
+    VAULT_ADMIN_TOKEN_FILE: "/dev/null",
+    VAULT_ALLOW_SAVED_SIGNUPS: "false",
+    VAULT_CADDY_IP: `10.239.${String(octet)}.2`,
+    VAULT_TEST_DOMAIN: "https://vault.localhost",
+    VAULT_SIGNUPS_ALLOWED: "false",
+    VAULT_INVITATIONS_ALLOWED: "true",
+    VAULT_SMTP_HOST: "",
+    VAULT_TEST_API_SUBNET: `10.240.${String(octet)}.0/24`,
+    VAULT_TEST_API_IP: `10.240.${String(octet)}.2`,
     API_PROXY_CADDY_IP: `10.240.${String(octet)}.2`,
     API_PROXY_API_IP: `10.240.${String(octet)}.3`,
     MAIL_MANAGEMENT_SUBNET: `10.238.${String(octet)}.0/24`,
@@ -42,12 +42,12 @@ export function createPassFixture(label: string) {
     MAIL_MANAGEMENT_OPS_IP: `10.238.${String(octet)}.22`,
     MAIL_MANAGEMENT_BACKUP_IP: `10.238.${String(octet)}.23`,
     MAIL_MANAGEMENT_BOOTSTRAP_IP: `10.238.${String(octet)}.24`,
-    PASS_TEST_SUBNET: `10.239.${String(octet)}.0/24`,
-    PASS_TEST_DYNAMIC_RANGE: `10.239.${String(octet)}.128/25`,
-    PASS_TEST_PROXY_IP: `10.239.${String(octet)}.2`,
+    VAULT_TEST_SUBNET: `10.239.${String(octet)}.0/24`,
+    VAULT_TEST_DYNAMIC_RANGE: `10.239.${String(octet)}.128/25`,
+    VAULT_TEST_PROXY_IP: `10.239.${String(octet)}.2`,
   };
   // Select unused /24s from Docker's current IPAM allocations for the API,
-  // Pass proxy and management networks used by disposable fixtures.
+  // Vault proxy and management networks used by disposable fixtures.
   const chooseSubnets = async () => {
     const ids = (await run("docker", ["network", "ls", "-q"])).stdout
       .trim()
@@ -88,13 +88,13 @@ export function createPassFixture(label: string) {
           ranges.every(({ start, end }) => base > end || base + 255 < start),
         )
       ) {
-        env.PASS_TEST_SUBNET = `10.239.${String(candidate)}.0/24`;
-        env.PASS_TEST_DYNAMIC_RANGE = `10.239.${String(candidate)}.128/25`;
-        env.PASS_TEST_PROXY_IP = `10.239.${String(candidate)}.2`;
-        env.PASS_CADDY_IP = env.PASS_TEST_PROXY_IP;
-        env.PASS_TEST_API_SUBNET = `10.240.${String(candidate)}.0/24`;
-        env.PASS_TEST_API_IP = `10.240.${String(candidate)}.2`;
-        env.API_PROXY_CADDY_IP = env.PASS_TEST_API_IP;
+        env.VAULT_TEST_SUBNET = `10.239.${String(candidate)}.0/24`;
+        env.VAULT_TEST_DYNAMIC_RANGE = `10.239.${String(candidate)}.128/25`;
+        env.VAULT_TEST_PROXY_IP = `10.239.${String(candidate)}.2`;
+        env.VAULT_CADDY_IP = env.VAULT_TEST_PROXY_IP;
+        env.VAULT_TEST_API_SUBNET = `10.240.${String(candidate)}.0/24`;
+        env.VAULT_TEST_API_IP = `10.240.${String(candidate)}.2`;
+        env.API_PROXY_CADDY_IP = env.VAULT_TEST_API_IP;
         env.API_PROXY_API_IP = `10.240.${String(candidate)}.3`;
         const management = `10.238.${String(candidate)}`;
         env.MAIL_MANAGEMENT_SUBNET = `${management}.0/24`;
@@ -114,7 +114,7 @@ export function createPassFixture(label: string) {
     "--project-name",
     project,
     "--profile",
-    "pass",
+    "vault",
     "--env-file",
     "deploy/env.example",
     "-f",
@@ -122,7 +122,7 @@ export function createPassFixture(label: string) {
     "-f",
     "compose.test.yaml",
     "-f",
-    "test-support/pass-compose.yaml",
+    "test-support/vault-compose.yaml",
   ];
   const compose = async (...command: string[]) =>
     (

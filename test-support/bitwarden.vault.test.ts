@@ -25,7 +25,7 @@ import { argon2id } from "@noble/hashes/argon2";
 import { chromium, type BrowserContext } from "@playwright/test";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { z } from "zod";
-import { createPassFixture } from "./pass-fixture.js";
+import { createVaultFixture } from "./vault-fixture.js";
 
 const run = promisify(execFile);
 const id = randomBytes(5).toString("hex");
@@ -34,14 +34,14 @@ const {
   args: composeArgs,
   compose,
   chooseSubnets,
-} = createPassFixture("bw");
+} = createVaultFixture("bw");
 const secret = () => randomBytes(24).toString("base64url");
 const b64 = (b: Uint8Array) =>
   Buffer.from(b).toString("base64").replace(/=+$/, "");
 const adminPassword = secret();
 const masterPassword = secret();
 const emails = [`a-${id}@example.invalid`, `b-${id}@example.invalid`];
-const marker = `pass-marker-${secret()}`;
+const marker = `vault-marker-${secret()}`;
 const seed = randomBytes(20);
 const seedBase32 =
   [...seed]
@@ -127,7 +127,7 @@ const request = (
       {
         hostname: "127.0.0.1",
         port: target.port,
-        servername: "pass.localhost",
+        servername: "vault.localhost",
         ca,
         path,
         method: options.method ?? "GET",
@@ -211,7 +211,7 @@ async function register(
       locale: "en-US",
       args: [
         `--ignore-certificate-errors-spki-list=${pin}`,
-        "--host-resolver-rules=MAP pass.localhost 127.0.0.1",
+        "--host-resolver-rules=MAP vault.localhost 127.0.0.1",
       ],
       env: {
         ...process.env,
@@ -318,11 +318,11 @@ async function register(
   context = undefined;
 }
 
-describe("Bitwarden CLI against Pass", () => {
+describe("Bitwarden CLI against Vault", () => {
   beforeAll(async () => {
     try {
       await chooseSubnets();
-      temp = await mkdtemp(join(tmpdir(), "opensuite-pass-"));
+      temp = await mkdtemp(join(tmpdir(), "opensuite-vault-"));
       privateDir = join(temp, "private");
       await mkdir(privateDir, { mode: 0o700 });
       homes[0] = join(temp, "user-a");
@@ -344,7 +344,7 @@ describe("Bitwarden CLI against Pass", () => {
         `$argon2id$v=19$m=19456,t=2,p=1$${b64(salt)}$${b64(hash)}`,
         { mode: 0o644 },
       );
-      Object.assign(env, { PASS_ADMIN_TOKEN_FILE: adminFile });
+      Object.assign(env, { VAULT_ADMIN_TOKEN_FILE: adminFile });
       await compose(
         "up",
         "-d",
@@ -357,10 +357,10 @@ describe("Bitwarden CLI against Pass", () => {
       const getPort = async (service: string, port: string) =>
         /:(\d+)\s*$/.exec(await compose("port", service, port))?.[1] ?? "";
       const port = await getPort("caddy", "443");
-      origin = `https://pass.localhost:${port}`;
-      env.PASS_TEST_DOMAIN = origin;
-      await compose("up", "-d", "--wait", "--wait-timeout", "180", "pass");
-      direct = await getPort("pass", "8080");
+      origin = `https://vault.localhost:${port}`;
+      env.VAULT_TEST_DOMAIN = origin;
+      await compose("up", "-d", "--wait", "--wait-timeout", "180", "vault");
+      direct = await getPort("vault", "8080");
       ca = await compose(
         "exec",
         "-T",
@@ -376,7 +376,7 @@ describe("Bitwarden CLI against Pass", () => {
           {
             host: "127.0.0.1",
             port: Number(port),
-            servername: "pass.localhost",
+            servername: "vault.localhost",
             ca,
           },
           () => {
@@ -542,7 +542,7 @@ describe("Bitwarden CLI against Pass", () => {
   test("encrypted data and attachment persist across restart and re-login", async () => {
     await bw(0, ["logout"]);
     sessions[0] = "";
-    await compose("restart", "pass");
+    await compose("restart", "vault");
     await compose(
       "up",
       "-d",
@@ -550,7 +550,7 @@ describe("Bitwarden CLI against Pass", () => {
       "--wait",
       "--wait-timeout",
       "180",
-      "pass",
+      "vault",
     );
     sessions[0] = await bw(0, [
       "login",
@@ -703,7 +703,7 @@ describe("Bitwarden CLI against Pass", () => {
       "-U",
       "opensuite",
       "-d",
-      "opensuite_pass",
+      "opensuite_vault",
     );
     expect(dump).toContain(itemId);
     expect(dump).not.toContain(marker);
@@ -713,7 +713,7 @@ describe("Bitwarden CLI against Pass", () => {
         ...composeArgs,
         "exec",
         "-T",
-        "pass",
+        "vault",
         "tar",
         "-C",
         "/data",
@@ -733,13 +733,13 @@ describe("Bitwarden CLI against Pass", () => {
       paths.every((path) => archive.stdout.includes(Buffer.from(path))),
     ).toBe(true);
     expect(archive.stdout.includes(Buffer.from(marker))).toBe(false);
-    for (const service of ["pass", "caddy"])
+    for (const service of ["vault", "caddy"])
       expect(await compose("logs", "--no-color", service)).not.toContain(
         marker,
       );
   }
 
-  test("plaintext marker is absent from database, Pass volume and logs", async () => {
+  test("plaintext marker is absent from database, Vault volume and logs", async () => {
     expect(attachmentId).toBeTruthy();
     await scanStorage();
   }, 120_000);

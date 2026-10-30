@@ -15,8 +15,8 @@ const timeoutFetcher: typeof fetch = (_url, init) =>
   });
 let app: FastifyInstance | undefined;
 async function start(
-  passOrigin?: string,
-  passStatusOptions?: ServerDependencies["passStatusOptions"],
+  vaultOrigin?: string,
+  vaultStatusOptions?: ServerDependencies["vaultStatusOptions"],
   identity?: ServerDependencies["identity"],
 ) {
   app = await buildServer({
@@ -29,8 +29,8 @@ async function start(
     }),
     monotonicMs: () => performance.now(),
     ...(identity ? { identity } : {}),
-    ...(passOrigin ? { passOrigin } : {}),
-    ...(passStatusOptions ? { passStatusOptions } : {}),
+    ...(vaultOrigin ? { vaultOrigin } : {}),
+    ...(vaultStatusOptions ? { vaultStatusOptions } : {}),
   });
   return app;
 }
@@ -38,12 +38,16 @@ afterEach(async () => {
   await app?.close();
   app = undefined;
 });
-describe("Pass status", () => {
+describe("Vault status", () => {
+  it("does not expose the former status route", async () => {
+    const server = await start();
+    expect((await server.inject("/pass/status")).statusCode).toBe(404);
+  });
   it("reports disabled without contacting a vault", async () => {
     const fetcher = vi.fn<typeof fetch>();
     const response = await (
       await start(undefined, { fetcher })
-    ).inject("/pass/status");
+    ).inject("/vault/status");
     expect(response.json()).toEqual({
       enabled: false,
       reachable: false,
@@ -71,14 +75,14 @@ describe("Pass status", () => {
         ),
     };
     const server = await start(
-      "https://pass.example.test",
+      "https://vault.example.test",
       { fetcher },
       identity,
     );
-    const anonymous = await server.inject("/pass/status");
+    const anonymous = await server.inject("/vault/status");
     expect(anonymous.json()).toEqual({ enabled: true, reachable: true });
     const response = await server.inject({
-      url: "/pass/status",
+      url: "/vault/status",
       headers: { cookie: "session=valid" },
     });
     expect(response.statusCode).toBe(200);
@@ -88,26 +92,26 @@ describe("Pass status", () => {
       reachable: true,
       version: "1.37.4",
     });
-    expect((await server.inject("/pass/status")).json()).not.toHaveProperty(
+    expect((await server.inject("/vault/status")).json()).not.toHaveProperty(
       "version",
     );
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(fetcher.mock.calls.map(([url]) => urlText(url)).toSorted()).toEqual([
-      "https://pass.example.test/alive",
-      "https://pass.example.test/api/config",
+      "https://vault.example.test/alive",
+      "https://vault.example.test/api/config",
     ]);
     for (const [, init] of fetcher.mock.calls)
       expect(init).toMatchObject({ redirect: "error", credentials: "omit" });
     expect((await server.inject("/origins")).json()).toEqual({
-      pass: "https://pass.example.test",
+      vault: "https://vault.example.test",
     });
   });
   it("keeps reachability when the version endpoint fails", async () => {
     const response = await (
-      await start("https://pass.example.test", {
+      await start("https://vault.example.test", {
         fetcher: configFailureFetcher,
       })
-    ).inject("/pass/status");
+    ).inject("/vault/status");
     expect(response.json()).toMatchObject({
       enabled: true,
       reachable: true,
@@ -121,17 +125,17 @@ describe("Pass status", () => {
           ? new Response("ok")
           : new Response(new ReadableStream({ cancel }), { status: 503 }),
       );
-    const server = await start("https://pass.example.test", { fetcher });
-    expect((await server.inject("/pass/status")).statusCode).toBe(200);
+    const server = await start("https://vault.example.test", { fetcher });
+    expect((await server.inject("/vault/status")).statusCode).toBe(200);
     expect(cancel).toHaveBeenCalledOnce();
   });
   it("times out an unreachable vault without affecting readiness", async () => {
-    const server = await start("https://pass.example.test", {
+    const server = await start("https://vault.example.test", {
       fetcher: timeoutFetcher,
       timeoutMs: 30,
     });
     const started = Date.now();
-    const response = await server.inject("/pass/status");
+    const response = await server.inject("/vault/status");
     expect(Date.now() - started).toBeLessThan(1000);
     expect(response.json()).toMatchObject({
       enabled: true,
