@@ -52,12 +52,20 @@ services:
         chown 2000:1000 /setup-status
         chmod 0775 /setup-status
         generate drive-database 999
+        generate pass-database 999
+        chown 999:1000 /secrets/pass-database /secrets/pass-database/password
+        chmod 0550 /secrets/pass-database
+        chmod 0440 /secrets/pass-database/password
+        mkdir -p /pass-data
+        chown -R 1000:1000 /pass-data
+        chmod 0700 /pass-data
         chown 999:1000 /secrets/app-database /secrets/app-database/password
         chmod 0550 /secrets/app-database
         chmod 0440 /secrets/app-database/password
     volumes:
       - secrets:/secrets
       - setup-status:/setup-status
+      - vaultwarden-data:/pass-data
     network_mode: none
 
   caddy:
@@ -66,6 +74,8 @@ services:
       default:
       api-proxy:
         ipv4_address: 172.28.254.2
+      pass-network:
+        ipv4_address: ${PASS_CADDY_IP:-172.28.253.2}
     image: caddy:2.11.7@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8
     entrypoint: ["/bin/sh", "-ec"]
     command:
@@ -74,6 +84,7 @@ services:
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     environment:
       OPENSUITE_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
+      PASS_SITE_ADDRESS: ${PASS_PUBLIC_HOST:-pass.localhost}
       MAIL_MANAGEMENT_SUBNET: ${MAIL_MANAGEMENT_SUBNET:-172.30.248.0/24}
     ports:
       - "${HTTP_PORT:-80}:80"
@@ -315,6 +326,7 @@ services:
 
   postgres:
     <<: *restart
+    networks: [default, pass-network]
     image: postgres:18.6@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-opensuite}
@@ -338,6 +350,115 @@ services:
       start_period: 20s
     depends_on:
       secrets:
+        condition: service_completed_successfully
+
+  # Provisioning is separate from initdb so upgrades of existing volumes work.
+  pass-provision:
+    profiles: [pass]
+    image: postgres:18.6@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+    logging: *logging
+    networks: [pass-network]
+    user: "999:999"
+    entrypoint: ["/bin/sh", "/opt/opensuite/provision.sh"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opensuite}
+      POSTGRES_DB: ${POSTGRES_DB:-opensuite}
+      POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
+    volumes:
+      - ./deploy/vaultwarden/provision.sh:/opt/opensuite/provision.sh:ro
+      - type: volume
+        source: secrets
+        target: /run/opensuite/postgres
+        read_only: true
+        volume:
+          subpath: postgres
+      - type: volume
+        source: secrets
+        target: /run/opensuite/pass-database
+        read_only: true
+        volume:
+          subpath: pass-database
+    depends_on:
+      postgres:
+        condition: service_healthy
+      secrets:
+        condition: service_completed_successfully
+
+  pass:
+    profiles: [pass]
+    <<: *restart
+    image: ${PASS_IMAGE:-vaultwarden/server:1.37.4@sha256:efb3cde962015fcc036b2ea625242248611943b27212ebf4392841fb30fad055}
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,mode=1777"]
+    entrypoint: ["/bin/sh", "/opt/opensuite/start.sh"]
+    environment:
+      DOMAIN: https://${PASS_PUBLIC_HOST:-pass.localhost}
+      PASS_PUBLIC_HOST: ${PASS_PUBLIC_HOST:-pass.localhost}
+      PASS_MAIN_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
+      PASS_HTTPS_PORT: ${HTTPS_PORT:-443}
+      ROCKET_PORT: 8080
+      ORG_CREATION_USERS: ${PASS_ORG_CREATION_USERS:-none}
+      SIGNUPS_ALLOWED: ${PASS_SIGNUPS_ALLOWED:-false}
+      INVITATIONS_ALLOWED: ${PASS_INVITATIONS_ALLOWED:-true}
+      IP_HEADER: X-Real-IP
+      IP_HEADER_TRUSTED_PROXIES: ${PASS_CADDY_IP:-172.28.253.2}
+      LOGIN_RATELIMIT_SECONDS: ${PASS_LOGIN_RATELIMIT_SECONDS:-60}
+      LOGIN_RATELIMIT_MAX_BURST: ${PASS_LOGIN_RATELIMIT_MAX_BURST:-10}
+      ADMIN_RATELIMIT_SECONDS: ${PASS_ADMIN_RATELIMIT_SECONDS:-300}
+      ADMIN_RATELIMIT_MAX_BURST: ${PASS_ADMIN_RATELIMIT_MAX_BURST:-3}
+      LOG_LEVEL: warn
+      EXTENDED_LOGGING: "false"
+      PASS_ALLOW_SAVED_SIGNUPS: ${PASS_ALLOW_SAVED_SIGNUPS:-false}
+      PASS_SMTP_HOST: ${PASS_SMTP_HOST:-}
+      PASS_SMTP_FROM: ${PASS_SMTP_FROM:-}
+      PASS_SMTP_PORT: ${PASS_SMTP_PORT:-2587}
+      PASS_SMTP_SECURITY: ${PASS_SMTP_SECURITY:-starttls}
+      PASS_SMTP_USERNAME: ${PASS_SMTP_USERNAME:-}
+      PASS_PUSH_ENABLED: ${PASS_PUSH_ENABLED:-false}
+      PASS_PUSH_INSTALLATION_ID: ${PASS_PUSH_INSTALLATION_ID:-}
+      PASS_PUSH_RELAY_URI: ${PASS_PUSH_RELAY_URI:-https://push.bitwarden.com}
+      PASS_PUSH_IDENTITY_URI: ${PASS_PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
+    ports:
+      - "127.0.0.1:${PASS_ADMIN_PORT:-8081}:8080"
+    volumes:
+      - vaultwarden-data:/data
+      - ./deploy/vaultwarden/start.sh:/opt/opensuite/start.sh:ro
+      - type: volume
+        source: secrets
+        target: /run/opensuite/pass-database
+        read_only: true
+        volume:
+          subpath: pass-database
+      - type: bind
+        source: ${PASS_ADMIN_TOKEN_FILE:-/dev/null}
+        target: /run/opensuite/pass-admin-token
+        read_only: true
+      - type: bind
+        source: ${PASS_SMTP_SECRET_FILE:-/dev/null}
+        target: /run/opensuite/pass-smtp-secret
+        read_only: true
+      - type: bind
+        source: ${PASS_PUSH_KEY_FILE:-/dev/null}
+        target: /run/opensuite/pass-push-key
+        read_only: true
+    networks:
+      pass-network:
+        aliases: [pass-vault]
+    healthcheck:
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      secrets:
+        condition: service_completed_successfully
+      pass-provision:
         condition: service_completed_successfully
 
   # Apply versioned migrations before starting the API.
@@ -523,6 +644,11 @@ services:
       start_period: 20s
 
 networks:
+  pass-network:
+    ipam:
+      config:
+        - subnet: ${PASS_NETWORK_SUBNET:-172.28.253.0/24}
+          ip_range: ${PASS_NETWORK_IP_RANGE:-172.28.253.128/25}
   api-proxy:
     internal: true
     ipam:
@@ -539,5 +665,6 @@ volumes:
   caddy-config:
   postgres-data:
   stalwart-data:
+  vaultwarden-data:
   localstack-data:
   setup-status:
