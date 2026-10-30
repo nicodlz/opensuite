@@ -13,6 +13,9 @@ const products: AppProduct[] = ["mail", "drive", "calendar"];
 /** Paths that only exist on the sign-in (mail) origin. */
 const hubPaths = [
   "/login",
+  "/settings",
+  "/subscribe",
+  "/welcome",
   "/status",
   "/setup",
   "/domains",

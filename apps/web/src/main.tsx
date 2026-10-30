@@ -32,6 +32,8 @@ import { CallbackPage, HandoffPage, startHandoff } from "./auth/handoff.tsx";
 import { activeLayout, redirectFor, rewriteFor } from "./origins.ts";
 import { MailPage } from "./mail/mail-page.tsx";
 import { getHealth, getReadiness } from "./api.ts";
+import { BillingSettings } from "./billing/settings.tsx";
+import { SubscribePage, WelcomePage } from "./billing/public.tsx";
 import {
   AppShell,
   SidebarItem,
@@ -442,6 +444,25 @@ const loginRoute = createRoute({
   path: "/login",
   component: LoginPage,
 });
+const billingSettingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/billing",
+  component: () => (
+    <Protected>
+      <BillingSettings />
+    </Protected>
+  ),
+});
+const subscribeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/subscribe",
+  component: SubscribePage,
+});
+const welcomeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/welcome",
+  component: WelcomePage,
+});
 const mailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mail",
@@ -563,6 +584,9 @@ const router = createRouter({
     handoffRoute,
     callbackRoute,
     loginRoute,
+    billingSettingsRoute,
+    subscribeRoute,
+    welcomeRoute,
     mailRoute,
     calendarRoute,
     contactsRoute,

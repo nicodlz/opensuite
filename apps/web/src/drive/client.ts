@@ -67,9 +67,10 @@ const live: Transport = {
   put,
   preview: (id) => `/drive/api/v1/preview/${encodeURIComponent(id)}`,
 };
-export const driveTransport: Transport = import.meta.env.DEV
-  ? (await import("../dev-data/drive.ts")).fakeDriveTransport
-  : live;
+export const driveTransport: Transport =
+  import.meta.env.DEV && sessionStorage.getItem("drive-fixture-live") !== "1"
+    ? (await import("../dev-data/drive.ts")).fakeDriveTransport
+    : live;
 export async function command(input: DriveCommand) {
   return DriveOutputSchema.parse(
     await driveTransport.command(DriveCommandSchema.parse(input)),

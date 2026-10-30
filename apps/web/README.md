@@ -13,3 +13,5 @@ Email HTML is sanitized and displayed in a sandboxed iframe. Remote images requi
 Run browser tests with `pnpm build && pnpm test:e2e`. Playwright starts the development server for synthetic mail and a local API on port 3199 for status tests. It checks the built production assets for fixture exclusion. Install Chromium with `pnpm exec playwright install chromium` if needed. The appearance preference and workspace label are stored in this browser.
 
 Drive uploads use presigned object-storage URLs, so the SPA CSP permits HTTP(S) connections in addition to same-origin API requests. Configure the object store’s CORS policy for the application origin.
+
+Billing also uses development-only synthetic data. Set `sessionStorage.setItem("billing-fixture", "plus")` in the browser and reload to try an active Cloud plan; other scenarios are `past_due`, `over_quota`, and `no_plan`. With no fixture selected, the app shows self-hosted mode. Set the value to `live` to use the real billing API instead. Synthetic checkout and portal actions return to the workspace without contacting Stripe.

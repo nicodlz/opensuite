@@ -16,6 +16,9 @@ import {
   type DragEvent as ReactDragEvent,
   type FormEvent,
 } from "react";
+import { billingQuery } from "../billing/client.ts";
+import { bytes, usageState } from "../billing/model.ts";
+import { activeLayout, hubHref } from "../origins.ts";
 import { AppShell, SidebarItem } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
@@ -268,6 +271,10 @@ function FolderTree({
 
 export function DrivePage() {
   const queryClient = useQueryClient();
+  const billingOverview = useQuery(billingQuery);
+  const storage = billingOverview.data?.storage;
+  const settingsHref = hubHref(activeLayout(), "/settings/billing");
+  const [quotaError, setQuotaError] = useState(false);
   const [place, setPlace] = useState<Place>("drive");
   const [path, setPath] = useState<Crumb[]>([root]);
   const [view, setView] = useState<"list" | "grid">("list");
@@ -654,6 +661,8 @@ export function DrivePage() {
     const affected = new Set<string | null>();
     const finished: UploadJob[] = [];
     const failed: string[] = [];
+    let quotaExceeded = false;
+    setQuotaError(false);
     let uploadedFiles = 0;
     try {
       const next = async (): Promise<void> => {
@@ -689,12 +698,19 @@ export function DrivePage() {
           },
           upload: async (file, fileParent) => {
             affected.add(fileParent);
-            await uploadFile(
-              file,
-              fileParent,
-              abort.signal,
-              (phase, progress) => setTransfer({ ...current, phase, progress }),
-            );
+            try {
+              await uploadFile(
+                file,
+                fileParent,
+                abort.signal,
+                (phase, progress) =>
+                  setTransfer({ ...current, phase, progress }),
+              );
+            } catch (error) {
+              if (error instanceof Error && error.message === "Quota exceeded")
+                quotaExceeded = true;
+              throw error;
+            }
           },
         });
         uploadedFiles += result.uploaded;
@@ -717,6 +733,7 @@ export function DrivePage() {
           ? `Uploaded ${plural(files, "file")} in ${plural(created, "folder")}${label}.`
           : `${files === 1 ? "File" : "Files"} uploaded${label}.`;
       const shown = failed.slice(0, 5).join(", ");
+      setQuotaError(quotaExceeded);
       setNotice(
         failed.length === 0
           ? done
@@ -735,6 +752,7 @@ export function DrivePage() {
       controller.current = null;
       setTransfer(null);
       await invalidate([...affected].map((id) => listKey("drive", id)));
+      void queryClient.invalidateQueries({ queryKey: billingQuery.queryKey });
     }
   }
   function uploadFiles(files: File[], plan?: UploadPlan) {
@@ -1122,8 +1140,25 @@ export function DrivePage() {
             </div>
             <div className="drive-storage">
               <p className="shell-nav-heading">Storage</p>
-              <strong>Quota unavailable</strong>
-              <small>Storage usage is not provided by the server.</small>
+              {storage?.measured ? (
+                <>
+                  <strong>
+                    {bytes(storage.usedBytes)} used
+                    {storage.quotaBytes !== null
+                      ? ` of ${bytes(storage.quotaBytes)}`
+                      : ""}
+                  </strong>
+                  <small>
+                    Drive {bytes(storage.driveBytes)} · Mail{" "}
+                    {bytes(storage.mailBytes)}
+                  </small>
+                </>
+              ) : (
+                <strong>Usage temporarily unavailable</strong>
+              )}
+              <a className="drive-billing-link" href={settingsHref}>
+                Plan &amp; storage
+              </a>
             </div>
           </>
         }
@@ -1145,6 +1180,23 @@ export function DrivePage() {
       >
         <div className="drive-page">
           {menuAnchor("main")}
+          {storage && usageState(storage) === "over" && (
+            <output className="billing-warning drive-billing-banner">
+              Storage quota reached: new uploads and incoming mail are paused;
+              nothing is deleted.{" "}
+              <a className="drive-billing-link" href={settingsHref}>
+                Plan &amp; storage
+              </a>
+            </output>
+          )}
+          {quotaError && (
+            <div className="billing-warning drive-billing-banner" role="alert">
+              Storage quota exceeded. Your upload could not be completed.{" "}
+              <a className="drive-billing-link" href={settingsHref}>
+                Review plan &amp; storage
+              </a>
+            </div>
+          )}
           <div className="drive-header">
             <nav aria-label="Breadcrumb" hidden={path.length === 1}>
               <ol className="drive-breadcrumbs">

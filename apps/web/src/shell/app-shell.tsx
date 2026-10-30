@@ -335,6 +335,11 @@ export function AppShell({
                     Notification settings
                   </DropdownItem>
                 )}
+                <DropdownItem className="menu-item" asChild>
+                  <a href={hubHref(activeLayout(), "/settings/billing")}>
+                    Plan &amp; storage
+                  </a>
+                </DropdownItem>
                 <AppearanceItems />
               </AccountMenu>
             ) : (
