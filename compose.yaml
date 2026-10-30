@@ -142,7 +142,19 @@ services:
       AUTH_SECRET_FILE: /run/opensuite/auth/password
       MAILBOX_KEY_FILE: /run/opensuite/mailbox-key/password
       STALWART_MANAGEMENT_PASSWORD_FILE: /run/opensuite/stalwart-management/password
+      DOMAINS_SES_ENABLED: ${DOMAINS_SES_ENABLED:-}
+      DOMAINS_SES_RULE: ${DOMAINS_SES_RULE:-}
+      DOMAINS_SES_ENDPOINT: ${DOMAINS_SES_ENDPOINT:-}
+      DOMAINS_SES_CREDENTIALS_FILE: ${DOMAINS_SES_CREDENTIALS_FILE:+/run/opensuite/domain-ses-credentials}
+      DOMAINS_STALWART_ORIGIN: ${DOMAINS_STALWART_ORIGIN:-}
+      DOMAINS_STALWART_USER: ${DOMAINS_STALWART_USER:-}
+      DOMAINS_STALWART_PASSWORD_FILE: ${DOMAINS_STALWART_PASSWORD_FILE:-}
+      DOMAINS_CHECK_INTERVAL_SECONDS: ${DOMAINS_CHECK_INTERVAL_SECONDS:-}
     volumes:
+      - type: bind
+        source: ${DOMAINS_SES_CREDENTIALS_FILE:-/dev/null}
+        target: /run/opensuite/domain-ses-credentials
+        read_only: true
       - type: volume
         source: secrets
         target: /run/opensuite/app-database

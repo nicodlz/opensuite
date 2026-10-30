@@ -22,6 +22,11 @@ export function createSesDomainProvider(config: {
   enabled: boolean;
   ruleName: string;
   endpoint?: string;
+  credentials?: {
+    accessKeyId: string;
+    secretAccessKey: string;
+    sessionToken?: string;
+  };
 }): DomainProvider | undefined {
   if (!config.enabled) return undefined;
   if (!config.ruleName.trim())
@@ -29,6 +34,9 @@ export function createSesDomainProvider(config: {
   const options = {
     region: "eu-north-1",
     ...(config.endpoint === undefined ? {} : { endpoint: config.endpoint }),
+    ...(config.credentials === undefined
+      ? {}
+      : { credentials: config.credentials }),
   };
   const ses = new SESClient(options);
   const sesv2 = new SESv2Client(options);
@@ -37,20 +45,29 @@ export function createSesDomainProvider(config: {
     async ensure(name) {
       const result = await ResultAsync.fromPromise(
         (async () => {
+          let identity;
           try {
-            await sesv2.send(
-              new CreateEmailIdentityCommand({ EmailIdentity: name }),
+            identity = await sesv2.send(
+              new GetEmailIdentityCommand({ EmailIdentity: name }),
             );
           } catch (error) {
-            if (
-              !(error instanceof Error) ||
-              error.name !== "AlreadyExistsException"
-            )
+            if (!(error instanceof Error) || error.name !== "NotFoundException")
               throw error;
+            try {
+              await sesv2.send(
+                new CreateEmailIdentityCommand({ EmailIdentity: name }),
+              );
+            } catch (createError) {
+              if (
+                !(createError instanceof Error) ||
+                createError.name !== "AlreadyExistsException"
+              )
+                throw createError;
+            }
+            identity = await sesv2.send(
+              new GetEmailIdentityCommand({ EmailIdentity: name }),
+            );
           }
-          const identity = await sesv2.send(
-            new GetEmailIdentityCommand({ EmailIdentity: name }),
-          );
           const token = await ses.send(
             new VerifyDomainIdentityCommand({ Domain: name }),
           );
@@ -86,6 +103,10 @@ export function createSesDomainProvider(config: {
           throw new Error(
             "receipt rule must be enabled and restricted to recipients",
           );
+        const present = rule.Recipients.some(
+          (item) => item.toLowerCase() === name.toLowerCase(),
+        );
+        if (present === add) return true;
         const recipients = rule.Recipients.filter(
           (item) => item.toLowerCase() !== name.toLowerCase(),
         );
