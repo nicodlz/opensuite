@@ -29,13 +29,7 @@ import { ORPCError } from "@orpc/client";
 import { AuthError } from "./auth/client.ts";
 import { LoginPage, Protected, expireSession } from "./auth/components.tsx";
 import { CallbackPage, HandoffPage, startHandoff } from "./auth/handoff.tsx";
-import {
-  loadOrigins,
-  redirectFor,
-  resolveLayout,
-  rewriteFor,
-  setActiveLayout,
-} from "./origins.ts";
+import { activeLayout, redirectFor, rewriteFor } from "./origins.ts";
 import { MailPage } from "./mail/mail-page.tsx";
 import { getHealth, getReadiness } from "./api.ts";
 import {
@@ -50,9 +44,8 @@ import { useKeyboardShortcut } from "./ui/keyboard-shortcut.ts";
 import { TextField } from "./ui/text-field.tsx";
 import { Toast, ToastProvider } from "./ui/toast.tsx";
 
-// Each application may have its own origin; decide routing before render.
-const layout = resolveLayout(await loadOrigins(), window.location.origin);
-setActiveLayout(layout);
+// The bootstrap has already resolved the origin and selected app metadata.
+const layout = activeLayout();
 const moved = redirectFor(
   layout,
   window.location.pathname,
