@@ -3,7 +3,7 @@ import { err, ok, type Result } from "neverthrow";
 import {
   parseNotification,
   resolveRecipients,
-  verdictPolicy,
+  quarantineReason,
 } from "../domain/notification.ts";
 import type {
   Failure,
@@ -86,7 +86,9 @@ export class IngestService {
     };
     let firstFailure: Failure | undefined;
     const uploads = new Map<string, string>();
-    const quarantine = verdictPolicy(n) === "quarantine";
+    // Logged with each import, so operators can see why mail went to Junk.
+    const reason = quarantineReason(n);
+    const quarantine = reason !== null;
     // Sequential delivery bounds memory and ensures the buffer is read only once.
     const processRecipient = async (record: LedgerRecipient): Promise<void> => {
       if (finished.has(record.state)) return;
@@ -272,6 +274,7 @@ export class IngestService {
         events.emit("ingest_imported", {
           messageId: n.mail.messageId,
           recipient: record.destination,
+          placement: reason ?? "inbox",
           delaySeconds: Math.max(
             0,
             (Date.now() - Date.parse(n.mail.timestamp)) / 1000,

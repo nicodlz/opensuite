@@ -254,6 +254,7 @@ const service = new IngestService({
         delaySeconds: fields["delaySeconds"],
         matches: fields["matches"],
         recipientKey: fields["recipientKey"],
+        placement: fields["placement"],
         code: fields["code"],
       };
       process.stdout.write(

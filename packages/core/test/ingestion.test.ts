@@ -605,6 +605,38 @@ describe("held unknown recipients", () => {
     expect(memory.messageStates.get("ses-1")).toBe("imported");
   });
 
+  it("logs where each import went and why", async () => {
+    const memory = synthetic();
+    const seen: Record<string, string | number>[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event, fields) {
+          if (event === "ingest_imported") seen.push(fields);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    memory.buffers.set("ses-2", new Uint8Array([1]));
+    await service.process(
+      JSON.stringify(notification(["alice@example.test"], "PASS", "ses-1")),
+    );
+    await service.process(
+      JSON.stringify(notification(["alice@example.test"], "FAIL", "ses-2")),
+    );
+    expect(seen.map((fields) => fields["placement"])).toEqual([
+      "inbox",
+      "spam",
+    ]);
+  });
+
   it("keeps a completed message for replay when deleting its object fails", async () => {
     const memory = synthetic();
     let failures = 1;

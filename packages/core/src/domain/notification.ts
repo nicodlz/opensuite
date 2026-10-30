@@ -98,6 +98,14 @@ export function resolveRecipients(
   }
   return [...result.values()];
 }
+/** Why a message is quarantined; `null` when it goes to the inbox. */
+export type QuarantineReason =
+  | "spam"
+  | "virus"
+  | "dmarc_fail"
+  | "dmarc_unchecked"
+  | "spf_fail"
+  | "dkim_fail";
 /**
  * Inbox or quarantine, from the SES verdicts. See
  * https://docs.aws.amazon.com/ses/latest/dg/receiving-email-notifications-contents.html
@@ -105,28 +113,40 @@ export function resolveRecipients(
  * Content scans must pass: a spam or virus verdict of FAIL, GRAY (scanned
  * but undecided) or PROCESSING_FAILED (not scanned) quarantines.
  *
- * For authentication, GRAY is an absence of proof, not a failure: SPF none,
- * softfail or neutral; DKIM unsigned or signed by a domain other than the
- * From domain; DMARC passing SPF or DKIM for a domain without a policy or
- * with p=none. On its own it does not quarantine, so ordinary mail from
- * domains without DMARC enforcement reaches the inbox. A failure does: DMARC
- * FAIL always, whatever the domain's requested policy; SPF or DKIM FAIL
- * unless DMARC passed, as forwarding and mailing lists break them while the
- * aligned identifier still holds. PROCESSING_FAILED (for instance a DNS
- * error) is as unproven as GRAY, never a pass.
+ * For authentication, AWS documents GRAY as an absence of proof, not a
+ * failure: SPF none, softfail or neutral; DKIM unsigned or signed for
+ * another domain than From; DMARC for a domain without a policy or with
+ * p=none. Real Gmail mail arrives with all three GRAY, which contradicts
+ * AWS's DMARC definition (at least SPF or DKIM passed), so GRAY proves
+ * nothing either way: on its own it does not quarantine, so ordinary mail
+ * reaches the inbox, and it is never treated as authentication. A failure
+ * quarantines: DMARC FAIL whatever the domain's requested policy; SPF or
+ * DKIM FAIL unless DMARC passed, as forwarding and mailing lists break them
+ * while the aligned identifier holds. DMARC that could not be checked
+ * (PROCESSING_FAILED, for instance a DNS error or a malformed signature)
+ * quarantines unless SPF or DKIM passed, so it cannot hide a forged From.
  */
+export function quarantineReason(
+  notification: Notification,
+): QuarantineReason | null {
+  const r = notification.receipt;
+  if (r.spamVerdict.status !== "PASS") return "spam";
+  if (r.virusVerdict.status !== "PASS") return "virus";
+  const dmarc = r.dmarcVerdict.status;
+  if (dmarc === "FAIL") return "dmarc_fail";
+  if (dmarc === "PASS") return null;
+  if (r.spfVerdict.status === "FAIL") return "spf_fail";
+  if (r.dkimVerdict.status === "FAIL") return "dkim_fail";
+  if (
+    dmarc === "PROCESSING_FAILED" &&
+    r.spfVerdict.status !== "PASS" &&
+    r.dkimVerdict.status !== "PASS"
+  )
+    return "dmarc_unchecked";
+  return null;
+}
 export function verdictPolicy(
   notification: Notification,
 ): "deliver" | "quarantine" {
-  const r = notification.receipt;
-  if (r.spamVerdict.status !== "PASS" || r.virusVerdict.status !== "PASS")
-    return "quarantine";
-  const dmarc = r.dmarcVerdict.status;
-  if (dmarc === "FAIL") return "quarantine";
-  if (
-    dmarc !== "PASS" &&
-    (r.spfVerdict.status === "FAIL" || r.dkimVerdict.status === "FAIL")
-  )
-    return "quarantine";
-  return "deliver";
+  return quarantineReason(notification) === null ? "deliver" : "quarantine";
 }

@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   parseNotification,
+  quarantineReason,
   verdictPolicy,
 } from "../src/domain/notification.ts";
 import { notification } from "./fixtures.ts";
 
 type Status = "PASS" | "FAIL" | "GRAY" | "PROCESSING_FAILED";
-const policy = (verdicts: {
+const parse = (verdicts: {
   spam?: Status;
   virus?: Status;
   spf?: Status;
@@ -28,8 +29,12 @@ const policy = (verdicts: {
   };
   const parsed = parseNotification(JSON.stringify({ ...base, receipt }));
   if (parsed.isErr()) throw new Error(parsed.error);
-  return verdictPolicy(parsed.value);
+  return parsed.value;
 };
+const policy = (verdicts: Parameters<typeof parse>[0]) =>
+  verdictPolicy(parse(verdicts));
+const reason = (verdicts: Parameters<typeof parse>[0]) =>
+  quarantineReason(parse(verdicts));
 
 describe("inbound verdict policy", () => {
   it("delivers mail whose authentication is only unproven, as SES reports real Gmail mail", () => {
@@ -39,12 +44,48 @@ describe("inbound verdict policy", () => {
     );
     expect(policy({})).toBe("deliver");
     expect(
-      policy({
+      policy({ spf: "PROCESSING_FAILED", dkim: "PROCESSING_FAILED" }),
+    ).toBe("deliver");
+    // DMARC passed: broken SPF and DKIM come from forwarding or lists.
+    expect(policy({ spf: "FAIL", dkim: "FAIL", dmarc: "PASS" })).toBe(
+      "deliver",
+    );
+  });
+
+  it("quarantines unchecked DMARC unless SPF or DKIM passed", () => {
+    // A spoof with SPF softfail and a malformed signature.
+    expect(
+      reason({
+        spf: "GRAY",
+        dkim: "PROCESSING_FAILED",
+        dmarc: "PROCESSING_FAILED",
+      }),
+    ).toBe("dmarc_unchecked");
+    expect(
+      reason({
         spf: "PROCESSING_FAILED",
         dkim: "PROCESSING_FAILED",
         dmarc: "PROCESSING_FAILED",
       }),
+    ).toBe("dmarc_unchecked");
+    expect(
+      policy({ spf: "PASS", dkim: "GRAY", dmarc: "PROCESSING_FAILED" }),
     ).toBe("deliver");
+    expect(
+      policy({ spf: "GRAY", dkim: "PASS", dmarc: "PROCESSING_FAILED" }),
+    ).toBe("deliver");
+  });
+
+  it("names the first reason for quarantine", () => {
+    expect(reason({ spf: "GRAY", dkim: "GRAY", dmarc: "GRAY" })).toBeNull();
+    expect(reason({ spam: "GRAY", virus: "FAIL" })).toBe("spam");
+    expect(reason({ virus: "PROCESSING_FAILED" })).toBe("virus");
+    expect(reason({ dmarc: "FAIL", spf: "FAIL" })).toBe("dmarc_fail");
+    expect(reason({ spf: "FAIL", dmarc: "GRAY" })).toBe("spf_fail");
+    expect(reason({ dkim: "FAIL", dmarc: "GRAY" })).toBe("dkim_fail");
+    expect(
+      reason({ spf: "PROCESSING_FAILED", dkim: "FAIL", dmarc: "FAIL" }),
+    ).toBe("dmarc_fail");
   });
 
   it("quarantines any content scan that does not pass", () => {
