@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
   createServer,
+  request as httpRequest,
   type IncomingMessage,
   type Server,
   type ServerResponse,
@@ -11,9 +12,12 @@ import {
 import { extname, join, normalize } from "node:path";
 import { promisify } from "node:util";
 import { createReadinessService } from "@opensuite/core";
-import { createAccountStore, createDatabase } from "../packages/db/src/index.ts";
+import {
+  createAccountStore,
+  createDatabase,
+} from "../packages/db/src/index.ts";
 import { expect, test, type Page } from "@playwright/test";
-import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import { createIdentity } from "../apps/api/src/auth/identity.ts";
 import { buildServer } from "../apps/api/src/server.ts";
 
@@ -23,7 +27,7 @@ const run = promisify(execFile);
 const dist = "apps/web/dist";
 const container = `opensuite-split-e2e-${randomUUID().slice(0, 8)}`;
 let web: Server | undefined;
-let api: FastifyInstance | undefined;
+let api: Awaited<ReturnType<typeof buildServer>> | undefined;
 let disconnect = () => Promise.resolve();
 let mail = "";
 let drive = "";
@@ -64,10 +68,35 @@ const types: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 async function body(request: IncomingMessage) {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of request)
+    if (chunk instanceof Uint8Array) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
+const pause = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+/** Retries an asynchronous step until it succeeds or attempts run out. */
+async function retry<T>(
+  attempts: number,
+  ms: number,
+  step: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await step();
+  } catch (error) {
+    if (attempts <= 1) throw error;
+    await pause(ms);
+    return retry(attempts - 1, ms, step);
+  }
+}
+const cookieOf = (response: Response) =>
+  response.headers
+    .getSetCookie()
+    .map((item) => item.split(";")[0])
+    .join("; ");
+const monotonicMs = () => performance.now();
 /** Stands in for Caddy: /api goes to the API, everything else to the SPA. */
 async function serve(
   request: IncomingMessage,
@@ -76,33 +105,32 @@ async function serve(
 ) {
   const url = new URL(request.url ?? "/", "http://placeholder");
   if (url.pathname.startsWith("/api/")) {
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(request.headers))
-      if (typeof value === "string" && name !== "host" && name !== "connection")
-        headers.set(name, value);
+    // node:http without an agent: no idle keep-alive connection can hold
+    // the API open at teardown.
+    const target = new URL(`${url.pathname.slice(4)}${url.search}`, apiBase());
+    const headers = Object.fromEntries(
+      Object.entries(request.headers).filter(
+        ([name]) => name !== "host" && name !== "connection",
+      ),
+    );
     const payload =
       request.method === "GET" || request.method === "HEAD"
         ? undefined
         : await body(request);
-    const upstream = await fetch(
-      `${apiBase()}${url.pathname.slice(4)}${url.search}`,
-      {
-        method: request.method ?? "GET",
-        headers,
-        ...(payload === undefined ? {} : { body: payload }),
-        redirect: "manual",
-      },
-    );
-    const outgoing: Record<string, string | string[]> = {};
-    upstream.headers.forEach((value, name) => {
-      if (name !== "set-cookie" && name !== "content-encoding")
-        outgoing[name] = value;
+    await new Promise<void>((resolve, reject) => {
+      const upstream = httpRequest(
+        target,
+        { method: request.method ?? "GET", headers, agent: false },
+        (reply) => {
+          response.writeHead(reply.statusCode ?? 502, reply.headers);
+          reply.pipe(response);
+          reply.on("end", resolve);
+          reply.on("error", reject);
+        },
+      );
+      upstream.on("error", reject);
+      upstream.end(payload);
     });
-    const cookies = upstream.headers.getSetCookie();
-    if (cookies.length) outgoing["set-cookie"] = cookies;
-    delete outgoing["content-length"];
-    response.writeHead(upstream.status, outgoing);
-    response.end(Buffer.from(await upstream.arrayBuffer()));
     return;
   }
   if (url.pathname.startsWith("/drive/api/")) {
@@ -156,32 +184,20 @@ test.beforeAll(async () => {
     "127.0.0.1::5432",
     "postgres:18.6",
   ]);
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await run("docker", ["exec", container, "pg_isready", "-U", "postgres"]);
-      break;
-    } catch {
-      if (attempt > 240) throw new Error("PostgreSQL did not start");
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
+  await retry(240, 500, () =>
+    run("docker", ["exec", container, "pg_isready", "-U", "postgres"]),
+  );
   const dbPort = /:(\d+)\s*$/.exec(
     (await run("docker", ["port", container, "5432"])).stdout,
   )?.[1];
   const databaseUrl = `postgresql://postgres:test-password@127.0.0.1:${dbPort}/postgres`;
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await run(
-        "pnpm",
-        ["--filter", "@opensuite/db", "exec", "prisma", "migrate", "deploy"],
-        { env: { ...process.env, DATABASE_URL: databaseUrl } },
-      );
-      break;
-    } catch (error) {
-      if (attempt > 10) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
+  await retry(10, 1000, () =>
+    run(
+      "pnpm",
+      ["--filter", "@opensuite/db", "exec", "prisma", "migrate", "deploy"],
+      { env: { ...process.env, DATABASE_URL: databaseUrl } },
+    ),
+  );
   const database = createDatabase(databaseUrl);
   if (database.isErr()) throw new Error(database.error.message);
   const db = database.value;
@@ -199,8 +215,11 @@ test.beforeAll(async () => {
     },
     mayStartSession: (userId) => Promise.resolve(provisioned.has(userId)),
   });
-  for (const account of [user, mfa])
-    await identity.api.signUpEmail({ body: { ...account, name: "Split" } });
+  await Promise.all(
+    [user, mfa].map((account) =>
+      identity.api.signUpEmail({ body: { ...account, name: "Split" } }),
+    ),
+  );
   // Enrol TOTP for the MFA account through the public handler.
   const call = async (path: string, payload: object, cookie = "") =>
     identity.handler(
@@ -210,15 +229,14 @@ test.beforeAll(async () => {
         body: JSON.stringify(payload),
       }),
     );
-  const cookieOf = (response: Response) =>
-    response.headers
-      .getSetCookie()
-      .map((item) => item.split(";")[0])
-      .join("; ");
   const mfaCookie = cookieOf(await call("sign-in/email", mfa));
-  const enrolment = (await (
-    await call("two-factor/enable", { password: mfa.password }, mfaCookie)
-  ).json()) as { totpURI: string };
+  const enrolment = z
+    .object({ totpURI: z.string() })
+    .parse(
+      await (
+        await call("two-factor/enable", { password: mfa.password }, mfaCookie)
+      ).json(),
+    );
   totpSecret = new URL(enrolment.totpURI).searchParams.get("secret") ?? "";
   expect(
     (
@@ -231,7 +249,6 @@ test.beforeAll(async () => {
   ).toBe(200);
 
   const accounts = createAccountStore(db);
-  const monotonicMs = () => performance.now();
   api = await buildServer({
     config: { logLevel: "silent" },
     readiness: createReadinessService({
@@ -257,14 +274,37 @@ test.beforeAll(async () => {
   });
   apiBase = await api.listen({ host: "127.0.0.1", port: 0 });
 });
+const timed = async (label: string, step: () => Promise<unknown>) => {
+  const started = performance.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    step().then(() => "done"),
+    new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve("timed out"), 15_000);
+    }),
+  ]);
+  clearTimeout(timer);
+  process.stderr.write(
+    `split-origins teardown ${label}: ${outcome} after ${Math.round(performance.now() - started)} ms\n`,
+  );
+};
 test.afterAll(async () => {
-  await api?.close();
-  await new Promise<void>((resolve) => {
-    if (web === undefined) resolve();
-    else web.close(() => resolve());
+  // Close the browser-facing server first so the API sees no new requests.
+  await timed("web", async () => {
+    await new Promise<void>((resolve) => {
+      if (web === undefined) resolve();
+      else {
+        // Browsers keep connections alive; close() alone waits for them.
+        web.close(() => resolve());
+        web.closeAllConnections();
+      }
+    });
   });
-  await disconnect();
-  await run("docker", ["rm", "-f", container]).catch(() => undefined);
+  await timed("api", async () => api?.close());
+  await timed("database", disconnect);
+  await timed("container", () =>
+    run("docker", ["rm", "-f", container]).catch(() => undefined),
+  );
 });
 
 async function signIn(
@@ -292,10 +332,11 @@ test("sign in once on mail, then reach calendar and drive at their root", async 
   await page.goto(`${calendar}/?view=week#today`);
   await signIn(page, user);
   await expect(page).toHaveURL(`${calendar}/?view=week`);
-  await expect(page.getByRole("link", { name: "Mail" })).toHaveAttribute(
-    "href",
-    `${mail}/`,
-  );
+  await expect(
+    page
+      .getByRole("navigation", { name: "Products" })
+      .getByRole("link", { name: "Mail" }),
+  ).toHaveAttribute("href", `${mail}/`);
   // The token travelled in a fragment and never reached the address bar now.
   expect(page.url()).not.toContain("token");
   expect(urls.some((url) => url.includes("/auth/callback#token="))).toBe(true);
@@ -314,7 +355,10 @@ test("sign in once on mail, then reach calendar and drive at their root", async 
   );
 
   // Moving to Drive needs no new sign-in.
-  await page.getByRole("link", { name: "Drive" }).first().click();
+  await page
+    .getByRole("navigation", { name: "Products" })
+    .getByRole("link", { name: "Drive" })
+    .click();
   await expect(page).toHaveURL(`${drive}/`);
   await expect(
     page.getByRole("link", { name: "Calendar" }).first(),

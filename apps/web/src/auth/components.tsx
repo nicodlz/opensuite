@@ -35,27 +35,18 @@ export function Protected({ children }: { children: ReactNode }) {
   const session = useQuery(sessionQuery);
   const navigate = useNavigate();
   const hadSession = useRef(false);
-  const [stuck, setStuck] = useState(false);
   useEffect(() => {
     if (session.data) hadSession.current = true;
     if (session.isSuccess && session.data === null) {
       const layout = activeLayout();
       if (layout.split && layout.host !== "mail") {
-        // Sibling origins obtain their session from the sign-in origin.
-        if (!startHandoff()) setStuck(true);
+        // Sibling origins obtain their session from the sign-in origin;
+        // after repeated failures, fall back to its sign-in page.
+        if (!startHandoff()) window.location.assign(`${layout.hub}/login`);
       } else if (hadSession.current) expireSession();
       else void navigate({ to: "/login" });
     }
   }, [session.isSuccess, session.data, navigate]);
-  if (stuck)
-    return (
-      <main className="auth-loading" role="alert">
-        Could not sign you in automatically.{" "}
-        <Button asChild>
-          <a href={`${activeLayout().hub}/login`}>Sign in</a>
-        </Button>
-      </main>
-    );
   if (session.isPending)
     return <main className="auth-loading">Checking your session…</main>;
   if (session.isError)

@@ -9,7 +9,7 @@ import type {
 
 export type CalendarView = "day" | "week" | "month";
 export const calendarViews: CalendarView[] = ["day", "week", "month"];
-export const MINUTES_PER_DAY = 1440;
+const MINUTES_PER_DAY = 1440;
 const DAY_MS = 86_400_000;
 
 export function isCalendarView(value: unknown): value is CalendarView {
@@ -283,7 +283,7 @@ export type SpanItem = {
 };
 
 /** Columns covered by an event within `days` columns starting at `start`. */
-export function spanColumns(
+function spanColumns(
   event: Timing,
   start: Date,
   days: number,
@@ -398,11 +398,11 @@ export function matchesSearch(event: CalendarEvent, query: string): boolean {
 }
 
 /** Date and time input values (`YYYY-MM-DD`, `HH:MM`) in local time. */
-export function toDateInput(date: Date): string {
+function toDateInput(date: Date): string {
   return dayKey(date);
 }
 
-export function toTimeInput(date: Date): string {
+function toTimeInput(date: Date): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
@@ -625,6 +625,13 @@ export function timeZoneLabel(date: Date, locale?: string): string {
   );
 }
 
+/** Part of a series, even when its rule has no simple recurrence value. */
+export const isRecurring = (event: CalendarEvent) =>
+  event.recurrence !== "none" || event.id !== event.seriesId;
+/** Shown optimistically while the server has not created it yet. */
+export const isPending = (event: CalendarEvent) =>
+  event.id.startsWith("draft-");
+
 export type EventChange =
   | { type: "create"; id: string; content: EventContent }
   | { type: "update"; event: CalendarEvent; content: EventContent }
@@ -646,9 +653,9 @@ export function applyEventChange(
   if (change.type === "delete") {
     const { event } = change;
     return events.filter((item) =>
-      event.recurrence === "none"
-        ? item.id !== event.id
-        : item.seriesId !== event.seriesId,
+      isRecurring(event)
+        ? item.seriesId !== event.seriesId
+        : item.id !== event.id,
     );
   }
   const { event, content } = change;
@@ -656,8 +663,7 @@ export function applyEventChange(
   const duration = Date.parse(content.end) - Date.parse(content.start);
   return events.flatMap((item) => {
     if (item.id === event.id) return [{ ...item, ...content }];
-    if (event.recurrence === "none" || item.seriesId !== event.seriesId)
-      return [item];
+    if (!isRecurring(event) || item.seriesId !== event.seriesId) return [item];
     if (content.recurrence === "none") return [];
     const start = Date.parse(item.start) + delta;
     return [

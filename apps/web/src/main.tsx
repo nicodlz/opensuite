@@ -143,7 +143,7 @@ function AdminShell({
     setToastOpen(true);
   }
   const links = [
-    { to: "/", label: "System status", icon: "status" },
+    { to: "/status", label: "System status", icon: "status" },
     { to: "/setup", label: "Setup wizard", icon: "sparkle" },
     { to: "/domains", label: "Domains", icon: "globe" },
   ] as const;
@@ -164,7 +164,9 @@ function AdminShell({
                   to={link.to}
                   icon={link.icon}
                   label={link.label}
-                  active={path === link.to}
+                  active={
+                    path === link.to || (link.to === "/status" && path === "/")
+                  }
                 />
               ))}
               <SidebarItem
@@ -401,7 +403,7 @@ function ProductPlaceholder({ name }: { name: string }) {
           installation while it is being built.
         </p>
         <Button asChild variant="secondary">
-          <Link to="/">View system status</Link>
+          <Link to="/status">View system status</Link>
         </Button>
       </section>
     </div>

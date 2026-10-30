@@ -52,7 +52,11 @@ function useDebounced<T>(value: T, delay: number) {
 const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement &&
   (target.isContentEditable ||
-    ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    (target instanceof HTMLInputElement &&
+      !["checkbox", "radio", "button"].includes(target.type)));
+const noSelection: ReadonlySet<string> = new Set();
 
 export function MailPage() {
   const queryClient = useQueryClient();
@@ -65,7 +69,12 @@ export function MailPage() {
   const [cursor, setCursor] = useState<string | undefined>();
   const [selected, setSelected] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
-  const [checked, setChecked] = useState<Set<string>>(new Set());
+  // Ticked rows belong to one view; a new folder, search, filter, sort or
+  // page starts with nothing selected.
+  const [selection, setSelection] = useState<{
+    view: string;
+    ids: ReadonlySet<string>;
+  }>({ view: "", ids: noSelection });
   const lastChecked = useRef<string | null>(null);
   const [composers, setComposers] = useState<ComposerState[]>([]);
   const [minimized, setMinimized] = useState<Set<string>>(new Set());
@@ -113,6 +122,9 @@ export function MailPage() {
       }),
   });
   const list = threads.data?.threads ?? [];
+  const view = JSON.stringify([folder, searchInput, sort, cursor ?? ""]);
+  const checked = selection.view === view ? selection.ids : noSelection;
+  const setChecked = (ids: ReadonlySet<string>) => setSelection({ view, ids });
   const fetchThread = useCallback(
     (threadId: string) => mailClient.thread({ accountId, threadId }),
     [],
@@ -180,7 +192,11 @@ export function MailPage() {
         queryClient.setQueryData(listKey, context.previous);
       setUndo(null);
       const first = variables.threadIds[0];
-      if (removes(variables.change) && first && variables.threadIds.length === 1) {
+      if (
+        removes(variables.change) &&
+        first &&
+        variables.threadIds.length === 1
+      ) {
         setSelected(first);
         setReading(true);
       }
@@ -270,7 +286,9 @@ export function MailPage() {
       (value) =>
         new Set([
           ...value,
-          ...composers.slice(0, Math.max(0, composers.length - 1)).map((item) => item.key),
+          ...composers
+            .slice(0, Math.max(0, composers.length - 1))
+            .map((item) => item.key),
         ]),
     );
     setComposers((items) => [...items, state]);
@@ -330,7 +348,8 @@ export function MailPage() {
           if (checked.size) setChecked(new Set());
           else setReading(false);
         },
-        x: () => selected && toggleCheck(selected, !checked.has(selected), false),
+        x: () =>
+          selected && toggleCheck(selected, !checked.has(selected), false),
         e: () => perform(targets, { type: "archive" }),
         "#": () =>
           request(targets, {
@@ -366,8 +385,15 @@ export function MailPage() {
     return () => document.removeEventListener("keydown", onKey);
   });
   useEffect(() => {
-    if (!notice || undo) return undefined;
-    const timer = window.setTimeout(() => setNotice(""), 6000);
+    if (!notice) return undefined;
+    // An undo offer expires with its notice.
+    const timer = window.setTimeout(
+      () => {
+        setNotice("");
+        setUndo(null);
+      },
+      undo ? 10_000 : 6000,
+    );
     return () => window.clearTimeout(timer);
   }, [notice, undo]);
   useEffect(() => {
@@ -383,7 +409,8 @@ export function MailPage() {
     index: list.findIndex((thread) => thread.id === selected),
     total: list.length,
   };
-  const allChecked = list.length > 0 && list.every((thread) => checked.has(thread.id));
+  const allChecked =
+    list.length > 0 && list.every((thread) => checked.has(thread.id));
   const system = boxes.filter((item) => item.role !== "custom");
   const custom = boxes.filter((item) => item.role === "custom");
   return (
@@ -484,7 +511,10 @@ export function MailPage() {
                 <input
                   value={filters.from ?? ""}
                   onChange={(event) =>
-                    setFilters({ ...filters, from: event.target.value || undefined })
+                    setFilters({
+                      ...filters,
+                      from: event.target.value || undefined,
+                    })
                   }
                 />
               </label>
@@ -493,7 +523,10 @@ export function MailPage() {
                 <input
                   value={filters.to ?? ""}
                   onChange={(event) =>
-                    setFilters({ ...filters, to: event.target.value || undefined })
+                    setFilters({
+                      ...filters,
+                      to: event.target.value || undefined,
+                    })
                   }
                 />
               </label>
@@ -598,7 +631,9 @@ export function MailPage() {
                 }}
                 onChange={() =>
                   setChecked(
-                    allChecked ? new Set() : new Set(list.map((thread) => thread.id)),
+                    allChecked
+                      ? new Set()
+                      : new Set(list.map((thread) => thread.id)),
                   )
                 }
               />
@@ -672,7 +707,9 @@ export function MailPage() {
                   <select
                     value={sort}
                     onChange={(event) => {
-                      setSort(event.target.value === "oldest" ? "oldest" : "newest");
+                      setSort(
+                        event.target.value === "oldest" ? "oldest" : "newest",
+                      );
                       setCursor(undefined);
                     }}
                   >
@@ -695,7 +732,7 @@ export function MailPage() {
               </div>
             )}
           </div>
-          {(threads.isFetching && threads.isPlaceholderData) && (
+          {threads.isFetching && threads.isPlaceholderData && (
             <div className="page-loading" aria-hidden="true" />
           )}
           {filterCount > 0 && (
@@ -705,7 +742,9 @@ export function MailPage() {
                   <button
                     type="button"
                     key={name}
-                    onClick={() => setFilters({ ...filters, [name]: undefined })}
+                    onClick={() =>
+                      setFilters({ ...filters, [name]: undefined })
+                    }
                     aria-label={`Remove filter ${name}`}
                   >
                     {name === "hasAttachment"
@@ -737,8 +776,9 @@ export function MailPage() {
                         <span className="draft-label">Draft</span>
                         <strong>{draft.subject || "(No subject)"}</strong>
                         <span>
-                          {draft.to.map((address) => address.email).join(", ") ||
-                            "No recipients"}
+                          {draft.to
+                            .map((address) => address.email)
+                            .join(", ") || "No recipients"}
                         </span>
                       </button>
                     </li>
@@ -771,9 +811,14 @@ export function MailPage() {
               </div>
             ) : !list.length ? (
               <div className="mail-empty">
-                <Icon name={query || filterCount ? "search" : "inbox"} size={28} />
+                <Icon
+                  name={query || filterCount ? "search" : "inbox"}
+                  size={28}
+                />
                 <strong>
-                  {query || filterCount ? "No matching conversations" : "All clear"}
+                  {query || filterCount
+                    ? "No matching conversations"
+                    : "All clear"}
                 </strong>
                 <p>
                   {query || filterCount
@@ -796,7 +841,9 @@ export function MailPage() {
                         thread.labels.includes(label.id) && label.id !== folder,
                     )}
                     onOpen={() => openThread(thread.id)}
-                    onCheck={(value, range) => toggleCheck(thread.id, value, range)}
+                    onCheck={(value, range) =>
+                      toggleCheck(thread.id, value, range)
+                    }
                     onPrefetch={() => prefetch(thread.id)}
                     onQuick={(change) =>
                       request(
@@ -824,7 +871,9 @@ export function MailPage() {
                   variant="ghost"
                   size="small"
                   disabled={!threads.data?.nextCursor}
-                  onClick={() => setCursor(threads.data?.nextCursor ?? undefined)}
+                  onClick={() =>
+                    setCursor(threads.data?.nextCursor ?? undefined)
+                  }
                 >
                   Older <Icon name="chevronRight" size={14} />
                 </Button>
@@ -835,7 +884,10 @@ export function MailPage() {
         <section className="reading-pane" aria-label="Reading pane">
           {reading && selected ? (
             detail.isPending ? (
-              <div className="reading-loading" aria-label="Loading conversation">
+              <div
+                className="reading-loading"
+                aria-label="Loading conversation"
+              >
                 <span />
                 <span />
                 <span />
@@ -858,7 +910,13 @@ export function MailPage() {
                 messages={detail.data.messages}
                 folder={current}
                 mailboxes={boxes}
-                labels={selectedThread?.labels ?? []}
+                labels={
+                  selectedThread?.labels ?? [
+                    ...new Set(
+                      detail.data.messages.flatMap((message) => message.labels),
+                    ),
+                  ]
+                }
                 starred={
                   selectedThread?.starred ??
                   detail.data.messages.some((message) => message.starred)
@@ -873,11 +931,7 @@ export function MailPage() {
           ) : (
             <div className="reading-empty">
               <span className="reading-illustration" aria-hidden="true">
-                <img
-                  className="product-mark"
-                  src="/mail-mark.svg"
-                  alt=""
-                />
+                <img className="product-mark" src="/mail-mark.svg" alt="" />
               </span>
               <h2>
                 {checked.size
@@ -947,13 +1001,34 @@ export function MailPage() {
               })
             }
             onClose={() =>
-              setComposers((items) => items.filter((item) => item.key !== state.key))
+              setComposers((items) =>
+                items.filter((item) => item.key !== state.key),
+              )
             }
-            onNotice={setNotice}
+            onNotice={(value) => {
+              setUndo(null);
+              setNotice(value);
+            }}
+            onDraftId={(id) =>
+              setComposers((items) =>
+                items.map((item) =>
+                  item.key === state.key ? { ...item, draftId: id } : item,
+                ),
+              )
+            }
             onSaved={() => {
-              void queryClient.invalidateQueries({ queryKey: [...key, "drafts"] });
-              void queryClient.invalidateQueries({ queryKey: [...key, "threads"] });
-              void queryClient.invalidateQueries({ queryKey: [...key, "mailboxes"] });
+              void queryClient.invalidateQueries({
+                queryKey: [...key, "drafts"],
+              });
+              void queryClient.invalidateQueries({
+                queryKey: [...key, "thread"],
+              });
+              void queryClient.invalidateQueries({
+                queryKey: [...key, "threads"],
+              });
+              void queryClient.invalidateQueries({
+                queryKey: [...key, "mailboxes"],
+              });
             }}
           />
         ))}

@@ -113,6 +113,39 @@ B2 S3 CORS works only without native B2 CORS rules. Confirm preflight and a brow
 download from the real origin. The public endpoint must be browser-reachable
 and match the signed host. See [B2 CORS](https://www.backblaze.com/docs/cloud-storage-enable-cors-with-the-s3-compatible-api).
 
+### Separate application origins (optional)
+
+Mail, Drive and Calendar can each be served at the root of their own origin,
+for example `https://mail.example.com/`, `https://drive.example.com/` and
+`https://calendar.example.com/`. The mail origin stays the sign-in origin.
+Add to `.env` (commas, no spaces):
+
+```dotenv
+OPENSUITE_SITE_ADDRESS="mail.example.com, drive.example.com, calendar.example.com"
+OPENSUITE_PUBLIC_HOST=mail.example.com
+AUTH_PRODUCT_ORIGINS=drive=https://drive.example.com,calendar=https://calendar.example.com
+DRIVE_TRUSTED_ORIGINS=https://mail.example.com,https://drive.example.com,https://calendar.example.com
+```
+
+Create explicit DNS records for each name; do not rely on a wildcard. Add the
+Drive origin to the Drive bucket CORS rule. Then check:
+
+- `GET https://<each origin>/api/origins` returns the three origins.
+- Opening Drive or Calendar while signed out leads to the mail sign-in page,
+  including the second factor, then back to the requested page.
+- Signing out on any origin signs out on all three.
+- Old URLs such as `https://mail.example.com/drive?…` move to the new origin
+  with their query. Public Drive links under `/drive/api/v1/public/…` keep
+  working on every origin.
+- A `POST` to `/api/…` or `/drive/api/…` with another `Origin` is refused.
+
+Sessions use host-only `__Host-opensuite.*` cookies, never a parent-domain
+cookie, so other hosts under the same parent domain cannot read or replace
+them. A sibling origin receives the session through a single-use token valid
+for one minute, bound to that origin and carried in the URL fragment. After
+upgrading from a release with `__Secure-better-auth.*` cookies, every user
+signs in once again.
+
 ## Bootstrap and mail storage
 
 Keep Caddy stopped and public mail ports closed while the recovery override is

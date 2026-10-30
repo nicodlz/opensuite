@@ -144,6 +144,14 @@ blob=$(request -H 'Content-Type: message/rfc822' --data-binary "@$work/message" 
 response=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Email/import\",{\"accountId\":\"$account\",\"emails\":{\"fixture\":{\"blobId\":\"$blob\",\"mailboxIds\":{\"$inbox\":true}}}},\"a\"]]}")
 email=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].created.fixture.id')
 ./deploy/backup/init.sh
+# A scratch area too small for the objects is refused before any service stops.
+before=$(compose ps --services --filter status=running | sort)
+if BACKUP_SCRATCH_RESERVE_BYTES=999999999999999999 ./deploy/backup/backup.sh 2>"$work/too-small"; then
+  echo 'backup ran without enough scratch space' >&2; exit 1
+fi
+grep -q 'scratch too small' "$work/too-small"
+[ "$(compose ps --services --filter status=running | sort)" = "$before" ]
+[ ! -e "$work/source/deploy/backup-status/last-success" ]
 ./deploy/backup/backup.sh
 [ -s "$work/source/deploy/backup-status/last-success" ]
 # Delete live application state and object copies while retaining the backup bucket.

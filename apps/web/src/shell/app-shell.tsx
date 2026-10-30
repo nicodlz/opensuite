@@ -84,7 +84,7 @@ const hrefOf = (product: Product) =>
     ? hubHref(activeLayout(), product === "admin" ? "/status" : "/contacts")
     : productHref(activeLayout(), product);
 
-export function AppearanceItems() {
+function AppearanceItems() {
   const theme = useTheme();
   return (
     <>

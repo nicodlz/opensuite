@@ -18,7 +18,20 @@ no intervening blob purge. Stopping Stalwart ensures this. Unlike an atomic
 filesystem snapshot, a file-by-file copy while Stalwart is running is unsafe.
 This solution favors portability over availability: copying and checking large
 object prefixes can make downtime long. Size the encrypted scratch filesystem
-for the entire uncompressed set plus dumps, and monitor its free space. The
+for the entire uncompressed set plus dumps, and monitor its free space.
+
+**Capacity limit.** Every backup copies all mail and Drive objects into the
+scratch filesystem while services are stopped. The total object volume must
+therefore fit in scratch, plus a reserve for dumps and volumes
+(`BACKUP_SCRATCH_RESERVE_BYTES`, default 4 GiB). Before stopping anything,
+`backup.sh` measures both object prefixes and refuses to run, with the event
+`scratch_too_small`, when they do not fit. This avoids a useless interruption
+but means **no backup is taken** until scratch is enlarged: Drive files are
+allowed up to the per-user quota and 10 TB per file, so a large total volume
+is not covered by this backup design. Alert on `scratch_too_small` and on the
+age of the last successful backup, and keep total Drive and mail usage below
+the scratch capacity until a streaming or object-level backup replaces the
+scratch copy. The
 scratch files are removed on normal exit or handled termination; inspect and
 securely clean stale directories after a crash or power loss.
 
