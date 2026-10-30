@@ -194,10 +194,19 @@ replacing the operator's manual endpoint reservation; Caddy remains at
 the other distinct management addresses from the environment template within
 the existing `MAIL_MANAGEMENT_SUBNET`, retaining any existing API IP and subnet.
 
-Before upgrading, inspect the current assignments with `docker network inspect
-opensuite_api-proxy opensuite_mail-management` (substitute the actual project
-name). If another running endpoint occupies a newly assigned address, stop
-that container during the window so Compose can claim it. Wait for all setup,
+Before upgrading, list the current assignments (substitute the actual project
+name for `opensuite`):
+
+```sh
+docker network inspect -f '{{.Name}}{{range .Containers}}{{"\n  "}}{{.Name}} {{.IPv4Address}}{{end}}' \
+  opensuite_api-proxy opensuite_mail-management
+```
+
+Look for `.2` and `.3` on the API proxy network and for `.10` and `.20`–`.24` on
+the management network. Only the API, Caddy and Stalwart may hold them; if
+any other running container (for example a leftover `management`,
+`stalwart-setup` or `backup-management` one-off) occupies one of these
+addresses, stop it during the window so Compose can claim it. Wait for all setup,
 bootstrap, management and backup jobs to finish; do not run two instances of
 the same one-off service concurrently. Scheduled and manual `backup.sh` jobs
 using the same scratch directory are serialized by its flock; direct Compose
@@ -212,6 +221,18 @@ and configuration are unchanged by the defaults, so it need not be recreated.
 Other configuration or image changes can cause additional recreations. No
 particular startup order between the API and Caddy is required. Verify
 `docker compose ps`, setup logs, and application and mail health afterwards.
+
+Because one-off services now have fixed addresses, two instances of the same
+one-off cannot run at once. Wait for the `stalwart-setup` container created by
+`docker compose up -d` to exit before running `docker compose run --rm
+--no-deps stalwart-setup` manually, and remove any orphaned
+`backup-management` container left by an interrupted backup before the next
+run.
+
+To roll back, check out the previous release and run `docker compose up -d`;
+the networks are unchanged. The API then returns to a dynamic address on the
+API proxy network, which reintroduces the original start-order risk: re-apply
+the manual endpoint reservation, or always start Caddy before the API.
 
 ## Optional Pass
 
