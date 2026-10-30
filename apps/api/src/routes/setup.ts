@@ -22,7 +22,12 @@ export const setupRouter = setup.router({
       )
         throw new ORPCError("SERVICE_UNAVAILABLE");
       const email = input.email.toLowerCase();
-      if (email.split("@")[1] !== identity.mailDomain)
+      const name = email.split("@")[1];
+      if (
+        !(identity.isMailDomain === undefined
+          ? name === identity.mailDomain
+          : await identity.isMailDomain(name))
+      )
         throw new ORPCError("BAD_REQUEST");
       const localPart = LocalPart.safeParse(email.split("@")[0]);
       if (!localPart.success) throw new ORPCError("BAD_REQUEST");
@@ -30,9 +35,7 @@ export const setupRouter = setup.router({
         throw new ORPCError("SERVICE_UNAVAILABLE");
       const domains = await context.domains.list(context.actor);
       if (domains.isErr()) throw new ORPCError("SERVICE_UNAVAILABLE");
-      const domain = domains.value.find(
-        (item) => item.name === identity.mailDomain,
-      );
+      const domain = domains.value.find((item) => item.name === name);
       if (domain === undefined) throw new ORPCError("CONFLICT");
       if ((await identity.userIdForEmail(email)) !== null)
         throw new ORPCError("CONFLICT");

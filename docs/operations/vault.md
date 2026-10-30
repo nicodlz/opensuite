@@ -12,9 +12,9 @@ recovery process have not been verified. This integration is not a security audi
 ## Enable and first administrator
 
 1. The operator creates an A record (and AAAA only if IPv6 works) for a
-   dedicated hostname such as `vault.esuno.net` pointing at the server. No DNS
+   dedicated hostname such as `vault.example.com` pointing at the server. No DNS
    changes are made by Compose. Allow inbound 80 and 443, and set
-   `VAULT_PUBLIC_HOST=vault.esuno.net`
+   `VAULT_PUBLIC_HOST=vault.example.com`
    in `.env`. Caddy obtains and renews a public certificate for the name. The
    default `vault.localhost` uses Caddy's local CA and is for local use; clients
    must trust that CA. The Vault hostname must differ from the main site. Do not
@@ -198,7 +198,7 @@ confirmation. Test recovery before reconnecting users.
 
 To enable the Vault launcher in Esuno, include the exact HTTPS vault origin in
 `AUTH_PRODUCT_ORIGINS`, for example
-`AUTH_PRODUCT_ORIGINS=vault=https://vault.esuno.net` (comma-separate existing
+`AUTH_PRODUCT_ORIGINS=vault=https://vault.example.com` (comma-separate existing
 `drive=` and `calendar=` entries). It must match the dedicated `VAULT_PUBLIC_HOST`.
 The API checks the origin against `VAULT_PUBLIC_HOST` at startup and refuses a mismatch. Recreate the API after changing it. Leave the entry absent when Vault is not
 configured. The vault origin is not an Esuno authentication origin and does

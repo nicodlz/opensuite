@@ -214,7 +214,10 @@ real object-storage providers. Docker is required.
 
 The API serves Better Auth at `/api/auth/*` through Caddy, with secure,
 HTTP-only, SameSite=Lax cookies. Set `OPENSUITE_PUBLIC_HOST` to the HTTPS host
-and `MAIL_DOMAIN` to the single domain allowed for new accounts. Registration is
+and `MAIL_DOMAIN` to the primary domain for new accounts. Accounts may also
+use any domain in the comma-separated `MAIL_DOMAINS` and any domain an
+administrator manages in the console, until its removal starts; every other
+domain is refused at signup, bootstrap and provisioning. Registration is
 restricted to authenticated administrators; it does not verify email ownership.
 The administrator must verify the address out of band and send the initial
 password securely. Passwords need at least 12 characters. MFA supports TOTP
@@ -229,7 +232,7 @@ provisioned account, prepare a password file outside Git and `.env`, then run:
 docker compose exec -T api node apps/api/src/bootstrap.ts admin@example.com /dev/stdin < /secure/path/initial-password
 ```
 
-The email must belong to `MAIL_DOMAIN`. For an existing account the command
+The email must belong to an allowed domain (see above). For an existing account the command
 promotes that account without changing its password; a disabled account cannot be
 promoted. An administrator can then create accounts with
 `POST /api/auth/sign-up/email` using their session and the configured Origin.

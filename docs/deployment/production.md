@@ -9,10 +9,6 @@ wildcard change are a **separate owner-approved cutover**; this procedure does
 not authorize them. Real AWS and B2 integration has not been tested here.
 Do not cut over until the preservation and verification gates below are met.
 
-The intended interface hosts are `mail.esuno.net` and `calendar.esuno.net`.
-The generic examples below still need to be adapted to the actual installation;
-these target names do not imply that DNS, hosting or mail routing is configured.
-
 ## Prerequisites and DNS
 
 1. Prepare an Ubuntu VPS with adequate RAM, encrypted storage and space for
@@ -66,6 +62,8 @@ OPENSUITE_SITE_ADDRESS=mail.example.com
 OPENSUITE_PUBLIC_HOST=mail.example.com
 MAIL_HOSTNAME=mail.example.com
 MAIL_DOMAIN=example.com
+# Optional further account domains, comma separated.
+#MAIL_DOMAINS=example.net
 MAIL_PROTOCOL_BIND=127.0.0.1
 MAIL_MANAGEMENT_SUBNET=172.30.248.0/24
 MAIL_MANAGEMENT_API_IP=172.30.248.10
@@ -153,6 +151,79 @@ them. A sibling origin receives the session through a single-use token valid
 for one minute, bound to that origin and carried in the URL fragment. After
 upgrading from a release with `__Secure-better-auth.*` cookies, every user
 signs in once again.
+
+## Moving to a new domain
+
+Schedule a maintenance window and notify users that old hostnames will stop
+working. Replace `example.com` with the new domain in the examples below;
+keep the existing Vault hostname if it is not moving.
+
+1. Create DNS A records pointing to the server for `mail.example.com`,
+   `drive.example.com`, `calendar.example.com`, and, only if moving it,
+   `vault.example.com`. Leave MX, wildcard and SPF records unchanged. Confirm
+   DNS resolves and ports 80 and 443 are reachable for Caddy's ACME validation.
+2. Update the Drive bucket's S3-compatible CORS configuration before moving
+   users. Replace these example origins with the exact new origins serving the
+   app; preserve any other required rules. For example, save this JSON outside
+   Git and use the B2 S3-compatible API to apply it to the Drive bucket:
+
+   ```json
+   {
+     "CORSRules": [
+       {
+         "AllowedOrigins": [
+           "https://mail.example.com",
+           "https://drive.example.com",
+           "https://calendar.example.com"
+         ],
+         "AllowedMethods": ["GET", "HEAD", "PUT"],
+         "AllowedHeaders": ["Content-Type", "Content-Length"],
+         "ExposeHeaders": ["ETag"],
+         "MaxAgeSeconds": 3600
+       }
+     ]
+   }
+   ```
+
+   B2 S3 CORS requires removing native B2 CORS rules first. Confirm browser
+   preflight, upload and download after the move; see [B2 CORS](https://www.backblaze.com/docs/cloud-storage-enable-cors-with-the-s3-compatible-api).
+
+3. Update `.env` with the new hosts, retaining the existing Vault host if it is
+   not moving. Do not include the old hosts in the application or trusted
+   origins. Keep existing storage and secret settings. With Vault enabled:
+
+   ```dotenv
+   OPENSUITE_SITE_ADDRESS="mail.example.com, drive.example.com, calendar.example.com"
+   OPENSUITE_PUBLIC_HOST=mail.example.com
+   AUTH_PRODUCT_ORIGINS=drive=https://drive.example.com,calendar=https://calendar.example.com,vault=https://vault.example.com
+   DRIVE_TRUSTED_ORIGINS=https://mail.example.com,https://drive.example.com,https://calendar.example.com
+   VAULT_PUBLIC_HOST=vault.example.com
+   MAIL_HOSTNAME=mail.example.com
+   COMPOSE_PROFILES=vault
+   ```
+
+   Compose derives `AUTH_PUBLIC_ORIGIN` from `OPENSUITE_PUBLIC_HOST` and
+   Caddy's Vault site and Vaultwarden's `DOMAIN` from `VAULT_PUBLIC_HOST`.
+   The Vault origin must match `VAULT_PUBLIC_HOST` and is not an application
+   authentication origin. Validate with `docker compose config` (the output
+   includes operational configuration, so handle it as sensitive).
+
+4. Recreate Caddy with `docker compose up -d --no-deps caddy`. Wait for a
+   valid public certificate on the new mail hostname. Then run
+   `sudo /opt/opensuite/deploy/tls/renew.sh` to install its Caddy certificate
+   for SMTP/IMAP and recreate Stalwart. The renewal timer already selects the
+   Caddy certificate named by `MAIL_HOSTNAME`. Run `docker compose up -d` to
+   recreate services with their new configuration. Wait for the
+   `stalwart-setup` job to exit successfully and inspect its logs, then perform
+   the checks in [Mail TLS](#mail-tls), including certificate hostname on ports
+   465 and 993.
+   Verify the three web origins, sign-in and handoff, Vault, and Drive uploads,
+   downloads and public links. If Vault moves, update its clients' server URL.
+5. Users must sign in again because application cookies are host-only. Update
+   the Bitwarden SimpleLogin alias generator's Server URL to
+   `https://mail.example.com` (without `/api`). Update IMAP and SMTP server
+   hostnames in mail clients to `mail.example.com`; a certificate for the new
+   name does not validate for the old name, and mail protocols do not redirect.
 
 ## Bootstrap and mail storage
 
@@ -271,7 +342,8 @@ following steps:
 ## First administrator
 
 Create a strong initial password in a protected file outside the checkout and
-`.env`, with no trailing newline. Use an address within `MAIL_DOMAIN`:
+`.env`, with no trailing newline. Use an address within `MAIL_DOMAIN`, a
+domain in `MAIL_DOMAINS` or a managed domain:
 
 ```sh
 docker compose exec -T api node apps/api/src/bootstrap.ts admin@example.com /dev/stdin < /secure/path/initial-password
@@ -282,6 +354,51 @@ command provisions the mailbox and promotes the account. Sign in at the HTTPS
 site, enable MFA, and create any additional accounts through the authenticated
 admin signup API. Check provisioning and reconciliation logs; signup does not
 verify mailbox ownership. See [authentication](../development.md#authentication-and-mailbox-provisioning).
+
+## Additional account domain
+
+Accounts can use other domains than `MAIL_DOMAIN`, for example to give
+`user@example.net` a mailbox on the same installation. Each address must
+belong to only one account.
+
+1. Add the domain, in lowercase, to `MAIL_DOMAINS` in `.env` (comma separated)
+   and recreate the API so it reads the new value: `docker compose up -d api`.
+   A plain restart keeps the old environment, and the bootstrap command,
+   which runs in the API container, refuses the domain until then. Domains
+   managed in the console are accepted without this step.
+2. Create the account. With an administrator session, call
+   `POST /api/auth/sign-up/email` with `name`, `email` and `password` and the
+   configured Origin, as described in the
+   [admin guide](../admin/index.md#users); the bootstrap command also works
+   but promotes the account to administrator. Provisioning creates the domain
+   in Stalwart; mail between local accounts of both domains is then delivered
+   locally.
+3. Receive mail: add the domain to both the `domains` and `recipients`
+   variables of the [AWS module](aws.md) (they are independent; import an
+   SES identity that already exists with `tofu import` first), apply, and
+   after owner approval publish its MX, as in
+   [SES inbound and outbound](#ses-inbound-and-outbound). Check that the
+   worker routes the address: a release that routes primary addresses and
+   delivers to linked mailboxes needs nothing else; otherwise issue a static
+   route and destination for the account with the `management ingest` helper
+   and recreate the worker with `docker compose --profile ingest up -d ingest`.
+4. Send mail: SES accepts only verified identities, so publish every record
+   of the AWS module's `dns_records` output for the domain (identity, SES
+   DKIM, MAIL FROM MX and SPF), Stalwart's DKIM record from
+   `management dns`, and SPF and DMARC, as in
+   [outbound DKIM and DNS](../operations/outbound.md#dkim-and-dns).
+   Until then SES rejects its messages and the sender receives a bounce.
+
+To retire a domain listed in `MAIL_DOMAINS`, remove it from that list and
+recreate the API as well as removing its managed domain: once the domain
+record is gone, the list alone accepts new accounts in it again.
+
+Before deploying a release with this support, list the domain records
+(`SELECT name, status, "removalPending" FROM "Domain";`): every managed
+domain whose removal has not started becomes available for accounts. Before
+rolling back, make sure every account in another domain has its mailbox:
+older releases refuse to provision such an account on every reconciliation,
+including when it is disabled before it was provisioned.
 
 ## Mail TLS
 
@@ -325,8 +442,9 @@ successful imports, and its own archive does not protect events never received.
 The regional [SES endpoint list](https://docs.aws.amazon.com/general/latest/gr/ses.html)
 includes `eu-north-1` receiving. Do not change the MX yet.
 
-For each provisioned mailbox, obtain its account ID without exposing its
-application credential. The query below assumes the default PostgreSQL user
+Linked mailboxes need no destination (see below). To deliver a mailbox
+instead with a separate inbound app password, obtain its account ID without
+exposing its application credential. The query below assumes the default PostgreSQL user
 and database names; substitute the values in `.env` if changed:
 
 ```sh
@@ -373,20 +491,45 @@ INGEST_ROUTES='[{"address":"user@example.com","destination":"ACCOUNT_ID"}]'
 INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","authorization":"Basic <encoded-credential>","quarantineMailbox":"JUNK_ID","rewriteSessionUrls":true}]'
 ```
 
-Add a static route for each independently configured mailbox address and one
+Mailboxes created in the admin console, with their addresses, aliases and
+domain addresses, need no entry: Compose gives the worker the mailbox key
+(`MAILBOX_KEY_FILE`) and the internal Stalwart origin
+(`INGEST_MAILBOX_ORIGIN`), and it delivers with each mailbox's stored
+credential, read at every connection. Each mailbox's primary address is
+routed, as well as its addresses and aliases. Held mail for a new mailbox is
+delivered by the next replay, and the first deployment with linked delivery
+may at once deliver older mail that waited with `Destination is not
+configured` or was held for a primary address within `INGEST_HOLD_DAYS`. That credential is the one the API
+uses, not a separate inbound app password: the key opens every mailbox with
+full access, so the worker must stay on the private network, without a
+published port, and its logs and environment remain restricted. Compose's
+`environment` overrides `deploy/ingest.env`; to turn linked delivery off, set
+`INGEST_MAILBOX_KEY_FILE=` and `INGEST_MAILBOX_ORIGIN=` (both empty) in
+`.env` and recreate the worker. Alert on repeated
+`Destination lookup failed` or JMAP 401 errors, and if Stalwart rate-limits
+or bans failed authentication, exempt the worker's network: every delivery
+comes from its address, so one stale credential must not block the others.
+`INGEST_ROUTES` and `INGEST_DESTINATIONS` are optional, for mailboxes
+delivered with a separate inbound app password; a static destination takes
+precedence over a linked mailbox with the same account ID and keeps
+receiving if that mailbox is disabled, until it is removed. For them, add a
+static route for each independently configured mailbox address and one
 destination per mailbox. Managed aliases resolve from the database; do not add
-them to `INGEST_ROUTES`, because static routes can bypass alias disablement.
-Every static route's `destination` must match a destination's `id`; each alias
-owner's mailbox must also have an `INGEST_DESTINATIONS` entry. See
-[alias inbound behavior](../architecture/aliases.md#inbound-behavior-and-limits). Protect and
-back up these files; safely delete the intermediate destination file after use.
-The exact schema, permission requirements, ambiguity handling and replay
-procedure are in [ingestion](../architecture/ingestion.md). Maintain routes
-and credentials whenever accounts change; signup does not update them. After
-adding a destination, recreate the worker with
+them to `INGEST_ROUTES`, because static routes can bypass alias disablement
+(see [alias inbound behavior](../architecture/aliases.md#inbound-behavior-and-limits)).
+Every static route's `destination` must match a destination's `id`, which is
+the Stalwart account ID. Changing them requires recreating the worker with
 `docker compose --profile ingest up -d ingest` (a plain restart keeps the old
-environment); held mail for the new mailbox is then delivered by the next
-replay. Start and check `docker compose --profile ingest up -d --build ingest`. Install the replay timer after configuring backups below. Alert on replay
+environment). Before upgrading to linked delivery, compare each static entry
+with `SELECT address, "accountId" FROM "MailboxLink";`: a static route must
+name the same account as the database for that address, or the message fails
+with `Conflicting recipient routes`, and a static destination's `id` must be
+the account its credential opens, or delivery fails with `Destination
+credential is for another account`. Neither loses mail; both block it until
+corrected. Protect and back up these files; safely delete the intermediate
+destination file after use. The exact schema, permission requirements,
+ambiguity handling and replay procedure are in
+[ingestion](../architecture/ingestion.md). Start and check `docker compose --profile ingest up -d --build ingest`. Install the replay timer after configuring backups below. Alert on replay
 failures. Verify destination credentials
 and quarantine mailboxes before allowing production traffic.
 
@@ -469,6 +612,13 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 
 ## Rollback
 
+To return to a worker release that has held recipients but not linked
+delivery, no ledger conversion is needed: roll back the image together with
+`compose.yaml` and keep a static route and destination for every mailbox
+that must keep receiving. Recipients of other mailboxes then wait with
+`Destination is not configured`, and mail for primary addresses without an
+address record is held again, until linked delivery returns.
+
 Before running a worker release that predates held recipients, convert the
 ledger to states that release knows (procedure checked against the previous
 release's ledger on PostgreSQL). Older code fails on any message that has a
@@ -481,7 +631,8 @@ dead-letter queue after its retries:
 
    ```sh
    systemctl stop opensuite-replay.timer        # no new scheduled replay
-   while systemctl is-active --quiet opensuite-replay.service; do sleep 30; done
+   # A running oneshot replay is "activating", not "active".
+   while [ "$(systemctl is-active opensuite-replay.service)" = activating ]; do sleep 30; done
    docker compose --profile ingest stop ingest  # SIGTERM; the worker drains
    docker ps --filter label=com.docker.compose.service=ingest   # must list none
    ```
@@ -490,10 +641,9 @@ dead-letter queue after its retries:
    operator commands; wait for them too. Leave the queues in place.
 
 2. With the current release, finish every held recipient: list them with
-   `operator list held`, then provision the address (a new mailbox also needs
-   its `INGEST_DESTINATIONS` entry) and run `deploy/ingest/replay.sh` once by
-   hand, or reject them, until the list is empty. Wait for that replay to
-   exit and repeat the checks of step 1.
+   `operator list held`, then provision the address and run
+   `deploy/ingest/replay.sh` once by hand, or reject them, until the list is
+   empty. Wait for that replay to exit and repeat the checks of step 1.
 3. Take a backup (`deploy/backup/backup.sh`, or at least a `pg_dump` of the
    ledger tables). Then relabel routed rows in one transaction that records
    each change in the append-only `InboundResolutionAudit` table, while holding
@@ -501,11 +651,12 @@ dead-letter queue after its retries:
    (`flock -n` fails instead of waiting if one is running):
 
    ```sh
-   set -a; . ./.env; . /etc/opensuite/backup.conf; set +a
-   docker ps -q --filter label=com.docker.compose.service=ingest   # must print nothing
-   flock -n "$BACKUP_SCRATCH/opensuite-backup.lock" \
-     docker compose exec -T -e PGPASSWORD="$(docker compose exec -T postgres cat /run/opensuite/postgres/password)" \
-     postgres psql -h localhost -U "${POSTGRES_USER:-opensuite}" -d "${POSTGRES_DB:-opensuite}" -v ON_ERROR_STOP=1 < rollback-relabel.sql
+   . /etc/opensuite/backup.conf
+   { [ -z "$(docker ps -q --filter label=com.docker.compose.service=ingest)" ] &&
+     flock -n "${BACKUP_SCRATCH:?}/opensuite-backup.lock" \
+       docker compose exec -T postgres \
+       sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < rollback-relabel.sql; } ||
+     echo 'ingest running, lock held or SQL failed: relabel NOT applied' >&2
    ```
 
    with `rollback-relabel.sql` containing:
@@ -529,10 +680,18 @@ dead-letter queue after its retries:
    says nothing about delivery: that destination recipient keeps its own
    state (`received`, `failed`, `importing`, `uncertain`, `imported` or
    `quarantined`), which this statement leaves unchanged and which the older
-   release processes as usual. Check those destination recipients before and
+   release processes as usual if it has a static destination for it (step
+   4). Check those destination recipients before and
    after, for example with `operator list` and the rows of the same messages.
 
-4. Start the older worker and re-enable the replay timer. The worker then
+4. The older release delivers only to static destinations and requires at
+   least one. Before starting it, make sure `deploy/ingest.env` has a
+   non-empty `INGEST_DESTINATIONS` with a route and destination for every
+   mailbox that must keep receiving (see the `management ingest` helper
+   above); recipients for other mailboxes, including rerouted ones, stay
+   failed with their buffer kept until a release with linked delivery
+   returns. Roll back `compose.yaml` with the image.
+5. Start the older worker and re-enable the replay timer. The worker then
    processes the queue backlog, any redrive and unfinished destination
    recipients; mail for unknown recipients is again rejected and its object
    deleted once the other recipients finish.

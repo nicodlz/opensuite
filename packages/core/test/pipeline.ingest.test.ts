@@ -1,16 +1,24 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import {
   GetQueueUrlCommand,
   SendMessageCommand,
   SQSClient,
 } from "@aws-sdk/client-sqs";
-import { createDatabase } from "@opensuite/db";
+import {
+  createDatabase,
+  createDomainStore,
+  createMailboxStore,
+} from "@opensuite/db";
 import { JmapCapability, JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
-import { err, type Result } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { operatorCommand } from "../../../apps/ingest/src/operator.ts";
 import { awsQueue, awsStorage } from "../src/adapters/aws.ts";
@@ -91,6 +99,7 @@ let clients: Map<
   }
 >;
 let origin: string;
+let domainId: string;
 const password = "cobalt-rocket-forest-9381!";
 const getValue = <T>(result: Result<T, JmapError>) => unwrap(result);
 
@@ -120,6 +129,12 @@ const connectClients = async () => {
   );
 };
 
+// Static destinations are keyed by the Stalwart account ID they open.
+const account = (name: string) => {
+  const mailbox = clients.get(name);
+  if (mailbox === undefined) throw new Error("Missing client");
+  return mailbox.account;
+};
 // Count by listing the whole mailbox and reading subjects: Stalwart's
 // full-text index is asynchronous, so a subject search can miss a copy.
 const bySubject = async (
@@ -154,7 +169,7 @@ const connectService = (
       const mailbox = clients.get(name);
       if (mailbox === undefined) throw new Error("Missing client");
       return {
-        id: name,
+        id: mailbox.account,
         origin,
         authorization: `Basic ${Buffer.from(`${name}@example.test:${password}`).toString("base64")}`,
         quarantineMailbox: mailbox.quarantine,
@@ -167,9 +182,9 @@ const connectService = (
     ledger: databaseLedger(db.value),
     delivery,
     routes: [
-      { address: "alice@example.test", destination: "alice" },
-      { address: "alias@other.test", destination: "alice" },
-      { address: "hidden@example.test", destination: "bob" },
+      { address: "alice@example.test", destination: account("alice") },
+      { address: "alias@other.test", destination: account("alice") },
+      { address: "hidden@example.test", destination: account("bob") },
       ...extraRoutes,
     ],
     bucket: "inbound",
@@ -253,10 +268,10 @@ describe("local ingestion pipeline", () => {
         username: "admin",
         password: "integration-password",
       });
-      const domain = getValue(await admin.createDomain("example.test"));
+      domainId = getValue(await admin.createDomain("example.test")).id;
       await Promise.all(
         ["alice", "bob"].map(async (name) =>
-          getValue(await admin.createAccount(name, domain.id, password)),
+          getValue(await admin.createAccount(name, domainId, password)),
         ),
       );
       await connectClients();
@@ -367,8 +382,8 @@ describe("local ingestion pipeline", () => {
     expect((await service.reconcile(3600)).isOk()).toBe(true);
     expect(unwrap(await storage.bufferKeys())).toContain("ses-fail");
     connectService([
-      { address: "unknown@example.test", destination: "bob" },
-      { address: "late@example.test", destination: "alice" },
+      { address: "unknown@example.test", destination: account("bob") },
+      { address: "late@example.test", destination: account("alice") },
     ]);
     try {
       expect((await service.reconcile(3600)).isOk()).toBe(true);
@@ -383,12 +398,14 @@ describe("local ingestion pipeline", () => {
       after
         .map((row) => `${row.destination} ${row.state}`)
         .toSorted((a, b) => a.localeCompare(b)),
-    ).toEqual([
-      "alice quarantined",
-      "bob quarantined",
-      "late@example.test rerouted",
-      "unknown@example.test rerouted",
-    ]);
+    ).toEqual(
+      [
+        `${account("alice")} quarantined`,
+        `${account("bob")} quarantined`,
+        "late@example.test rerouted",
+        "unknown@example.test rerouted",
+      ].toSorted((a, b) => a.localeCompare(b)),
+    );
     const delivered = await bySubject(bob, "Quarantine");
     expect(delivered).toHaveLength(1);
     // Alice already had it: still exactly one copy.
@@ -470,7 +487,7 @@ describe("local ingestion pipeline", () => {
         "operator",
         reason,
       ]),
-    ).rejects.toThrow("Only a held recipient can be rejected");
+    ).rejects.toThrow("Only a held recipient");
     expect(
       await db.value.inboundResolutionAudit.findMany({
         where: { recipientKey: row.idempotencyKey },
@@ -530,7 +547,7 @@ describe("local ingestion pipeline", () => {
           (error: unknown) =>
             error instanceof Error ? error.message : "error",
         );
-      connectService([{ address, destination: "bob" }]);
+      connectService([{ address, destination: account("bob") }]);
       let rejection: Promise<string>;
       let routing: Promise<unknown>;
       try {
@@ -572,7 +589,12 @@ describe("local ingestion pipeline", () => {
       ).toEqual(
         outcome === "rejected"
           ? ["rejected", 1, 0]
-          : ["rerouted", 0, 1, "Only a held recipient can be rejected"],
+          : [
+              "rerouted",
+              0,
+              1,
+              "Only a held recipient or one whose destination is not configured can be rejected",
+            ],
       );
       // Finish the message either way: the object goes once nothing is left.
       expect((await service.reconcile(3600)).isOk()).toBe(true);
@@ -591,7 +613,7 @@ describe("local ingestion pipeline", () => {
     // The address is now known, but the window ends before the lock frees.
     const preparing = databaseLedger(db.value).prepare(
       parsed.value,
-      resolveRecipients([address], [{ address, destination: "bob" }]),
+      resolveRecipients([address], [{ address, destination: account("bob") }]),
       { rerouteUntil: Date.now() + 300 },
     );
     await pause(700);
@@ -637,7 +659,9 @@ describe("local ingestion pipeline", () => {
       where: { messageId: "ses-expired" },
     });
     expect(row.state).toBe("held");
-    connectService([{ address: "gone@example.test", destination: "bob" }]);
+    connectService([
+      { address: "gone@example.test", destination: account("bob") },
+    ]);
     try {
       expect((await service.reconcile(3600)).isOk()).toBe(true);
     } finally {
@@ -685,6 +709,274 @@ describe("local ingestion pipeline", () => {
     ).not.toContain("ses-expired");
   }, 90_000);
 
+  it("delivers to a mailbox linked after start-up, without a restart, and only into its own account", async () => {
+    if (s3 === undefined || db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    const prisma = db.value;
+    const store = unwrap(createMailboxStore(prisma, "ef".repeat(32)));
+    const linked = jmapDelivery([], {
+      origin,
+      credential: async (accountId) => store.getForAccount(accountId),
+    });
+    // Built before the mailbox exists, as a running worker would be.
+    const dependencies = {
+      storage: awsStorage(s3, s3, "inbound", "archive", "notifications/", ""),
+      ledger: databaseLedger(prisma),
+      delivery: linked,
+      routes: [],
+      resolveRoutes: async (addresses: string[]) =>
+        createDomainStore(prisma).routes(addresses),
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 5,
+      events: { emit() {} },
+    };
+    const dynamic = new IngestService(dependencies);
+    const raw = Buffer.from(
+      "From: sender@example.test\r\nTo: carol@example.test\r\nSubject: Linked\r\n\r\nWelcome\r\n",
+    );
+    await s3.send(
+      new PutObjectCommand({ Bucket: "inbound", Key: "ses-linked", Body: raw }),
+    );
+    const body = recent(["carol@example.test"], "PASS", "ses-linked");
+    expect((await dynamic.process(body)).isOk()).toBe(true);
+    expect(
+      (
+        await prisma.inboundRecipient.findFirstOrThrow({
+          where: { messageId: "ses-linked" },
+        })
+      ).state,
+    ).toBe("held");
+
+    // Provision Carol as signup and bootstrap do: a Stalwart account, then
+    // only the user and its encrypted mailbox link, with no address record.
+    const admin = new StalwartAdmin(origin, {
+      username: "admin",
+      password: "integration-password",
+    });
+    const created = getValue(
+      await admin.createAccount("carol", domainId, password),
+    );
+    const carolClient = new JmapClient(origin, {
+      authorization: `Basic ${Buffer.from(`carol@example.test:${password}`).toString("base64")}`,
+      rewriteSessionUrlsToOrigin: origin,
+    });
+    const session = getValue(await carolClient.discover());
+    const carolAccount = session.primaryAccounts[JmapCapability.mail];
+    if (carolAccount === undefined) throw new Error("Missing account");
+    // The API stores the management API's account ID; delivery checks it
+    // against the JMAP session.
+    expect(created.id).toBe(carolAccount);
+    const boxes = getValue(
+      await carolClient.mailboxes(session, carolAccount),
+    ).list;
+    const carol = { client: carolClient, session, account: carolAccount };
+    const inbox = boxes.find((box) => box.role === "inbox")?.id;
+    const junk = boxes.find((box) => box.role === "junk")?.id;
+    if (inbox === undefined || junk === undefined)
+      throw new Error("Missing inbox or junk");
+    await prisma.user.create({
+      data: { id: "carol", name: "Carol", email: "carol@example.test" },
+    });
+    unwrap(
+      await store.create({
+        userId: "carol",
+        accountId: carolAccount,
+        address: "carol@example.test",
+        credentialId: "carol",
+        secret: password,
+      }),
+    );
+
+    expect((await dynamic.process(body)).isOk()).toBe(true);
+    const delivered = await bySubject(carol, "Linked");
+    expect(delivered).toHaveLength(1);
+    const email = getValue(
+      await carolClient.emails(session, carolAccount, delivered),
+    ).list[0];
+    expect(email?.mailboxIds).toEqual({ [inbox]: true });
+    if (email === undefined) throw new Error("Missing email");
+    expect(
+      Buffer.from(
+        getValue(
+          await carolClient.download(session, carolAccount, email.blobId),
+        ),
+      ),
+    ).toEqual(raw);
+    expect(
+      (
+        await prisma.inboundMessage.findUniqueOrThrow({
+          where: { id: "ses-linked" },
+        })
+      ).state,
+    ).toBe("imported");
+
+    // Quarantine without a configured mailbox ID goes to the junk role.
+    const suspect = Buffer.from(
+      "From: sender@example.test\r\nTo: carol@example.test\r\nSubject: Linked junk\r\n\r\nSpam\r\n",
+    );
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-linked-junk",
+        Body: suspect,
+      }),
+    );
+    expect(
+      (
+        await dynamic.process(
+          recent(["carol@example.test"], "FAIL", "ses-linked-junk"),
+        )
+      ).isOk(),
+    ).toBe(true);
+    const quarantined = await bySubject(carol, "Linked junk");
+    expect(quarantined).toHaveLength(1);
+    expect(
+      getValue(await carolClient.emails(session, carolAccount, quarantined))
+        .list[0]?.mailboxIds,
+    ).toEqual({ [junk]: true });
+
+    // A link whose credential opens another account (here Alice's) is
+    // never used.
+    await prisma.user.create({
+      data: { id: "mallory", name: "Mallory", email: "mallory@example.test" },
+    });
+    unwrap(
+      await store.create({
+        userId: "mallory",
+        accountId: "not-alice",
+        address: "alice@example.test",
+        credentialId: "mallory",
+        secret: password,
+      }),
+    );
+    const misdirected = await linked.import(
+      "not-alice",
+      suspect,
+      false,
+      new Date().toISOString(),
+      "misdirected",
+      new Map(),
+      () => Promise.resolve(ok(undefined)),
+    );
+    expect(misdirected.isErr() && misdirected.error.message).toBe(
+      "Destination credential is for another account",
+    );
+    // Disabling the mailbox stops delivery at once.
+    await prisma.mailboxLink.update({
+      where: { userId: "carol" },
+      data: { status: "disabling" },
+    });
+    const disabled = await linked.import(
+      carolAccount,
+      suspect,
+      false,
+      new Date().toISOString(),
+      "disabled",
+      new Map(),
+      () => Promise.resolve(ok(undefined)),
+    );
+    expect(disabled.isErr() && disabled.error.message).toBe(
+      "Destination is not configured",
+    );
+    // So does disabling its user.
+    await prisma.mailboxLink.update({
+      where: { userId: "carol" },
+      data: { status: "active" },
+    });
+    await prisma.user.update({
+      where: { id: "carol" },
+      data: { disabled: true },
+    });
+    const blocked = await linked.import(
+      carolAccount,
+      suspect,
+      false,
+      new Date().toISOString(),
+      "blocked",
+      new Map(),
+      () => Promise.resolve(ok(undefined)),
+    );
+    expect(blocked.isErr() && blocked.error.message).toBe(
+      "Destination is not configured",
+    );
+    await prisma.user.update({
+      where: { id: "carol" },
+      data: { disabled: false },
+    });
+    // Mail routed before its mailbox was disabled waits without end; an
+    // operator can reject it and the next pass deletes its object.
+    const closed = new IngestService({
+      ...dependencies,
+      delivery: jmapDelivery([], {
+        origin,
+        credential: () => Promise.resolve(err({ kind: "not_found" })),
+      }),
+    });
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-linked-closed",
+        Body: suspect,
+      }),
+    );
+    const closedBody = recent(
+      ["carol@example.test"],
+      "PASS",
+      "ses-linked-closed",
+    );
+    await closed.process(closedBody);
+    const stuck = await prisma.inboundRecipient.findFirstOrThrow({
+      where: { messageId: "ses-linked-closed" },
+    });
+    expect([stuck.state, stuck.error]).toEqual([
+      "failed",
+      "Destination is not configured",
+    ]);
+    const operating = {
+      db: prisma,
+      ledger: databaseLedger(prisma),
+      delivery: linked,
+      storage: dependencies.storage,
+    };
+    const reject = () =>
+      operatorCommand(operating, [
+        "reject",
+        stuck.idempotencyKey,
+        "operator",
+        "Mailbox closed; sender told",
+      ]);
+    // Never while the mailbox could still receive it.
+    await expect(reject()).rejects.toThrow("Mailbox is active");
+    await prisma.mailboxLink.update({
+      where: { userId: "carol" },
+      data: { status: "disabling" },
+    });
+    // Nor for another failure, which may be transient.
+    await prisma.inboundRecipient.update({
+      where: { idempotencyKey: stuck.idempotencyKey },
+      data: { error: "Destination lookup failed: database_error" },
+    });
+    await expect(reject()).rejects.toThrow("Only a held recipient");
+    await prisma.inboundRecipient.update({
+      where: { idempotencyKey: stuck.idempotencyKey },
+      data: { error: "Destination is not configured" },
+    });
+    await reject();
+    expect(
+      await prisma.inboundResolutionAudit.findFirstOrThrow({
+        where: { recipientKey: stuck.idempotencyKey },
+      }),
+    ).toMatchObject({ action: "reject", previousState: "failed" });
+    expect((await closed.process(closedBody)).isOk()).toBe(true);
+    await expect(
+      s3.send(
+        new GetObjectCommand({ Bucket: "inbound", Key: "ses-linked-closed" }),
+      ),
+    ).rejects.toThrow(/does not exist/);
+    expect(await bySubject(carol, "Linked junk")).toHaveLength(1);
+  }, 90_000);
   it("replays an archived notification after queue loss with a large attachment", async () => {
     if (s3 === undefined || db === undefined || db.isErr())
       throw new Error("Clients not initialized");
@@ -790,7 +1082,7 @@ describe("local ingestion pipeline", () => {
     );
     const delivery = jmapDelivery([
       {
-        id: "alice",
+        id: account("alice"),
         origin,
         authorization: `Basic ${Buffer.from(`alice@example.test:${password}`).toString("base64")}`,
         quarantineMailbox: alice.quarantine,
@@ -810,7 +1102,9 @@ describe("local ingestion pipeline", () => {
             : err({ message: "response lost", ambiguous: true });
         },
       },
-      routes: [{ address: "alice@example.test", destination: "alice" }],
+      routes: [
+        { address: "alice@example.test", destination: account("alice") },
+      ],
       bucket: "inbound",
       bufferPrefix: "",
       topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
@@ -861,7 +1155,7 @@ describe("local ingestion pipeline", () => {
         parsed.value,
         resolveRecipients(
           ["alice@example.test"],
-          [{ address: "alice@example.test", destination: "alice" }],
+          [{ address: "alice@example.test", destination: account("alice") }],
         ),
       ),
     );
@@ -905,7 +1199,7 @@ describe("local ingestion pipeline", () => {
         parsed.value,
         resolveRecipients(
           ["alice@example.test"],
-          [{ address: "alice@example.test", destination: "alice" }],
+          [{ address: "alice@example.test", destination: account("alice") }],
         ),
       ),
     );
@@ -991,7 +1285,7 @@ describe("local ingestion pipeline", () => {
         parsed.value,
         resolveRecipients(
           ["alice@example.test"],
-          [{ address: "alice@example.test", destination: "alice" }],
+          [{ address: "alice@example.test", destination: account("alice") }],
         ),
       ),
     );
@@ -1012,7 +1306,7 @@ describe("local ingestion pipeline", () => {
     });
     const delivery = jmapDelivery([
       {
-        id: "alice",
+        id: account("alice"),
         origin,
         authorization: `Basic ${Buffer.from(`alice@example.test:${password}`).toString("base64")}`,
         quarantineMailbox: alice.quarantine,

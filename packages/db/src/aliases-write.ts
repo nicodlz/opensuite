@@ -49,6 +49,18 @@ export const createReserve = (locked: Locked) => ({
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
         const domain = await validDomain(tx, domainId);
         if (!domain) return err({ kind: "invalid" });
+        // Another account's primary address, provisioned or not.
+        if (
+          await tx.user.count({
+            where: {
+              email: {
+                equals: `${localPart}@${domain.name}`,
+                mode: "insensitive",
+              },
+            },
+          })
+        )
+          return err({ kind: "conflict" });
         if (await aliasCapReached(tx, userId, cap))
           return err({ kind: "limit" });
         const record = await tx.address.create({
