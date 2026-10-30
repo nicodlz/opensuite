@@ -53,12 +53,13 @@ export const createDomainStore = (db: PrismaClient) => ({
           where: { id: domainId },
           select: { name: true },
         });
-        // Accounts created by signup have a primary address but no record.
+        // Accounts created by signup have a primary address but no record,
+        // and may still be waiting for their mailbox.
         const [addresses, defaults, mailboxes] = await Promise.all([
           tx.address.count({ where: { domainId } }),
           tx.user.count({ where: { defaultAliasDomainId: domainId } }),
-          tx.mailboxLink.count({
-            where: { address: { endsWith: `@${name}`, mode: "insensitive" } },
+          tx.user.count({
+            where: { email: { endsWith: `@${name}`, mode: "insensitive" } },
           }),
         ]);
         if (addresses || defaults || mailboxes) return false;
@@ -227,15 +228,16 @@ export const createDomainStore = (db: PrismaClient) => ({
           where: { id: domainId },
         });
         if (domain.removalPending) throw new Error("domain removal pending");
-        // Another account's primary address is not an address record.
+        // Another account's primary address, provisioned or not, is not an
+        // address record.
         if (
-          await tx.mailboxLink.count({
+          await tx.user.count({
             where: {
-              address: {
+              email: {
                 equals: `${localPart}@${domain.name}`,
                 mode: "insensitive",
               },
-              userId: { not: userId },
+              id: { not: userId },
             },
           })
         )

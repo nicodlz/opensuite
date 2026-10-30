@@ -73,11 +73,13 @@ export const createAuthRuntime = (
   /** A configured domain or one an administrator manages in the console. */
   const isMailDomain = async (domain: string | undefined) => {
     if (domain === undefined) return false;
-    if (configured.has(domain)) return true;
-    const managed = await db.domain.count({
-      where: { name: domain, removalPending: false },
+    const managed = await db.domain.findUnique({
+      where: { name: domain },
+      select: { removalPending: true },
     });
-    return managed > 0;
+    // A removal in progress wins over the configuration.
+    if (managed !== null) return !managed.removalPending;
+    return configured.has(domain);
   };
   const audit = async (event: { userId: string | null; action: string }) => {
     const result = await accounts.audit(event);

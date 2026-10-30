@@ -516,6 +516,19 @@ it("provisions and authenticates accounts on every configured or managed domain 
       (await post("/api/auth/sign-up/email", managed, adminCookie)).status,
     ).toBe(200);
     expect((await post("/api/auth/sign-in/email", managed)).status).toBe(200);
+    // An address record of the account itself does not block it.
+    await db.value.user.create({
+      data: { id: "self", name: "Self", email: "self@managed.test" },
+    });
+    await db.value.address.create({
+      data: { userId: "self", domainId: row.id, localPart: "self" },
+    });
+    await reconcile();
+    expect(
+      await db.value.mailboxLink.count({
+        where: { userId: "self", status: "active" },
+      }),
+    ).toBe(1);
     // Its accounts keep the domain from removal.
     const removal = await createDomainStore(db.value).beginRemoval(row.id);
     expect(removal.isOk() && removal.value).toBe(false);
@@ -551,6 +564,19 @@ it("provisions and authenticates accounts on every configured or managed domain 
       ).status,
     ).toBe(400);
 
+    // A removal in progress wins over MAIL_DOMAINS.
+    await db.value.domain.create({
+      data: { userId: adminId, name: "second.test", removalPending: true },
+    });
+    expect(
+      (
+        await post(
+          "/api/auth/sign-up/email",
+          account("late@second.test"),
+          adminCookie,
+        )
+      ).status,
+    ).toBe(400);
     // Any other domain stays refused on every path.
     expect(
       (

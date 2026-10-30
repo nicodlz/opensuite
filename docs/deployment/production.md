@@ -304,23 +304,28 @@ belong to only one account.
    but promotes the account to administrator. Provisioning creates the domain
    in Stalwart; mail between local accounts of both domains is then delivered
    locally.
-3. Receive mail: verify the domain in SES, extend the receipt rule to it and,
-   after owner approval, publish its MX, as in
+3. Receive mail: add the domain to both the `domains` and `recipients`
+   variables of the [AWS module](aws.md) (they are independent; import an
+   SES identity that already exists with `tofu import` first), apply, and
+   after owner approval publish its MX, as in
    [SES inbound and outbound](#ses-inbound-and-outbound). Check that the
    worker routes the address: a release that routes primary addresses and
-   delivers to linked mailboxes needs nothing else; otherwise add a static
-   route and destination for the account.
-4. Send mail: SES accepts only verified identities, so verify the domain and
-   publish its DKIM, SPF and DMARC records as in
+   delivers to linked mailboxes needs nothing else; otherwise issue a static
+   route and destination for the account with the `management ingest` helper
+   and recreate the worker with `docker compose --profile ingest up -d ingest`.
+4. Send mail: SES accepts only verified identities, so publish every record
+   of the AWS module's `dns_records` output for the domain (identity, SES
+   DKIM, MAIL FROM MX and SPF), Stalwart's DKIM record from
+   `management dns`, and SPF and DMARC, as in
    [outbound DKIM and DNS](../operations/outbound.md#dkim-and-dns).
    Until then SES rejects its messages and the sender receives a bounce.
 
 Before deploying a release with this support, list the domain records
 (`SELECT name, status, "removalPending" FROM "Domain";`): every managed
 domain whose removal has not started becomes available for accounts. Before
-rolling back, make sure no account in another domain is still pending
-provisioning, or disable it, as older releases refuse it on every
-reconciliation.
+rolling back, make sure every account in another domain has its mailbox:
+older releases refuse to provision such an account on every reconciliation,
+including when it is disabled before it was provisioned.
 
 ## Mail TLS
 

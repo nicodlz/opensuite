@@ -518,6 +518,8 @@ describe("alias reservations", () => {
       data: [
         { id: owner, email: `owner@${name}`, name: owner },
         { id: other, email: `other@${name}`, name: other },
+        // Signed up, still waiting for its mailbox.
+        { id: `pending-${suffix}`, email: `pending@${name}`, name: "Pending" },
       ],
     });
     const domain = await db.domain.create({
@@ -549,6 +551,18 @@ describe("alias reservations", () => {
       10,
     );
     expect(alias.isErr() && alias.error).toEqual({ kind: "conflict" });
+    expect(
+      (
+        await domains.addAddress(owner, domain.id, other, "pending", false)
+      ).isErr(),
+    ).toBe(true);
+    const early = await createAliasStore(db).reserve(
+      other,
+      { domainId: domain.id },
+      "pending",
+      10,
+    );
+    expect(early.isErr() && early.error).toEqual({ kind: "conflict" });
     expect(await db.address.count({ where: { domainId: domain.id } })).toBe(0);
     expect(
       (
