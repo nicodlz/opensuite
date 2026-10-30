@@ -8,6 +8,22 @@ export PASS_DB_PASSWORD="$(cat /run/opensuite/pass-database/password)"
 # Suppress server-side statement/error logging for this superuser session: the
 # ALTER ROLE statement contains a password. Never emit psql output or errors.
 export PGOPTIONS='-c log_statement=none -c log_min_error_statement=panic -c log_min_duration_statement=-1 -c log_min_duration_sample=-1 -c log_transaction_sample_rate=0'
+if ! pg_isready -q -h postgres -U "$POSTGRES_USER" -d postgres; then
+  echo 'Pass database provisioning failed: PostgreSQL is unreachable.' >&2
+  exit 2
+fi
+if ! psql -X -q -h postgres -U "$POSTGRES_USER" -d postgres -c 'SELECT 1' >/dev/null 2>&1; then
+  echo 'Pass database provisioning failed: superuser authentication or connection failed.' >&2
+  exit 3
+fi
+owner=$(psql -X -A -t -q -v ON_ERROR_STOP=1 -h postgres -U "$POSTGRES_USER" -d postgres -c "SELECT EXISTS (SELECT FROM pg_database WHERE datname = 'opensuite_pass' AND pg_get_userbyid(datdba) <> 'opensuite_pass')" 2>/dev/null) || {
+  echo 'Pass database provisioning failed: could not inspect database ownership.' >&2
+  exit 1
+}
+if [ "$owner" = t ]; then
+  echo 'Pass database provisioning failed: database is owned by another role.' >&2
+  exit 4
+fi
 if ! psql -X -q -v ON_ERROR_STOP=1 -h postgres -U "$POSTGRES_USER" -d postgres >/dev/null 2>&1 <<'SQL'
 \getenv pass_password PASS_DB_PASSWORD
 SELECT pg_advisory_lock(104857603);

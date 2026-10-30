@@ -13,13 +13,12 @@ have not been verified here; this integration is not a security audit.
 1. The operator creates an A record (and AAAA only if IPv6 works) for a
    dedicated hostname such as `pass.example.org` pointing at the server. No DNS
    changes are made by Compose. Allow inbound 80 and 443, and set
-   `PASS_SITE_ADDRESS=pass.example.org` and `PASS_PUBLIC_HOST=pass.example.org`
+   `PASS_PUBLIC_HOST=pass.example.org`
    in `.env`. Caddy obtains and renews a public certificate for the name. The
    default `pass.localhost` uses Caddy's local CA and is for local use; clients
    must trust that CA. The Pass hostname must differ from the main site. Do not
-   proxy it under the SPA origin. `DOMAIN` is derived as
-   `https://${PASS_PUBLIC_HOST}`; use `PASS_DOMAIN` only for a deliberate
-   alternative origin and keep it consistent with Caddy.
+   proxy it under the SPA origin. Caddy and Vaultwarden both derive their
+   origin from `PASS_PUBLIC_HOST`, with HTTPS for the Vaultwarden `DOMAIN`.
 2. Generate a strong random admin password and keep it in a password manager.
    Generate its Argon2id PHC hash using the pinned image's interactive tool:
 
@@ -65,7 +64,11 @@ have not been verified here; this integration is not a security audit.
    invitation workflow as documented upstream and verify delivery/activation
    before relying on it. Vaultwarden admin settings saved in `/data/config.json`
    can override environment settings; treat that file as sensitive and verify
-   signup and invitation settings after changes.
+   signup and invitation settings after changes. On startup, Pass refuses a
+   saved `signups_allowed: true` unless `PASS_ALLOW_SAVED_SIGNUPS=true` is set
+   explicitly. The conservative check also refuses JSON Unicode escapes unless
+   that override is set; inspect the file before enabling it. A change made in
+   the admin interface can take effect immediately, before the next restart.
 
 ## SMTP and notifications
 
@@ -87,13 +90,41 @@ if needed. This sends notification metadata to the external relay; verify the
 current upstream instructions and client behavior before enabling it.
 
 Caddy overwrites `X-Real-IP` from the connection address; Vaultwarden trusts it
-only from Caddy's `172.28.254.2` proxy address. A separate upstream proxy needs
+only from Caddy's `172.28.253.2` address on the dedicated Pass network. A separate upstream proxy needs
 an explicitly reviewed client-IP trust configuration. Login and admin limits
 are configurable through the `PASS_*_RATELIMIT_*` settings. Caddy applies HSTS,
 nosniff, no-referrer and removes `Server`; Vaultwarden provides its own CSP.
-Container logging for Pass and its provisioner is disabled so request data,
-credentials and database URLs are not retained in Docker logs. Use health and
-operator-side checks for availability; this reduces diagnostic visibility.
+Pass uses rotated Docker JSON logs with `LOG_LEVEL=warn` and extended logging
+turned off. Request lines and access-token query strings are not logged at this
+level. Avoid debug or trace logging: logs can contain usernames, IP addresses
+and sensitive diagnostic data. Provisioning emits fixed errors, suppresses its
+SQL output and disables PostgreSQL statement logging for its session. The role
+password nevertheless appears briefly in the `ALTER ROLE` query visible to
+PostgreSQL administrators through activity inspection; restrict database
+administration and monitoring access.
+
+### Fail2ban for failed logins
+
+As an optional additional boundary, configure fail2ban to read the Pass
+container's Docker JSON log, including after container recreation and rotation.
+The following `/etc/fail2ban/filter.d/opensuite-pass.conf` filter matches the
+pinned Vaultwarden release's password and admin login errors:
+
+```ini
+[Definition]
+failregex = ^\{"log":".*Username or password is incorrect\. Try again\. IP: <HOST>\. Username:
+            ^\{"log":".*Invalid admin token\. IP: <HOST>(?:\\n|")
+ignoreregex =
+```
+
+Configure a jail with the current container's `LogPath` from `docker inspect`,
+appropriate `maxretry`, `findtime` and `bantime`, and an action that filters
+Docker-published traffic in the host's `DOCKER-USER` chain. Update the log path
+when the container is recreated; grant fail2ban access without making the logs
+public. Use `fail2ban-regex` with representative sanitized log lines and verify
+an actual ban from a controlled source. With another reverse proxy, review the
+client-IP trust chain first; otherwise a ban can target the proxy rather than the
+client. Built-in Vaultwarden rate limiting remains enabled independently.
 
 ## Backups and recovery
 

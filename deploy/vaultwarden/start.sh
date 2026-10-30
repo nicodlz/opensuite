@@ -1,5 +1,13 @@
 #!/bin/sh
 set -eu
+# Saved admin settings override environment values. Fail closed on Unicode
+# escapes, which could otherwise disguise the setting's name or value.
+if [ -f /data/config.json ] && [ "$PASS_ALLOW_SAVED_SIGNUPS" != true ]; then
+  if ! perl -0777 -ne 'exit((/\\u[0-9a-fA-F]{4}/ || /"signups_allowed"\s*:\s*true\b/) ? 1 : 0)' /data/config.json; then
+    echo 'Pass saved configuration may enable signups; review it or explicitly allow saved signups.' >&2
+    exit 1
+  fi
+fi
 password=$(cat /run/opensuite/pass-database/password)
 case "$password" in ''|*[!A-Za-z0-9]*) echo 'Invalid Pass database secret' >&2; exit 1;; esac
 # The generated password is URL-safe. It never appears in Compose or argv.
