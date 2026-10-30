@@ -505,6 +505,11 @@ INGEST_ROUTES='[{"address":"user@example.com","destination":"ACCOUNT_ID"}]'
 INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","authorization":"Basic <encoded-credential>","quarantineMailbox":"JUNK_ID","rewriteSessionUrls":true}]'
 ```
 
+`INBOUND_BUFFER_PREFIX` must equal the receipt rule's object key prefix
+(`messages/` in the AWS module): the worker refuses a notification whose
+object key is not that prefix followed by its message ID. Before upgrading
+to a release with this check, confirm it on one archived real notification.
+
 Mailboxes created in the admin console, with their addresses, aliases and
 domain addresses, need no entry: Compose gives the worker the mailbox key
 (`MAILBOX_KEY_FILE`) and the internal Stalwart origin
@@ -623,6 +628,100 @@ confirm on the real buckets that the SES buffer has an agreed lifecycle for
 noncurrent versions (do not assume the Terraform module's 30 days; a bucket
 without a lifecycle configuration keeps deleted messages indefinitely) and that
 archive retention exceeds `INGEST_HOLD_DAYS`.
+
+## Recovering mail from the archives
+
+Use this after an SQS message expired or was lost, after losing the host, or
+after restoring the database from a backup older than recent mail. It relies
+on the Firehose notification archive (`metadata/`, never expired) and the
+versioned buffer (`messages/`, noncurrent versions kept 30 days) in AWS, and
+on the replay archive in B2, none of which live on the host. Expect one
+request at a time: about 1.5 hours per 100,000 archive entries.
+
+**What it cannot recover.** The window is the shortest of the buffer's
+noncurrent-version retention (30 days), the B2 archive retention and the age
+of the backup. A notification SNS failed to hand to Firehose (after its own
+retries and the 14-day subscription DLQ) or that Firehose dropped after 24
+hours of retries is gone: only its object remains, reported as
+`ingest_buffer_without_notification`, and no envelope is guessed. A MIME
+version past retention is reported `unrecoverable`. Mail lost from Stalwart
+while the ledger still records it as imported is not reconsidered. Handle the
+ingestion and subscription DLQs before their 14 days run out.
+
+1. Quiesce as in step 1 of [Rollback](#rollback), and stop the backup timer
+   too so that it does not take the shared lock mid-run. After losing the
+   host, restore the database and Stalwart from the **same** backup (never a
+   database newer than the mail store); changes users made since are lost.
+2. Give the run a temporary recovery principal, preferably an assumed role
+   with a session of at most an hour; the worker's own principal cannot read
+   versions or write the buffer. Its policy on the buffer bucket allows
+   `s3:ListBucket` and `s3:ListBucketVersions` on the bucket, `s3:GetObject`
+   on `metadata/*`, and `s3:GetObject`, `s3:GetObjectVersion` and
+   `s3:PutObject` on `messages/*`, with the condition
+   `"StringEquals": {"s3:if-none-match": "*"}` on `s3:PutObject` so that it
+   can never replace an object, and nothing else. The archive keeps using the
+   `ARCHIVE_*` credentials of `deploy/ingest.env`. Load the credentials
+   without echoing them and pass them by name only:
+
+   ```sh
+   umask 077
+   read -rs AWS_ACCESS_KEY_ID; read -rs AWS_SECRET_ACCESS_KEY; read -rs AWS_SESSION_TOKEN
+   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+   recover() { docker compose --profile ingest run --rm --no-deps -T \
+     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+     ingest node apps/ingest/src/main.ts operator recover "$@"; }
+   ```
+
+   The values stay visible to `docker inspect` while a run lasts. Reports
+   list addresses and message IDs: write them to protected files.
+
+3. Recover notifications from Firehose:
+
+   ```sh
+   recover firehose OPERATOR metadata/YYYY/MM/ SINCE [UNTIL] > firehose.json
+   ```
+
+   Firehose writes under `metadata/YYYY/MM/DD/HH/` in UTC, so name the
+   narrowest prefix that covers the incident, and set `SINCE` to the incident
+   or backup time minus 24 hours (Firehose retries delivery for up to a
+   day); `SINCE` and `UNTIL` (ISO 8601) select notifications by their
+   receipt time. Read the report: notifications found, already archived,
+   missing, unreadable, invalid, foreign and outside the window, and
+   divergent message IDs (`mergeable: false` ones are skipped by replay and
+   need an operator). Run it again with `--apply` as last argument.
+
+4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
+   `--apply`. Investigate every `unrecoverable` message (its original is
+   gone) and every `divergent` one. A recipient an earlier replay marked
+   permanently failed because its original was missing stays so after the
+   object is restored: `inspect` every permanent row in `operator list` and,
+   when it reads the original, use `resolve ... retry`, never `reject`.
+5. Run replay once by hand (`deploy/ingest/replay.sh`). It exits 0 once no
+   permanent failure remains; close those with `inspect`, `resolve` or
+   `reject` as in [operator recovery](../architecture/ingestion.md#operator-recovery). Then
+   check that a second dry run of both commands reports `missing` and
+   `restorable` at 0, that `operator list` holds nothing unexpected, that no
+   `ingest_duplicate` or new `ingest_buffer_without_notification` event
+   appeared, and the mailboxes concerned. Then restart the worker
+   (`docker compose --profile ingest up -d ingest`), the replay and backup
+   timers (`systemctl start opensuite-replay.timer` and the backup timer),
+   `unset` the credentials and revoke the principal.
+
+Both commands can be repeated safely; they exit with an error while any
+read, write or restore failed, an original is unrecoverable or notifications
+of one message disagree beyond their envelope (an error that persists, once
+each such message is investigated, as long as the archive keeps them), and applied
+runs, complete or not, are recorded in the audit log. Before relying on
+them, test on the real buckets with the recovery principal: a conditional
+write on an existing key must answer 412, one on a key whose current version
+is a delete marker must succeed, two concurrent ones must leave one 409, all
+existing versions must remain, and the restored object must be encrypted;
+B2 must answer 412 to `If-None-Match` too (a B2 that ignores it rewrites
+identical bytes, harmless as entries are named after their content). Check
+once that a Firehose record and the worker's archive entry of the same mail
+have the same SHA-256, and rehearse on an isolated stack: an expired queue
+message, a database and mail store restored before recent mail, and repeated
+runs that write nothing.
 
 ## Rollback
 

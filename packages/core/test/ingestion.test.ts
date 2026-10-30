@@ -524,6 +524,65 @@ const routed = (extra: { address: string; destination: string }[]) => {
   return { memory, service, provision: () => known.push(...extra) };
 };
 
+describe("replay of archived notifications", () => {
+  it("skips foreign and disagreeing notifications, and leaves a lost original to an operator", async () => {
+    const memory = synthetic();
+    const stages: unknown[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event, fields) {
+          if (event === "ingest_failure") stages.push(fields["stage"]);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    const base = notification(["alice@example.test"], "PASS", "ses-a");
+    // Names another message's object.
+    memory.archives.set(
+      "notifications/foreign.json",
+      JSON.stringify({
+        ...base,
+        receipt: {
+          ...base.receipt,
+          action: { ...base.receipt.action, objectKey: "ses-b" },
+        },
+      }),
+    );
+    // Two variants of ses-c that disagree on a verdict.
+    memory.buffers.set("ses-c", new Uint8Array([1]));
+    memory.archives.set(
+      "notifications/c1.json",
+      JSON.stringify(notification(["alice@example.test"], "PASS", "ses-c")),
+    );
+    memory.archives.set(
+      "notifications/c2.json",
+      JSON.stringify(notification(["hidden@example.test"], "FAIL", "ses-c")),
+    );
+    // ses-d's original is gone.
+    memory.archives.set(
+      "notifications/d.json",
+      JSON.stringify(notification(["alice@example.test"], "PASS", "ses-d")),
+    );
+    const replay = await service.reconcile(86_400 * 3650);
+    expect(replay.isErr()).toBe(true);
+    expect(stages).toEqual(
+      expect.arrayContaining(["archive_foreign", "replay_divergent"]),
+    );
+    expect(memory.imports).toHaveLength(0);
+    expect(memory.buffers.has("ses-c")).toBe(true);
+    expect(
+      [...memory.records.values()].map((r) => [r.state, r.permanent]),
+    ).toEqual([["failed", true]]);
+  });
+});
+
 describe("held unknown recipients", () => {
   it("imports a held recipient once its address is provisioned, then deletes the object", async () => {
     const { memory, service, provision } = routed([
@@ -603,6 +662,68 @@ describe("held unknown recipients", () => {
     expect(memory.events).toContain("ingest_held_expired");
     expect(memory.buffers.has("ses-1")).toBe(false);
     expect(memory.messageStates.get("ses-1")).toBe("imported");
+  });
+
+  it("replays variants of one message together so every recipient receives it", async () => {
+    const { memory, service } = create();
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    // Same SES message, two envelopes: the first variant alone would
+    // complete the message and delete its object before Bob's copy.
+    memory.archives.set(
+      "notifications/a.json",
+      JSON.stringify(notification(["alice@example.test"])),
+    );
+    memory.archives.set(
+      "notifications/b.json",
+      JSON.stringify(notification(["hidden@example.test"])),
+    );
+    await service.reconcile(86_400 * 3650);
+    expect(memory.imports.map((item) => item.destination).toSorted()).toEqual([
+      "alice",
+      "bob",
+    ]);
+    expect(memory.buffers.has("ses-1")).toBe(false);
+    expect(memory.messageStates.get("ses-1")).toBe("imported");
+    // Imported, yet replayed again: nothing more is delivered.
+    await service.reconcile(86_400 * 3650);
+    expect(memory.imports).toHaveLength(2);
+  });
+
+  it("leaves a recipient whose copy only partly matches to an operator", async () => {
+    const memory = synthetic();
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: {
+        ...memory.delivery,
+        reconcile: () =>
+          Promise.resolve(
+            err({
+              message:
+                "Keyword candidates do not all match the original message",
+              ambiguous: true,
+            }),
+          ),
+      },
+      events: memory.sink,
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    memory.archives.set(
+      "notifications/a.json",
+      JSON.stringify(notification(["alice@example.test"])),
+    );
+    await service.reconcile(86_400 * 3650);
+    // Replay searched first and did not import; the row is permanent, so it
+    // is listed for an operator instead of retried every hour.
+    expect(memory.imports).toHaveLength(0);
+    expect([...memory.records.values()]).toMatchObject([
+      { state: "failed", permanent: true },
+    ]);
   });
 
   it("logs where each import went and why", async () => {

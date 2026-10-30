@@ -516,6 +516,16 @@ export class StalwartAdmin {
         });
   }
 
+  async findDomain(name: string): Promise<AdminResult<Domain>> {
+    const domains = await this.#list("Domain", DomainSchema);
+    if (domains.isErr()) return err(domains.error);
+    const existing = domains.value.find(
+      (domain) => domain.name.toLowerCase() === name.toLowerCase(),
+    );
+    return existing === undefined
+      ? err({ kind: "invalidResponse", message: "Domain not found" })
+      : ok(existing);
+  }
   async createDomain(name: string): Promise<AdminResult<Domain>> {
     const domains = await this.#list("Domain", DomainSchema);
     if (domains.isErr()) return err(domains.error);

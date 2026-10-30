@@ -41,7 +41,9 @@ export function synthetic() {
     readBuffer(_bucket, key) {
       const body = buffers.get(key);
       return Promise.resolve(
-        body === undefined ? err({ message: "Missing buffer" }) : ok(body),
+        body === undefined
+          ? err({ message: "Missing buffer", code: "NoSuchKey" })
+          : ok(body),
       );
     },
     deleteBuffer(_bucket, key) {
@@ -174,6 +176,15 @@ export function synthetic() {
     messageState(id, state) {
       messageStates.set(id, state);
       return Promise.resolve(ok(undefined));
+    },
+    recordedAddresses(messageId) {
+      return Promise.resolve(
+        ok(
+          [...recordMessages.entries()]
+            .filter(([, id]) => id === messageId)
+            .flatMap(([key]) => recordAddresses.get(key) ?? []),
+        ),
+      );
     },
     importedMessages(ids) {
       return Promise.resolve(

@@ -5,6 +5,7 @@ import {
   resolveRecipients,
   quarantineReason,
 } from "../domain/notification.ts";
+import { archiveKey, belongs, covered, mergeVariants } from "./recovery.ts";
 import type {
   Failure,
   IngestDependencies,
@@ -44,14 +45,10 @@ export class IngestService {
       return err({ message: `Invalid notification: ${parsed.error}` });
     const n = parsed.value;
     const { storage, ledger, delivery, events } = this.deps;
-    if (
-      n.receipt.action.bucketName !== this.deps.bucket ||
-      n.receipt.action.topicArn !== this.deps.topic ||
-      !n.receipt.action.objectKey.startsWith(this.deps.bufferPrefix)
-    )
+    if (!belongs(n, this.deps))
       return err({ message: "Unexpected bucket or topic" });
     if (!reconcile) {
-      const archive = await storage.archive(`${digest(body)}.json`, body);
+      const archive = await storage.archive(archiveKey(body), body);
       if (archive.isErr()) return archive;
     }
     const claims = await ledger.expireClaims();
@@ -208,6 +205,55 @@ export class IngestService {
       if (!claimed.value) {
         firstFailure ??= { message: "Recipient already claimed" };
         return;
+      }
+      // Replay may run on a ledger restored from a backup older than this
+      // import: look for the copy in the mailbox before importing again.
+      if (reconcile) {
+        const source = await bytes();
+        const found = source.isErr()
+          ? err(source.error)
+          : await delivery.reconcile(
+              record.destination,
+              source.value,
+              quarantine,
+              n.mail.timestamp,
+              record.key,
+            );
+        const remoteId = found.isOk() ? found.value[0] : undefined;
+        if (found.isErr() || remoteId !== undefined) {
+          if (found.isOk() && found.value.length > 1)
+            events.emit("ingest_duplicate", {
+              messageId: n.mail.messageId,
+              recipient: record.destination,
+              matches: found.value.length,
+              recipientKey: record.key,
+            });
+          // A copy that only partly matches, or an original that is gone,
+          // will not resolve itself: leave it to an operator, listed.
+          const stuck =
+            found.isErr() &&
+            (found.error.ambiguous === true ||
+              found.error.code === "NoSuchKey");
+          const saved = found.isErr()
+            ? await ledger.finish(
+                record.key,
+                "failed",
+                undefined,
+                found.error.message,
+                owner,
+                stuck,
+              )
+            : await ledger.finish(
+                record.key,
+                quarantine ? "quarantined" : "imported",
+                remoteId,
+                undefined,
+                owner,
+              );
+          if (saved.isErr()) firstFailure ??= saved.error;
+          else if (found.isErr()) firstFailure ??= found.error;
+          return;
+        }
       }
       let renewal: Promise<void> = Promise.resolve();
       const timer = setInterval(() => {
@@ -393,6 +439,13 @@ export class IngestService {
         this.deps.events.emit("ingest_failure", { stage: "archive_parse" });
         return;
       }
+      // Another installation's notification, or one naming another
+      // message's object, is never replayed nor merged into a variant.
+      if (!belongs(n.value, this.deps)) {
+        failures++;
+        this.deps.events.emit("ingest_failure", { stage: "archive_foreign" });
+        return;
+      }
       referenced.add(n.value.receipt.action.objectKey);
       if (
         keys.isOk() &&
@@ -428,13 +481,45 @@ export class IngestService {
       Promise.resolve(ok(undefined)),
     );
     if (lookup.isErr()) return lookup;
-    await archived.reduce<Promise<void>>(
+    // SES can send several notifications for one message with different
+    // envelopes. Replaying them one by one would let the first delete the
+    // object before the others are delivered, so they are replayed together
+    // when they agree on everything else, and again after the message was
+    // imported only if they name recipients the ledger does not hold yet.
+    const variants = new Map<string, string[]>();
+    for (const item of archived)
+      variants.set(item.id, [...(variants.get(item.id) ?? []), item.body]);
+    const pending: { id: string; body: string }[] = [];
+    const select = async (id: string, bodies: string[]): Promise<void> => {
+      const [single] = bodies;
+      if (bodies.length === 1 && single !== undefined) {
+        if (!completed.has(id)) pending.push({ id, body: single });
+        return;
+      }
+      const merged = mergeVariants(bodies);
+      if (merged.isErr()) {
+        failures++;
+        this.deps.events.emit("ingest_failure", { stage: "replay_divergent" });
+        return;
+      }
+      if (completed.has(id)) {
+        const recorded = await this.deps.ledger.recordedAddresses(id);
+        if (recorded.isErr()) {
+          failures++;
+          return;
+        }
+        if (covered(merged.value.recipients, recorded.value)) return;
+      }
+      pending.push({ id, body: merged.value.body });
+    };
+    await [...variants].reduce<Promise<void>>(
+      (previous, [id, bodies]) => previous.then(() => select(id, bodies)),
+      Promise.resolve(),
+    );
+    await pending.reduce<Promise<void>>(
       (previous, item) =>
         previous.then(async () => {
-          if (
-            !completed.has(item.id) &&
-            (await this.process(item.body, true)).isErr()
-          ) {
+          if ((await this.process(item.body, true)).isErr()) {
             failures++;
             this.deps.events.emit("ingest_failure", {
               stage: "replay_message",

@@ -9,7 +9,7 @@ import type { createDomainStore } from "@opensuite/db";
 import type { Actor } from "./accounts.ts";
 
 type Failure = {
-  kind: "forbidden" | "unavailable" | "invalid";
+  kind: "forbidden" | "unavailable" | "invalid" | "confirmed";
   message: string;
 };
 type Outcome<T> = PromiseLike<Result<T, Failure>>;
@@ -23,6 +23,7 @@ export interface DomainProvider {
   verified(name: string): Outcome<boolean>;
 }
 export interface DomainMail {
+  findDomain(name: string): Outcome<{ id: string; name: string }>;
   createDomain(name: string): Outcome<{ id: string; name: string }>;
   dkimRecords(
     id: string,
@@ -67,46 +68,73 @@ export function createDomainService(
   provider: DomainProvider,
   mail: DomainMail,
   dns: DnsPort,
+  options: { adoptionOnly?: boolean } = {},
 ) {
-  async function provision(
-    actor: Actor,
-    row: DomainRow,
-  ): Promise<Result<DomainRow, Failure>> {
-    const domain = await mail.createDomain(row.name);
+  async function prepare(name: string) {
+    const domain = await (options.adoptionOnly === true
+      ? mail.findDomain(name)
+      : mail.createDomain(name));
     if (domain.isErr()) return err(unavailable());
     const keys = await mail.dkimRecords(domain.value.id);
-    if (keys.isErr()) return err(unavailable());
-    const identity = await provider.ensure(row.name);
+    if (keys.isErr() || keys.value.length === 0) return err(unavailable());
+    const identity = await provider.ensure(name);
     if (identity.isErr()) return err(unavailable());
     if (
       !identity.value.verificationToken ||
       identity.value.dkimTokens.length === 0
     )
       return err(unavailable());
-    const recipient = await provider.receipt(row.name, true);
+    const recipient = await provider.receipt(name, true);
     if (recipient.isErr()) return err(unavailable());
     const records = [
-      pending("MX", row.name, "inbound-smtp.eu-north-1.amazonaws.com", 10),
-      pending("TXT", row.name, "v=spf1 include:amazonses.com ~all"),
-      pending("TXT", `_dmarc.${row.name}`, "v=DMARC1; p=none"),
-      pending(
-        "TXT",
-        `_amazonses.${row.name}`,
-        identity.value.verificationToken,
-      ),
+      pending("MX", name, "inbound-smtp.eu-north-1.amazonaws.com", 10),
+      pending("TXT", name, "v=spf1 include:amazonses.com ~all"),
+      pending("TXT", `_dmarc.${name}`, "v=DMARC1; p=none"),
+      pending("TXT", `_amazonses.${name}`, identity.value.verificationToken),
       ...keys.value.map((key) => pending(key.type, key.name, key.value)),
       ...identity.value.dkimTokens.map((token) =>
         pending(
           "CNAME",
-          `${token}._domainkey.${row.name}`,
+          `${token}._domainkey.${name}`,
           `${token}.dkim.amazonses.com`,
         ),
       ),
     ];
+    if (options.adoptionOnly === true) {
+      const checks = await Promise.all(
+        records.map(async (record): Promise<DnsRecord> => {
+          const result = await dns.lookup(record);
+          return {
+            ...record,
+            status: result.isOk() && result.value ? "verified" : "failing",
+          };
+        }),
+      );
+      if (checks.some((record) => record.status !== "verified"))
+        return err(unavailable());
+      return ok({
+        stalwartId: domain.value.id,
+        status: "verified" as const,
+        records: checks,
+        checkedAt: new Date(),
+      });
+    }
+    return ok({
+      stalwartId: domain.value.id,
+      status: "pending" as const,
+      records,
+    });
+  }
+  async function provision(
+    actor: Actor,
+    row: DomainRow,
+  ): Promise<Result<DomainRow, Failure>> {
+    const prepared = await prepare(row.name);
+    if (prepared.isErr()) return err(unavailable());
     const saved = await store.save(
       actor.id,
       row.id,
-      { stalwartId: domain.value.id, status: "pending", records },
+      prepared.value,
       "admin.domain.provision",
     );
     return saved.isErr() ? err(unavailable()) : ok(saved.value);
@@ -123,6 +151,19 @@ export function createDomainService(
       if (actor.role !== "admin") return err(denied());
       const parsed = DomainName.safeParse(name);
       if (!parsed.success) return err(invalid());
+      if (options.adoptionOnly === true) {
+        const prepared = await prepare(parsed.data);
+        if (prepared.isErr()) return err(unavailable());
+        const created = await store.create(actor.id, parsed.data);
+        if (created.isErr()) return err(unavailable());
+        const saved = await store.save(
+          actor.id,
+          created.value.id,
+          prepared.value,
+          "admin.domain.provision",
+        );
+        return saved.isErr() ? err(unavailable()) : ok(saved.value);
+      }
       const created = await store.create(actor.id, parsed.data);
       if (created.isErr()) return err(unavailable());
       return provision(actor, created.value);
@@ -152,17 +193,65 @@ export function createDomainService(
         row = result.value;
       }
       const checks = await Promise.all(
-        row.records.map(async (record): Promise<DnsRecord> => {
-          const result = await dns.lookup(record);
-          return {
-            ...record,
+        row.records.map(async (record) => ({
+          record,
+          result: await dns.lookup(record),
+        })),
+      );
+      if (options.adoptionOnly === true) {
+        const receipt = await provider.receipt(row.name, true);
+        const identity = await provider.ensure(row.name);
+        const unavailableCheck =
+          checks.some(({ result }) => result.isErr()) ||
+          (receipt.isErr() && receipt.error.kind !== "confirmed") ||
+          (identity.isErr() && identity.error.kind !== "confirmed");
+        const checkedRecords: DnsRecord[] = checks.map(({ record, result }) =>
+          Object.assign({}, record, {
             status: result.isOk() && result.value ? "verified" : "failing",
-          };
+          }),
+        );
+        const identityRecordsMatch =
+          identity.isOk() &&
+          checkedRecords.some(
+            (record) =>
+              record.name === `_amazonses.${row.name}` &&
+              record.value === identity.value.verificationToken,
+          ) &&
+          identity.value.dkimTokens.every((token) =>
+            checkedRecords.some(
+              (record) =>
+                record.name === `${token}._domainkey.${row.name}` &&
+                record.value === `${token}.dkim.amazonses.com`,
+            ),
+          );
+        const confirmedFailure =
+          checks.some(({ result }) => result.isOk() && !result.value) ||
+          (receipt.isErr() && receipt.error.kind === "confirmed") ||
+          (identity.isErr() && identity.error.kind === "confirmed") ||
+          (identity.isOk() && !identityRecordsMatch);
+        const outcome = unavailableCheck
+          ? "unavailable"
+          : confirmedFailure
+            ? "confirmed"
+            : "verified";
+        const recorded = await store.recordAdoptionCheck(
+          actor.id,
+          id,
+          outcome,
+          checkedRecords,
+          source,
+        );
+        if (recorded.isErr() || unavailableCheck) return err(unavailable());
+        return ok(recorded.value);
+      }
+      const records: DnsRecord[] = checks.map(({ record, result }) =>
+        Object.assign({}, record, {
+          status: result.isOk() && result.value ? "verified" : "failing",
         }),
       );
       const ses = await provider.verified(row.name);
       const verified =
-        checks.every((record) => record.status === "verified") &&
+        records.every((record) => record.status === "verified") &&
         ses.isOk() &&
         ses.value;
       const saved = await store.save(
@@ -170,7 +259,7 @@ export function createDomainService(
         id,
         {
           status: verified ? "verified" : "failing",
-          records: checks,
+          records,
           checkedAt: new Date(),
         },
         `admin.domain.recheck.${source}`,

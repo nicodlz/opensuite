@@ -101,5 +101,9 @@ img[src$="/images/welcome-dialog-graphic.png"] { content: url('/esuno-vault/imag
 .theme_dark bit-landing-header bit-svg[aria-label="Bitwarden logo"] { content: url('/esuno-vault/images/logo-white.svg?v=1'); display: block; }
 bit-nav-logo bit-svg { content: url('/esuno-vault/images/logo-white.svg?v=1'); display: block; }
 bit-nav-logo bit-nav-item a:before { background-image: url('/esuno-vault/images/icon-white.svg?v=1'); }
+{{#if signup_disabled}}
+/* The 2026.7.0 client puts the login link in this dedicated wrapper. */
+.vw-signup-link { display: none !important; }
+{{/if}}
 .tw-rounded-lg { border-radius: var(--esuno-radius-control); }
 .tw-rounded-xl { border-radius: var(--esuno-radius-card); }

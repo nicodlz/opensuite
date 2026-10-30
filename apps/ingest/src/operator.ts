@@ -1,6 +1,17 @@
-import { parseNotification, verdictPolicy } from "@opensuite/core";
+import {
+  parseNotification,
+  recoverFirehose,
+  recoverObjects,
+  verdictPolicy,
+} from "@opensuite/core";
 import { z } from "zod";
-import type { Delivery, Ledger, Storage } from "@opensuite/core";
+import type {
+  Delivery,
+  Ledger,
+  RecoveryScope,
+  RecoveryStore,
+  Storage,
+} from "@opensuite/core";
 import type { createDatabase } from "@opensuite/db";
 import type { Result } from "neverthrow";
 
@@ -13,6 +24,7 @@ type Dependencies = {
   ledger: Ledger;
   delivery: Delivery;
   storage: Storage;
+  recovery?: { store: RecoveryStore; scope: RecoveryScope };
 };
 const keySchema = z.string().regex(/^[a-f0-9]{64}$/);
 // `system:` identities are reserved for automatic actions such as expiry.
@@ -26,7 +38,7 @@ const reasonSchema = z.string().trim().min(8).max(1000);
 
 const unconfigured = "Destination is not configured";
 const notRejectable =
-  "Only a held recipient or one whose destination is not configured can be rejected";
+  "Only a held recipient, one whose destination is not configured or a permanent failure can be rejected";
 export async function operatorCommand(
   deps: Dependencies,
   args: string[],
@@ -34,6 +46,7 @@ export async function operatorCommand(
   const expired = await deps.ledger.expireClaims();
   if (expired.isErr()) throw new Error("Could not expire claims");
   const [command, rawKey, action, remote, actor, explanation] = args;
+  if (command === "recover") return recover(deps, args.slice(1));
   if (command === "list" && args.length <= 3) {
     // `list held [cursor]` shows held recipients; `list [cursor]` the rows
     // that need an operator decision, without the held backlog.
@@ -99,14 +112,18 @@ export async function operatorCommand(
         row === null ||
         !(
           row.state === "held" ||
-          (row.state === "failed" && row.error === unconfigured)
+          (row.state === "failed" &&
+            (row.error === unconfigured || row.permanent))
         )
       )
         throw new Error(notRejectable);
       // A mailbox that is usable again (re-enabled, or linked delivery off)
-      // would receive this mail on the next replay: never discard it.
+      // would receive this mail on the next replay: never discard it. A
+      // permanent failure (a copy elsewhere in the mailbox, an original that
+      // is gone) is the operator's decision to close.
       if (
         row.state === "failed" &&
+        !row.permanent &&
         (await tx.mailboxLink.count({
           where: {
             accountId: row.destination,
@@ -234,3 +251,96 @@ export async function operatorCommand(
     matches: matches.value.length,
   };
 }
+
+const isoDate = z.iso
+  .datetime({ offset: true })
+  .transform((value) => new Date(value));
+/**
+ * `recover firehose OPERATOR PREFIX [SINCE] [UNTIL] [--apply]` copies
+ * notifications from the Firehose archive into the replay archive;
+ * `recover objects OPERATOR [--apply]` restores the stored versions of the
+ * MIME objects unfinished messages need. Both only report unless `--apply`
+ * is given; applied runs are recorded in the audit log.
+ */
+async function recover(deps: Dependencies, args: string[]) {
+  if (deps.recovery === undefined)
+    throw new Error("Recovery is not configured");
+  const apply = args.at(-1) === "--apply";
+  const [kind, rawOperator, ...rest] = apply ? args.slice(0, -1) : args;
+  const operator = identitySchema.parse(rawOperator);
+  const { store, scope } = deps.recovery;
+  let result;
+  let detail: Record<string, unknown>;
+  if (kind === "firehose" && rest.length >= 1 && rest.length <= 3) {
+    const [prefix, since, until] = rest;
+    const options = {
+      prefix: z.string().min(1).parse(prefix),
+      apply,
+      ...(since === undefined ? {} : { since: isoDate.parse(since) }),
+      ...(until === undefined ? {} : { until: isoDate.parse(until) }),
+    };
+    result = await recoverFirehose(store, scope, options);
+    detail = { prefix, since, until };
+  } else if (kind === "objects" && rest.length === 0) {
+    result = await recoverObjects(store, deps.storage, deps.ledger, scope, {
+      apply,
+    });
+    detail = {};
+  } else throw new Error("Invalid operator command");
+  if (apply && result.isErr())
+    // A run that stopped early is recorded too.
+    await deps.db.auditEvent.create({
+      data: {
+        userId: null,
+        action: `ingest.recover.${kind}`,
+        detail: { operator, ...detail, error: result.error.message },
+      },
+    });
+  if (result.isErr())
+    throw new Error(`Recovery failed: ${result.error.message}`);
+  if (apply) {
+    // Counts only: message IDs and addresses stay in the operator's output.
+    const counts = Object.fromEntries(
+      Object.entries(result.value).map(([name, value]) => [
+        name,
+        Array.isArray(value) ? value.length : value,
+      ]),
+    );
+    await deps.db.auditEvent.create({
+      data: {
+        userId: null,
+        action: `ingest.recover.${kind}`,
+        detail: { operator, ...detail, ...counts },
+      },
+    });
+  }
+  return result.value;
+}
+
+/**
+ * Whether a recovery report leaves work undone: the command then exits with
+ * a failure so that a scripted run cannot mistake it for success.
+ */
+export const recoveryIncomplete = (report: unknown) => {
+  const parsed = z
+    .object({
+      failed: z.number(),
+      unreadable: z.number().optional(),
+      unrecoverable: z.array(z.unknown()).optional(),
+      // Messages replay skips: object recovery lists their IDs, Firehose
+      // recovery every variant group with whether it can be merged.
+      divergent: z
+        .array(z.union([z.string(), z.object({ mergeable: z.boolean() })]))
+        .optional(),
+    })
+    .safeParse(report);
+  return (
+    parsed.success &&
+    (parsed.data.failed > 0 ||
+      (parsed.data.unreadable ?? 0) > 0 ||
+      (parsed.data.unrecoverable ?? []).length > 0 ||
+      (parsed.data.divergent ?? []).some(
+        (item) => typeof item === "string" || !item.mergeable,
+      ))
+  );
+};

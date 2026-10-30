@@ -1,6 +1,8 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectVersionsCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   type S3Client,
@@ -13,7 +15,7 @@ import {
 } from "@aws-sdk/client-sqs";
 import { ResultAsync } from "neverthrow";
 import { z } from "zod";
-import type { Queue, Storage } from "../ingest/contracts.ts";
+import type { Queue, RecoveryStore, Storage } from "../ingest/contracts.ts";
 
 const failure = (cause: unknown) => ({
   message: cause instanceof Error ? cause.message : String(cause),
@@ -196,6 +198,205 @@ export function awsStorage(
         buffer
           .send(new DeleteObjectCommand({ Bucket: name, Key: key }))
           .then(() => undefined),
+        failure,
+      );
+    },
+  };
+}
+
+const statusOf = (cause: unknown) => {
+  const parsed = z
+    .object({ $metadata: z.object({ httpStatusCode: z.number().optional() }) })
+    .safeParse(cause);
+  return parsed.success ? parsed.data.$metadata.httpStatusCode : undefined;
+};
+const exists = async (client: S3Client, name: string, key: string) => {
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: name, Key: key }));
+    return true;
+  } catch (cause) {
+    if (statusOf(cause) === 404) return false;
+    throw cause;
+  }
+};
+// A failed precondition means the destination already exists; a conflict
+// (409) means a concurrent conditional write and stays an error to retry.
+const unlessPresent = async <T>(write: () => Promise<T>) => {
+  try {
+    await write();
+    return true;
+  } catch (cause) {
+    if (statusOf(cause) === 412) return false;
+    throw cause;
+  }
+};
+const firehosePage = z
+  .object({
+    Contents: z
+      .array(
+        z
+          .object({ Key: z.string().min(1), LastModified: z.date() })
+          .passthrough(),
+      )
+      .optional(),
+    IsTruncated: z.boolean().optional(),
+    NextContinuationToken: z.string().optional(),
+  })
+  .passthrough();
+const versionPage = z
+  .object({
+    Versions: z
+      .array(
+        z
+          .object({
+            Key: z.string(),
+            VersionId: z.string().min(1),
+            LastModified: z.date(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+    IsTruncated: z.boolean().optional(),
+    NextKeyMarker: z.string().optional(),
+    NextVersionIdMarker: z.string().optional(),
+  })
+  .passthrough();
+
+/** Recovery reads Firehose output in the buffer and restores its versions. */
+export function awsRecovery(
+  buffer: S3Client,
+  archive: S3Client,
+  bucket: string,
+  archiveBucket: string,
+  prefix: string,
+): RecoveryStore {
+  return {
+    firehoseObjects(path) {
+      const page = async (
+        token?: string,
+      ): Promise<{ key: string; modified: Date }[]> => {
+        const response = firehosePage.parse(
+          await buffer.send(
+            new ListObjectsV2Command({
+              Bucket: bucket,
+              Prefix: path,
+              ContinuationToken: token,
+            }),
+          ),
+        );
+        const items = (response.Contents ?? []).map((item) => ({
+          key: item.Key,
+          modified: item.LastModified,
+        }));
+        if (response.IsTruncated !== true) return items;
+        if (response.NextContinuationToken === undefined)
+          throw new Error("Truncated S3 response has no continuation token");
+        return [...items, ...(await page(response.NextContinuationToken))];
+      };
+      return ResultAsync.fromPromise(page(), failure);
+    },
+    readFirehose(key) {
+      return ResultAsync.fromPromise(read(buffer, bucket, key), failure);
+    },
+    archiveExists(key) {
+      return ResultAsync.fromPromise(
+        exists(archive, archiveBucket, prefix + key),
+        failure,
+      );
+    },
+    archiveIfAbsent(key, body) {
+      return ResultAsync.fromPromise(
+        unlessPresent(() =>
+          archive.send(
+            new PutObjectCommand({
+              Bucket: archiveBucket,
+              Key: prefix + key,
+              Body: body,
+              ContentType: "application/json",
+              IfNoneMatch: "*",
+            }),
+          ),
+        ).then((written) => (written ? "written" : "present")),
+        failure,
+      );
+    },
+    bufferExists(name, key) {
+      return ResultAsync.fromPromise(exists(buffer, name, key), failure);
+    },
+    latestVersion(name, key) {
+      const page = async (marker?: {
+        key: string;
+        version: string;
+      }): Promise<{ id: string; modified: Date }[]> => {
+        const response = versionPage.parse(
+          await buffer.send(
+            new ListObjectVersionsCommand({
+              Bucket: name,
+              Prefix: key,
+              ...(marker === undefined
+                ? {}
+                : { KeyMarker: marker.key, VersionIdMarker: marker.version }),
+            }),
+          ),
+        );
+        const versions = (response.Versions ?? [])
+          .filter((item) => item.Key === key)
+          .map((item) => ({ id: item.VersionId, modified: item.LastModified }));
+        if (response.IsTruncated !== true) return versions;
+        if (
+          response.NextKeyMarker === undefined ||
+          response.NextVersionIdMarker === undefined
+        )
+          throw new Error("Truncated S3 version listing has no marker");
+        return [
+          ...versions,
+          ...(await page({
+            key: response.NextKeyMarker,
+            version: response.NextVersionIdMarker,
+          })),
+        ];
+      };
+      return ResultAsync.fromPromise(
+        page().then(
+          (versions) =>
+            versions.toSorted(
+              (a, b) => b.modified.getTime() - a.modified.getTime(),
+            )[0]?.id ?? null,
+        ),
+        failure,
+      );
+    },
+    restoreIfAbsent(name, key, versionId) {
+      // Read the version and write it back only if no current object exists:
+      // the condition is atomic on the destination, and some S3 services
+      // refuse to copy a version onto its own key.
+      return ResultAsync.fromPromise(
+        (async () => {
+          const version = await buffer.send(
+            new GetObjectCommand({
+              Bucket: name,
+              Key: key,
+              VersionId: versionId,
+            }),
+          );
+          if (version.Body === undefined)
+            throw new Error("Missing S3 object body");
+          const bytes = await version.Body.transformToByteArray();
+          const restored = await unlessPresent(() =>
+            buffer.send(
+              new PutObjectCommand({
+                Bucket: name,
+                Key: key,
+                Body: bytes,
+                ...(version.ContentType === undefined
+                  ? {}
+                  : { ContentType: version.ContentType }),
+                IfNoneMatch: "*",
+              }),
+            ),
+          );
+          return restored ? ("restored" as const) : ("present" as const);
+        })(),
         failure,
       );
     },

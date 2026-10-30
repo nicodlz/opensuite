@@ -5,7 +5,7 @@ resource "aws_sns_topic" "inbound" {
 data "aws_iam_policy_document" "topic" {
   statement {
     sid       = "AccountAdministration"
-    actions   = ["SNS:*"]
+    actions   = ["SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission", "SNS:RemovePermission", "SNS:DeleteTopic", "SNS:Subscribe", "SNS:ListSubscriptionsByTopic", "SNS:Publish"]
     resources = [aws_sns_topic.inbound.arn]
     principals {
       type        = "AWS"
@@ -31,6 +31,25 @@ data "aws_iam_policy_document" "topic" {
       values   = [local.rule_arn]
     }
   }
+  statement {
+    sid       = "EsunoReceiptRulePublish"
+    actions   = ["SNS:Publish"]
+    resources = [aws_sns_topic.inbound.arn]
+    principals {
+      type        = "Service"
+      identifiers = ["ses.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "AWS:SourceArn"
+      values   = [local.esuno_rule_arn]
+    }
+  }
 }
 
 resource "aws_sns_topic_policy" "inbound" {
@@ -39,13 +58,21 @@ resource "aws_sns_topic_policy" "inbound" {
 }
 
 resource "aws_sqs_queue" "ingestion_dlq" {
-  name                      = "${var.name_prefix}-ingestion-dlq"
+  name = coalesce(var.ingestion_dlq_name, "${var.name_prefix}-inbound-dlq")
+  tags = { Purpose = "InboundDLQ" }
+  lifecycle {
+    ignore_changes = [max_message_size]
+  }
   message_retention_seconds = 1209600
   sqs_managed_sse_enabled   = true
 }
 
 resource "aws_sqs_queue" "ingestion" {
-  name                       = "${var.name_prefix}-ingestion"
+  name = coalesce(var.ingestion_queue_name, "${var.name_prefix}-inbound")
+  tags = { Purpose = "Inbound" }
+  lifecycle {
+    ignore_changes = [max_message_size]
+  }
   message_retention_seconds  = 1209600
   visibility_timeout_seconds = 300
   receive_wait_time_seconds  = 20
@@ -75,6 +102,26 @@ data "aws_iam_policy_document" "queue" {
   for_each = {
     ingestion        = aws_sqs_queue.ingestion.arn
     subscription_dlq = aws_sqs_queue.subscription_dlq.arn
+  }
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["sqs:*"]
+    resources = [each.value]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:PrincipalIsAWSService"
+      values   = ["false"]
+    }
   }
   statement {
     sid       = "AllowOnlyInboundTopic"
