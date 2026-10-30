@@ -761,14 +761,17 @@ ingestion and subscription DLQs before their 14 days run out.
 
    `--fenced` records that the operator asserts this fence (in the audit
    log); it does not enforce it and is no global exclusion. What the
-   command does guarantee: it checks the archive again for each missing
-   entry, writes only an absent one and reads it back, failing if it
-   differs, and never rewrites an existing entry. Should another writer
-   still replace an entry, the replacement is detected rather than used:
-   entries are named after the SHA-256 of their content, and replay and
-   `recover objects` refuse an entry whose content no longer matches its
-   name (`archive_mismatch`). B2 keeps the earlier versions, from which the
-   entry can be restored by hand.
+   command does: for each missing entry it checks the archive again and
+   writes only an entry it found absent, then reads it back and checks
+   every stored version of that key, reporting `changed` (and exiting with
+   an error) if any holds other content. Another writer creating the entry
+   between that check and the write would see its version superseded but
+   kept by B2, and the run reports it; one writing after the run is caught
+   later, as entries are named after the SHA-256 of their content: replay
+   and `recover objects` refuse an entry whose content no longer matches
+   its name (`archive_mismatch`), and recovery reports an existing entry in
+   that state as `changed` instead of skipping it. The earlier versions B2
+   keeps allow restoring an entry by hand.
 
 4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
    `--apply`. Investigate every `unrecoverable` message (its original is

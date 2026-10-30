@@ -16,6 +16,7 @@ import {
 import { ResultAsync } from "neverthrow";
 import { z } from "zod";
 import type { Queue, RecoveryStore, Storage } from "../ingest/contracts.ts";
+import { namedAfter } from "../ingest/recovery.ts";
 
 const failure = (cause: unknown) => ({
   message: cause instanceof Error ? cause.message : String(cause),
@@ -262,6 +263,12 @@ const versionPage = z
   })
   .passthrough();
 
+// Another writer's different content found where this run wrote.
+const archiveChanged = () =>
+  Object.assign(
+    new Error("Archive entry holds content another writer stored"),
+    { name: "ArchiveChanged" },
+  );
 /** Recovery reads Firehose output in the buffer and restores its versions. */
 export function awsRecovery(
   buffer: S3Client,
@@ -270,6 +277,18 @@ export function awsRecovery(
   archiveBucket: string,
   prefix: string,
 ): RecoveryStore {
+  const archiveVersions = async (key: string) => {
+    const response = versionPage.parse(
+      await archive.send(
+        new ListObjectVersionsCommand({ Bucket: archiveBucket, Prefix: key }),
+      ),
+    );
+    if (response.IsTruncated === true)
+      throw new Error("Too many archive entry versions to check");
+    return (response.Versions ?? [])
+      .filter((item) => item.Key === key)
+      .map((item) => item.VersionId);
+  };
   return {
     firehoseObjects(path) {
       const page = async (
@@ -298,9 +317,18 @@ export function awsRecovery(
     readFirehose(key) {
       return ResultAsync.fromPromise(read(buffer, bucket, key), failure);
     },
-    archiveExists(key) {
+    archiveState(key) {
       return ResultAsync.fromPromise(
-        exists(archive, archiveBucket, prefix + key),
+        (async () => {
+          if (!(await exists(archive, archiveBucket, prefix + key)))
+            return "absent" as const;
+          const stored = new TextDecoder().decode(
+            await read(archive, archiveBucket, prefix + key),
+          );
+          return namedAfter(key, stored)
+            ? ("present" as const)
+            : ("changed" as const);
+        })(),
         failure,
       );
     },
@@ -323,19 +351,44 @@ export function awsRecovery(
               : ("present" as const);
           } catch (cause) {
             // B2 answers 501 to If-None-Match. Without a conditional write,
-            // only a fenced run (no other writer) may check, then write
-            // and read back; an existing entry is never rewritten.
+            // only a fenced run (no other writer) may check, then write an
+            // absent entry and verify every stored version.
             if (statusOf(cause) !== 501 || options?.fenced !== true)
               throw cause;
           }
-          if (await exists(archive, archiveBucket, prefix + key))
+          if (await exists(archive, archiveBucket, prefix + key)) {
+            const stored = new TextDecoder().decode(
+              await read(archive, archiveBucket, prefix + key),
+            );
+            if (stored !== body) throw archiveChanged();
             return "present" as const;
+          }
           await write(false);
           const stored = new TextDecoder().decode(
             await read(archive, archiveBucket, prefix + key),
           );
-          if (stored !== body)
-            throw new Error("Archive entry changed while it was written");
+          if (stored !== body) throw archiveChanged();
+          // Another writer may have created the entry between the check and
+          // the write: B2 keeps its version, which must hold the same text.
+          const versions = await archiveVersions(prefix + key);
+          await Promise.all(
+            versions.map(async (versionId) => {
+              const version = await archive.send(
+                new GetObjectCommand({
+                  Bucket: archiveBucket,
+                  Key: prefix + key,
+                  VersionId: versionId,
+                }),
+              );
+              const text =
+                version.Body === undefined
+                  ? ""
+                  : new TextDecoder().decode(
+                      await version.Body.transformToByteArray(),
+                    );
+              if (text !== body) throw archiveChanged();
+            }),
+          );
           return "written" as const;
         })(),
         failure,

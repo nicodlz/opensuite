@@ -5,6 +5,7 @@ import type { RecoveryStore, Storage } from "../src/ingest/contracts.ts";
 import {
   archiveKey,
   belongs,
+  namedAfter,
   recoverFirehose,
   recoverObjects,
 } from "../src/ingest/recovery.ts";
@@ -90,7 +91,18 @@ function fakeStore(objects: Record<string, { bytes: Uint8Array; at: Date }>) {
         item === undefined ? err({ message: "missing" }) : ok(item.bytes),
       );
     },
-    archiveExists: (key) => Promise.resolve(ok(archive.has(key))),
+    archiveState: (key) => {
+      const text = archive.get(key);
+      return Promise.resolve(
+        ok(
+          text === undefined
+            ? ("absent" as const)
+            : namedAfter(key, text)
+              ? ("present" as const)
+              : ("changed" as const),
+        ),
+      );
+    },
     archiveIfAbsent: (key, text) => {
       if (archive.has(key)) return Promise.resolve(ok("present" as const));
       archive.set(key, text);
@@ -236,6 +248,27 @@ describe("recovery from the Firehose archive", () => {
       missing: 0,
       written: 0,
     });
+  });
+
+  it("reports an archived entry replaced by other content as changed", async () => {
+    const fake = fakeStore({
+      "metadata/c.gz": {
+        bytes: firehose(b1),
+        at: new Date("2026-10-30T10:00:00Z"),
+      },
+    });
+    fake.archive.set(archiveKey(b1), b2);
+    const report = await recoverFirehose(fake.store, scope, {
+      prefix: "metadata/",
+      apply: true,
+    });
+    expect(report.isOk() && report.value).toMatchObject({
+      changed: 1,
+      written: 0,
+      alreadyArchived: 0,
+    });
+    // Never rewritten: the replacement stays for an operator to examine.
+    expect(fake.archive.get(archiveKey(b1))).toBe(b2);
   });
 
   it("selects records by their receipt time, not their object's", async () => {

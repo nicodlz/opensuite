@@ -32,13 +32,18 @@ export interface RecoveryStore {
   /** Objects written by Firehose under a prefix of the buffer bucket. */
   firehoseObjects(prefix: string): Outcome<{ key: string; modified: Date }[]>;
   readFirehose(key: string): Outcome<Uint8Array>;
-  archiveExists(key: string): Outcome<boolean>;
+  /**
+   * Whether an archive entry is absent, present with the content it is named
+   * after, or present but `changed` (another writer replaced it).
+   */
+  archiveState(key: string): Outcome<"absent" | "present" | "changed">;
   /**
    * Creates an archive entry unless one exists, as a conditional write. A
    * provider without conditional writes refuses it (`NotImplemented`);
-   * `fenced` then checks for the entry and writes it, which the operator
-   * may only ask for when no other writer of the archive can run, and reads
-   * it back to compare.
+   * `fenced`, which the operator may only ask for when no other writer of
+   * the archive can run, then writes an entry it found absent, reads it back
+   * and checks every stored version: an error named `ArchiveChanged` reports
+   * that another writer's different content was there.
    */
   archiveIfAbsent(
     key: string,

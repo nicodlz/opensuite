@@ -17,6 +17,8 @@ describe("recovery exit status", () => {
     expect(recoveryIncomplete({ ...clean, setup: 3 })).toBe(false);
     // Refused notifications usually mean a prefix is missing.
     expect(recoveryIncomplete({ ...clean, foreign: 1 })).toBe(true);
+    // An entry another writer replaced.
+    expect(recoveryIncomplete({ ...clean, changed: 1 })).toBe(true);
     expect(
       recoveryIncomplete({ ...clean, unrecoverable: [{ messageId: "m" }] }),
     ).toBe(true);

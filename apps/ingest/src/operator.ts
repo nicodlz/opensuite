@@ -277,8 +277,22 @@ async function recover(deps: Dependencies, args: string[]) {
   const fenced = flags.has("--fenced");
   if (fenced && !apply) throw new Error("--fenced requires --apply");
   const [kind, rawOperator, ...rest] = positional;
+  if (fenced && kind !== "firehose")
+    throw new Error("--fenced applies to recover firehose only");
   const operator = identitySchema.parse(rawOperator);
   const { store, scope } = deps.recovery;
+  // Recorded before any write, so an interrupted run, and the fence its
+  // operator asserted, leave a trace.
+  const started = async (detail: Record<string, unknown>) => {
+    if (apply)
+      await deps.db.auditEvent.create({
+        data: {
+          userId: null,
+          action: `ingest.recover.${kind ?? "unknown"}.start`,
+          detail: { operator, ...detail },
+        },
+      });
+  };
   let result;
   let detail: Record<string, unknown>;
   if (kind === "firehose" && rest.length >= 1 && rest.length <= 3) {
@@ -290,9 +304,11 @@ async function recover(deps: Dependencies, args: string[]) {
       ...(since === undefined ? {} : { since: isoDate.parse(since) }),
       ...(until === undefined ? {} : { until: isoDate.parse(until) }),
     };
+    await started({ prefix, since, until, fenced });
     result = await recoverFirehose(store, scope, options);
     detail = { prefix, since, until, fenced };
   } else if (kind === "objects" && rest.length === 0) {
+    await started({});
     result = await recoverObjects(store, deps.storage, deps.ledger, scope, {
       apply,
     });
@@ -338,6 +354,7 @@ export const recoveryIncomplete = (report: unknown) => {
       failed: z.number(),
       unreadable: z.number().optional(),
       invalid: z.number().optional(),
+      changed: z.number().optional(),
       // Notifications refused for their bucket, topic or object key: the
       // topic is this installation's, so usually a prefix missing from
       // INBOUND_OBJECT_PREFIXES, to fix before applying.
@@ -355,6 +372,7 @@ export const recoveryIncomplete = (report: unknown) => {
     (parsed.data.failed > 0 ||
       (parsed.data.unreadable ?? 0) > 0 ||
       (parsed.data.invalid ?? 0) > 0 ||
+      (parsed.data.changed ?? 0) > 0 ||
       (parsed.data.foreign ?? 0) > 0 ||
       (parsed.data.unrecoverable ?? []).length > 0 ||
       (parsed.data.divergent ?? []).some(

@@ -195,6 +195,11 @@ export interface FirehoseReport {
   /** Missing from the archive: written with `apply`, otherwise to write. */
   missing: number;
   written: number;
+  /**
+   * Entries holding content other than they are named after, or found
+   * replaced by another writer during a fenced write.
+   */
+  changed: number;
   failed: number;
   divergent: Divergence[];
 }
@@ -256,6 +261,7 @@ export async function recoverFirehose(
     alreadyArchived: 0,
     missing: 0,
     written: 0,
+    changed: 0,
     failed: 0,
     divergent: [],
   };
@@ -321,12 +327,16 @@ export async function recoverFirehose(
     });
   }
   await inTurn([...bodies], async ([key, { body }]) => {
-    const exists = await store.archiveExists(key);
-    if (exists.isErr()) {
+    const state = await store.archiveState(key);
+    if (state.isErr()) {
       report.failed++;
       return;
     }
-    if (exists.value) {
+    if (state.value === "changed") {
+      report.changed++;
+      return;
+    }
+    if (state.value === "present") {
       report.alreadyArchived++;
       return;
     }
@@ -335,8 +345,10 @@ export async function recoverFirehose(
     const written = await store.archiveIfAbsent(key, body, {
       fenced: options.fenced === true,
     });
-    if (written.isErr()) report.failed++;
-    else if (written.value === "written") report.written++;
+    if (written.isErr()) {
+      if (written.error.code === "ArchiveChanged") report.changed++;
+      else report.failed++;
+    } else if (written.value === "written") report.written++;
     // Written concurrently since the check: present, nothing lost.
     else report.alreadyArchived++;
   });

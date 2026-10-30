@@ -1,6 +1,7 @@
 import {
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectVersionsCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -65,39 +66,62 @@ describe("conditional restore against S3", () => {
   });
 });
 
-// An archive like B2, which answers 501 to If-None-Match.
-const archiveWith = (options: { existing?: string; storedAs?: string }) => {
+// An archive like B2: 501 to If-None-Match, every write a new version.
+const archiveWith = (options: {
+  existing?: string;
+  storedAs?: string;
+  // Written by another writer between this run's check and its write.
+  slippedIn?: string;
+}) => {
   const client = new S3Client({ region: "eu-north-1" });
   const puts: (string | undefined)[] = [];
-  let stored = options.existing;
+  const versions: string[] =
+    options.existing === undefined ? [] : [options.existing];
+  let checked = false;
   Object.defineProperty(client, "send", {
     value: (command: unknown) => {
       if (command instanceof PutObjectCommand) {
         puts.push(command.input.IfNoneMatch);
         if (command.input.IfNoneMatch === "*")
           return Promise.reject(status(501));
-        stored =
+        if (options.slippedIn !== undefined) versions.push(options.slippedIn);
+        versions.push(
           options.storedAs ??
-          (typeof command.input.Body === "string" ? command.input.Body : "");
+            (typeof command.input.Body === "string" ? command.input.Body : ""),
+        );
         return Promise.resolve({});
       }
-      if (command instanceof HeadObjectCommand)
-        return stored === undefined
+      if (command instanceof HeadObjectCommand) {
+        checked = true;
+        return versions.length === 0
           ? Promise.reject(status(404))
           : Promise.resolve({});
-      if (command instanceof GetObjectCommand)
+      }
+      if (command instanceof ListObjectVersionsCommand)
+        return Promise.resolve({
+          Versions: versions.map((_, index) => ({
+            Key: "n/k.json",
+            VersionId: String(index),
+            LastModified: new Date(index * 1000),
+          })),
+        });
+      if (command instanceof GetObjectCommand) {
+        const id = command.input.VersionId;
+        const text = id === undefined ? versions.at(-1) : versions[Number(id)];
         return Promise.resolve({
           Body: {
             transformToByteArray: () =>
-              Promise.resolve(new TextEncoder().encode(stored ?? "")),
+              Promise.resolve(new TextEncoder().encode(text ?? "")),
           },
         });
+      }
       return Promise.reject(new Error("unexpected command"));
     },
   });
   return {
     store: awsRecovery(client, client, "inbound", "archive", "n/"),
     puts,
+    checked: () => checked,
   };
 };
 
@@ -122,11 +146,34 @@ describe("archive writes without conditional support", () => {
     expect(written.isOk() && written.value).toBe("written");
     expect(absent.puts).toEqual(["*", undefined]);
 
-    // Another writer slipped in: the read-back shows it.
+    // Another writer replaced ours after the write: the read-back shows it.
     const raced = archiveWith({ storedAs: "other" });
     const changed = await raced.store.archiveIfAbsent("k.json", "body", {
       fenced: true,
     });
-    expect(changed.isErr()).toBe(true);
+    expect(changed.isErr() && changed.error.code).toBe("ArchiveChanged");
+
+    // Another writer created it between the check and the write: its
+    // different version, kept by B2, is found.
+    const slipped = archiveWith({ slippedIn: "other" });
+    const hidden = await slipped.store.archiveIfAbsent("k.json", "body", {
+      fenced: true,
+    });
+    expect(hidden.isErr() && hidden.error.code).toBe("ArchiveChanged");
+
+    // The same text written twice, as the worker would, is fine.
+    const twice = archiveWith({ slippedIn: "body" });
+    const same = await twice.store.archiveIfAbsent("k.json", "body", {
+      fenced: true,
+    });
+    expect(same.isOk() && same.value).toBe("written");
+
+    // An existing entry with other content is reported, never rewritten.
+    const replaced = archiveWith({ existing: "other" });
+    const stale = await replaced.store.archiveIfAbsent("k.json", "body", {
+      fenced: true,
+    });
+    expect(stale.isErr() && stale.error.code).toBe("ArchiveChanged");
+    expect(replaced.puts).toEqual(["*"]);
   });
 });
