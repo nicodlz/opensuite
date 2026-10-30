@@ -630,6 +630,43 @@ describe("held unknown recipients", () => {
     expect(memory.imports).toHaveLength(2);
   });
 
+  it("leaves a recipient whose copy only partly matches to an operator", async () => {
+    const memory = synthetic();
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: {
+        ...memory.delivery,
+        reconcile: () =>
+          Promise.resolve(
+            err({
+              message:
+                "Keyword candidates do not all match the original message",
+              ambiguous: true,
+            }),
+          ),
+      },
+      events: memory.sink,
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    memory.archives.set(
+      "notifications/a.json",
+      JSON.stringify(notification(["alice@example.test"])),
+    );
+    await service.reconcile(86_400 * 3650);
+    // Replay searched first and did not import; the row is permanent, so it
+    // is listed for an operator instead of retried every hour.
+    expect(memory.imports).toHaveLength(0);
+    expect([...memory.records.values()]).toMatchObject([
+      { state: "failed", permanent: true },
+    ]);
+  });
+
   it("logs where each import went and why", async () => {
     const memory = synthetic();
     const seen: Record<string, string | number>[] = [];

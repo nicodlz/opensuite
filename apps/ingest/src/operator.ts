@@ -283,6 +283,15 @@ async function recover(deps: Dependencies, args: string[]) {
     });
     detail = {};
   } else throw new Error("Invalid operator command");
+  if (apply && result.isErr())
+    // A run that stopped early is recorded too.
+    await deps.db.auditEvent.create({
+      data: {
+        userId: null,
+        action: `ingest.recover.${kind}`,
+        detail: { operator, ...detail, error: result.error.message },
+      },
+    });
   if (result.isErr())
     throw new Error(`Recovery failed: ${result.error.message}`);
   if (apply) {
@@ -303,3 +312,23 @@ async function recover(deps: Dependencies, args: string[]) {
   }
   return result.value;
 }
+
+/**
+ * Whether a recovery report leaves work undone: the command then exits with
+ * a failure so that a scripted run cannot mistake it for success.
+ */
+export const recoveryIncomplete = (report: unknown) => {
+  const parsed = z
+    .object({
+      failed: z.number(),
+      unreadable: z.number().optional(),
+      unrecoverable: z.array(z.unknown()).optional(),
+    })
+    .safeParse(report);
+  return (
+    parsed.success &&
+    (parsed.data.failed > 0 ||
+      (parsed.data.unreadable ?? 0) > 0 ||
+      (parsed.data.unrecoverable ?? []).length > 0)
+  );
+};

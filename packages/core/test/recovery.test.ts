@@ -15,13 +15,29 @@ const scope = {
   topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
   bufferPrefix: "",
 };
-const body = (recipients: string[], id: string, bucket = "inbound") => {
-  const n = notification(recipients, "PASS", id);
+const body = (
+  recipients: string[],
+  id: string,
+  options: {
+    bucket?: string;
+    at?: string;
+    status?: string;
+    object?: string;
+  } = {},
+) => {
+  const n = notification(recipients, options.status ?? "PASS", id);
+  const at = options.at ?? "2026-10-30T09:00:00.000Z";
   return JSON.stringify({
     ...n,
+    mail: { ...n.mail, timestamp: at },
     receipt: {
       ...n.receipt,
-      action: { ...n.receipt.action, bucketName: bucket },
+      timestamp: at,
+      action: {
+        ...n.receipt.action,
+        bucketName: options.bucket ?? "inbound",
+        objectKey: options.object ?? id,
+      },
     },
   });
 };
@@ -70,10 +86,16 @@ describe("recovery from the Firehose archive", () => {
   const b2 = body(["bcc@example.test"], "ses-b2");
   const c1 = body(["alice@example.test"], "ses-c");
   const c2 = body(["bob@example.test"], "ses-c");
-  const foreign = body(["alice@example.test"], "ses-x", "elsewhere");
+  const foreign = body(["alice@example.test"], "ses-x", {
+    bucket: "elsewhere",
+  });
+  // Names another message's object: never this installation's record.
+  const misdirected = body(["alice@example.test"], "ses-y", {
+    object: "ses-b1",
+  });
   const objects = {
     "metadata/2026/10/30/a.gz": {
-      bytes: firehose(b1, b1, b2, c1, "not json", foreign),
+      bytes: firehose(b1, b1, b2, c1, "not json", foreign, misdirected),
       at: new Date("2026-10-30T10:00:00Z"),
     },
     "metadata/2026/10/30/b.gz": {
@@ -85,7 +107,11 @@ describe("recovery from the Firehose archive", () => {
       at: new Date("2026-10-30T12:00:00Z"),
     },
     "metadata/2026/10/29/old.gz": {
-      bytes: firehose(body(["alice@example.test"], "ses-old")),
+      bytes: firehose(
+        body(["alice@example.test"], "ses-old", {
+          at: "2026-10-29T09:00:00.000Z",
+        }),
+      ),
       at: new Date("2026-10-29T10:00:00Z"),
     },
   };
@@ -104,9 +130,9 @@ describe("recovery from the Firehose archive", () => {
     expect(dry.isOk() && dry.value).toMatchObject({
       objects: 3,
       unreadable: 1,
-      records: 7,
+      records: 8,
       invalid: 1,
-      foreign: 1,
+      foreign: 2,
       notifications: 4,
       alreadyArchived: 1,
       missing: 3,
@@ -118,6 +144,7 @@ describe("recovery from the Firehose archive", () => {
           variants: 2,
           recipients: ["alice@example.test", "bob@example.test"],
           recipientsDiffer: true,
+          mergeable: true,
         },
       ],
     });
@@ -141,22 +168,95 @@ describe("recovery from the Firehose archive", () => {
     });
   });
 
-  it("selects objects by modification time", async () => {
+  it("selects records by their receipt time, not their object's", async () => {
     const fake = fakeStore(objects);
+    // A record received before `until` can sit in a later object.
     const report = await recoverFirehose(fake.store, scope, {
       prefix: "metadata/",
       until: new Date("2026-10-29T23:59:59Z"),
       apply: false,
     });
     expect(report.isOk() && report.value).toMatchObject({
-      objects: 1,
+      objects: 4,
       notifications: 1,
+      outsideWindow: 5,
       missing: 1,
     });
+  });
+
+  it("reports variants that disagree beyond their envelope as not mergeable", async () => {
+    const fake = fakeStore({
+      "metadata/x.gz": {
+        bytes: firehose(
+          body(["alice@example.test"], "ses-d"),
+          body(["bob@example.test"], "ses-d", { status: "FAIL" }),
+        ),
+        at: new Date("2026-10-30T10:00:00Z"),
+      },
+    });
+    const report = await recoverFirehose(fake.store, scope, {
+      prefix: "metadata/",
+      apply: false,
+    });
+    expect(report.isOk() && report.value.divergent).toMatchObject([
+      { messageId: "ses-d", recipientsDiffer: true, mergeable: false },
+    ]);
+  });
+
+  it("refuses to read the message buffer as Firehose output", async () => {
+    const fake = fakeStore({});
+    const report = await recoverFirehose(
+      fake.store,
+      { ...scope, bufferPrefix: "messages/" },
+      { prefix: "messages/2026/", apply: false },
+    );
+    expect(report.isErr() && report.error.message).toBe(
+      "Prefix is inside the message buffer",
+    );
   });
 });
 
 describe("recovery of buffered MIME objects", () => {
+  it("skips an imported message whose variants add no recipient", async () => {
+    const fake = fakeStore({});
+    const archived = new Map([
+      ["notifications/a.json", body(["alice@example.test"], "ses-v")],
+      ["notifications/b.json", body(["hidden@example.test"], "ses-v")],
+    ]);
+    const storage: Storage = {
+      archive: () => Promise.resolve(ok(undefined)),
+      archives: () => Promise.resolve(ok([...archived.keys()])),
+      readArchive: (key) => Promise.resolve(ok(archived.get(key) ?? "")),
+      bufferKeys: () => Promise.resolve(ok([])),
+      readBuffer: () => Promise.resolve(err({ message: "unused" })),
+      deleteBuffer: () => Promise.resolve(ok(undefined)),
+    };
+    const memory = synthetic();
+    memory.messageStates.set("ses-v", "imported");
+    fake.versions.set("ses-v", "v1");
+    const report = (recorded: string[]) =>
+      recoverObjects(
+        fake.store,
+        storage,
+        {
+          ...memory.ledger,
+          recordedAddresses: () => Promise.resolve(ok(recorded)),
+        },
+        scope,
+        { apply: false },
+      );
+    const all = await report(["alice@example.test", "HIDDEN@example.test"]);
+    expect(all.isOk() && all.value).toMatchObject({
+      pending: 0,
+      restorable: 0,
+    });
+    const partial = await report(["alice@example.test"]);
+    expect(partial.isOk() && partial.value).toMatchObject({
+      pending: 1,
+      restorable: 1,
+    });
+  });
+
   it("restores only missing objects of unfinished messages that have a version", async () => {
     const fake = fakeStore({});
     const archived = new Map([
@@ -164,7 +264,10 @@ describe("recovery of buffered MIME objects", () => {
       ["notifications/b.json", body(["alice@example.test"], "ses-present")],
       ["notifications/c.json", body(["alice@example.test"], "ses-restore")],
       ["notifications/d.json", body(["alice@example.test"], "ses-lost")],
-      ["notifications/e.json", body(["alice@example.test"], "ses-far", "far")],
+      [
+        "notifications/e.json",
+        body(["alice@example.test"], "ses-far", { bucket: "far" }),
+      ],
       ["notifications/f.json", "corrupt"],
     ]);
     const storage: Storage = {
@@ -190,6 +293,7 @@ describe("recovery of buffered MIME objects", () => {
       restorable: 1,
       restored: 0,
       unrecoverable: [{ messageId: "ses-lost", objectKey: "ses-lost" }],
+      divergent: [],
       failed: 1,
     });
     expect(fake.buffer.has("ses-restore")).toBe(false);

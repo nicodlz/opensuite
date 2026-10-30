@@ -173,8 +173,9 @@ notification endpoint: without it, alarms change state but notify nobody. Five
 alarms cover queue age, both DLQ depths, SNS failed deliveries and Firehose S3
 freshness. Missing metrics are treated as non-breaching, so also monitor service
 health, missing metrics, SNS redrive failures, and archive completeness; these
-alarms alone cannot prove preservation. Establish a documented replay process
-that identifies the failed subscription and validates each payload.
+alarms alone cannot prove preservation. Recover from the Firehose archive and the buffer's versions as in
+[Recovering mail from the archives](production.md#recovering-mail-from-the-archives),
+which validates each payload.
 
 The buffer bucket has versioning enabled. Noncurrent `messages/` versions
 expire 30 days after becoming noncurrent, including versions of unconfirmed

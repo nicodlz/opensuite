@@ -628,35 +628,82 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 
 Use this after an SQS message expired or was lost, after losing the host, or
 after restoring the database from a backup older than recent mail. It relies
-on the Firehose notification archive and the versioned buffer in AWS and on
-the replay archive in B2, none of which live on the host.
+on the Firehose notification archive (`metadata/`, never expired) and the
+versioned buffer (`messages/`, noncurrent versions kept 30 days) in AWS, and
+on the replay archive in B2, none of which live on the host. Expect one
+request at a time: about 1.5 hours per 100,000 archive entries.
 
-1. Quiesce the worker and replay as in step 1 of [Rollback](#rollback), and
-   restore the database and mail store first if the host was lost.
-2. Give the run a temporary recovery principal; the worker's own has no right
-   to read versions or write the buffer. On the buffer bucket it needs
-   `s3:ListBucket` and `s3:ListBucketVersions`, `s3:GetObject` on the
-   Firehose prefix, and `s3:GetObject`, `s3:GetObjectVersion` and
-   `s3:PutObject` on the message prefix. The archive credentials of
-   `deploy/ingest.env` already allow reading and writing the replay archive.
-   Pass the principal for this run only, for example with
-   `docker compose --profile ingest run --rm --no-deps -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY ingest node apps/ingest/src/main.ts operator ...`,
-   and remove it afterwards.
-3. Run `operator recover firehose <operator> <firehose-prefix> [since] [until]`
-   and read the report: notifications found, already archived, missing,
-   unreadable, invalid or foreign records, and divergent message IDs. Run it
-   again with `--apply`.
-4. Run `operator recover objects <operator>`, then with `--apply`. Investigate
-   any `unrecoverable` message: its original is gone.
-5. Run replay once by hand (`deploy/ingest/replay.sh`) and check
-   `operator list`, the `ingest_duplicate` alerts and the mailboxes concerned,
-   then restart the worker and the replay timer and remove the recovery
-   principal.
+**What it cannot recover.** The window is the shortest of the buffer's
+noncurrent-version retention (30 days), the B2 archive retention and the age
+of the backup. A notification SNS failed to hand to Firehose (after its own
+retries and the 14-day subscription DLQ) or that Firehose dropped after 24
+hours of retries is gone: only its object remains, reported as
+`ingest_buffer_without_notification`, and no envelope is guessed. A MIME
+version past retention is reported `unrecoverable`. Mail lost from Stalwart
+while the ledger still records it as imported is not reconsidered. Handle the
+ingestion and subscription DLQs before their 14 days run out.
 
-Both commands can be repeated safely. The conditional writes have been tested
-against LocalStack; confirm that the production buckets honour
-`If-None-Match` (a failed precondition must answer 412) before relying on
-them, and that the buffer's noncurrent versions are kept long enough.
+1. Quiesce as in step 1 of [Rollback](#rollback), and stop the backup timer
+   too so that it does not take the shared lock mid-run. After losing the
+   host, restore the database and Stalwart from the **same** backup (never a
+   database newer than the mail store); changes users made since are lost.
+2. Give the run a temporary recovery principal, preferably an assumed role
+   with a session of at most an hour; the worker's own principal cannot read
+   versions or write the buffer. Its policy on the buffer bucket allows
+   `s3:ListBucket` and `s3:ListBucketVersions` on the bucket, `s3:GetObject`
+   on `metadata/*`, and `s3:GetObject`, `s3:GetObjectVersion` and
+   `s3:PutObject` on `messages/*`, with the condition
+   `"StringEquals": {"s3:if-none-match": "*"}` on `s3:PutObject` so that it
+   can never replace an object, and nothing else. The archive keeps using the
+   `ARCHIVE_*` credentials of `deploy/ingest.env`. Load the credentials
+   without echoing them and pass them by name only:
+
+   ```sh
+   umask 077
+   read -rs AWS_ACCESS_KEY_ID; read -rs AWS_SECRET_ACCESS_KEY; read -rs AWS_SESSION_TOKEN
+   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+   recover() { docker compose --profile ingest run --rm --no-deps -T \
+     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+     ingest node apps/ingest/src/main.ts operator recover "$@"; }
+   ```
+
+   The values stay visible to `docker inspect` while a run lasts. Reports
+   list addresses and message IDs: write them to protected files.
+
+3. Run `recover firehose <operator> metadata/YYYY/MM/ [since] [until]
+   > firehose.json`. Firehose writes under `metadata/YYYY/MM/DD/HH/`in UTC,
+so name the narrowest prefix that covers the incident, and set`since`to
+the incident or backup time minus 24 hours (Firehose retries delivery for
+up to a day);`since`and`until` select notifications by their receipt
+time. Read the report: notifications found, already archived, missing,
+unreadable, invalid, foreign and outside the window, and divergent
+message IDs (`mergeable: false`ones are skipped by replay and need an
+operator). Run it again with`--apply`.
+4. Run `recover objects <operator> > objects.json`, then with `--apply`.
+   Investigate every `unrecoverable` message (its original is gone) and
+   every `divergent` one.
+5. Run replay once by hand (`deploy/ingest/replay.sh`). It must exit 0; then
+   check that a second dry run of both commands reports `missing` and
+   `restorable` at 0, that `operator list` holds nothing unexpected, that no
+   `ingest_duplicate` or new `ingest_buffer_without_notification` event
+   appeared, and the mailboxes concerned. Then restart the worker
+   (`docker compose --profile ingest up -d ingest`), the replay and backup
+   timers (`systemctl start opensuite-replay.timer` and the backup timer),
+   `unset` the credentials and revoke the principal.
+
+Both commands can be repeated safely; they exit with an error while any
+read, write or restore failed or an original is unrecoverable, and applied
+runs, complete or not, are recorded in the audit log. Before relying on
+them, test on the real buckets with the recovery principal: a conditional
+write on an existing key must answer 412, one on a key whose current version
+is a delete marker must succeed, two concurrent ones must leave one 409, all
+existing versions must remain, and the restored object must be encrypted;
+B2 must answer 412 to `If-None-Match` too (a B2 that ignores it rewrites
+identical bytes, harmless as entries are named after their content). Check
+once that a Firehose record and the worker's archive entry of the same mail
+have the same SHA-256, and rehearse on an isolated stack: an expired queue
+message, a database and mail store restored before recent mail, and repeated
+runs that write nothing.
 
 ## Rollback
 

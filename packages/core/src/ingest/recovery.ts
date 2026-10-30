@@ -24,25 +24,57 @@ export interface RecoveryScope {
   topic: string;
   bufferPrefix: string;
 }
+/**
+ * Whether a notification is this installation's, and names its own message:
+ * SES stores each message under the buffer prefix and its message ID, so a
+ * notification cannot point at another message's object.
+ */
 export const belongs = (n: Notification, scope: RecoveryScope) =>
   n.receipt.action.bucketName === scope.bucket &&
   n.receipt.action.topicArn === scope.topic &&
-  n.receipt.action.objectKey.startsWith(scope.bufferPrefix);
+  n.receipt.action.objectKey === scope.bufferPrefix + n.mail.messageId;
+
+// JSON with sorted keys, so equal notifications compare equal.
+const canonical = (value: unknown): string =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(",")}]`
+    : value !== null && typeof value === "object"
+      ? `{${Object.entries(value)
+          .toSorted(([a], [b]) => a.localeCompare(b))
+          .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+          .join(",")}}`
+      : JSON.stringify(value);
+// What must agree between variants: everything but their envelope and the
+// time and duration of the receipt rule that produced each.
+const shared = (n: Notification) =>
+  canonical({
+    ...n,
+    receipt: {
+      ...n.receipt,
+      recipients: [],
+      timestamp: "",
+      processingTimeMillis: 0,
+    },
+  });
 
 /**
  * One notification carrying every envelope recipient of several variants of
- * the same message, in their first-seen order; the rest is the first
- * variant's. Unparsable variants are left out.
+ * the same message, in their first-seen order. Variants are merged only when
+ * everything else agrees (object, verdicts, sender, times); otherwise they
+ * are refused, never resolved by picking one.
  */
-export function mergeVariants(bodies: string[]): string {
-  const parsed = bodies.flatMap((body) => {
-    const n = parseNotification(body);
-    return n.isOk() ? [n.value] : [];
-  });
-  const [first] = parsed;
-  if (first === undefined) return bodies[0] ?? "";
+export function mergeVariants(
+  bodies: string[],
+): Result<{ body: string; recipients: string[] }, Failure> {
+  const parsed = bodies.map((body) => parseNotification(body));
+  const valid = parsed.flatMap((n) => (n.isOk() ? [n.value] : []));
+  const [first] = valid;
+  if (first === undefined || valid.length !== parsed.length)
+    return err({ message: "Invalid notification variant" });
+  if (new Set(valid.map(shared)).size > 1)
+    return err({ message: "Notification variants disagree" });
   const seen = new Set<string>();
-  const recipients = parsed
+  const recipients = valid
     .flatMap((n) => n.receipt.recipients)
     .filter((address) => {
       const key = address.toLowerCase();
@@ -50,11 +82,19 @@ export function mergeVariants(bodies: string[]): string {
       seen.add(key);
       return true;
     });
-  return JSON.stringify({
-    ...first,
-    receipt: { ...first.receipt, recipients },
+  return ok({
+    body: JSON.stringify({
+      ...first,
+      receipt: { ...first.receipt, recipients },
+    }),
+    recipients,
   });
 }
+/** Whether every address is already recorded for the message. */
+export const covered = (addresses: string[], recorded: string[]) => {
+  const known = new Set(recorded.map((address) => address.toLowerCase()));
+  return addresses.every((address) => known.has(address.toLowerCase()));
+};
 export interface Divergence {
   messageId: string;
   /** Distinct notifications carrying this SES message ID. */
@@ -62,6 +102,8 @@ export interface Divergence {
   /** Envelope recipients of every variant; replay delivers to all of them. */
   recipients: string[];
   recipientsDiffer: boolean;
+  /** False when anything but the envelope differs: replay then skips it. */
+  mergeable: boolean;
 }
 export interface FirehoseReport {
   apply: boolean;
@@ -70,6 +112,8 @@ export interface FirehoseReport {
   records: number;
   invalid: number;
   foreign: number;
+  /** Received outside `since`..`until`. */
+  outsideWindow: number;
   notifications: number;
   alreadyArchived: number;
   /** Missing from the archive: written with `apply`, otherwise to write. */
@@ -92,13 +136,27 @@ export async function recoverFirehose(
   scope: RecoveryScope,
   options: { prefix: string; since?: Date; until?: Date; apply: boolean },
 ): Promise<Result<FirehoseReport, Failure>> {
+  // The Firehose prefix only: never read the buffered messages themselves.
+  if (
+    scope.bufferPrefix !== "" &&
+    options.prefix.startsWith(scope.bufferPrefix)
+  )
+    return err({ message: "Prefix is inside the message buffer" });
   const listed = await store.firehoseObjects(options.prefix);
   if (listed.isErr()) return err(listed.error);
+  // An object is written after the records it holds, possibly much later
+  // when Firehose retries, so only `since` can skip whole objects; records
+  // are selected by their own receipt time.
   const objects = listed.value.filter(
-    (item) =>
-      (options.since === undefined || item.modified >= options.since) &&
-      (options.until === undefined || item.modified <= options.until),
+    (item) => options.since === undefined || item.modified >= options.since,
   );
+  const inWindow = (n: Notification) => {
+    const at = Date.parse(n.mail.timestamp);
+    return (
+      (options.since === undefined || at >= options.since.getTime()) &&
+      (options.until === undefined || at <= options.until.getTime())
+    );
+  };
   const report: FirehoseReport = {
     apply: options.apply,
     objects: objects.length,
@@ -106,6 +164,7 @@ export async function recoverFirehose(
     records: 0,
     invalid: 0,
     foreign: 0,
+    outsideWindow: 0,
     notifications: 0,
     alreadyArchived: 0,
     missing: 0,
@@ -119,7 +178,9 @@ export async function recoverFirehose(
     let text: string;
     try {
       if (read.isErr()) throw new Error(read.error.message);
-      text = gunzipSync(read.value).toString("utf8");
+      text = gunzipSync(read.value, {
+        maxOutputLength: 512 * 1024 * 1024,
+      }).toString("utf8");
     } catch {
       report.unreadable++;
       return;
@@ -132,16 +193,20 @@ export async function recoverFirehose(
       const parsed = parseNotification(line);
       if (parsed.isErr()) report.invalid++;
       else if (!belongs(parsed.value, scope)) report.foreign++;
+      else if (!inWindow(parsed.value)) report.outsideWindow++;
       else bodies.set(archiveKey(line), { body: line, n: parsed.value });
     }
   });
   report.notifications = bodies.size;
   const byMessage = new Map<string, Notification[]>();
-  for (const { n } of bodies.values())
+  const texts = new Map<string, string[]>();
+  for (const { body, n } of bodies.values()) {
     byMessage.set(n.mail.messageId, [
       ...(byMessage.get(n.mail.messageId) ?? []),
       n,
     ]);
+    texts.set(n.mail.messageId, [...(texts.get(n.mail.messageId) ?? []), body]);
+  }
   for (const [messageId, variants] of byMessage) {
     if (variants.length < 2) continue;
     const sets = variants.map((n) =>
@@ -156,6 +221,7 @@ export async function recoverFirehose(
         ...new Set(variants.flatMap((n) => n.receipt.recipients)),
       ].toSorted(),
       recipientsDiffer: new Set(sets).size > 1,
+      mergeable: mergeVariants(texts.get(messageId) ?? []).isOk(),
     });
   }
   await inTurn([...bodies], async ([key, { body }]) => {
@@ -189,6 +255,8 @@ export interface ObjectReport {
   restored: number;
   /** Missing objects with no version left; their mail cannot be replayed. */
   unrecoverable: { messageId: string; objectKey: string }[];
+  /** Messages whose notifications disagree beyond their envelope. */
+  divergent: string[];
   failed: number;
 }
 
@@ -209,8 +277,7 @@ export async function recoverObjects(
   const keys = await storage.archives();
   if (keys.isErr()) return err(keys.error);
   const messages = new Map<string, Notification>();
-  // Messages archived more than once are replayed even when imported.
-  const repeated = new Set<string>();
+  const variants = new Map<string, string[]>();
   let failed = 0;
   await inTurn(keys.value, async (key) => {
     const body = await storage.readArchive(key);
@@ -219,10 +286,10 @@ export async function recoverObjects(
       failed++;
       return;
     }
-    if (!belongs(parsed.value, scope)) return;
+    if (!belongs(parsed.value, scope) || body.isErr()) return;
     const id = parsed.value.mail.messageId;
-    if (messages.has(id)) repeated.add(id);
     messages.set(id, parsed.value);
+    variants.set(id, [...(variants.get(id) ?? []), body.value]);
   });
   const ids = [...messages.keys()];
   const imported = new Set<string>();
@@ -246,12 +313,34 @@ export async function recoverObjects(
     restorable: 0,
     restored: 0,
     unrecoverable: [],
+    divergent: [],
     failed,
   };
+  // An imported message is replayed again only if its notifications name
+  // envelope recipients the ledger does not hold yet (see replay).
   const objects = new Map<string, string>();
-  for (const [messageId, n] of messages)
-    if (!imported.has(messageId) || repeated.has(messageId))
-      objects.set(n.receipt.action.objectKey, messageId);
+  await inTurn([...messages], async ([messageId, n]) => {
+    const bodies = variants.get(messageId) ?? [];
+    if (bodies.length < 2) {
+      if (!imported.has(messageId))
+        objects.set(n.receipt.action.objectKey, messageId);
+      return;
+    }
+    const merged = mergeVariants(bodies);
+    if (merged.isErr()) {
+      report.divergent.push(messageId);
+      return;
+    }
+    if (imported.has(messageId)) {
+      const recorded = await ledger.recordedAddresses(messageId);
+      if (recorded.isErr()) {
+        report.failed++;
+        return;
+      }
+      if (covered(merged.value.recipients, recorded.value)) return;
+    }
+    objects.set(n.receipt.action.objectKey, messageId);
+  });
   report.pending = objects.size;
   await inTurn([...objects], async ([objectKey, messageId]) => {
     const exists = await store.bufferExists(scope.bucket, objectKey);

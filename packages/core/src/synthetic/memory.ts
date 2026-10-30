@@ -175,6 +175,15 @@ export function synthetic() {
       messageStates.set(id, state);
       return Promise.resolve(ok(undefined));
     },
+    recordedAddresses(messageId) {
+      return Promise.resolve(
+        ok(
+          [...recordMessages.entries()]
+            .filter(([, id]) => id === messageId)
+            .flatMap(([key]) => recordAddresses.get(key) ?? []),
+        ),
+      );
+    },
     importedMessages(ids) {
       return Promise.resolve(
         ok(ids.filter((id) => messageStates.get(id) === "imported")),

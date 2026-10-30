@@ -96,6 +96,8 @@ export interface Ledger {
   ): Outcome<void>;
   messageState(id: string, state: string): Outcome<void>;
   importedMessages(ids: string[]): Outcome<string[]>;
+  /** Envelope addresses already recorded for a message, in any state. */
+  recordedAddresses(messageId: string): Outcome<string[]>;
   resetFailures(): Outcome<void>;
 }
 export interface Delivery {

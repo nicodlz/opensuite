@@ -342,12 +342,12 @@ export function awsRecovery(
         const versions = (response.Versions ?? [])
           .filter((item) => item.Key === key)
           .map((item) => ({ id: item.VersionId, modified: item.LastModified }));
+        if (response.IsTruncated !== true) return versions;
         if (
-          response.IsTruncated !== true ||
           response.NextKeyMarker === undefined ||
           response.NextVersionIdMarker === undefined
         )
-          return versions;
+          throw new Error("Truncated S3 version listing has no marker");
         return [
           ...versions,
           ...(await page({

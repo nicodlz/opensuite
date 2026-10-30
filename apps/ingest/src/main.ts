@@ -22,7 +22,7 @@ import {
 import { z } from "zod";
 import { createHealthServer } from "./health.ts";
 import { runWorker } from "./worker.ts";
-import { operatorCommand } from "./operator.ts";
+import { operatorCommand, recoveryIncomplete } from "./operator.ts";
 
 const route = z.object({ address: z.email(), destination: z.string().min(1) });
 const destination = z.object({
@@ -323,6 +323,7 @@ try {
       process.argv.slice(3),
     );
     process.stdout.write(`${JSON.stringify(result)}\n`);
+    if (recoveryIncomplete(result)) process.exitCode = 1;
   } else if (command === "worker") {
     const state = { stopping: false };
     healthServer = createHealthServer(readiness, () => state.stopping);

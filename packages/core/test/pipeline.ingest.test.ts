@@ -1428,7 +1428,12 @@ describe("local ingestion pipeline", () => {
     const b1 = recent(["alice@example.test"], "PASS", "rec-b1");
     const b2 = recent(["hidden@example.test"], "PASS", "rec-b2");
     const c1 = recent(["alice@example.test"], "PASS", "rec-c");
-    const c2 = recent(["hidden@example.test"], "PASS", "rec-c");
+    // The same SES message under a second receipt rule: only the envelope
+    // differs.
+    const c2 = c1.replace(
+      '"recipients":["alice@example.test"]',
+      '"recipients":["hidden@example.test"]',
+    );
     await put("metadata/2026/10/30/stream-1.gz", lines(b1, b1, b2, c1, "{"));
     await put("metadata/2026/10/30/stream-2.gz", lines(c2));
     const storage = awsStorage(

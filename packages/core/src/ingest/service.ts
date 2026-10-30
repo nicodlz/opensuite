@@ -5,7 +5,7 @@ import {
   resolveRecipients,
   quarantineReason,
 } from "../domain/notification.ts";
-import { archiveKey, belongs, mergeVariants } from "./recovery.ts";
+import { archiveKey, belongs, covered, mergeVariants } from "./recovery.ts";
 import type {
   Failure,
   IngestDependencies,
@@ -228,6 +228,12 @@ export class IngestService {
               matches: found.value.length,
               recipientKey: record.key,
             });
+          // A copy that only partly matches, or an original that is gone,
+          // will not resolve itself: leave it to an operator, listed.
+          const stuck =
+            found.isErr() &&
+            (found.error.ambiguous === true ||
+              found.error.code === "NoSuchKey");
           const saved = found.isErr()
             ? await ledger.finish(
                 record.key,
@@ -235,6 +241,7 @@ export class IngestService {
                 undefined,
                 found.error.message,
                 owner,
+                stuck,
               )
             : await ledger.finish(
                 record.key,
@@ -432,6 +439,13 @@ export class IngestService {
         this.deps.events.emit("ingest_failure", { stage: "archive_parse" });
         return;
       }
+      // Another installation's notification, or one naming another
+      // message's object, is never replayed nor merged into a variant.
+      if (!belongs(n.value, this.deps)) {
+        failures++;
+        this.deps.events.emit("ingest_failure", { stage: "archive_foreign" });
+        return;
+      }
       referenced.add(n.value.receipt.action.objectKey);
       if (
         keys.isOk() &&
@@ -469,17 +483,38 @@ export class IngestService {
     if (lookup.isErr()) return lookup;
     // SES can send several notifications for one message with different
     // envelopes. Replaying them one by one would let the first delete the
-    // object before the others are delivered, so they are replayed together,
-    // even when the message already counts as imported.
+    // object before the others are delivered, so they are replayed together
+    // when they agree on everything else, and again after the message was
+    // imported only if they name recipients the ledger does not hold yet.
     const variants = new Map<string, string[]>();
     for (const item of archived)
       variants.set(item.id, [...(variants.get(item.id) ?? []), item.body]);
-    const pending = [...variants].flatMap(([id, bodies]) =>
-      bodies.length > 1
-        ? [{ id, body: mergeVariants(bodies) }]
-        : completed.has(id)
-          ? []
-          : bodies.map((body) => ({ id, body })),
+    const pending: { id: string; body: string }[] = [];
+    const select = async (id: string, bodies: string[]): Promise<void> => {
+      const [single] = bodies;
+      if (bodies.length === 1 && single !== undefined) {
+        if (!completed.has(id)) pending.push({ id, body: single });
+        return;
+      }
+      const merged = mergeVariants(bodies);
+      if (merged.isErr()) {
+        failures++;
+        this.deps.events.emit("ingest_failure", { stage: "replay_divergent" });
+        return;
+      }
+      if (completed.has(id)) {
+        const recorded = await this.deps.ledger.recordedAddresses(id);
+        if (recorded.isErr()) {
+          failures++;
+          return;
+        }
+        if (covered(merged.value.recipients, recorded.value)) return;
+      }
+      pending.push({ id, body: merged.value.body });
+    };
+    await [...variants].reduce<Promise<void>>(
+      (previous, [id, bodies]) => previous.then(() => select(id, bodies)),
+      Promise.resolve(),
     );
     await pending.reduce<Promise<void>>(
       (previous, item) =>

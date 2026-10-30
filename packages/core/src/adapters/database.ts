@@ -350,6 +350,14 @@ export function databaseLedger(db: Client): Ledger {
         failure,
       );
     },
+    recordedAddresses(messageId) {
+      return ResultAsync.fromPromise(
+        db.inboundRecipient
+          .findMany({ where: { messageId }, select: { addresses: true } })
+          .then((rows) => rows.flatMap((row) => addressesOf(row))),
+        failure,
+      );
+    },
     importedMessages(ids) {
       return ResultAsync.fromPromise(
         db.inboundMessage
