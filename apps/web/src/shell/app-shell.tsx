@@ -336,6 +336,11 @@ export function AppShell({
                   </DropdownItem>
                 )}
                 <DropdownItem className="menu-item" asChild>
+                  <a href={hubHref(activeLayout(), "/settings/addresses")}>
+                    Addresses
+                  </a>
+                </DropdownItem>
+                <DropdownItem className="menu-item" asChild>
                   <a href={hubHref(activeLayout(), "/settings/billing")}>
                     Plan &amp; storage
                   </a>

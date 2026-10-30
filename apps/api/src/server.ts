@@ -1,7 +1,8 @@
+import type { AddressService } from "@opensuite/core/services/addresses";
 import { createFixedWindow } from "./auth/fixed-window.ts";
 import type { DomainService } from "./routes/domains.ts";
 import { randomBytes } from "node:crypto";
-import { createAliasLimiter } from "./auth/alias-limits.ts";
+import { createAliasLimiter, networkBucket } from "./auth/alias-limits.ts";
 import type { AliasService } from "@opensuite/core/services/aliases";
 import { registerAliasCompat } from "./routes/alias-compat.ts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
@@ -56,6 +57,13 @@ export interface ServerDependencies {
     /** Whether accounts may use this domain; defaults to `mailDomain` only. */
     readonly isMailDomain?: (domain: string | undefined) => Promise<boolean>;
     readonly actor?: (headers: Headers) => Promise<Actor | null>;
+    readonly withPrimaryReservation?: (
+      email: string,
+      work: () => Promise<Response>,
+    ) => Promise<Response | null>;
+    readonly resolveAddress?: (
+      email: string,
+    ) => Promise<{ id: string; email: string } | null>;
     readonly userIdForEmail?: (email: string) => Promise<string | null>;
     readonly audit?: (event: {
       userId: string | null;
@@ -67,6 +75,7 @@ export interface ServerDependencies {
   readonly calendar?: CalendarService;
   readonly domains?: DomainService;
   readonly aliases?: AliasService;
+  readonly addresses?: AddressService;
   readonly push?: NonNullable<ApiContext["push"]>;
   readonly pushCleanup?: NonNullable<ApiContext["pushCleanup"]>;
   readonly setupStatus?: ApiContext["setupStatus"];
@@ -93,6 +102,8 @@ export const buildServer = async (
   });
   const startedAt = dependencies.monotonicMs();
   const aliasLimits = createAliasLimiter();
+  const addressLimits = createAliasLimiter();
+  const signInLookupLimit = createFixedWindow(Date.now, 10_000, true);
   const pushLimits = createFixedWindow();
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("x-request-id", request.id);
@@ -446,16 +457,65 @@ export const buildServer = async (
             message: "Duplicate authentication cookie",
           });
         }
+        if (path === "/auth/sign-in/email" && request.method === "POST") {
+          const lookupLimit = signInLookupLimit.consume(
+            networkBucket(request.ip),
+            50,
+            10_000,
+          );
+          if (lookupLimit) {
+            if (lookupLimit.first)
+              await identity.audit?.({
+                userId: null,
+                action: "authentication.rate_limited",
+              });
+            return reply
+              .header("retry-after", String(lookupLimit.retryAfter))
+              .code(429)
+              .send({ code: "TOO_MANY_REQUESTS", message: "Try again later" });
+          }
+        }
+        let authBody = request.body;
+        let resolvedUserId: string | null = null;
+        if (path === "/auth/sign-in/email" && request.method === "POST") {
+          const submitted = z
+            .object({ email: z.email() })
+            .safeParse(request.body);
+          if (
+            submitted.success &&
+            identity.resolveAddress &&
+            typeof request.body === "object" &&
+            request.body !== null &&
+            !Array.isArray(request.body)
+          ) {
+            const resolved = await identity.resolveAddress(
+              submitted.data.email,
+            );
+            if (resolved) {
+              resolvedUserId = resolved.id;
+              authBody = {
+                ...request.body,
+                email: resolved.email,
+              };
+            }
+          }
+        }
         const limit = limiter.check(
           path,
           request.ip,
-          request.body,
+          authBody,
           request.headers.cookie,
         );
         if (limit !== undefined) {
           if (limit.first)
             await identity.audit?.({
-              userId: null,
+              userId:
+                resolvedUserId ??
+                (identity.resolveAddress
+                  ? ((await identity.userIdForEmail?.(
+                      limiter.account(authBody, request.headers.cookie) ?? "",
+                    )) ?? null)
+                  : null),
               action: "authentication.rate_limited",
             });
           return reply
@@ -551,10 +611,7 @@ export const buildServer = async (
         }
         if (path === "/auth/get-session" && actor === null)
           return reply.send(null);
-        const accountEmail = limiter.account(
-          request.body,
-          request.headers.cookie,
-        );
+        const accountEmail = limiter.account(authBody, request.headers.cookie);
         const auditUserId =
           actor?.id ??
           (accountEmail === undefined
@@ -563,7 +620,7 @@ export const buildServer = async (
         const body =
           request.method === "GET" || request.method === "HEAD"
             ? undefined
-            : JSON.stringify(request.body);
+            : JSON.stringify(authBody);
         if (path === "/auth/sign-out" && pendingFactor) {
           const cancelled = await identity.handler(
             new Request(
@@ -595,7 +652,16 @@ export const buildServer = async (
               code: "UPSTREAM_UNAVAILABLE",
               message: "Signup unavailable",
             });
-          response = await identity.handler.adminSignUp(signup.data);
+          const adminSignUp = identity.handler.adminSignUp;
+          const create = () => adminSignUp(signup.data);
+          const reserved = identity.withPrimaryReservation
+            ? await identity.withPrimaryReservation(signup.data.email, create)
+            : await create();
+          if (!reserved)
+            return reply
+              .code(409)
+              .send({ code: "CONFLICT", message: "Address unavailable" });
+          response = reserved;
         } else {
           response = await identity.handler(
             new Request(url, {
@@ -615,8 +681,7 @@ export const buildServer = async (
           cookies.push(
             "__Host-opensuite.two_factor=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
           );
-        if (path === "/auth/sign-in/email")
-          limiter.remember(request.body, cookies);
+        if (path === "/auth/sign-in/email") limiter.remember(authBody, cookies);
         const actions: Readonly<Record<string, string>> = {
           "/auth/sign-up/email": "sign_up",
           "/auth/sign-in/email": "sign_in",
@@ -732,6 +797,8 @@ export const buildServer = async (
         accounts: dependencies.accounts,
         domains: dependencies.domains,
         aliases: dependencies.aliases,
+        addresses: dependencies.addresses,
+        addressMutationLimit: (userId) => addressLimits.mutate(userId),
         aliasCreationLimit: (userId) => aliasLimits.user(userId),
         aliasMutationLimit: (userId) => aliasLimits.mutate(userId),
         log: request.log,

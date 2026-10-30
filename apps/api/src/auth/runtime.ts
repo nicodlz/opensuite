@@ -10,6 +10,7 @@ import {
 } from "@opensuite/core/services/provisioning";
 import {
   createAccountStore,
+  createAddressStore,
   createProvisioningStore,
   type PrismaClient,
 } from "@opensuite/db";
@@ -46,6 +47,10 @@ export const createAuthRuntime = (
     ...new Set([config.publicOrigin, ...Object.values(productOrigins)]),
   ];
   const accounts = createAccountStore(db);
+  const primaryReservations = createAddressStore(
+    db,
+    config.mailDomains ?? [config.mailDomain],
+  );
   const storeResult = createProvisioningStore(db, config.mailboxKey);
   if (storeResult.isErr()) throw new Error("invalid mailbox encryption key");
   const store = storeResult.value;
@@ -195,9 +200,14 @@ export const createAuthRuntime = (
       if (existing.isErr()) throw new Error("account lookup failed");
       if (existing.value === null) {
         try {
-          const created = await identity.api.signUpEmail({
-            body: { email: email.toLowerCase(), password, name },
-          });
+          const created = await primaryReservations.withPrimaryReservation(
+            email,
+            () =>
+              identity.api.signUpEmail({
+                body: { email: email.toLowerCase(), password, name },
+              }),
+          );
+          if (!created) throw new Error("address unavailable");
           await audit({ userId: created.user.id, action: "sign_up.success" });
         } catch (error) {
           await audit({ userId: null, action: "sign_up.failure" });
@@ -212,6 +222,7 @@ export const createAuthRuntime = (
     },
     identity: {
       handler: identity.handler,
+      withPrimaryReservation: primaryReservations.withPrimaryReservation,
       publicOrigin: config.publicOrigin,
       trustedOrigins,
       productOrigins,

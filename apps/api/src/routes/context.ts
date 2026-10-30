@@ -1,3 +1,4 @@
+import type { AddressService } from "@opensuite/core/services/addresses";
 import type { NotificationDispatcher } from "@opensuite/core/services/notifications";
 import type { createPushStore } from "@opensuite/db";
 import type { AliasService } from "@opensuite/core/services/aliases";
@@ -48,6 +49,8 @@ export interface ApiContext {
   readonly actor: Actor | null;
   readonly domains: DomainService | undefined;
   readonly aliases: AliasService | undefined;
+  readonly addresses: AddressService | undefined;
+  readonly addressMutationLimit: (userId: string) => boolean;
   readonly aliasCreationLimit: (userId: string) => boolean;
   readonly aliasMutationLimit: (userId: string) => boolean;
   readonly audit:

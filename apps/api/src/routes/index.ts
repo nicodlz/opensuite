@@ -1,3 +1,4 @@
+import { addressesRouter } from "./addresses.ts";
 import { pushRouter } from "./push.ts";
 import { aliasesRouter } from "./aliases.ts";
 import { accountRouter, adminRouter } from "./account.ts";
@@ -9,6 +10,7 @@ export type { ApiContext } from "./context.ts";
 
 export const router = {
   aliases: aliasesRouter,
+  addresses: addressesRouter,
   system: systemRouter,
   account: accountRouter,
   admin: adminRouter,

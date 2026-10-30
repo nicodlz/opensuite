@@ -25,7 +25,20 @@ export const fakeAuth: AuthClient = {
         : { user: { email: "you@example.test", twoFactorEnabled: enabled() } },
     ),
   signIn(email, password) {
-    if (email !== "you@example.test" || password !== "synthetic-password")
+    const extra: unknown = JSON.parse(
+      sessionStorage.getItem("address-fixture-items") ?? "[]",
+    );
+    const matches = z.array(z.object({ address: z.string() })).safeParse(extra);
+    if (
+      (email.toLowerCase() !== "you@example.test" &&
+        !(
+          matches.success &&
+          matches.data.some(
+            (row) => row.address.toLowerCase() === email.toLowerCase(),
+          )
+        )) ||
+      password !== "synthetic-password"
+    )
       return Promise.reject(new Error("Incorrect email or password."));
     if (enabled()) return Promise.resolve({ twoFactorRedirect: true });
     sessionStorage.removeItem("auth-fixture-signed-out");

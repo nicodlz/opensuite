@@ -20,6 +20,7 @@ describe("loadConfig", () => {
         logLevel: "info",
         readinessTimeoutMs: 2000,
         aliasPerUserCap: 1000,
+        addressPerUserCap: 50,
       }),
     );
   });
@@ -31,6 +32,7 @@ describe("loadConfig", () => {
       LOG_LEVEL: "debug",
       READINESS_TIMEOUT_MS: "500",
       ALIAS_PER_USER_CAP: "42",
+      ADDRESS_PER_USER_CAP: "7",
     });
     expect(config).toEqual(
       ok({
@@ -39,6 +41,7 @@ describe("loadConfig", () => {
         logLevel: "debug",
         readinessTimeoutMs: 500,
         aliasPerUserCap: 42,
+        addressPerUserCap: 7,
       }),
     );
   });

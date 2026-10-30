@@ -21,7 +21,6 @@ beforeAll(async () => {
     await run("docker", [
       "run",
       "-d",
-      "--rm",
       "--name",
       container,
       "-e",
@@ -79,7 +78,7 @@ afterAll(async () => {
   // oxlint-disable-next-line typescript/no-unnecessary-condition
   await db?.$disconnect();
   if (!disposableUrl)
-    await run("docker", ["rm", "-f", container]).catch(() => undefined);
+    await run("docker", ["rm", "-fv", container]).catch(() => undefined);
 }, 60_000);
 
 describe("calendar reminder persistence", () => {

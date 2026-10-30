@@ -1,3 +1,4 @@
+import { AddressesPage } from "./addresses/page.tsx";
 import * as React from "react";
 import {
   QueryClient,
@@ -444,6 +445,15 @@ const loginRoute = createRoute({
   path: "/login",
   component: LoginPage,
 });
+const addressesSettingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/addresses",
+  component: () => (
+    <Protected>
+      <AddressesPage />
+    </Protected>
+  ),
+});
 const billingSettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/billing",
@@ -585,6 +595,7 @@ const router = createRouter({
     callbackRoute,
     loginRoute,
     billingSettingsRoute,
+    addressesSettingsRoute,
     subscribeRoute,
     welcomeRoute,
     mailRoute,
