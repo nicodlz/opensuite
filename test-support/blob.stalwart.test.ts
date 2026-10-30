@@ -64,6 +64,7 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
   ]);
   await run("chmod", ["644", keyFile, certFile]);
   const certFileContents = await readFile(certFile);
+  const managementPrefix = `172.29.${String(100 + (process.pid % 100))}`;
   const env = {
     ...process.env,
     MAIL_TLS_ENABLED: "1",
@@ -71,7 +72,13 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
     MAIL_TLS_KEY_FILE: keyFile,
     MAIL_HOSTNAME: "localhost",
     MAIL_BLOB_STORE: "s3",
-    MAIL_MANAGEMENT_SUBNET: `172.29.${String(100 + (process.pid % 100))}.0/24`,
+    MAIL_MANAGEMENT_SUBNET: `${managementPrefix}.0/24`,
+    MAIL_MANAGEMENT_API_IP: `${managementPrefix}.10`,
+    MAIL_MANAGEMENT_STALWART_IP: `${managementPrefix}.20`,
+    MAIL_MANAGEMENT_SETUP_IP: `${managementPrefix}.21`,
+    MAIL_MANAGEMENT_OPS_IP: `${managementPrefix}.22`,
+    MAIL_MANAGEMENT_BACKUP_IP: `${managementPrefix}.23`,
+    MAIL_MANAGEMENT_BOOTSTRAP_IP: `${managementPrefix}.24`,
     MAIL_S3_ENDPOINT: "http://minio:9000",
     MAIL_S3_REGION: "us-east-1",
     MAIL_S3_BUCKET: bucket,

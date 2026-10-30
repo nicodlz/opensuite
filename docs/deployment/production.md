@@ -56,9 +56,10 @@ pnpm build
 
 Put the following in `.env`, substituting real values, and leave secret values
 out of it. Values are trusted POSIX shell assignments as well as Compose env
-values; avoid shell metacharacters. Choose a free management subnet and API IP
-within it that do not overlap other Docker/host networks. Do not change them
-later without changing the account's IP restriction.
+values; avoid shell metacharacters. Choose a management subnet that does not
+overlap other Docker/host networks and distinct free addresses within it for
+all services listed in `deploy/env.example`. If changing the subnet later,
+also update the management account's IP restriction.
 
 ```dotenv
 OPENSUITE_SITE_ADDRESS=mail.example.com
@@ -68,6 +69,13 @@ MAIL_DOMAIN=example.com
 MAIL_PROTOCOL_BIND=127.0.0.1
 MAIL_MANAGEMENT_SUBNET=172.30.248.0/24
 MAIL_MANAGEMENT_API_IP=172.30.248.10
+MAIL_MANAGEMENT_STALWART_IP=172.30.248.20
+MAIL_MANAGEMENT_SETUP_IP=172.30.248.21
+MAIL_MANAGEMENT_OPS_IP=172.30.248.22
+MAIL_MANAGEMENT_BACKUP_IP=172.30.248.23
+MAIL_MANAGEMENT_BOOTSTRAP_IP=172.30.248.24
+API_PROXY_CADDY_IP=172.28.254.2
+API_PROXY_API_IP=172.28.254.3
 MAIL_BLOB_STORE=s3
 MAIL_S3_ENDPOINT=https://s3.<b2-region>.backblazeb2.com
 MAIL_S3_REGION=<b2-region>
@@ -175,6 +183,35 @@ override is absent from the running Stalwart container before exposing Caddy.
 Start the stack with `docker compose up -d` and inspect `docker compose ps` and
 `docker compose logs stalwart-setup`. Setup failures are recorded and alerted,
 but do not stop the API or HTTPS; repair and rerun the job.
+
+## Upgrade to fixed network addresses
+
+Schedule a short maintenance window. This release leaves the existing network
+subnets and IPAM unchanged: do not remove or recreate the networks. On the
+existing installation, the API proxy address defaults to `172.28.254.3`,
+replacing the operator's manual endpoint reservation; Caddy remains at
+`172.28.254.2`. The management API keeps its existing `.10` default. Configure
+the other distinct management addresses from the environment template within
+the existing `MAIL_MANAGEMENT_SUBNET`, retaining any existing API IP and subnet.
+
+Before upgrading, inspect the current assignments with `docker network inspect
+opensuite_api-proxy opensuite_mail-management` (substitute the actual project
+name). If another running endpoint occupies a newly assigned address, stop
+that container during the window so Compose can claim it. Wait for all setup,
+bootstrap, management and backup jobs to finish; do not run two instances of
+the same one-off service concurrently. Scheduled and manual `backup.sh` jobs
+using the same scratch directory are serialized by its flock; direct Compose
+invocations or different scratch directories do not share that protection.
+
+Run `docker compose up -d` with the installation's usual profiles. Compose
+recreates the API and Stalwart containers for their changed network settings
+and recreates/runs the `stalwart-setup` job. Any existing `management` service
+container is recreated when its ops profile is enabled; the backup and
+bootstrap one-offs receive their addresses on their next run. Caddy's address
+and configuration are unchanged by the defaults, so it need not be recreated.
+Other configuration or image changes can cause additional recreations. No
+particular startup order between the API and Caddy is required. Verify
+`docker compose ps`, setup logs, and application and mail health afterwards.
 
 ## Optional Pass
 

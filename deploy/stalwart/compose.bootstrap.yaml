@@ -19,7 +19,8 @@ services:
     environment:
       MAIL_MANAGEMENT_SUBNET: ${MAIL_MANAGEMENT_SUBNET:-172.30.248.0/24}
     networks:
-      - mail-management
+      mail-management:
+        ipv4_address: ${MAIL_MANAGEMENT_BOOTSTRAP_IP:-172.30.248.24}
     volumes:
       - ./deploy/stalwart/bootstrap.sh:/opt/opensuite/bootstrap.sh:ro
       - type: volume
