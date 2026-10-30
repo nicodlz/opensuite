@@ -286,8 +286,11 @@ Add a route for every address and alias, and one destination per mailbox. The
 back up these files; safely delete the intermediate destination file after use.
 The exact schema, permission requirements, ambiguity handling and replay
 procedure are in [ingestion](../architecture/ingestion.md). Maintain routes
-and credentials whenever accounts change; signup does not update them. Start
-and check `docker compose --profile ingest up -d --build ingest`. Install the replay timer after configuring backups below. Alert on replay
+and credentials whenever accounts change; signup does not update them. After
+adding a destination, recreate the worker with
+`docker compose --profile ingest up -d ingest` (a plain restart keeps the old
+environment); held mail for the new mailbox is then delivered by the next
+replay. Start and check `docker compose --profile ingest up -d --build ingest`. Install the replay timer after configuring backups below. Alert on replay
 failures. Verify destination credentials
 and quarantine mailboxes before allowing production traffic.
 
@@ -377,15 +380,39 @@ release's ledger on PostgreSQL). Older code fails on any message that has a
 notification for a message that was already delivered, and sends it to the
 dead-letter queue after its retries:
 
-1. Stop the current worker and let it drain (SIGTERM), and stop the scheduled
-   replay (`systemctl stop opensuite-replay.timer`) so nothing changes the
-   ledger during the conversion; leave the queues in place.
+1. Quiesce every ledger writer, letting work finish rather than interrupting
+   an import:
+
+   ```sh
+   systemctl stop opensuite-replay.timer        # no new scheduled replay
+   while systemctl is-active --quiet opensuite-replay.service; do sleep 30; done
+   docker compose --profile ingest stop ingest  # SIGTERM; the worker drains
+   docker ps --filter label=com.docker.compose.service=ingest   # must list none
+   ```
+
+   The last command also shows one-off `docker compose run` replays or
+   operator commands; wait for them too. Leave the queues in place.
+
 2. With the current release, finish every held recipient: list them with
-   `operator list held`, then provision the address and run replay once by
-   hand, or reject them, until the list is empty. Stop again before step 3.
-3. Take a database backup (or at least export the affected rows), then relabel
-   routed rows in one transaction that records each change in the append-only
-   `InboundResolutionAudit` table:
+   `operator list held`, then provision the address (a new mailbox also needs
+   its `INGEST_DESTINATIONS` entry) and run `deploy/ingest/replay.sh` once by
+   hand, or reject them, until the list is empty. Wait for that replay to
+   exit and repeat the checks of step 1.
+3. Take a backup (`deploy/backup/backup.sh`, or at least a `pg_dump` of the
+   ledger tables). Then relabel routed rows in one transaction that records
+   each change in the append-only `InboundResolutionAudit` table, while holding
+   the lock that backup and replay share, so neither can start meanwhile
+   (`flock -n` fails instead of waiting if one is running):
+
+   ```sh
+   set -a; . ./.env; . /etc/opensuite/backup.conf; set +a
+   docker ps -q --filter label=com.docker.compose.service=ingest   # must print nothing
+   flock -n "$BACKUP_SCRATCH/opensuite-backup.lock" \
+     docker compose exec -T -e PGPASSWORD="$(docker compose exec -T postgres cat /run/opensuite/postgres/password)" \
+     postgres psql -h localhost -U "${POSTGRES_USER:-opensuite}" -d "${POSTGRES_DB:-opensuite}" -v ON_ERROR_STOP=1 < rollback-relabel.sql
+   ```
+
+   with `rollback-relabel.sql` containing:
 
    ```sql
    BEGIN;
