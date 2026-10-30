@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   hubHref,
+  installProduct,
   loadOrigins,
   productHref,
   redirectFor,
@@ -81,6 +82,22 @@ const answer =
   () =>
     Promise.resolve(new Response(JSON.stringify(body), { status }));
 const offline: typeof fetch = () => Promise.reject(new TypeError("offline"));
+
+describe("installation product", () => {
+  it("uses the configured product on each split origin and Mail otherwise", () => {
+    expect(installProduct(resolveLayout(origins, mail))).toBe("mail");
+    expect(installProduct(resolveLayout(origins, drive))).toBe("drive");
+    expect(installProduct(resolveLayout(origins, calendar))).toBe("calendar");
+    expect(installProduct(resolveLayout({ mail }, mail))).toBe("mail");
+    expect(installProduct(resolveLayout({}, drive))).toBe("mail");
+    expect(
+      installProduct(resolveLayout(origins, "https://unknown.example.test")),
+    ).toBe("mail");
+    expect(installProduct(resolveLayout({ mail, drive: mail }, mail))).toBe(
+      "mail",
+    );
+  });
+});
 
 describe("origin map loading", () => {
   beforeEach(() => localStorage.clear());

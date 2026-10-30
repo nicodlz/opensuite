@@ -59,9 +59,9 @@
 				try_files {path} /index.html
 				@index path /index.html
 				header @index Cache-Control "no-cache"
-				# The asset-recovery script is not fingerprinted; always revalidate.
-				@boot path /boot.js
-				header @boot Cache-Control "no-cache"
+				# These public files are not fingerprinted; always revalidate.
+				@public_files path /boot.js /manifest-*.webmanifest /icons/*
+				header @public_files Cache-Control "no-cache"
 				file_server
 			}
 		}
@@ -77,9 +77,101 @@
 		Referrer-Policy no-referrer
 		-Server
 	}
-	@admin path /admin /admin/*
-	respond @admin 404
-	reverse_proxy vault:8080 {
-		header_up X-Real-IP {remote_host}
+	route {
+		@admin path /admin /admin/*
+		respond @admin 404
+
+		# Keep Vaultwarden's dynamic security headers on the generated shell.
+		handle / {
+			reverse_proxy vault:8080 {
+				header_up X-Real-IP {remote_host}
+				# Upstream validators describe the original shell, not our generated one.
+				header_up -If-None-Match
+				header_up -If-Modified-Since
+				@ok status 200
+				handle_response @ok {
+					copy_response_headers {
+						exclude Cache-Control Content-Length Content-Encoding ETag Last-Modified Expires
+					}
+					header Cache-Control "no-cache"
+					root * /opt/opensuite/vault-brand
+					rewrite * /index.html
+					file_server {
+						disable_canonical_uris
+					}
+				}
+			}
+		}
+
+		# Versioned URLs bypass copies of the original images cached for a week.
+		@legacy_brand path /images/logo.svg /images/logo-white.svg /images/logo-dark@2x.png /images/logo-white@2x.png /images/icon-dark.png /images/icon-white.png /images/icon-white.svg /images/welcome-dialog-graphic.png /images/favicon-16x16.png /images/favicon-32x32.png /images/apple-touch-icon.png /images/safari-pinned-tab.svg /images/android-chrome-192x192.png /images/android-chrome-512x512.png /images/mstile-150x150.png /images/icons/favicon-16x16.png /images/icons/favicon-32x32.png /images/icons/apple-touch-icon.png /images/icons/safari-pinned-tab.svg /images/icons/android-chrome-192x192.png /images/icons/android-chrome-512x512.png /images/icons/mstile-150x150.png /images/register-layout/logo-horizontal-white.svg /images/register-layout/logo-horizontal-white.png
+		handle @legacy_brand {
+			rewrite * /esuno-vault{path}
+			root * /opt/opensuite/vault-brand
+			header Cache-Control "no-cache"
+			header Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'"
+			file_server
+		}
+		@legacy_manifest path /manifest.json /cca56971e438d22818d6.json
+		handle @legacy_manifest {
+			rewrite * /esuno-vault/manifest.json
+			root * /opt/opensuite/vault-brand
+			header Cache-Control "no-cache"
+			file_server
+		}
+		handle /favicon.ico {
+			rewrite * /esuno-vault/favicon.ico
+			root * /opt/opensuite/vault-brand
+			header Cache-Control "no-cache"
+			file_server
+		}
+		handle /esuno-vault/* {
+			root * /opt/opensuite/vault-brand
+			header Cache-Control "no-cache"
+			@images path /esuno-vault/images/* /esuno-vault/favicon.ico
+			header @images Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'"
+			file_server
+		}
+		handle {
+			reverse_proxy vault:8080 {
+				header_up X-Real-IP {remote_host}
+			}
+		}
+	}
+}
+
+# Optional static project website (apps/landing), on its own origin. A www.
+# address in the list redirects to the same host without the prefix. Errors
+# repeat the headers because deferred headers are skipped on error responses.
+(landing_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+		X-Frame-Options DENY
+		-Server
+	}
+}
+
+{$LANDING_SITE_ADDRESS:landing.localhost} {
+	encode zstd gzip
+	import landing_headers
+
+	@www header_regexp www Host (?i)^www\.(.+)$
+	redir @www https://{re.www.1}{uri} 308
+
+	# The parent directory is mounted so a missing build is a 404, not a
+	# root-owned directory created by Docker in the checkout.
+	root * /landing/dist
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	@pages not path /assets/*
+	header @pages Cache-Control "no-cache"
+	file_server
+
+	handle_errors {
+		import landing_headers
+		respond "{err.status_code} {err.status_text}"
 	}
 }

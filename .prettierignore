@@ -5,3 +5,6 @@ coverage/
 .turbo/
 **/src/generated/
 apps/drive/src/db/generated/
+# Generated from the pinned Vaultwarden image; SCSS inside a Handlebars template.
+deploy/vaultwarden/brand/index.html
+deploy/vaultwarden/templates/
