@@ -7,7 +7,14 @@ import {
   randomBytes,
   X509Certificate,
 } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -24,6 +31,8 @@ const project = `opensuite-bw-${id}`;
 const octet = (randomBytes(1).readUInt8() % 200) + 20;
 const env = {
   ...process.env,
+  COMPOSE_PROFILES: "",
+  HTTPS_PORT: "443",
   DRIVE_S3_ENDPOINT: "http://fixture.invalid",
   DRIVE_S3_PUBLIC_ENDPOINT: "http://fixture.invalid",
   DRIVE_S3_BUCKET: "fixture",
@@ -37,6 +46,7 @@ const env = {
   PASS_TEST_SUBNET: `10.238.${octet}.0/24`,
   PASS_TEST_DYNAMIC_RANGE: `10.238.${octet}.128/25`,
   PASS_TEST_PROXY_IP: `10.238.${octet}.2`,
+  PASS_CADDY_IP: `10.238.${octet}.2`,
   PASS_TEST_DOMAIN: "https://pass.localhost",
   PASS_SIGNUPS_ALLOWED: "false",
   PASS_INVITATIONS_ALLOWED: "true",
@@ -282,6 +292,10 @@ describe("Bitwarden CLI against Pass", () => {
       temp = await mkdtemp(join(tmpdir(), "opensuite-pass-"));
       homes[0] = join(temp, "user-a");
       homes[1] = join(temp, "user-b");
+      await Promise.all(homes.map((home) => mkdir(home, { mode: 0o700 })));
+      // The container runs as UID 1000, which may differ from the test user.
+      // The container reads the generated admin hash from this directory.
+      await chmod(temp, 0o711);
       const salt = randomBytes(16);
       const hash = argon2id(adminPassword, salt, {
         t: 2,
@@ -293,7 +307,7 @@ describe("Bitwarden CLI against Pass", () => {
       await writeFile(
         adminFile,
         `$argon2id$v=19$m=19456,t=2,p=1$${b64(salt)}$${b64(hash)}`,
-        { mode: 0o600 },
+        { mode: 0o644 },
       );
       Object.assign(env, { PASS_ADMIN_TOKEN_FILE: adminFile });
       await compose(
@@ -311,7 +325,7 @@ describe("Bitwarden CLI against Pass", () => {
       origin = `https://pass.localhost:${port}`;
       env.PASS_TEST_DOMAIN = origin;
       await compose("up", "-d", "--wait", "--wait-timeout", "180", "pass");
-      direct = await getPort("pass", "80");
+      direct = await getPort("pass", "8080");
       ca = await compose(
         "exec",
         "-T",
