@@ -491,7 +491,7 @@ describe("Vault Compose integration", () => {
     const networks = z
       .record(z.string(), z.unknown())
       .parse(JSON.parse(result.stdout));
-    expect(Object.keys(networks)).toEqual([`${project}_vault-network`]);
+    expect(Object.keys(networks)).toEqual([`${project}_pass-network`]);
   });
 
   test("guards saved signup settings on startup", async () => {

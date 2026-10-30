@@ -15,7 +15,7 @@ services:
     networks:
       api-proxy:
         ipv4_address: ${VAULT_TEST_API_IP}
-      vault-network:
+      pass-network:
         ipv4_address: ${VAULT_TEST_PROXY_IP}
     ports: !override
       - "127.0.0.1::443"
@@ -30,7 +30,7 @@ networks:
     ipam:
       config: !override
         - subnet: ${VAULT_TEST_API_SUBNET}
-  vault-network:
+  pass-network:
     ipam:
       config: !override
         - subnet: ${VAULT_TEST_SUBNET}

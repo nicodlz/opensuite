@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Pass renamed to Vault.
+- Pass renamed to Vault. The internal Compose network key stays `pass-network`, so upgrading an existing installation keeps the existing network and does not recreate PostgreSQL; Caddy and the API are recreated for their renamed variables (a short HTTP interruption). An unused `pass-database/` directory created by the previous release in the `secrets` volume can be deleted.
 
 - Added optional Esuno Vault with a digest-pinned Vaultwarden service, separate
   database, launcher and local generator, and hide-my-email aliases. Coordinated

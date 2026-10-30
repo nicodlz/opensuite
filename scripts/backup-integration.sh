@@ -114,14 +114,14 @@ services:
     networks:
       api-proxy:
         ipv4_address: 10.240.$octet.2
-      vault-network:
+      pass-network:
         ipv4_address: 10.241.$octet.2
 networks:
   api-proxy:
     ipam:
       config: !override
         - subnet: 10.240.$octet.0/24
-  vault-network:
+  pass-network:
     ipam:
       config: !override
         - subnet: 10.241.$octet.0/24
