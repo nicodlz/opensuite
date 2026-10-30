@@ -182,7 +182,7 @@ Pass uses a separate public hostname and can run independently of the mail and
 application services. Before enabling the `pass` profile, follow
 [Pass operations](../operations/pass.md) for operator-managed DNS, TLS, the
 loopback-only administrator, invitations, SMTP and recovery. The scheduled
-OpenSuite backup currently does not include the Pass database or data volume;
+Esuno backup currently does not include the Pass database or data volume;
 arrange and test a separate encrypted backup before storing real vaults.
 
 ## First administrator

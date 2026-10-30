@@ -1,7 +1,7 @@
-# OpenSuite Pass operations
+# Esuno Pass operations
 
 Pass runs the official Vaultwarden web vault and compatible server independently
-of the OpenSuite application accounts. It shares PostgreSQL and Caddy, but does
+of the Esuno application accounts. It shares PostgreSQL and Caddy, but does
 not require the API, Drive, ingestion or Stalwart. Vault records and metadata
 are in the separate `opensuite_pass` database; attachments, signing keys and
 other Vaultwarden data are in the `vaultwarden-data` volume. Attachments do not
@@ -128,7 +128,7 @@ client. Built-in Vaultwarden rate limiting remains enabled independently.
 
 ## Backups and recovery
 
-**The existing scheduled OpenSuite backup does not capture the Pass database or
+**The existing scheduled Esuno backup does not capture the Pass database or
 volume and does not quiesce Pass.** Set up and test a separate encrypted backup
 before storing real vaults. Back up the Pass database, the complete
 `vaultwarden-data` volume (including attachments, RSA keys and config), the
