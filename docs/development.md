@@ -304,6 +304,17 @@ services. Configure S3 CORS for the actual application origins, PUT/GET/HEAD,
 required headers, and exposed `ETag`; local development uses permissive CORS.
 AWS and other S3-compatible providers have not been exercised here.
 
+The web Drive workspace uses synthetic in-memory data in the Vite development
+server and the real Drive API in production builds. Set `DRIVE_PROXY_TARGET` to
+proxy `/drive/api` to a local Drive service when testing a production preview.
+The current contract does not expose quota totals or lists of existing shares
+and links; the workspace reports quota as unavailable and accepts user and
+link IDs to change or revoke access. A public link and its ID must be saved
+when created because the token is returned only once. The browser attempts to
+remove pending reservations when an upload fails or is cancelled; if it lacks
+owner access, the service has no separate abort command and cleanup requires
+the owner.
+
 The oRPC endpoint `POST /drive/api/v1/command` accepts the discriminated actions
 in `packages/contracts/src/drive.ts`. Uploads reserve quota first and return a
 five-minute URL. Single uploads require the specified content type and length;
