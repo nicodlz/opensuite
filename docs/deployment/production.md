@@ -493,6 +493,10 @@ AWS_ACCESS_KEY_ID=<ingestion-access-key-id>
 AWS_SECRET_ACCESS_KEY=<ingestion-secret-key>
 INBOUND_BUCKET=<aws-buffer-bucket>
 INBOUND_BUFFER_PREFIX=messages/
+# Object key prefix of each receipt rule whose notifications may be replayed
+# (the AWS module's esuno_message_prefix output); add messages/ only if
+# archived notifications still use it (see below).
+INBOUND_OBJECT_PREFIXES=messages/esuno/
 INBOUND_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/<account>/<queue>
 INBOUND_TOPIC_ARN=arn:aws:sns:eu-north-1:<account>:<topic>
 ARCHIVE_ENDPOINT_URL=https://s3.<b2-region>.backblazeb2.com
@@ -506,16 +510,34 @@ INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","author
 ```
 
 The worker refuses a notification whose object key is not exactly an
-accepted prefix followed by its message ID. Accepted prefixes are
-`INBOUND_OBJECT_PREFIXES` (comma separated, each within
-`INBOUND_BUFFER_PREFIX`), or `INBOUND_BUFFER_PREFIX` alone. List the object
-key prefix of every receipt rule, current and past, whose notifications may
-still be replayed: with a rule writing to `messages/esuno/` and older
-notifications under `messages/`, set `INBOUND_BUFFER_PREFIX=messages/` and
-`INBOUND_OBJECT_PREFIXES=messages/,messages/esuno/`. Before upgrading to a
-release with this check, compare the object keys of the archived real
-notifications with that list: a missing prefix rejects new mail, and an old
-one makes every replay fail.
+accepted prefix followed by its message ID (logged as an unexpected bucket,
+topic or object key). Accepted prefixes are `INBOUND_OBJECT_PREFIXES` (comma
+separated, each ending with a slash and within `INBOUND_BUFFER_PREFIX`, which
+scopes buffer listing), or `INBOUND_BUFFER_PREFIX` alone. List the prefix of
+every receipt rule whose notifications may still be replayed (the AWS
+module's `message_prefix` and `esuno_message_prefix` outputs): a missing one
+rejects new mail, which then waits in the queue and its DLQ, and one missing
+for archived notifications makes every replay fail. Keep `messages/` listed
+only while archived notifications under it are not all imported, and give
+the worker delete rights there too (the AWS module grants them on the Esuno
+prefix only), or replay cannot remove their objects.
+
+Before upgrading to a release with this check, count the archived
+notifications by prefix with the archive credentials, in a private
+directory that you delete afterwards (the files contain addresses):
+
+```sh
+umask 077; dir=$(mktemp -d)
+aws s3 sync "s3://$ARCHIVE_BUCKET/$ARCHIVE_PREFIX" "$dir" --endpoint-url "$ARCHIVE_ENDPOINT_URL"
+jq -r '.receipt.action.objectKey' "$dir"/*.json | sed 's#[^/]*$##' | sort | uniq -c
+rm -rf "$dir"
+```
+
+Set `INBOUND_OBJECT_PREFIXES` in `deploy/ingest.env` before the new image
+runs (the replay timer uses it too), recreate the worker with
+`docker compose --profile ingest up -d ingest`, run `deploy/ingest/replay.sh`
+once and check it exits 0 without `archive_foreign` failures, then send a
+test message. Rolling back to an earlier release ignores the variable.
 
 Mailboxes created in the admin console, with their addresses, aliases and
 domain addresses, need no entry: Compose gives the worker the mailbox key
@@ -641,7 +663,8 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 Use this after an SQS message expired or was lost, after losing the host, or
 after restoring the database from a backup older than recent mail. It relies
 on the Firehose notification archive (`metadata/`, never expired) and the
-versioned buffer (`messages/`, noncurrent versions kept 30 days) in AWS, and
+versioned buffer (noncurrent versions under `messages/esuno/` kept 30 days)
+in AWS, and
 on the replay archive in B2, none of which live on the host. Expect one
 request at a time: about 1.5 hours per 100,000 archive entries.
 
@@ -696,7 +719,9 @@ ingestion and subscription DLQs before their 14 days run out.
    missing, unreadable, invalid, SES setup notices (no mail, ignored),
    foreign and outside the window, and
    divergent message IDs (`mergeable: false` ones are skipped by replay and
-   need an operator). Run it again with `--apply` as last argument.
+   need an operator). The topic is this installation's, so `foreign`
+   records usually mean `INBOUND_OBJECT_PREFIXES` lacks a rule's prefix: fix
+   it before applying (both commands exit with an error while any remain). Run it again with `--apply` as last argument.
 
 4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
    `--apply`. Investigate every `unrecoverable` message (its original is

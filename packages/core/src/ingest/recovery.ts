@@ -55,9 +55,10 @@ export const belongs = (n: Notification, scope: RecoveryScope) =>
   n.receipt.action.bucketName === scope.bucket &&
   n.receipt.action.topicArn === scope.topic &&
   !n.mail.messageId.includes("/") &&
-  (scope.objectPrefixes ?? [scope.bufferPrefix]).some(
-    (prefix) => n.receipt.action.objectKey === prefix + n.mail.messageId,
-  );
+  (scope.objectPrefixes?.length
+    ? scope.objectPrefixes
+    : [scope.bufferPrefix]
+  ).some((prefix) => n.receipt.action.objectKey === prefix + n.mail.messageId);
 
 // JSON with sorted keys, so equal notifications compare equal.
 const canonical = (value: unknown): string =>
@@ -168,10 +169,12 @@ export async function recoverFirehose(
   options: { prefix: string; since?: Date; until?: Date; apply: boolean },
 ): Promise<Result<FirehoseReport, Failure>> {
   // The Firehose prefix only: never read the buffered messages themselves.
+  const overlaps = (prefix: string) =>
+    prefix !== "" &&
+    (options.prefix.startsWith(prefix) || prefix.startsWith(options.prefix));
   if (
-    scope.bufferPrefix !== "" &&
-    (options.prefix.startsWith(scope.bufferPrefix) ||
-      scope.bufferPrefix.startsWith(options.prefix))
+    overlaps(scope.bufferPrefix) ||
+    (scope.objectPrefixes ?? []).some(overlaps)
   )
     return err({ message: "Prefix is inside the message buffer" });
   const listed = await store.firehoseObjects(options.prefix);
@@ -292,6 +295,11 @@ export interface ObjectReport {
   unrecoverable: { messageId: string; objectKey: string }[];
   /** Messages whose notifications disagree beyond their envelope. */
   divergent: string[];
+  /**
+   * Archived notifications this installation does not accept, usually an
+   * object key prefix missing from the configuration.
+   */
+  foreign: number;
   failed: number;
 }
 
@@ -314,6 +322,7 @@ export async function recoverObjects(
   const messages = new Map<string, Notification>();
   const variants = new Map<string, string[]>();
   let failed = 0;
+  let foreign = 0;
   await inTurn(keys.value, async (key) => {
     const body = await storage.readArchive(key);
     const parsed = body.isOk() ? parseNotification(body.value) : undefined;
@@ -321,7 +330,11 @@ export async function recoverObjects(
       failed++;
       return;
     }
-    if (!belongs(parsed.value, scope) || body.isErr()) return;
+    if (body.isErr()) return;
+    if (!belongs(parsed.value, scope)) {
+      foreign++;
+      return;
+    }
     const id = parsed.value.mail.messageId;
     messages.set(id, parsed.value);
     variants.set(id, [...(variants.get(id) ?? []), body.value]);
@@ -349,6 +362,7 @@ export async function recoverObjects(
     restored: 0,
     unrecoverable: [],
     divergent: [],
+    foreign,
     failed,
   };
   // An imported message is replayed again only if its notifications name

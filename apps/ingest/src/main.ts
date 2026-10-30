@@ -23,6 +23,7 @@ import { z } from "zod";
 import { createHealthServer } from "./health.ts";
 import { runWorker } from "./worker.ts";
 import { operatorCommand, recoveryIncomplete } from "./operator.ts";
+import { parseObjectPrefixes } from "./prefixes.ts";
 
 const route = z.object({ address: z.email(), destination: z.string().min(1) });
 const destination = z.object({
@@ -43,15 +44,7 @@ const configSchema = z
     INBOUND_BUFFER_PREFIX: z.string().default(""),
     // Receipt rules' object key prefixes, current and past, comma separated;
     // the buffer prefix alone when empty.
-    INBOUND_OBJECT_PREFIXES: z
-      .string()
-      .default("")
-      .transform((value) =>
-        value
-          .split(",")
-          .map((item) => item.trim())
-          .filter((item) => item !== ""),
-      ),
+    INBOUND_OBJECT_PREFIXES: z.string().default(""),
     ARCHIVE_BUCKET: z.string().min(1),
     ARCHIVE_PREFIX: z.string().min(1).default("notifications/"),
     AWS_REGION: z.string().default("eu-north-1"),
@@ -128,16 +121,15 @@ const configSchema = z
     )
       ctx.addIssue({ code: "custom", message: "Route has no destination" });
     if (
-      value.INBOUND_OBJECT_PREFIXES.some(
-        (prefix) => !prefix.startsWith(value.INBOUND_BUFFER_PREFIX),
-      ) ||
-      new Set(value.INBOUND_OBJECT_PREFIXES).size !==
-        value.INBOUND_OBJECT_PREFIXES.length
+      !parseObjectPrefixes(
+        value.INBOUND_OBJECT_PREFIXES,
+        value.INBOUND_BUFFER_PREFIX,
+      ).success
     )
       ctx.addIssue({
         code: "custom",
         message:
-          "Object prefixes must be distinct and within the buffer prefix",
+          "Object prefixes must be distinct, end with a slash and lie within the buffer prefix",
       });
     if (
       value.INBOUND_BUCKET === value.ARCHIVE_BUCKET &&
@@ -203,9 +195,11 @@ async function linkedMailboxes() {
   };
 }
 function objectPrefixes() {
-  return c.INBOUND_OBJECT_PREFIXES.length > 0
-    ? c.INBOUND_OBJECT_PREFIXES
-    : undefined;
+  const parsed = parseObjectPrefixes(
+    c.INBOUND_OBJECT_PREFIXES,
+    c.INBOUND_BUFFER_PREFIX,
+  );
+  return parsed.success ? parsed.data : undefined;
 }
 const s3 = new S3Client({
   requestHandler: {

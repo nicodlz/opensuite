@@ -69,8 +69,11 @@ list before any apply or replacement.
 dedicated prefix if different. It scopes the Esuno rule's S3 action, the added
 bucket permission, the noncurrent-version lifecycle and worker deletion. The
 original rule still writes under `messages/`; deletion outside the dedicated
-prefix is no longer granted by this module. Ensure the worker's
-`INBOUND_BUFFER_PREFIX` and replay configuration match the actual paths and
+prefix is no longer granted by this module. List both rules'
+prefixes (`tofu output message_prefix esuno_message_prefix`) in the
+worker's `INBOUND_OBJECT_PREFIXES`, as long as their notifications may be
+replayed (see [production](production.md)), keep its `INBOUND_BUFFER_PREFIX`
+enclosing them, and ensure
 that other rules' messages have a safe, separately authorized cleanup process.
 The existing SMTP user and its credentials are managed outside this module. The
 inline policy permits `ses:SendRawEmail` only for the SES identity ARNs and

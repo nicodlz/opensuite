@@ -104,8 +104,9 @@ describe("notification ownership", () => {
     expect(owned("abc", "messages/esuno/abd", prefixes)).toBe(false);
     // A slash in the message ID would reach into the nested prefix.
     expect(owned("esuno/abc", "messages/esuno/abc", prefixes)).toBe(false);
-    // Without a list, the buffer prefix alone.
+    // Without a list, or an empty one, the buffer prefix alone.
     expect(owned("abc", "messages/abc")).toBe(true);
+    expect(owned("abc", "messages/abc", [])).toBe(true);
     expect(owned("abc", "messages/esuno/abc")).toBe(false);
   });
 });
@@ -257,6 +258,13 @@ describe("recovery from the Firehose archive", () => {
     expect(report.isErr() && report.error.message).toBe(
       "Prefix is inside the message buffer",
     );
+    // Nor one overlapping an object prefix outside an empty buffer prefix.
+    const nested = await recoverFirehose(
+      fake.store,
+      { ...scope, bufferPrefix: "", objectPrefixes: ["messages/esuno/"] },
+      { prefix: "messages/", apply: false },
+    );
+    expect(nested.isErr()).toBe(true);
     // Nor a parent of it, which would list every buffered message.
     const parent = await recoverFirehose(
       fake.store,
@@ -345,6 +353,7 @@ describe("recovery of buffered MIME objects", () => {
       restored: 0,
       unrecoverable: [{ messageId: "ses-lost", objectKey: "ses-lost" }],
       divergent: [],
+      foreign: 1,
       failed: 1,
     });
     expect(fake.buffer.has("ses-restore")).toBe(false);
