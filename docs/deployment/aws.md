@@ -70,9 +70,10 @@ dedicated prefix if different. It scopes the Esuno rule's S3 action, the added
 bucket permission, the noncurrent-version lifecycle and worker deletion. The
 original rule still writes under `messages/`; deletion outside the dedicated
 prefix is no longer granted by this module. List both rules'
-prefixes (`tofu output message_prefix esuno_message_prefix`) in the
-worker's `INBOUND_OBJECT_PREFIXES`, as long as their notifications may be
-replayed (see [production](production.md)), keep its `INBOUND_BUFFER_PREFIX`
+prefixes (`tofu output -raw message_prefix` and
+`tofu output -raw esuno_message_prefix`) in the worker's
+`INBOUND_OBJECT_PREFIXES` for as long as the archives hold their
+notifications (see [production](production.md)), keep its `INBOUND_BUFFER_PREFIX`
 enclosing them, and ensure
 that other rules' messages have a safe, separately authorized cleanup process.
 The existing SMTP user and its credentials are managed outside this module. The

@@ -493,10 +493,10 @@ AWS_ACCESS_KEY_ID=<ingestion-access-key-id>
 AWS_SECRET_ACCESS_KEY=<ingestion-secret-key>
 INBOUND_BUCKET=<aws-buffer-bucket>
 INBOUND_BUFFER_PREFIX=messages/
-# Object key prefix of each receipt rule whose notifications may be replayed
-# (the AWS module's esuno_message_prefix output); add messages/ only if
-# archived notifications still use it (see below).
-INBOUND_OBJECT_PREFIXES=messages/esuno/
+# Object key prefix of every receipt rule whose notifications are in the
+# archives, current and past (see below); list messages/ too if any archived
+# notification uses it.
+INBOUND_OBJECT_PREFIXES=messages/,messages/esuno/
 INBOUND_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/<account>/<queue>
 INBOUND_TOPIC_ARN=arn:aws:sns:eu-north-1:<account>:<topic>
 ARCHIVE_ENDPOINT_URL=https://s3.<b2-region>.backblazeb2.com
@@ -517,21 +517,33 @@ scopes buffer listing), or `INBOUND_BUFFER_PREFIX` alone. List the prefix of
 every receipt rule whose notifications may still be replayed (the AWS
 module's `message_prefix` and `esuno_message_prefix` outputs): a missing one
 rejects new mail, which then waits in the queue and its DLQ, and one missing
-for archived notifications makes every replay fail. Keep `messages/` listed
-only while archived notifications under it are not all imported, and give
-the worker delete rights there too (the AWS module grants them on the Esuno
-prefix only), or replay cannot remove their objects.
+for archived notifications makes every replay fail. Replay checks every
+archived notification, imported or not, and the Firehose archive never
+expires, so keep a former rule's prefix listed as long as the B2 archive or
+the Firehose files a recovery may read hold notifications under it, in
+practice for good. The worker needs delete rights under such a prefix only
+while one of its messages is not yet imported (the AWS module grants them on
+the Esuno prefix only).
 
 Before upgrading to a release with this check, count the archived
-notifications by prefix with the archive credentials, in a private
-directory that you delete afterwards (the files contain addresses):
+notifications by prefix. On a host with the AWS CLI and `jq`, load
+`deploy/ingest.env` into the shell, then use the archive credentials (not
+the AWS ones) in a private directory that you delete afterwards, as the
+files contain addresses:
 
 ```sh
+set -a; . deploy/ingest.env; set +a
 umask 077; dir=$(mktemp -d)
-aws s3 sync "s3://$ARCHIVE_BUCKET/$ARCHIVE_PREFIX" "$dir" --endpoint-url "$ARCHIVE_ENDPOINT_URL"
-jq -r '.receipt.action.objectKey' "$dir"/*.json | sed 's#[^/]*$##' | sort | uniq -c
+AWS_ACCESS_KEY_ID="$ARCHIVE_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$ARCHIVE_SECRET_ACCESS_KEY" \
+AWS_REGION="$ARCHIVE_REGION" \
+  aws s3 sync "s3://$ARCHIVE_BUCKET/$ARCHIVE_PREFIX" "$dir" --endpoint-url "$ARCHIVE_ENDPOINT_URL"
+find "$dir" -name '*.json' -exec jq -r '.receipt.action.objectKey' {} + \
+  | sed 's#[^/]*$##' | sort | uniq -c
 rm -rf "$dir"
 ```
+
+Every prefix it prints must be listed.
 
 Set `INBOUND_OBJECT_PREFIXES` in `deploy/ingest.env` before the new image
 runs (the replay timer uses it too), recreate the worker with
@@ -663,8 +675,9 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 Use this after an SQS message expired or was lost, after losing the host, or
 after restoring the database from a backup older than recent mail. It relies
 on the Firehose notification archive (`metadata/`, never expired) and the
-versioned buffer (noncurrent versions under `messages/esuno/` kept 30 days)
-in AWS, and
+versioned buffer (noncurrent versions under `messages/esuno/` kept 30 days
+by the AWS module; other prefixes follow the bucket's actual lifecycle) in
+AWS, and
 on the replay archive in B2, none of which live on the host. Expect one
 request at a time: about 1.5 hours per 100,000 archive entries.
 
