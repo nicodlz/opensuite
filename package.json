@@ -20,9 +20,10 @@
     "iac:validate": "node scripts/iac-validate.mjs"
   },
   "devDependencies": {
-    "@axe-core/playwright": "catalog:",
     "@aws-sdk/client-s3": "catalog:",
+    "@axe-core/playwright": "catalog:",
     "@bitwarden/cli": "catalog:",
+    "@noble/hashes": "catalog:",
     "@opensuite/core": "workspace:*",
     "@opensuite/typescript-config": "workspace:*",
     "@playwright/test": "catalog:",
