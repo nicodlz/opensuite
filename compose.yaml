@@ -56,6 +56,7 @@ services:
         chown 999:1000 /secrets/vault-database /secrets/vault-database/password
         chmod 0550 /secrets/vault-database
         chmod 0440 /secrets/vault-database/password
+        # Repair fresh and existing Vault volumes before Vault starts.
         mkdir -p /vault-data
         chown -R 1000:1000 /vault-data
         chmod 0700 /vault-data
@@ -442,7 +443,13 @@ services:
     ports:
       - "127.0.0.1:${VAULT_ADMIN_PORT:-8081}:8080"
     volumes:
-      - vaultwarden-data:/data
+      # Do not let image /data metadata overwrite the secrets job's repair
+      # when Docker creates a container against an empty volume.
+      - type: volume
+        source: vaultwarden-data
+        target: /data
+        volume:
+          nocopy: true
       - ./deploy/vaultwarden/start.sh:/opt/opensuite/start.sh:ro
       - type: volume
         source: secrets
