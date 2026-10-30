@@ -52,7 +52,7 @@ describe("outbound management errors", () => {
     const result = await admin.configureRelay(valid);
     expect(result.isErr() && result.error).toMatchObject({
       kind: "method",
-      method: "x:MtaRoute/query",
+      method: "x:MtaStageData/get",
       type: "forbidden",
     });
   });

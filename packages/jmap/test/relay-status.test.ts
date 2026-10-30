@@ -5,7 +5,11 @@ import { StalwartAdmin } from "../src/admin.ts";
 const request = z.object({
   methodCalls: z.tuple([z.tuple([z.string(), z.unknown(), z.string()])]),
 });
-function fixture(routeHost: string, strategyRoute = "'osrelay'") {
+function fixture(
+  routeHost: string,
+  strategyRoute = "'osrelay'",
+  signing: object = { match: {}, else: "false" },
+) {
   const fetcher: typeof fetch = (_input, init) => {
     if (typeof init?.body !== "string") throw new Error("missing request body");
     const body = request.parse(JSON.parse(init.body));
@@ -31,6 +35,12 @@ function fixture(routeHost: string, strategyRoute = "'osrelay'") {
             authSecret: { "@type": "File", filePath: "/secret" },
           },
         ],
+      };
+    else if (method === "x:MtaStageData/get")
+      value = {
+        accountId: "a",
+        notFound: [],
+        list: [{ id: "singleton", dkimSignDomain: signing }],
       };
     else if (method === "x:MtaTlsStrategy/get")
       value = {
@@ -91,5 +101,12 @@ describe("SES relay inspection", () => {
     expect(configured.isOk() && configured.value).toBe(true);
     expect(wrongHost.isOk() && wrongHost.value).toBe(false);
     expect(wrongStrategy.isOk() && wrongStrategy.value).toBe(false);
+    // Stalwart still signing would make SES refuse the message.
+    const signing = await fixture(
+      "email-smtp.eu-north-1.amazonaws.com",
+      "'osrelay'",
+      { match: {}, else: "sender_domain" },
+    ).sesRelayConfigured();
+    expect(signing.isOk() && signing.value).toBe(false);
   });
 });
