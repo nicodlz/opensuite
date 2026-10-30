@@ -1,3 +1,4 @@
+import { createECDH } from "node:crypto";
 import { err, ok, type Result } from "neverthrow";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
@@ -252,3 +253,73 @@ export const loadAuthConfig = async (
     });
   }
 };
+
+/** VAPID material is read from files and never included in diagnostics. */
+export async function loadVapidConfig(
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  try {
+    const publicFile = z.string().min(1).parse(env["VAPID_PUBLIC_KEY_FILE"]);
+    const privateFile = z.string().min(1).parse(env["VAPID_PRIVATE_KEY_FILE"]);
+    const [publicKey, privateKey] = await Promise.all([
+      readFile(publicFile, "utf8"),
+      readFile(privateFile, "utf8"),
+    ]);
+    const keys = z
+      .object({
+        publicKey: z.string().regex(/^[A-Za-z0-9_-]{87}$/),
+        privateKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      })
+      .parse({ publicKey: publicKey.trim(), privateKey: privateKey.trim() });
+    const curve = createECDH("prime256v1");
+    curve.setPrivateKey(Buffer.from(keys.privateKey, "base64url"));
+    if (curve.getPublicKey().toString("base64url") !== keys.publicKey)
+      throw new Error("Invalid key pair");
+    return ok(keys);
+  } catch {
+    return err<never, ConfigError>({
+      kind: "invalid_environment",
+      issues: ["VAPID secrets unavailable or invalid"],
+    });
+  }
+}
+
+const MailPushEnvironment = z.object({
+  MAIL_PUSH_POLL_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
+  MAIL_PUSH_REFRESH_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(5)
+    .max(300)
+    .default(10),
+  MAIL_PUSH_FRESHNESS_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(86400)
+    .default(900),
+  MAIL_PUSH_BURST_SECONDS: z.coerce.number().int().min(0).max(30).default(3),
+  MAIL_PUSH_BURST_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
+  MAIL_PUSH_CONNECTIONS: z.coerce.number().int().min(0).max(1000).default(50),
+});
+export function loadMailPushConfig(
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  const result = MailPushEnvironment.safeParse(env);
+  if (!result.success)
+    return err<never, ConfigError>({
+      kind: "invalid_environment",
+      issues: result.error.issues.map(
+        (issue) => `${issue.path.join(".")}: ${issue.message}`,
+      ),
+    });
+  const value = result.data;
+  return ok({
+    pollMs: value.MAIL_PUSH_POLL_SECONDS * 1000,
+    refreshMs: value.MAIL_PUSH_REFRESH_SECONDS * 1000,
+    freshnessMs: value.MAIL_PUSH_FRESHNESS_SECONDS * 1000,
+    burstMs: value.MAIL_PUSH_BURST_SECONDS * 1000,
+    burstThreshold: value.MAIL_PUSH_BURST_THRESHOLD,
+    pushConnections: value.MAIL_PUSH_CONNECTIONS,
+  });
+}

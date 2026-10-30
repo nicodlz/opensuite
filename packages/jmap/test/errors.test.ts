@@ -251,3 +251,27 @@ it("rejects session URL rewriting in a browser", () => {
     vi.unstubAllGlobals();
   }
 });
+
+it("aborts an in-flight JMAP request when the client signal is cancelled", async () => {
+  const abort = new AbortController();
+  // oxlint-disable-next-line unicorn/consistent-function-scoping
+  const fetcher: typeof fetch = (_input, init) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => {
+          reject(new Error("cancelled"));
+        },
+        { once: true },
+      );
+    });
+  const client = new JmapClient("https://mail.example.test", {
+    authorization: "secret",
+    fetch: fetcher,
+    signal: abort.signal,
+  });
+  const pending = client.discover();
+  abort.abort();
+  const result = await pending;
+  expect(result.isErr() && result.error.kind).toBe("network");
+});

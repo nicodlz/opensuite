@@ -911,3 +911,33 @@ relay reset enables direct MX and may deliver queued mail. For host recovery,
 fence the old VPS and use the isolated [restore procedure](../operations/backup.md);
 never restore over live object prefixes. Keep backups and provider state until
 recovery and mail flow are verified.
+
+## Web Push keys
+
+The `secrets` service creates a P-256 VAPID key pair once in the persistent
+`secrets` volume, under `vapid/`. The API reads both files from its read-only
+mount through `VAPID_PUBLIC_KEY_FILE` and `VAPID_PRIVATE_KEY_FILE`; only the
+public key is returned to signed-in users. Keep the volume in protected
+backups. No key needs to be placed in `.env`. HTTPS is required for production
+browser subscriptions. Outbound HTTPS to browser push services must be allowed.
+If the key files are missing or invalid, the API logs a warning and continues
+serving other functions; push endpoints return 503 until valid files are
+restored and the API is restarted.
+
+To rotate a compromised key pair, stop the API, remove both key files from the
+volume, run the generator and restart the API:
+
+```sh
+docker compose stop api
+docker compose run --rm --no-deps --entrypoint sh secrets -c 'rm -f /secrets/vapid/public /secrets/vapid/private'
+docker compose run --rm --no-deps secrets
+docker compose up -d --no-deps --force-recreate api
+```
+
+Rotation invalidates existing subscriptions: the server detects the old key and
+users must re-enable notifications on each device and product. The migration
+that adds session and key tracking also removes legacy subscriptions, so users
+must re-enable them once after upgrading. Expired or unauthorized endpoints are removed when a
+push provider returns 401, 403, 404 or 410. Back up the new key pair securely. Mail and
+calendar event producers are added separately; the test button verifies the
+shared push path.

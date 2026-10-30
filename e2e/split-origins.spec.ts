@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { createHmac, randomUUID } from "node:crypto";
+import { createECDH, createHmac, randomUUID } from "node:crypto";
+import { createNotificationDispatcher } from "@opensuite/core/services/notifications";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
@@ -14,6 +15,8 @@ import { promisify } from "node:util";
 import { createReadinessService } from "@opensuite/core";
 import {
   createAccountStore,
+  createPushStore,
+  type PrismaClient,
   createDatabase,
 } from "../packages/db/src/index.ts";
 import { expect, test, type Page } from "@playwright/test";
@@ -29,6 +32,7 @@ const container = `opensuite-split-e2e-${randomUUID().slice(0, 8)}`;
 let web: Server | undefined;
 let api: Awaited<ReturnType<typeof buildServer>> | undefined;
 let disconnect = () => Promise.resolve();
+let pushDb: PrismaClient;
 let mail = "";
 let drive = "";
 let calendar = "";
@@ -47,6 +51,8 @@ const totpUser = {
   password: "totp-ui-strong-password",
 };
 let totpSecret = "";
+let pushSession = "";
+let issuePushSession = () => Promise.resolve("");
 
 function totp(secret: string) {
   let bits = "";
@@ -213,6 +219,7 @@ test.beforeAll(async () => {
   const database = createDatabase(databaseUrl);
   if (database.isErr()) throw new Error(database.error.message);
   const db = database.value;
+  pushDb = db;
   disconnect = () => db.$disconnect();
   const provisioned = new Set<string>();
   const trusted = [mail, drive, calendar, single];
@@ -241,6 +248,17 @@ test.beforeAll(async () => {
         body: JSON.stringify(payload),
       }),
     );
+  issuePushSession = async () => {
+    const login = await call("sign-in/email", user);
+    const cookie = login.headers
+      .getSetCookie()
+      .find((item) => item.startsWith("__Host-opensuite.session_token="));
+    if (!cookie) throw new Error("Missing test session");
+    return (
+      cookie.slice("__Host-opensuite.session_token=".length).split(";")[0] ?? ""
+    );
+  };
+  pushSession = await issuePushSession();
   const mfaCookie = cookieOf(await call("sign-in/email", mfa));
   const enrolment = z
     .object({ totpURI: z.string() })
@@ -261,7 +279,17 @@ test.beforeAll(async () => {
   ).toBe(200);
 
   const accounts = createAccountStore(db);
+  const pushStore = createPushStore(db);
+  const vapid = createECDH("prime256v1");
+  vapid.generateKeys();
   api = await buildServer({
+    push: {
+      publicKey: vapid.getPublicKey().toString("base64url"),
+      store: pushStore,
+      dispatcher: createNotificationDispatcher(pushStore, {
+        send: async () => {},
+      }),
+    },
     config: { logLevel: "silent" },
     readiness: createReadinessService({
       probes: [],
@@ -279,7 +307,9 @@ test.beforeAll(async () => {
         const session = await identity.api.getSession({ headers });
         if (session === null) return null;
         const actor = await accounts.actor(session.user.id);
-        return actor.isOk() ? actor.value : null;
+        return actor.isOk() && actor.value !== null
+          ? { ...actor.value, sessionId: session.session.id }
+          : null;
       },
       audit: () => Promise.resolve(),
     },
@@ -814,4 +844,228 @@ test("a single origin keeps path routing", async ({ page }) => {
   await expect(page).toHaveURL(`${single}/calendar`);
   await page.goto(`${single}/drive?folder=abc`);
   await expect(page).toHaveURL(`${single}/drive?folder=abc`);
+});
+
+/* oxlint-disable typescript/consistent-type-assertions, typescript/no-unsafe-type-assertion, typescript/no-non-null-assertion, typescript/require-await, eslint/no-await-in-loop, unicorn/consistent-function-scoping */
+// Chromium has no push service credentials in this test environment. The browser
+// subscription API is stubbed; the API, database, worker and notification UI are real.
+for (const product of ["mail", "calendar", "drive"] as const) {
+  test(`${product} notification opt-in and worker delivery`, async ({
+    page,
+    context,
+  }) => {
+    const origin = { mail, calendar, drive }[product];
+    await context.grantPermissions(["notifications"], { origin });
+    await page.addInitScript(() => {
+      let current: PushSubscription | null = null;
+      PushManager.prototype.getSubscription = async () => current;
+      PushManager.prototype.subscribe = async () => {
+        const endpoint = `https://fcm.googleapis.com/e2e-${location.hostname}-${crypto.randomUUID()}`;
+        current = {
+          endpoint,
+          expirationTime: null,
+          options: {} as PushSubscriptionOptions,
+          getKey: () => null,
+          toJSON: () => ({
+            endpoint,
+            keys: { p256dh: "A".repeat(87), auth: "B".repeat(22) },
+          }),
+          unsubscribe: async () => {
+            current = null;
+            return true;
+          },
+        };
+        return current;
+      };
+    });
+    await context.addCookies([
+      {
+        name: "__Host-opensuite.session_token",
+        value: pushSession,
+        url: origin.replace("http:", "https:"),
+        secure: true,
+        httpOnly: true,
+        sameSite: "Lax",
+      },
+    ]);
+    await page.goto(`${origin}/`);
+    await expect(page).toHaveURL(`${origin}/`);
+    await page.getByRole("button", { name: "Account menu" }).click();
+    await page.getByRole("menuitem", { name: "Notification settings" }).click();
+    await page.getByRole("button", { name: "Enable notifications" }).click();
+    await expect(page.getByText("Status: on")).toBeVisible();
+    const saved = await pushDb.pushSubscription.findFirst({
+      where: { product, user: { email: user.email } },
+    });
+    expect(saved?.endpoint).toContain(`e2e-${product}.localhost`);
+
+    const cdp = await context.newCDPSession(page);
+    const registrations: { registrationId: string; scopeURL: string }[] = [];
+    cdp.on(
+      "ServiceWorker.workerRegistrationUpdated",
+      (event: {
+        registrations: { registrationId: string; scopeURL: string }[];
+      }) => registrations.push(...event.registrations),
+    );
+    await cdp.send("ServiceWorker.enable");
+    await expect
+      .poll(
+        () =>
+          registrations.find((entry) => entry.scopeURL === `${origin}/`)
+            ?.registrationId,
+      )
+      .toBeTruthy();
+    const id = registrations.find(
+      (entry) => entry.scopeURL === `${origin}/`,
+    )!.registrationId;
+    await cdp.send("ServiceWorker.deliverPushMessage", {
+      origin,
+      registrationId: id,
+      data: JSON.stringify({
+        title: "Push test",
+        body: "Delivered",
+        url: product === "drive" ? "//evil.example/" : "/?from=push",
+        tag: `e2e-${product}`,
+      }),
+    });
+    await expect
+      .poll(async () =>
+        page.evaluate(async () =>
+          (await (await navigator.serviceWorker.ready).getNotifications()).map(
+            (item) => ({
+              title: item.title,
+              body: item.body,
+              tag: item.tag,
+              icon: item.icon,
+            }),
+          ),
+        ),
+      )
+      .toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: "Push test",
+            body: "Delivered",
+            tag: `e2e-${product}`,
+            icon: `${origin}/icons/${product}-192.png`,
+          }),
+        ]),
+      );
+    // Dispatch a click to the actual worker, using its real notification object.
+    await expect
+      .poll(() =>
+        context
+          .serviceWorkers()
+          .find((worker) => worker.url().startsWith(`${origin}/push-sw-v1.js`)),
+      )
+      .toBeTruthy();
+    const worker = context
+      .serviceWorkers()
+      .find((item) => item.url().startsWith(`${origin}/push-sw-v1.js`))!;
+    await worker.evaluate(async () => {
+      const sw = globalThis as unknown as {
+        registration: ServiceWorkerRegistration;
+        dispatchEvent(event: Event): boolean;
+      };
+      const notification = (await sw.registration.getNotifications())[0]!;
+      const pending: Promise<unknown>[] = [];
+      const event = new Event("notificationclick");
+      Object.defineProperties(event, {
+        notification: { value: notification },
+        waitUntil: {
+          value: (promise: Promise<unknown>) => pending.push(promise),
+        },
+      });
+      sw.dispatchEvent(event);
+      // A synthetic click has no browser user activation, so Chromium rejects
+      // focus after navigation; a real notification click has activation.
+      await Promise.all(pending).catch((error: unknown) => {
+        if (
+          !(error instanceof DOMException) ||
+          error.name !== "InvalidAccessError"
+        )
+          throw error;
+      });
+    });
+    await expect(page).toHaveURL(
+      product === "drive" ? `${origin}/` : `${origin}/?from=push`,
+    );
+    await cdp.detach();
+  });
+}
+
+test("sign-out removes the current session's subscriptions across origins", async ({
+  page,
+  context,
+}) => {
+  for (const origin of [mail, calendar])
+    await context.grantPermissions(["notifications"], { origin });
+  await page.addInitScript(() => {
+    function make(endpoint: string): PushSubscription {
+      return {
+        endpoint,
+        expirationTime: null,
+        options: {} as PushSubscriptionOptions,
+        getKey: () => null,
+        toJSON: () => ({
+          endpoint,
+          keys: { p256dh: "A".repeat(87), auth: "B".repeat(22) },
+        }),
+        unsubscribe: async () => {
+          localStorage.removeItem("mock-push-endpoint");
+          return true;
+        },
+      };
+    }
+    PushManager.prototype.getSubscription = async () => {
+      const endpoint = localStorage.getItem("mock-push-endpoint");
+      return endpoint ? make(endpoint) : null;
+    };
+    PushManager.prototype.subscribe = async () => {
+      const endpoint = `https://fcm.googleapis.com/logout-${location.hostname}-${crypto.randomUUID()}`;
+      localStorage.setItem("mock-push-endpoint", endpoint);
+      return make(endpoint);
+    };
+  });
+  const session = await issuePushSession();
+  await context.addCookies(
+    [mail, calendar].map((origin) => ({
+      name: "__Host-opensuite.session_token",
+      value: session,
+      url: origin.replace("http:", "https:"),
+      secure: true,
+      httpOnly: true,
+      sameSite: "Lax" as const,
+    })),
+  );
+  const endpoints: string[] = [];
+  for (const origin of [calendar, mail]) {
+    await page.goto(`${origin}/`);
+    await page.getByRole("button", { name: "Account menu" }).click();
+    await page.getByRole("menuitem", { name: "Notification settings" }).click();
+    await page.getByRole("button", { name: "Enable notifications" }).click();
+    await expect(page.getByText("Status: on")).toBeVisible();
+    const endpoint = await page.evaluate(() =>
+      localStorage.getItem("mock-push-endpoint"),
+    );
+    if (!endpoint) throw new Error("missing endpoint");
+    endpoints.push(endpoint);
+    await page.getByRole("button", { name: "Close dialog" }).click();
+  }
+  expect(
+    await pushDb.pushSubscription.count({
+      where: { endpoint: { in: endpoints } },
+    }),
+  ).toBe(2);
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(`${mail}/login`);
+  expect(
+    await pushDb.pushSubscription.count({
+      where: { endpoint: { in: endpoints } },
+    }),
+  ).toBe(0);
+  expect(
+    await page.evaluate(() => localStorage.getItem("mock-push-endpoint")),
+  ).toBeNull();
 });

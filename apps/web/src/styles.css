@@ -1706,3 +1706,27 @@ h1 {
   overflow-wrap: anywhere;
   user-select: all;
 }
+
+.notification-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+.notification-prompt p {
+  margin: 0.25rem 0;
+}
+.notification-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+@media (max-width: 640px) {
+  .notification-prompt {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

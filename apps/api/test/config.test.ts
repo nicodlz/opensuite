@@ -1,3 +1,4 @@
+import { createECDH } from "node:crypto";
 import { ok } from "neverthrow";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import {
   parseProductOrigins,
   loadAuthConfig,
   loadConfig,
+  loadVapidConfig,
 } from "../src/config.ts";
 
 describe("loadConfig", () => {
@@ -177,4 +179,55 @@ describe("application origins", () => {
   ])("refuses %s", (value) => {
     expect(parseProductOrigins(hub, value)).toBeNull();
   });
+});
+
+it("reads a matching VAPID key pair from files without revealing failures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "opensuite-vapid-"));
+  try {
+    const key = createECDH("prime256v1");
+    key.generateKeys();
+    const publicFile = join(directory, "public");
+    const privateFile = join(directory, "private");
+    await writeFile(publicFile, key.getPublicKey().toString("base64url"));
+    await writeFile(privateFile, key.getPrivateKey().toString("base64url"));
+    const env = {
+      VAPID_PUBLIC_KEY_FILE: publicFile,
+      VAPID_PRIVATE_KEY_FILE: privateFile,
+    };
+    expect((await loadVapidConfig(env)).isOk()).toBe(true);
+    const other = createECDH("prime256v1");
+    other.generateKeys();
+    await writeFile(privateFile, other.getPrivateKey().toString("base64url"));
+    const invalid = await loadVapidConfig(env);
+    expect(invalid.isErr()).toBe(true);
+    expect(JSON.stringify(invalid)).not.toContain(
+      other.getPrivateKey().toString("base64url"),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("bounds mail notification settings and permits polling-only operation", async () => {
+  const { loadMailPushConfig } = await import("../src/config.ts");
+  const defaults = loadMailPushConfig({});
+  expect(defaults.isOk() && defaults.value).toEqual({
+    pollMs: 30000,
+    refreshMs: 10000,
+    freshnessMs: 900000,
+    burstMs: 3000,
+    burstThreshold: 3,
+    pushConnections: 50,
+  });
+  const polling = loadMailPushConfig({
+    MAIL_PUSH_CONNECTIONS: "0",
+    MAIL_PUSH_POLL_SECONDS: "5",
+  });
+  expect(polling.isOk() && polling.value.pushConnections).toBe(0);
+  expect(
+    loadMailPushConfig({
+      MAIL_PUSH_POLL_SECONDS: "1",
+      MAIL_PUSH_CONNECTIONS: "1001",
+    }).isErr(),
+  ).toBe(true);
 });

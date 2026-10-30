@@ -179,6 +179,7 @@ function MessageView({
       <button
         type="button"
         className="message collapsed"
+        data-message-id={message.id}
         onClick={onToggle}
         aria-expanded="false"
       >
@@ -196,7 +197,7 @@ function MessageView({
     .map((address) => address.name ?? address.email)
     .join(", ");
   return (
-    <article className="message">
+    <article className="message" data-message-id={message.id}>
       <div className="message-header">
         <span className="message-avatar" aria-hidden="true">
           {initials(sender)}
@@ -275,6 +276,7 @@ function MessageView({
 
 export function ReadingPane({
   messages,
+  focusMessageId,
   aliasesByMessage,
   folder,
   mailboxes,
@@ -287,6 +289,7 @@ export function ReadingPane({
   onStep,
 }: {
   messages: Message[];
+  focusMessageId: string | null;
   aliasesByMessage: Record<string, Alias[]>;
   folder: Mailbox | undefined;
   mailboxes: Mailbox[];
@@ -312,12 +315,24 @@ export function ReadingPane({
     () =>
       new Set(
         messages
-          .filter((message, index) =>
-            index === messages.length - 1 ? true : message.unread,
+          .filter(
+            (message, index) =>
+              index === messages.length - 1 ||
+              message.id === focusMessageId ||
+              message.unread,
           )
           .map((message) => message.id),
       ),
   );
+  const messageStack = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focusMessageId) {
+      const target = Array.from(messageStack.current?.children ?? []).find(
+        (element) => element.getAttribute("data-message-id") === focusMessageId,
+      );
+      target?.scrollIntoView({ block: "start" });
+    }
+  }, [focusMessageId]);
   const inTrash = folder?.role === "trash";
   const custom = mailboxes.filter((item) => item.role === "custom");
   const subject = messages[0]?.subject || "(No subject)";
@@ -497,7 +512,7 @@ export function ReadingPane({
             )}
           </div>
         </header>
-        <div className="message-stack">
+        <div className="message-stack" ref={messageStack}>
           {messages.map((message) => (
             <MessageView
               key={message.id}

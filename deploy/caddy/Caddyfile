@@ -60,7 +60,7 @@
 				@index path /index.html
 				header @index Cache-Control "no-cache"
 				# These public files are not fingerprinted; always revalidate.
-				@public_files path /boot.js /manifest-*.webmanifest /icons/*
+				@public_files path /boot.js /push-sw-*.js /manifest-*.webmanifest /icons/*
 				header @public_files Cache-Control "no-cache"
 				file_server
 			}

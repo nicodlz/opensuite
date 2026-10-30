@@ -1,3 +1,4 @@
+import { clearPushOnSignOut } from "../push/client.ts";
 import * as React from "react";
 import {
   useEffect,
@@ -335,6 +336,8 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
   }
   async function signOut() {
     try {
+      // Best effort: the server also clears this session's push records on sign-out.
+      await clearPushOnSignOut().catch(() => undefined);
       await auth.signOut();
     } catch (failure) {
       if (failure instanceof AuthError && failure.status === 401) {
@@ -487,10 +490,14 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                 <code className="auth-secret">
                   {new URL(enrollment.totpURI).searchParams.get("secret")}
                 </code>
-                <p>Save these backup codes somewhere safe:</p>
-                <code className="auth-secret">
-                  {enrollment.backupCodes.join("\n")}
-                </code>
+                {enrollment.backupCodes.length > 0 ? (
+                  <>
+                    <p>Save these backup codes somewhere safe:</p>
+                    <code className="auth-secret">
+                      {enrollment.backupCodes.join("\n")}
+                    </code>
+                  </>
+                ) : null}
                 {!factors.data?.totp ? (
                   <>
                     <TextField

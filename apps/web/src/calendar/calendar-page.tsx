@@ -1,9 +1,11 @@
 import * as React from "react";
 import {
   RecurrenceSchema,
+  ReminderSchema,
   type Calendar,
   type CalendarEvent,
   type EventContent,
+  type Reminder,
 } from "@opensuite/contracts";
 import { ORPCError } from "@orpc/client";
 import {
@@ -30,6 +32,13 @@ import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { Icon } from "../ui/icons.tsx";
 import { TextField } from "../ui/text-field.tsx";
 import { Toast, ToastProvider } from "../ui/toast.tsx";
+import { useNotificationPrompt } from "../push/hook.ts";
+import {
+  isIosUninstalled,
+  pushIsOn,
+  supportsPush,
+  refreshCalendarTimeZone,
+} from "../push/client.ts";
 import { accountId, calendarClient } from "./client.ts";
 import {
   addDays,
@@ -381,11 +390,37 @@ export function CalendarPage() {
 
 function CalendarWorkspace() {
   const queryClient = useQueryClient();
+  const { offer } = useNotificationPrompt("calendar");
+  useEffect(() => {
+    void refreshCalendarTimeZone().catch(() => {});
+  }, []);
+  const notificationTarget = useRef(
+    new URLSearchParams(window.location.search),
+  );
   const narrow = useMediaQuery("(max-width: 900px)");
   const [view, setViewState] = useState<CalendarView>(() =>
     initialView(narrow),
   );
-  const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
+  const [anchor, setAnchor] = useState(() => {
+    const start = notificationTarget.current.get("start");
+    let date = start === null ? new Date() : new Date(start);
+    if (
+      start !== null &&
+      notificationTarget.current.get("allDay") === "1" &&
+      !Number.isNaN(date.getTime())
+    ) {
+      const day = notificationTarget.current.get("day");
+      date =
+        day !== null && /^\d{4}-\d{2}-\d{2}$/.test(day)
+          ? new Date(`${day}T00:00:00`)
+          : new Date(
+              date.getUTCFullYear(),
+              date.getUTCMonth(),
+              date.getUTCDate(),
+            );
+    }
+    return startOfDay(Number.isNaN(date.getTime()) ? new Date() : date);
+  });
   const [search, setSearch] = useState("");
   const [hidden, setHidden] = useState(readHidden);
   const [popover, setPopover] = useState<Popover | null>(null);
@@ -418,6 +453,14 @@ function CalendarWorkspace() {
     refetchInterval: false,
   });
   const loaded = events.isSuccess && !events.isPlaceholderData;
+  useEffect(() => {
+    if (!loaded) return;
+    const id = notificationTarget.current.get("event");
+    if (id === null) return;
+    notificationTarget.current.delete("event");
+    const event = events.data.events.find((item) => item.id === id);
+    if (event) setEditor({ event, content: contentOf(event) });
+  }, [loaded, events.data]);
   useEffect(() => {
     if (!loaded) return;
     for (const direction of [-1, 1]) {
@@ -590,13 +633,34 @@ function CalendarWorkspace() {
   }
   function saveEditor(content: EventContent) {
     const current = editor?.event;
-    if (current) mutation.mutate({ type: "update", event: current, content });
+    // This callback is specific to an editor save, not drag or quick-create.
+    const onSuccess = (saved: CalendarEvent | null) => {
+      if (!saved) return;
+      const reminder = saved.reminder ?? content.reminder;
+      if (!reminder || reminder === "none") return;
+      const details = {
+        reason: "calendar-reminder",
+        message: "Get this reminder on this device?",
+      };
+      if (isIosUninstalled()) offer(details);
+      else if (supportsPush())
+        void pushIsOn("calendar")
+          .then((enabled) => {
+            if (!enabled) offer(details);
+            return undefined;
+          })
+          .catch(() => {});
+    };
+    if (current)
+      mutation.mutate(
+        { type: "update", event: current, content },
+        { onSuccess },
+      );
     else
-      mutation.mutate({
-        type: "create",
-        id: `draft-${crypto.randomUUID()}`,
-        content,
-      });
+      mutation.mutate(
+        { type: "create", id: `draft-${crypto.randomUUID()}`, content },
+        { onSuccess },
+      );
     setEditor(null);
   }
   function createQuick(content: EventContent) {
@@ -2389,6 +2453,9 @@ function EventEditor({
 }) {
   const id = useId();
   const [form, setForm] = useState<EventForm>(() => formFromEvent(content));
+  const [reminder, setReminder] = useState<Reminder>(
+    content.reminder ?? "none",
+  );
   const [error, setError] = useState("");
   const formRef = useRef<HTMLFormElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
@@ -2419,6 +2486,7 @@ function EventEditor({
       title: form.title.trim(),
       allDay: form.allDay,
       recurrence: form.recurrence,
+      reminder,
       calendarId: form.calendarId,
       location: form.location.trim(),
       description: form.description,
@@ -2575,6 +2643,29 @@ function EventEditor({
           </select>
         </label>
       </div>
+      <label className="field">
+        <span className="field-label">Reminder</span>
+        <select
+          className="field-input"
+          value={reminder}
+          onChange={(event) => {
+            const parsed = ReminderSchema.safeParse(event.target.value);
+            if (parsed.success) setReminder(parsed.data);
+          }}
+        >
+          <option value="none">None</option>
+          <option value="at-time">At time of event</option>
+          <option value="5m">5 minutes before</option>
+          <option value="10m">10 minutes before</option>
+          <option value="15m">15 minutes before</option>
+          <option value="30m">30 minutes before</option>
+          <option value="1h">1 hour before</option>
+          <option value="1d">1 day before</option>
+          {content.reminder === "custom" && (
+            <option value="custom">Custom reminders</option>
+          )}
+        </select>
+      </label>
       <TextField
         label="Location"
         maxLength={500}

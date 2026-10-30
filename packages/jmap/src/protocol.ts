@@ -44,6 +44,8 @@ export interface TransportOptions {
   readonly authorization: string;
   readonly fetch?: typeof fetch;
   readonly timeoutMs?: number;
+  /** Abort all requests made by this client, including response bodies. */
+  readonly signal?: AbortSignal;
   readonly rewriteSessionUrlsToOrigin?: string;
 }
 
@@ -61,6 +63,7 @@ export const SessionSchema = z.object({
   primaryAccounts: z.record(z.string(), z.string()),
   username: z.string(),
   apiUrl: z.url(),
+  eventSourceUrl: z.url().optional(),
   downloadUrl: z.string(),
   uploadUrl: z.string(),
   state: z.string(),
@@ -77,11 +80,13 @@ export class Transport {
   readonly #fetch: typeof fetch;
   readonly #origin: string;
   readonly #timeoutMs: number;
+  readonly #signal: AbortSignal | undefined;
   constructor(origin: string, options: TransportOptions) {
     this.#origin = new URL(origin).origin;
     this.#authorization = options.authorization;
     this.#fetch = options.fetch ?? fetch;
     this.#timeoutMs = options.timeoutMs ?? 120_000;
+    this.#signal = options.signal;
   }
 
   async request(
@@ -103,10 +108,11 @@ export class Transport {
     try {
       const headers = new Headers(init.headers);
       const timeout = AbortSignal.timeout(this.#timeoutMs);
-      const signal =
-        init.signal === null || init.signal === undefined
-          ? timeout
-          : AbortSignal.any([init.signal, timeout]);
+      const signals = [timeout];
+      if (this.#signal !== undefined) signals.push(this.#signal);
+      if (init.signal !== null && init.signal !== undefined)
+        signals.push(init.signal);
+      const signal = signals.length === 1 ? timeout : AbortSignal.any(signals);
       headers.set("Authorization", this.#authorization);
       // Discovery may redirect on the same origin; never forward credentials to another origin.
       requests++;

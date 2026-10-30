@@ -1,5 +1,17 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import {
+  randomUUID,
+  randomBytes,
+  createECDH,
+  createPublicKey,
+  verify,
+} from "node:crypto";
+import { Agent, createServer } from "node:https";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createWebPushTransport } from "@opensuite/core/adapters/web-push";
+import { createNotificationDispatcher } from "@opensuite/core/services/notifications";
 import { promisify } from "node:util";
 import { createReadinessService } from "@opensuite/core";
 import {
@@ -9,6 +21,7 @@ import {
 import {
   createDatabase,
   createAliasStore,
+  createPushStore,
   createDomainStore,
   type PrismaClient,
 } from "@opensuite/db";
@@ -141,7 +154,18 @@ beforeAll(async () => {
       },
       2,
     );
+    const pushStore = createPushStore(db);
+    const key = createECDH("prime256v1");
+    key.generateKeys();
+    const dispatcher = createNotificationDispatcher(pushStore, {
+      send: async () => {},
+    });
     app = await buildServer({
+      push: {
+        publicKey: key.getPublicKey().toString("base64url"),
+        store: pushStore,
+        dispatcher,
+      },
       config: { logLevel: "silent" },
       monotonicMs: clock,
       readiness: createReadinessService({
@@ -160,6 +184,7 @@ beforeAll(async () => {
             user
               ? {
                   id: user,
+                  sessionId: `session-${user}`,
                   email: `${user}@example.test`,
                   role: "user" as const,
                 }
@@ -1014,5 +1039,391 @@ describe("alias API", () => {
     expect(limitedMutations.map((response) => response.statusCode)).toEqual([
       429, 429, 429,
     ]);
+  });
+});
+
+describe("push API", () => {
+  const endpoint = "https://fcm.googleapis.com/test-http";
+  const body = {
+    product: "mail",
+    endpoint,
+    p256dh: "A".repeat(87),
+    auth: "A".repeat(22),
+    userAgent: "test",
+  };
+  it("records valid calendar subscriber zones without accepting another user's update", async () => {
+    const calendarEndpoint = "https://fcm.googleapis.com/calendar-zone-test";
+    const subscription = {
+      ...body,
+      product: "calendar",
+      endpoint: calendarEndpoint,
+      timeZone: "Europe/Paris",
+    };
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/push/subscribe",
+          headers: headers("alice"),
+          payload: subscription,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (await db.user.findUniqueOrThrow({ where: { id: "alice" } }))
+        .calendarTimeZone,
+    ).toBe("Europe/Paris");
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/push/status",
+      headers: headers("alice"),
+      payload: {
+        product: "calendar",
+        endpoint: calendarEndpoint,
+        timeZone: "Invalid/Zone",
+      },
+    });
+    expect(invalid.statusCode).toBe(400);
+    const other = await app.inject({
+      method: "POST",
+      url: "/push/status",
+      headers: headers("bob"),
+      payload: {
+        product: "calendar",
+        endpoint: calendarEndpoint,
+        timeZone: "America/New_York",
+      },
+    });
+    expect(other.json()).toEqual({ subscribed: false });
+    expect(
+      (await db.user.findUniqueOrThrow({ where: { id: "bob" } }))
+        .calendarTimeZone,
+    ).toBe("UTC");
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/push/status",
+          headers: headers("alice"),
+          payload: {
+            product: "calendar",
+            endpoint: calendarEndpoint,
+            timeZone: "America/New_York",
+          },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (await db.user.findUniqueOrThrow({ where: { id: "alice" } }))
+        .calendarTimeZone,
+    ).toBe("America/New_York");
+  });
+  it("requires a session for the public key and exposes only the public key", async () => {
+    expect(
+      (await app.inject({ method: "GET", url: "/push/public-key" })).statusCode,
+    ).toBe(401);
+    const response = await app.inject({
+      method: "GET",
+      url: "/push/public-key",
+      headers: headers("alice"),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(response.json())).toEqual(["publicKey"]);
+    expect(response.json<{ publicKey: string }>().publicKey).toHaveLength(87);
+  });
+  it("does not let another user take, inspect, remove or test a subscription", async () => {
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/push/subscribe",
+          headers: headers("alice"),
+          payload: body,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/push/subscribe",
+          headers: headers("bob"),
+          payload: body,
+        })
+      ).statusCode,
+    ).toBe(409);
+    const status = await app.inject({
+      method: "POST",
+      url: "/push/status",
+      headers: headers("bob"),
+      payload: { product: "mail", endpoint },
+    });
+    expect(status.json()).toEqual({ subscribed: false });
+    await app.inject({
+      method: "POST",
+      url: "/push/unsubscribe",
+      headers: headers("bob"),
+      payload: { product: "mail", endpoint },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/push/test",
+      headers: headers("bob"),
+      payload: { product: "mail" },
+    });
+    expect(
+      (await db.pushSubscription.findUniqueOrThrow({ where: { endpoint } }))
+        .lastSuccessAt,
+    ).toBeNull();
+  });
+  it("accepts Edge and Apple push endpoints but refuses unsafe origins", async () => {
+    // oxlint-disable-next-line unicorn/consistent-function-scoping
+    const send = (candidate: string) =>
+      app.inject({
+        method: "POST",
+        url: "/push/subscribe",
+        headers: headers("bob"),
+        payload: { ...body, endpoint: candidate },
+      });
+    const accepted = await Promise.all(
+      [
+        "https://db5.notify.windows.com/push/test",
+        "https://web.push.apple.com/3/device/test",
+      ].map(send),
+    );
+    expect(accepted.map((response) => response.statusCode)).toEqual([200, 200]);
+    const rejected = await Promise.all(
+      [
+        "http://db5.notify.windows.com/push/test",
+        "https://db5.notify.windows.com:8443/x",
+        "https://db5.notify.windows.com:443/x",
+        "https://user@web.push.apple.com/x",
+        "https://notify.windows.com.evil.test/x",
+      ].map(send),
+    );
+    expect(rejected.map((response) => response.statusCode)).toEqual([
+      400, 400, 400, 400, 400,
+    ]);
+  });
+  it("clears only subscriptions attached to the current authenticated session", async () => {
+    const store = createPushStore(db);
+    const input = {
+      product: "calendar" as const,
+      endpoint: "https://fcm.googleapis.com/session-one",
+      p256dh: "A".repeat(87),
+      auth: "A".repeat(22),
+      userAgent: "test",
+    };
+    await store.subscribe("alice", input, "session-alice");
+    await store.subscribe(
+      "alice",
+      { ...input, endpoint: "https://fcm.googleapis.com/other-device" },
+      "session-other",
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: "/push/clear-session",
+      headers: headers("alice"),
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    expect(await store.status("alice", "calendar", input.endpoint)).toBe(false);
+    expect(
+      await store.status(
+        "alice",
+        "calendar",
+        "https://fcm.googleapis.com/other-device",
+      ),
+    ).toBe(true);
+    expect(
+      await store.status(
+        "bob",
+        "mail",
+        "https://db5.notify.windows.com/push/test",
+      ),
+    ).toBe(true);
+  });
+  it("cleans session subscriptions when sign-out is called directly", async () => {
+    const store = createPushStore(db);
+    const directEndpoint = "https://fcm.googleapis.com/direct-logout";
+    await store.subscribe(
+      "bob",
+      {
+        product: "drive",
+        endpoint: directEndpoint,
+        p256dh: "A".repeat(87),
+        auth: "A".repeat(22),
+        userAgent: "test",
+      },
+      "session-bob",
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/sign-out",
+      headers: headers("bob"),
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    expect(await store.status("bob", "drive", directEndpoint)).toBe(false);
+  });
+  it("sends a signed encrypted push and purges the stored endpoint on 410", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "esuno-push-http-"));
+    const keyFile = join(directory, "key.pem");
+    const certFile = join(directory, "cert.pem");
+    await run("openssl", [
+      "req",
+      "-x509",
+      "-newkey",
+      "ec",
+      "-pkeyopt",
+      "ec_paramgen_curve:P-256",
+      "-nodes",
+      "-keyout",
+      keyFile,
+      "-out",
+      certFile,
+      "-days",
+      "1",
+      "-subj",
+      "/CN=localhost",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+    ]);
+    const [key, cert] = await Promise.all([
+      readFile(keyFile),
+      readFile(certFile),
+    ]);
+    const vapid = createECDH("prime256v1");
+    vapid.generateKeys();
+    const receiver = createECDH("prime256v1");
+    receiver.generateKeys();
+    let valid = false;
+    let received = false;
+    const statuses: (number | null)[] = [];
+    const server = createServer({ key, cert }, (request, response) => {
+      received = true;
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        const match = /^vapid t=([^,]+), k=(.+)$/.exec(
+          request.headers.authorization ?? "",
+        );
+        const parts = match?.[1]?.split(".") ?? [];
+        const [header, claims, signature] = parts;
+        if (
+          header &&
+          claims &&
+          signature &&
+          match?.[2] === vapid.getPublicKey().toString("base64url")
+        ) {
+          const bytes = vapid.getPublicKey();
+          const publicKey = createPublicKey({
+            key: {
+              kty: "EC",
+              crv: "P-256",
+              x: bytes.subarray(1, 33).toString("base64url"),
+              y: bytes.subarray(33, 65).toString("base64url"),
+            },
+            format: "jwk",
+          });
+          const encrypted = Buffer.concat(chunks);
+          valid =
+            request.headers["content-encoding"] === "aes128gcm" &&
+            encrypted.length > 86 &&
+            !encrypted.includes(Buffer.from("private content")) &&
+            verify(
+              "sha256",
+              Buffer.from(`${header}.${claims}`),
+              { key: publicKey, dsaEncoding: "ieee-p1363" },
+              Buffer.from(signature, "base64url"),
+            );
+        }
+        response.writeHead(410).end();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address();
+    if (!address || typeof address === "string")
+      throw new Error("missing push test port");
+    const localEndpoint = `https://127.0.0.1:${address.port}/push`;
+    const publicKey = vapid.getPublicKey().toString("base64url");
+    const store = createPushStore(db, publicKey);
+    const agent = new Agent({ ca: cert });
+    try {
+      expect(
+        await store.subscribe(
+          "alice",
+          {
+            product: "calendar",
+            endpoint: localEndpoint,
+            p256dh: receiver.getPublicKey().toString("base64url"),
+            auth: randomBytes(16).toString("base64url"),
+            userAgent: "test",
+          },
+          "session-alice",
+        ),
+      ).toBe(true);
+      const dispatcher = createNotificationDispatcher(
+        store,
+        createWebPushTransport(
+          publicKey,
+          vapid.getPrivateKey().toString("base64url"),
+          origin,
+          agent,
+        ),
+        () => new Date(),
+        (event) => statuses.push(event.status),
+      );
+      const result = await dispatcher.notifyWithResult("alice", "calendar", {
+        title: "private content",
+        url: "/calendar",
+        tag: `real-${randomUUID()}`,
+      });
+      expect(result).toMatchObject({
+        outcome: "failed",
+        delivered: 0,
+        failed: 1,
+      });
+      expect({ received, statuses, valid }).toMatchObject({ valid: true });
+      expect(
+        await db.pushSubscription.findUnique({
+          where: { endpoint: localEndpoint },
+        }),
+      ).toBeNull();
+    } finally {
+      agent.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+  it("limits subscription and test requests per user", async () => {
+    const subscribe = await Promise.all(
+      Array.from({ length: 11 }, () =>
+        app.inject({
+          method: "POST",
+          url: "/push/subscribe",
+          headers: headers("alice"),
+          payload: body,
+        }),
+      ),
+    );
+    expect(subscribe.some((response) => response.statusCode === 429)).toBe(
+      true,
+    );
+    const tests = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        app.inject({
+          method: "POST",
+          url: "/push/test",
+          headers: headers("alice"),
+          payload: { product: "mail" },
+        }),
+      ),
+    );
+    expect(tests.some((response) => response.statusCode === 429)).toBe(true);
   });
 });

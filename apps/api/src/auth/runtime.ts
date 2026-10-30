@@ -227,7 +227,9 @@ export const createAuthRuntime = (
         if (allowed.isErr() || !allowed.value) return null;
         const result = await accounts.actor(session.user.id);
         if (result.isErr()) throw new Error("account lookup failed");
-        return result.value;
+        return result.value === null
+          ? null
+          : { ...result.value, sessionId: session.session.id };
       },
       userIdForEmail: async (email: string) => {
         const result = await accounts.userIdForEmail(email);

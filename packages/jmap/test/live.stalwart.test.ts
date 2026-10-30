@@ -14,10 +14,15 @@ import { ok } from "neverthrow";
 import {
   createAliasStore,
   createDatabase,
+  createMailPushStore,
+  createMailboxStore,
+  createPushStore,
   type PrismaClient,
 } from "../../db/src/index.ts";
 import { createAliasService } from "../../core/src/services/aliases.ts";
 import type { Result } from "neverthrow";
+import { startMailNotifier } from "../../../apps/api/src/adapters/mail-notifier.ts";
+import type { NotificationPayload } from "../../core/src/services/notifications.ts";
 
 const run = promisify(execFile);
 const runId = (
@@ -96,6 +101,17 @@ const pause = async (ms: number) =>
   new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
+
+// Polling depends on the result of the preceding attempt.
+/* oxlint-disable eslint/no-await-in-loop */
+const until = async (condition: () => boolean | Promise<boolean>) => {
+  for (let i = 0; i < 100; i++) {
+    if (await condition()) return;
+    await pause(100);
+  }
+  throw new Error("Notifier timed out");
+};
+/* oxlint-enable eslint/no-await-in-loop */
 
 describe("Stalwart JMAP integration", () => {
   beforeAll(async () => {
@@ -193,6 +209,188 @@ describe("Stalwart JMAP integration", () => {
     await aliasDb?.$disconnect();
     await run("docker", ["rm", "-f", pgContainer]).catch(() => undefined);
     await compose("down", "--volumes", "--remove-orphans");
+  }, 180_000);
+
+  it("notifies fresh inbox creations, ignores old imports and moves, and resumes its persisted state", async () => {
+    if (!aliasDb) throw new Error("Missing database");
+    const db = aliasDb;
+    const userId = "notification-owner";
+    await db.user.create({
+      data: {
+        id: userId,
+        email: "notification-owner@example.test",
+        name: "Fixture",
+      },
+    });
+    const mailboxResult = createMailboxStore(db, "ab".repeat(32));
+    if (mailboxResult.isErr()) throw new Error("Mailbox store unavailable");
+    const mailboxes = mailboxResult.value;
+    const created = await mailboxes.create({
+      userId,
+      accountId: aliceId,
+      address: "alice@example.test",
+      credentialId: "fixture",
+      secret: password,
+    });
+    if (created.isErr()) throw new Error("Mailbox link unavailable");
+    const push = createPushStore(db);
+    await push.subscribe(userId, {
+      product: "mail",
+      endpoint: "https://push.example/notify",
+      p256dh: "key",
+      auth: "auth",
+      userAgent: "test",
+    });
+    const calls: NotificationPayload[] = [];
+    const start = (withPush = true) =>
+      startMailNotifier({
+        store: createMailPushStore(db),
+        mailboxes: {
+          getForOwner: async (ownerId, accountId) =>
+            mailboxes.getForOwner(ownerId, accountId),
+        },
+        origin: base,
+        dispatcher: {
+          notify: (_user, _product, payload) => {
+            calls.push(payload);
+            return Promise.resolve();
+          },
+        },
+        options: {
+          pollMs: withPush ? 30000 : 250,
+          refreshMs: 250,
+          freshnessMs: 900000,
+          burstMs: 100,
+          burstThreshold: 3,
+          pushConnections: withPush ? 1 : 0,
+        },
+        log: () => undefined,
+      });
+    const importMessage = async (
+      subject: string,
+      mailbox: string,
+      receivedAt: string,
+    ) => {
+      const raw = Buffer.from(
+        `From: Sender <sender@example.test>\r\nTo: alice@example.test\r\nSubject: ${subject}\r\nMessage-ID: <${subject}@example.test>\r\n\r\nBody\r\n`,
+      );
+      const blob = value(await alice.upload(aliceSession, aliceId, raw));
+      return value(
+        await alice.importEmail(aliceSession, aliceId, {
+          blobId: blob.blobId,
+          mailboxIds: { [mailbox]: true },
+          receivedAt,
+        }),
+      );
+    };
+    let stop: (() => Promise<void>) | undefined;
+    try {
+      await importMessage(
+        "notification-baseline",
+        inbox,
+        new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      );
+      stop = start();
+      await until(async () =>
+        Boolean(
+          (await db.mailPushState.findUnique({ where: { userId } }))?.state,
+        ),
+      );
+      const cursor = async () =>
+        (await db.mailPushState.findUniqueOrThrow({ where: { userId } })).state;
+      const initial = await cursor();
+      expect(calls).toHaveLength(0);
+      await pause(1000); // Allow the EventSource to connect; the poll interval is deliberately longer than this test.
+      const fresh = await importMessage(
+        "notification-fresh",
+        inbox,
+        new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      );
+      await until(() => calls.length === 1);
+      expect(calls[0]).toMatchObject({
+        title: "Sender",
+        body: "notification-fresh",
+        tag: `mail:${fresh.id}`,
+        url: `/mail?thread=${encodeURIComponent(fresh.threadId)}&message=${encodeURIComponent(fresh.id)}`,
+        icon: "/icons/mail-192.png",
+      });
+      await until(async () => (await cursor()) !== initial);
+      const beforeImports = await cursor();
+      await importMessage("notification-old", inbox, "2020-01-02T03:04:05Z");
+      const junk = findMailbox(
+        value(await alice.mailboxes(aliceSession, aliceId)).list,
+        "junk",
+      );
+      const inJunk = await importMessage(
+        "notification-junk",
+        junk,
+        new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      );
+      await until(async () => (await cursor()) !== beforeImports);
+      // Ensure the junk creation is processed before its subsequent move.
+      await until(
+        async () =>
+          (await cursor()) ===
+          value(await alice.emailState(aliceSession, aliceId)).state,
+      );
+      const beforeMove = await cursor();
+      value(
+        await alice.updateEmail(aliceSession, aliceId, inJunk.id, {
+          mailboxIds: { [inbox]: true },
+        }),
+      );
+      await until(async () => (await cursor()) !== beforeMove);
+      expect(calls).toHaveLength(1);
+      await stop();
+      const persisted = (
+        await db.mailPushState.findUniqueOrThrow({ where: { userId } })
+      ).state;
+      const restartMessage = await importMessage(
+        "notification-restart",
+        inbox,
+        new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      );
+      stop = start(false); // A restarted polling-only worker resumes the same cursor.
+      await until(() => calls.length === 2);
+      expect(calls[1]).toMatchObject({
+        tag: `mail:${restartMessage.id}`,
+        url: `/mail?thread=${encodeURIComponent(restartMessage.threadId)}&message=${encodeURIComponent(restartMessage.id)}`,
+      });
+      await until(
+        async () =>
+          (await db.mailPushState.findUniqueOrThrow({ where: { userId } }))
+            .state !== persisted,
+      );
+      await pause(700);
+      expect(calls).toHaveLength(2);
+      await stop();
+      await db.mailPushState.update({
+        where: { userId },
+        data: { state: "invalid-state" },
+      });
+      const lostState = await alice.emailChanges(
+        aliceSession,
+        aliceId,
+        "invalid-state",
+      );
+      expect(lostState.isErr() && lostState.error).toMatchObject({
+        kind: "method",
+        type: "invalidArguments",
+      });
+      await importMessage(
+        "notification-lost-state",
+        inbox,
+        new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      );
+      stop = start(false);
+      await until(async () => (await cursor()) !== "invalid-state");
+      await pause(500);
+      expect(calls).toHaveLength(2);
+    } finally {
+      await stop?.();
+      await push.unsubscribe(userId, "mail", "https://push.example/notify");
+      await db.mailboxLink.deleteMany({ where: { userId } });
+    }
   }, 60_000);
 
   it("issues an application credential and suspends the mailbox", async () => {

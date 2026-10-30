@@ -33,6 +33,45 @@ function period(title: string) {
 const chip = (page: Page, title: string) =>
   page.getByRole("button", { name: new RegExp(`^${title},`) });
 
+test("a reminder link opens its event", async ({ page }) => {
+  await page.clock.setFixedTime(now);
+  await page.goto(
+    `/calendar?event=design-review&start=${encodeURIComponent(now.toISOString())}`,
+  );
+  const editor = page.getByRole("dialog", { name: "Edit event" });
+  await expect(editor.getByLabel("Title")).toHaveValue("Design review");
+});
+
+test("the event editor saves and reloads a reminder", async ({ page }) => {
+  await open(page);
+  await page
+    .getByRole("button", { name: "Create C", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog", { name: "New event" });
+  await editor.getByLabel("Title").fill("Reminder test");
+  await editor.getByLabel("Reminder").selectOption("10m");
+  await editor.getByRole("button", { name: "Save" }).click();
+  await expect(chip(page, "Reminder test")).toBeVisible();
+  await chip(page, "Reminder test").click();
+  await page
+    .getByRole("dialog", { name: "Reminder test" })
+    .getByRole("button", { name: "Edit event" })
+    .click();
+  const edit = page.getByRole("dialog", { name: "Edit event" });
+  await expect(edit.getByLabel("Reminder")).toHaveValue("10m");
+  await edit.getByLabel("Reminder").selectOption("none");
+  await edit.getByRole("button", { name: "Save" }).click();
+  await chip(page, "Reminder test").click();
+  await page
+    .getByRole("dialog", { name: "Reminder test" })
+    .getByRole("button", { name: "Edit event" })
+    .click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit event" }).getByLabel("Reminder"),
+  ).toHaveValue("none");
+});
+
 for (const theme of ["light", "dark"] as const) {
   test(`${theme} week, month and popovers are accessible`, async ({ page }) => {
     await page.emulateMedia({ colorScheme: theme });

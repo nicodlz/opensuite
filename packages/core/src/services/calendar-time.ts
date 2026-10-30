@@ -5,6 +5,7 @@ import type {
 } from "@opensuite/contracts";
 import type { CalendarEvent, RecurrenceRule } from "@opensuite/jmap";
 import { z } from "zod";
+import { reminderAlerts, reminderOf } from "./calendar-reminder-edit.ts";
 
 // A "wall" is a local date-time encoded as milliseconds on the UTC axis, so
 // calendar arithmetic (add days or months) never crosses an offset change.
@@ -254,9 +255,12 @@ export interface Series {
   duration: Duration;
   recurrence: Recurrence;
   recurring: boolean;
+  reminder: ReturnType<typeof reminderOf>;
+  alarmId?: string | undefined;
   rules: RecurrenceRule[];
   excluded: RecurrenceRule[];
   overrides: Map<number, Record<string, unknown>>;
+  alarmOverrides?: CalendarEvent["recurrenceOverrides"];
 }
 const locationOf = (locations: unknown) =>
   typeof locations === "object" && locations !== null
@@ -276,6 +280,7 @@ const locationOf = (locations: unknown) =>
 export function toSeries(
   event: CalendarEvent,
   calendars: readonly string[],
+  floatingZone = floating,
 ): Series | undefined {
   const owned = Object.keys(event.calendarIds).filter(
     (id) => event.calendarIds[id],
@@ -285,7 +290,9 @@ export function toSeries(
   const zone =
     !allDay && event.timeZone !== null && isTimeZone(event.timeZone)
       ? event.timeZone
-      : floating;
+      : isTimeZone(floatingZone)
+        ? floatingZone
+        : floating;
   const wall = parseLocal(event.start, zone);
   if (calendarId === undefined || wall === undefined) return undefined;
   const rules = event.recurrenceRules ?? [];
@@ -313,9 +320,15 @@ export function toSeries(
         ? first.frequency
         : "none",
     recurring: rules.length > 0 || overrides.size > 0,
+    reminder: reminderOf(event.alerts),
+    alarmId:
+      event.alerts && Object.keys(event.alerts).length === 1
+        ? Object.keys(event.alerts)[0]
+        : undefined,
     rules: rules.filter(expandable),
     excluded: (event.excludedRecurrenceRules ?? []).filter(expandable),
     overrides,
+    alarmOverrides: event.recurrenceOverrides,
   };
 }
 
@@ -442,11 +455,15 @@ export interface Occurrence {
   title: string;
   description: string;
   location: string;
+  reminder: ReturnType<typeof reminderOf>;
+  alarmId?: string | undefined;
 }
 const span = (series: Series, wall: number, duration: Duration) => {
   if (series.allDay) {
-    const end = wall + duration.days * DAY + duration.ms;
-    return { start: wall, end: end > wall ? end : wall + DAY };
+    const start = toInstant(wall, series.zone);
+    const endWall = wall + duration.days * DAY + duration.ms;
+    const end = toInstant(endWall > wall ? endWall : wall + DAY, series.zone);
+    return { start, end };
   }
   const start = toInstant(wall, series.zone);
   const end = toInstant(wall + duration.days * DAY, series.zone) + duration.ms;
@@ -472,6 +489,29 @@ function occurrence(
       ? parseDuration(patch["duration"])
       : series.duration;
   const locations = patch["locations"];
+  const reminder = Object.keys(patch).some((key) => key.startsWith("alerts/"))
+    ? "custom"
+    : "alerts" in patch
+      ? reminderOf(patch["alerts"])
+      : series.reminder;
+  const overrideAlerts = patch["alerts"];
+  const overrideId =
+    typeof overrideAlerts === "object" &&
+    overrideAlerts !== null &&
+    !Array.isArray(overrideAlerts) &&
+    Object.keys(overrideAlerts).length === 1
+      ? Object.keys(overrideAlerts)[0]
+      : undefined;
+  const overridePathIds = new Set(
+    Object.entries(patch)
+      .filter(([key, value]) => key.startsWith("alerts/") && value !== null)
+      .map(([key]) =>
+        (key.split("/")[1] ?? "").replaceAll("~1", "/").replaceAll("~0", "~"),
+      )
+      .filter(Boolean),
+  );
+  const pathId =
+    overridePathIds.size === 1 ? [...overridePathIds][0] : undefined;
   return {
     id: occurrenceId(series, wall),
     wall: moved ?? wall,
@@ -479,6 +519,8 @@ function occurrence(
     title: text("title", series.title),
     description: text("description", series.description),
     location: locations === undefined ? series.location : locationOf(locations),
+    reminder,
+    alarmId: overrideId ?? series.alarmId ?? pathId,
   };
 }
 
@@ -547,6 +589,7 @@ export const toContract = (
   allDay: series.allDay,
   timeZone: series.zone,
   recurrence: series.recurrence,
+  ...(item.reminder === "none" ? {} : { reminder: item.reminder }),
 });
 
 /** Validated local timing for new content; undefined when it is invalid. */
@@ -588,6 +631,7 @@ export function createObject(
 ) {
   const recurrenceRules = rules(content.recurrence);
   const place = locations(content.location);
+  const alerts = reminderAlerts(content.reminder);
   return {
     "@type": "Event",
     calendarIds: { [content.calendarId]: true },
@@ -600,6 +644,7 @@ export function createObject(
       : { timeZone: content.timeZone }),
     ...(place === null ? {} : { locations: place }),
     ...(recurrenceRules === null ? {} : { recurrenceRules }),
+    ...(alerts === null || alerts === undefined ? {} : { alerts }),
   };
 }
 
@@ -628,6 +673,28 @@ export function updatePatch(
     content.allDay !== series.allDay ||
     (!content.allDay && content.timeZone !== series.zone);
   const recurrenceChanged = content.recurrence !== series.recurrence;
+  if (content.reminder !== undefined && content.reminder !== current.reminder) {
+    const alerts = reminderAlerts(content.reminder, current.alarmId);
+    if (alerts !== undefined) {
+      patch["alerts"] = alerts;
+      if (series.alarmOverrides) {
+        const changed = Object.values(series.alarmOverrides).some((override) =>
+          Object.keys(override).some(
+            (name) => name === "alerts" || name.startsWith("alerts/"),
+          ),
+        );
+        const overrides = Object.fromEntries(
+          Object.entries(series.alarmOverrides).map(([key, override]) => {
+            const entries = Object.entries(override).filter(
+              ([name]) => name !== "alerts" && !name.startsWith("alerts/"),
+            );
+            return [key, Object.fromEntries(entries)];
+          }),
+        );
+        if (changed) patch["recurrenceOverrides"] = overrides;
+      }
+    }
+  }
   if (moved) {
     const wall = series.wall + (time.wall - current.wall);
     patch["start"] = formatLocal(wall);
