@@ -799,6 +799,8 @@
   z-index: 50;
   right: 20px;
   bottom: 0;
+  /* Several windows share the width instead of running off-screen. */
+  max-width: calc(100vw - 100px);
   display: flex;
   flex-direction: row-reverse;
   align-items: flex-end;
@@ -808,7 +810,9 @@
 .composer {
   position: relative;
   display: flex;
+  flex: 0 1 auto;
   flex-direction: column;
+  min-width: min(380px, calc(100vw - 120px));
   width: min(680px, calc(100vw - 120px));
   height: min(720px, calc(100dvh - 90px));
   border: 1px solid var(--border);

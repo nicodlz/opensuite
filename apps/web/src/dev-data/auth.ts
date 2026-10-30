@@ -38,7 +38,7 @@ export const fakeAuth: AuthClient = {
     sessionStorage.setItem("auth-fixture-enrolling", "1");
     return Promise.resolve({
       totpURI:
-        "otpauth://totp/OpenSuite:you@example.test?secret=JBSWY3DPEHPK3PXP&issuer=OpenSuite",
+        "otpauth://totp/Esuno:you@example.test?secret=JBSWY3DPEHPK3PXP&issuer=Esuno",
       backupCodes: ["backup-code"],
     });
   },

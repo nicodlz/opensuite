@@ -1,4 +1,4 @@
-# OpenSuite standard installation (single small server).
+# Esuno standard installation (single small server).
 #   Configure .env and secrets, then follow docs/deployment/production.md.
 #   Fresh installations must bootstrap the management account before normal up.
 # Add `--profile dev` for local AWS substitutes (LocalStack).

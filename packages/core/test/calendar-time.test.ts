@@ -387,6 +387,77 @@ describe("recurrence expansion", () => {
   });
 });
 
+const rule = (parts: { frequency: string } & Record<string, unknown>) =>
+  series({
+    recurrenceRules: [{ "@type": "RecurrenceRule", ...parts }],
+  });
+
+describe("rule parts", () => {
+  it("expands weekly rules on several weekdays", () => {
+    // 14 Oct 2026 is a Wednesday, 10:00 Paris.
+    const item = rule({
+      frequency: "weekly",
+      byDay: [{ day: "mo" }, { day: "we" }, { day: "fr" }],
+      count: 5,
+    });
+    expect(
+      starts(item, "2026-10-01T00:00:00Z", "2026-12-01T00:00:00Z"),
+    ).toEqual([
+      "2026-10-14T08:00:00.000Z",
+      "2026-10-16T08:00:00.000Z",
+      "2026-10-19T08:00:00.000Z",
+      "2026-10-21T08:00:00.000Z",
+      "2026-10-23T08:00:00.000Z",
+    ]);
+    const fortnightly = rule({
+      frequency: "weekly",
+      interval: 2,
+      byDay: [{ day: "tu" }, { day: "th" }],
+    });
+    expect(
+      starts(fortnightly, "2026-10-26T00:00:00Z", "2026-11-09T00:00:00Z"),
+    ).toEqual(["2026-10-27T09:00:00.000Z", "2026-10-29T09:00:00.000Z"]);
+  });
+  it("expands monthly rules on the nth weekday or a day of the month", () => {
+    const second = rule({
+      frequency: "monthly",
+      byDay: [{ day: "tu", nthOfPeriod: 2 }],
+    });
+    expect(
+      starts(second, "2026-11-01T00:00:00Z", "2027-01-01T00:00:00Z"),
+    ).toEqual(["2026-11-10T09:00:00.000Z", "2026-12-08T09:00:00.000Z"]);
+    const last = rule({
+      frequency: "monthly",
+      byDay: [{ day: "fr", nthOfPeriod: -1 }],
+    });
+    expect(
+      starts(last, "2026-10-01T00:00:00Z", "2026-12-01T00:00:00Z"),
+    ).toEqual([
+      "2026-10-14T08:00:00.000Z",
+      "2026-10-30T09:00:00.000Z",
+      "2026-11-27T09:00:00.000Z",
+    ]);
+    const endOfMonth = rule({ frequency: "monthly", byMonthDay: [-1, 15] });
+    expect(
+      starts(endOfMonth, "2027-02-01T00:00:00Z", "2027-03-01T00:00:00Z"),
+    ).toEqual(["2027-02-15T09:00:00.000Z", "2027-02-28T09:00:00.000Z"]);
+  });
+  it("does not invent occurrences for rule parts it does not expand", () => {
+    for (const parts of [
+      { frequency: "yearly", byMonth: ["3"] },
+      { frequency: "monthly", byDay: [{ day: "mo" }], bySetPosition: [1] },
+      { frequency: "weekly", byDay: [{ day: "mo", nthOfPeriod: 1 }] },
+      { frequency: "daily", byHour: [9, 17] },
+    ]) {
+      const item = rule(parts);
+      expect(item.recurrence).toBe(parts.frequency);
+      expect(
+        starts(item, "2026-10-01T00:00:00Z", "2027-10-01T00:00:00Z"),
+      ).toEqual(["2026-10-14T08:00:00.000Z"]);
+    }
+  });
+});
+
 describe("event updates", () => {
   it("shifts a series by the change made through one occurrence", () => {
     const item = series({

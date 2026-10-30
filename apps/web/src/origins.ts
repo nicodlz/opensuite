@@ -4,12 +4,12 @@ import {
 } from "@opensuite/contracts";
 
 export type AppProduct = "mail" | "drive" | "calendar";
-export const productPaths: Record<AppProduct, string> = {
+const productPaths: Record<AppProduct, string> = {
   mail: "/mail",
   drive: "/drive",
   calendar: "/calendar",
 };
-const products = Object.keys(productPaths) as AppProduct[];
+const products: AppProduct[] = ["mail", "drive", "calendar"];
 /** Paths that only exist on the sign-in (mail) origin. */
 const hubPaths = ["/login", "/status", "/setup", "/domains", "/contacts"];
 
@@ -66,10 +66,12 @@ export function redirectFor(
 ): string | null {
   if (!layout.split || layout.host === null) return null;
   const tail = `${search}${hash}`;
+  // "//host" would read as another origin; keep every path on this origin.
+  const path = pathname.replace(/^\/{2,}/, "/");
   for (const product of products) {
-    const path = productPaths[product];
-    if (pathname !== path && !pathname.startsWith(`${path}/`)) continue;
-    const rest = pathname.slice(path.length) || "/";
+    const prefix = productPaths[product];
+    if (path !== prefix && !path.startsWith(`${prefix}/`)) continue;
+    const rest = (path.slice(prefix.length) || "/").replace(/^\/{2,}/, "/");
     if (product === layout.host) return `${rest}${tail}`;
     const origin = layout.origins[product];
     return origin === undefined ? null : `${origin}${rest}${tail}`;
@@ -77,10 +79,10 @@ export function redirectFor(
   if (
     layout.host !== "mail" &&
     hubPaths.some(
-      (path) => pathname === path || pathname.startsWith(`${path}/`),
+      (hubPath) => path === hubPath || path.startsWith(`${hubPath}/`),
     )
   )
-    return `${layout.hub}${pathname}${tail}`;
+    return `${layout.hub}${path}${tail}`;
   return null;
 }
 
@@ -103,27 +105,13 @@ export function rewriteFor(layout: OriginLayout) {
   };
 }
 
-const cacheKey = "opensuite-origins";
-function cachedOrigins(current: string): ProductOrigins | null {
-  try {
-    const parsed = ProductOriginsSchema.safeParse(
-      JSON.parse(localStorage.getItem(cacheKey) ?? "null"),
-    );
-    // A copy that does not list this origin belongs to another configuration.
-    return parsed.success && Object.values(parsed.data).includes(current)
-      ? parsed.data
-      : null;
-  } catch {
-    return null;
-  }
-}
 /**
- * Reads the origin map from the API on every start, so a configuration
- * change applies at once. The last good copy is a fallback only when the API
- * cannot answer within two seconds.
+ * Reads the origin map from the API on every start. Without an answer within
+ * two seconds the app stays on this origin with path routing: a remembered
+ * map could name a host that no longer belongs to this installation, so it is
+ * never used to send users elsewhere.
  */
 export async function loadOrigins(
-  current = window.location.origin,
   fetcher: typeof fetch = fetch,
 ): Promise<ProductOrigins> {
   try {
@@ -132,17 +120,12 @@ export async function loadOrigins(
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
-    if (response.ok) {
-      const parsed = ProductOriginsSchema.safeParse(await response.json());
-      if (parsed.success) {
-        localStorage.setItem(cacheKey, JSON.stringify(parsed.data));
-        return parsed.data;
-      }
-    }
+    if (!response.ok) return {};
+    const parsed = ProductOriginsSchema.safeParse(await response.json());
+    return parsed.success ? parsed.data : {};
   } catch {
-    // Fall through to the cached copy.
+    return {};
   }
-  return cachedOrigins(current) ?? {};
 }
 
 let active: OriginLayout = {

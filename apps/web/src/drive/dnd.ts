@@ -114,7 +114,12 @@ export type UploadPlan = {
   folders: string[][];
   /** Files with the path of the folder that contains them. */
   files: { file: File; path: string[] }[];
+  /** Dropped entries that could not be read, by path. */
+  skipped?: string[];
 };
+const isAbort = (error: unknown, signal?: AbortSignal) =>
+  signal?.aborted === true ||
+  (error instanceof DOMException && error.name === "AbortError");
 
 function readBatch(reader: DropDirectoryReader) {
   return new Promise<DropEntry[]>((resolve, reject) => {
@@ -139,17 +144,22 @@ function sequence<T>(values: readonly T[], run: (value: T) => Promise<void>) {
   }, Promise.resolve());
 }
 
+// An unreadable file or folder is reported and skipped; the rest still uploads.
 async function walk(entry: DropEntry, path: string[], plan: UploadPlan) {
-  if (isFileEntry(entry)) {
-    const file = await new Promise<File>((resolve, reject) => {
-      entry.file(resolve, reject);
-    });
-    plan.files.push({ file, path });
-  } else if (isDirectoryEntry(entry)) {
-    const folder = [...path, entry.name];
-    plan.folders.push(folder);
-    const children = await readAllEntries(entry.createReader());
-    await sequence(children, (child) => walk(child, folder, plan));
+  try {
+    if (isFileEntry(entry)) {
+      const file = await new Promise<File>((resolve, reject) => {
+        entry.file(resolve, reject);
+      });
+      plan.files.push({ file, path });
+    } else if (isDirectoryEntry(entry)) {
+      const folder = [...path, entry.name];
+      const children = await readAllEntries(entry.createReader());
+      plan.folders.push(folder);
+      await sequence(children, (child) => walk(child, folder, plan));
+    }
+  } catch {
+    plan.skipped = [...(plan.skipped ?? []), [...path, entry.name].join("/")];
   }
 }
 
@@ -190,7 +200,8 @@ export type PlanStep =
 
 /**
  * Creates the plan's folders below `rootId`, then uploads its files into them,
- * one step at a time. Returns how many files were uploaded.
+ * one step at a time. A failed folder or file is recorded and the plan goes
+ * on; only cancellation stops it.
  */
 export async function executePlan(
   plan: UploadPlan,
@@ -203,6 +214,8 @@ export async function executePlan(
   },
 ) {
   const ids = new Map<string, string | null>([["", rootId]]);
+  const failed: string[] = [];
+  let uploaded = 0;
   const parentOf = (path: readonly string[]) => {
     const id = ids.get(folderKey(path));
     if (id === undefined) throw new Error("Parent folder was not created");
@@ -219,10 +232,15 @@ export async function executePlan(
         index,
         total: plan.folders.length,
       });
-      ids.set(
-        folderKey(path),
-        await actions.createFolder(name, parentOf(path.slice(0, -1))),
-      );
+      try {
+        ids.set(
+          folderKey(path),
+          await actions.createFolder(name, parentOf(path.slice(0, -1))),
+        );
+      } catch (error) {
+        if (isAbort(error, actions.signal)) throw error;
+        failed.push(`${path.join("/")}/`);
+      }
     },
   );
   await sequence(
@@ -230,8 +248,14 @@ export async function executePlan(
     async ({ file, path, index }) => {
       actions.signal?.throwIfAborted();
       actions.step?.({ kind: "file", file, index, total: plan.files.length });
-      await actions.upload(file, parentOf(path));
+      try {
+        await actions.upload(file, parentOf(path));
+        uploaded += 1;
+      } catch (error) {
+        if (isAbort(error, actions.signal)) throw error;
+        failed.push([...path, file.name].join("/"));
+      }
     },
   );
-  return plan.files.length;
+  return { uploaded, failed };
 }

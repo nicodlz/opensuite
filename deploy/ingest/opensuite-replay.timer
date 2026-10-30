@@ -1,5 +1,5 @@
 [Unit]
-Description=Reconcile OpenSuite inbound mail hourly
+Description=Reconcile Esuno inbound mail hourly
 
 [Timer]
 OnCalendar=*-*-* *:30:00 UTC

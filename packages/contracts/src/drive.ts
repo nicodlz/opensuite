@@ -26,7 +26,9 @@ const parentId = id.nullable();
 const checksum = z.string().regex(/^[a-f0-9]{64}$/);
 export const DRIVE_MIN_PART_SIZE = 5 * 1024 * 1024;
 export const DRIVE_MAX_PARTS = 10_000;
-export const DRIVE_MAX_FILE_SIZE = DRIVE_MAX_PARTS * 5 * 1024 * 1024 * 1024;
+// Backblaze B2 accepts files up to 10 TB; a part-size bound alone would allow
+// about 53.7 TB. Quotas (DRIVE_QUOTA_BYTES) still apply per user.
+export const DRIVE_MAX_FILE_SIZE = 10_000_000_000_000;
 export const drivePartSize = (size: number) =>
   Math.max(DRIVE_MIN_PART_SIZE, Math.ceil(size / DRIVE_MAX_PARTS));
 export const DriveCommandSchema = z.discriminatedUnion("action", [

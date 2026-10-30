@@ -1,5 +1,5 @@
 [Unit]
-Description=Reconcile OpenSuite inbound mail
+Description=Reconcile Esuno inbound mail
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

@@ -281,7 +281,7 @@ export const buildServer = async (
   const openapi = await new OpenAPIGenerator({
     schemaConverters: [new ZodToJsonSchemaConverter()],
   }).generate(router, {
-    info: { title: "OpenSuite API", version: "0.0.0" },
+    info: { title: "Esuno API", version: "0.0.0" },
   });
 
   app.get("/openapi.json", () => openapi);
@@ -290,8 +290,10 @@ export const buildServer = async (
     const identity = dependencies.identity;
     const limiter = createAuthLimiter();
     const handoffs = createHandoffRegistry();
-    const siblings = Object.values(identity.productOrigins ?? {}).filter(
-      (origin) => origin !== identity.publicOrigin,
+    const siblings = new Set(
+      Object.values(identity.productOrigins ?? {}).filter(
+        (origin) => origin !== identity.publicOrigin,
+      ),
     );
     // The sign-in origin issues a token for one listed sibling application.
     // The token returns in a URL fragment and is redeemed by that origin only.
@@ -302,14 +304,14 @@ export const buildServer = async (
           .code(403)
           .send({ code: "FORBIDDEN", message: "Invalid origin" });
       const input = z.object({ target: z.string() }).safeParse(request.body);
-      if (!input.success || !siblings.includes(input.data.target))
+      if (!input.success || !siblings.has(input.data.target))
         return reply
           .code(400)
           .send({ code: "BAD_REQUEST", message: "Unknown application" });
       const headers = new Headers();
       const cookie = request.headers.cookie;
       if (cookie !== undefined) headers.set("cookie", cookie);
-      if ((await identity.actor?.(headers)) == null)
+      if (((await identity.actor?.(headers)) ?? null) === null)
         return reply
           .code(401)
           .send({ code: "UNAUTHORIZED", message: "Unauthorized" });

@@ -4,6 +4,7 @@ import type {
   Recurrence,
 } from "@opensuite/contracts";
 import type { CalendarEvent, RecurrenceRule } from "@opensuite/jmap";
+import { z } from "zod";
 
 // A "wall" is a local date-time encoded as milliseconds on the UTC axis, so
 // calendar arithmetic (add days or months) never crosses an offset change.
@@ -150,9 +151,95 @@ const frequencies: readonly string[] = [
 ] satisfies Frequency[];
 const isFrequency = (value: string): value is Frequency =>
   frequencies.includes(value);
-const expandable = (rule: RecurrenceRule) =>
-  isFrequency(rule.frequency) &&
-  (rule["rscale"] === undefined || rule["rscale"] === "gregorian");
+const weekdays = ["mo", "tu", "we", "th", "fr", "sa", "su"];
+type ByDay = { day: number; nth: number | undefined };
+const ruleKeys = new Set([
+  "@type",
+  "frequency",
+  "interval",
+  "count",
+  "until",
+  "rscale",
+  "skip",
+  "firstDayOfWeek",
+  "byDay",
+  "byMonthDay",
+]);
+const ByDaySchema = z
+  .array(
+    z.looseObject({
+      day: z.enum(["mo", "tu", "we", "th", "fr", "sa", "su"]),
+      nthOfPeriod: z
+        .number()
+        .int()
+        .min(-5)
+        .max(5)
+        .refine((value) => value !== 0)
+        .optional(),
+    }),
+  )
+  .min(1);
+/** `byDay` entries, or null when absent or not understood. */
+function byDayOf(rule: RecurrenceRule): ByDay[] | null {
+  const parsed = ByDaySchema.safeParse(rule["byDay"]);
+  return parsed.success
+    ? parsed.data.map((entry) => ({
+        day: weekdays.indexOf(entry.day),
+        nth: entry.nthOfPeriod,
+      }))
+    : null;
+}
+const firstDayOf = (rule: RecurrenceRule) => {
+  const value = rule["firstDayOfWeek"];
+  return typeof value === "string" ? weekdays.indexOf(value) : 0;
+};
+function byMonthDayOf(rule: RecurrenceRule): number[] | null {
+  const value = rule["byMonthDay"];
+  if (!Array.isArray(value) || value.length === 0) return null;
+  return value.every(
+    (day) =>
+      typeof day === "number" &&
+      Number.isInteger(day) &&
+      day !== 0 &&
+      Math.abs(day) <= 31,
+  )
+    ? value.filter((day): day is number => typeof day === "number")
+    : null;
+}
+/**
+ * Rules this service expands exactly: plain daily, weekly, monthly and
+ * yearly rules, weekly rules on several weekdays, and monthly rules on
+ * weekdays (optionally the nth of the month) or days of the month. Other
+ * parts (byMonth, bySetPosition, byHour…) are not expanded rather than
+ * expanded wrongly; the stored rule is left untouched.
+ */
+const expandable = (rule: RecurrenceRule) => {
+  if (!isFrequency(rule.frequency)) return false;
+  if (rule["rscale"] !== undefined && rule["rscale"] !== "gregorian")
+    return false;
+  if (rule["skip"] !== undefined && rule["skip"] !== "omit") return false;
+  if (rule["firstDayOfWeek"] !== undefined && firstDayOf(rule) < 0)
+    return false;
+  if (
+    Object.keys(rule).some(
+      (key) => !ruleKeys.has(key) && rule[key] !== undefined,
+    )
+  )
+    return false;
+  const hasByDay = rule["byDay"] !== undefined;
+  const hasByMonthDay = rule["byMonthDay"] !== undefined;
+  if (hasByDay && hasByMonthDay) return false;
+  if (hasByDay) {
+    const days = byDayOf(rule);
+    if (days === null) return false;
+    if (rule.frequency === "weekly")
+      return days.every((day) => day.nth === undefined);
+    return rule.frequency === "monthly";
+  }
+  if (hasByMonthDay)
+    return rule.frequency === "monthly" && byMonthDayOf(rule) !== null;
+  return true;
+};
 
 /** One stored JSCalendar event, normalized for expansion and mapping. */
 export interface Series {
@@ -218,8 +305,11 @@ export function toSeries(
     zone,
     wall: allDay ? Math.floor(wall / DAY) * DAY : wall,
     duration: parseDuration(event.duration),
+    // The closest simple value, even when the rule is not expanded here.
     recurrence:
-      first !== undefined && expandable(first) && isFrequency(first.frequency)
+      first !== undefined &&
+      isFrequency(first.frequency) &&
+      (first["rscale"] === undefined || first["rscale"] === "gregorian")
         ? first.frequency
         : "none",
     recurring: rules.length > 0 || overrides.size > 0,
@@ -240,6 +330,66 @@ const step = (wall: number, frequency: Frequency, amount: number) => {
   // Invalid dates (31 February, 29 February in a common year) are skipped.
   return date.getUTCDate() === day ? date.getTime() : undefined;
 };
+const timeOfDay = (wall: number) => ((wall % DAY) + DAY) % DAY;
+/** Monday = 0 for a local wall time. */
+const weekdayOf = (wall: number) => (new Date(wall).getUTCDay() + 6) % 7;
+const daysInMonth = (year: number, month: number) =>
+  new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+/** Candidate local times inside one period, sorted. */
+function periodWalls(
+  rule: RecurrenceRule,
+  series: Series,
+  frequency: Frequency,
+  period: number,
+): number[] {
+  const byDay = rule["byDay"] === undefined ? null : byDayOf(rule);
+  const byMonthDay =
+    rule["byMonthDay"] === undefined ? null : byMonthDayOf(rule);
+  if (frequency === "weekly" && byDay !== null) {
+    const firstDay = firstDayOf(rule);
+    const shift = (weekdayOf(series.wall) - firstDay + 7) % 7;
+    const weekStart = series.wall - shift * DAY + period * 7 * DAY;
+    return [...new Set(byDay.map((item) => (item.day - firstDay + 7) % 7))]
+      .toSorted((a, b) => a - b)
+      .map((days) => weekStart + days * DAY);
+  }
+  if (frequency === "monthly" && (byDay !== null || byMonthDay !== null)) {
+    const base = new Date(series.wall);
+    const month = new Date(
+      Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + period, 1),
+    );
+    const year = month.getUTCFullYear();
+    const index = month.getUTCMonth();
+    const length = daysInMonth(year, index);
+    const days = new Set<number>();
+    for (const day of byMonthDay ?? []) {
+      const actual = day > 0 ? day : length + day + 1;
+      if (actual >= 1 && actual <= length) days.add(actual);
+    }
+    for (const item of byDay ?? []) {
+      const first = (item.day - weekdayOf(Date.UTC(year, index, 1)) + 7) % 7;
+      const matches: number[] = [];
+      for (let day = first + 1; day <= length; day += 7) matches.push(day);
+      if (item.nth === undefined) for (const day of matches) days.add(day);
+      else {
+        const pick =
+          item.nth > 0 ? matches[item.nth - 1] : matches.at(item.nth);
+        if (pick !== undefined) days.add(pick);
+      }
+    }
+    return [...days]
+      .toSorted((a, b) => a - b)
+      .map((day) => Date.UTC(year, index, day) + timeOfDay(series.wall));
+  }
+  const wall = step(series.wall, frequency, period);
+  return wall === undefined ? [] : [wall];
+}
+const periodLength: Record<Frequency, number> = {
+  daily: DAY,
+  weekly: 7 * DAY,
+  monthly: 31 * DAY,
+  yearly: 366 * DAY,
+};
 /** Local start times produced by one rule, in order, up to `limit`. */
 function ruleWalls(
   rule: RecurrenceRule,
@@ -259,22 +409,27 @@ function ruleWalls(
       : undefined;
   const until =
     rule.until === undefined ? undefined : parseLocal(rule.until, series.zone);
-  const fixed =
-    frequency === "daily" ? DAY : frequency === "weekly" ? 7 * DAY : undefined;
-  // Fixed-length steps never skip, so the first useful step can be computed.
+  // Without a count, skip whole periods that end before `from`; the
+  // estimate uses the longest period so it never skips too far.
   let index =
-    fixed === undefined
-      ? 0
-      : Math.max(0, Math.floor((from - series.wall) / (fixed * interval)) - 1);
-  let produced = index;
+    count === undefined
+      ? Math.max(
+          0,
+          Math.floor(
+            (from - series.wall) / (periodLength[frequency] * interval),
+          ) - 1,
+        )
+      : 0;
+  let produced = 0;
   const walls: number[] = [];
   for (let guard = 0; guard < 200_000; guard += 1, index += 1) {
-    if (count !== undefined && produced >= count) break;
-    const wall = step(series.wall, frequency, index * interval);
-    if (wall === undefined) continue;
-    if (wall > limit || (until !== undefined && wall > until)) break;
-    produced += 1;
-    if (wall >= from) walls.push(wall);
+    for (const wall of periodWalls(rule, series, frequency, index * interval)) {
+      if (wall < series.wall) continue;
+      if (count !== undefined && produced >= count) return walls;
+      if (wall > limit || (until !== undefined && wall > until)) return walls;
+      produced += 1;
+      if (wall >= from) walls.push(wall);
+    }
   }
   return walls;
 }

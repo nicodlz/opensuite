@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenSuite encrypted backup
+Description=Esuno encrypted backup
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

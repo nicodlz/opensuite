@@ -1,6 +1,9 @@
-# OpenSuite
+# Esuno
 
-OpenSuite is a self-hosted mail and file suite, intended as an alternative to hosted mail, calendar and Drive services. It combines a web workspace and application API with the Stalwart mail server, PostgreSQL and S3-compatible storage.
+Esuno is a self-hosted mail and file suite, intended as an alternative to hosted mail, calendar and Drive services. It combines a web workspace and application API with the Stalwart mail server, PostgreSQL and S3-compatible storage.
+
+The intended interface addresses are `mail.esuno.net` and `calendar.esuno.net`;
+their configuration and DNS cutover remain deployment steps.
 
 > **Status: early development.** The mail API, mailbox provisioning, Drive,
 > ingestion and backup tools are implemented. Real SES/B2 behavior and the

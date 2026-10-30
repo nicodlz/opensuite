@@ -42,10 +42,10 @@ read_secret() {
 }
 # Exact path component names used by these services. A trailing slash makes the
 # rclone source a directory/prefix rather than a similarly named sibling.
-objects() { # direction, mail|drive
+objects() { # save|restore|size, mail|drive
   direction=$1 kind=$2
   if [ "$kind" = mail ]; then
-    [ "${MAIL_BLOB_STORE:-local}" = s3 ] || return 0
+    if [ "${MAIL_BLOB_STORE:-local}" != s3 ]; then [ "$direction" != size ] || echo 0; return 0; fi
     OBJECT_ENDPOINT=${MAIL_S3_ENDPOINT:?}; OBJECT_REGION=${MAIL_S3_REGION:?}
     OBJECT_ACCESS_KEY_ID=${MAIL_S3_KEY_ID:?}; OBJECT_SECRET_ACCESS_KEY=$(read_secret "${MAIL_S3_SECRET_FILE:?}")
     bucket=${MAIL_S3_BUCKET:?}; prefix=${MAIL_S3_PREFIX:-}
@@ -57,6 +57,15 @@ objects() { # direction, mail|drive
   export OBJECT_ENDPOINT OBJECT_REGION OBJECT_ACCESS_KEY_ID OBJECT_SECRET_ACCESS_KEY
   case "$prefix" in ''|*/) ;; *) echo 'backup: object prefix must be empty or end in /' >&2; return 1;; esac
   remote="store:$bucket/${prefix}"
+  if [ "$direction" = size ]; then
+    # Keep rclone's own exit status; a pipeline would report only sed's.
+    sizes=$(compose run --rm --no-deps -T backup-objects 'exec rclone size "$1" --json' sh "$remote") ||
+      { echo "backup: could not measure $kind objects" >&2; return 1; }
+    bytes=$(printf '%s\n' "$sizes" | sed -n 's/.*"bytes":\([0-9][0-9]*\).*/\1/p')
+    [ -n "$bytes" ] || { echo "backup: could not measure $kind objects" >&2; return 1; }
+    echo "$bytes"
+    return 0
+  fi
   if [ "$direction" = save ]; then
     mkdir -p "$BACKUP_STAGE/data/objects/$kind"
     compose run --rm --no-deps -T backup-objects 'exec rclone copy "$1" "$2" --s3-no-check-bucket' sh "$remote" "/stage/data/objects/$kind" >&2

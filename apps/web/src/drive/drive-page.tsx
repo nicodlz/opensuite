@@ -653,13 +653,16 @@ export function DrivePage() {
     setNotice("");
     const affected = new Set<string | null>();
     const finished: UploadJob[] = [];
+    const failed: string[] = [];
+    let uploadedFiles = 0;
     try {
       const next = async (): Promise<void> => {
         const job = queue.current.shift();
         if (!job) return;
         affected.add(job.parentId);
         let current = { name: "", index: 0, total: 0 };
-        await executePlan(job.plan, job.parentId, {
+        failed.push(...(job.plan.skipped ?? []));
+        const result = await executePlan(job.plan, job.parentId, {
           signal: abort.signal,
           step: (step) => {
             current = {
@@ -694,14 +697,13 @@ export function DrivePage() {
             );
           },
         });
+        uploadedFiles += result.uploaded;
+        failed.push(...result.failed);
         finished.push(job);
         await next();
       };
       await next();
-      const files = finished.reduce(
-        (sum, job) => sum + job.plan.files.length,
-        0,
-      );
+      const files = uploadedFiles;
       const created = finished.reduce(
         (sum, job) => sum + job.plan.folders.length,
         0,
@@ -710,10 +712,15 @@ export function DrivePage() {
         finished.length === 1 && finished[0]?.label
           ? ` to ${finished[0].label}`
           : "";
-      setNotice(
+      const done =
         created > 0
           ? `Uploaded ${plural(files, "file")} in ${plural(created, "folder")}${label}.`
-          : `${files === 1 ? "File" : "Files"} uploaded${label}.`,
+          : `${files === 1 ? "File" : "Files"} uploaded${label}.`;
+      const shown = failed.slice(0, 5).join(", ");
+      setNotice(
+        failed.length === 0
+          ? done
+          : `${files > 0 ? `${done} ` : ""}${plural(failed.length, "item")} could not be uploaded: ${shown}${failed.length > 5 ? "…" : ""}`,
       );
     } catch (error) {
       queue.current = [];

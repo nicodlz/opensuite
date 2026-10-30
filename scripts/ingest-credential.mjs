@@ -26,7 +26,7 @@ const response = await fetch(`${origin}/jmap/`, {
           accountId,
           create: {
             inbound: {
-              description: "OpenSuite inbound worker",
+              description: "Esuno inbound worker",
               permissions: { "@type": "Inherit" },
               allowedIps: {},
             },
