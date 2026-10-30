@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { z } from "zod";
+import { configureApplicationRole } from "./application-role.ts";
 import { PrismaClient } from "./generated/index.js";
 
 const Env = z.object({
@@ -12,6 +13,7 @@ const Env = z.object({
   POSTGRES_DB: z.string().min(1),
   POSTGRES_HOST: z.string().min(1),
   POSTGRES_PASSWORD_FILE: z.string().min(1),
+  APP_DATABASE_PASSWORD_FILE: z.string().min(1).optional(),
 });
 const MigrationRows = z.array(
   z.object({
@@ -82,6 +84,19 @@ const run = async () => {
     });
   });
   if (status !== 0) throw new Error("migration deployment failed");
+  if (env.APP_DATABASE_PASSWORD_FILE !== undefined) {
+    const appPassword = (
+      await readFile(env.APP_DATABASE_PASSWORD_FILE, "utf8")
+    ).trim();
+    const owner = new PrismaClient({
+      datasources: { db: { url: url.toString() } },
+    });
+    try {
+      await configureApplicationRole(owner, appPassword);
+    } finally {
+      await owner.$disconnect();
+    }
+  }
 };
 
 try {

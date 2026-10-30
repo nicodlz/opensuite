@@ -9,6 +9,7 @@ import { z } from "zod";
 import {
   createDatabase,
   createDatabaseProbe,
+  createMailboxStore,
   createProviderStore,
   createSecretBox,
   loadDatabaseConfig,
@@ -96,6 +97,41 @@ afterAll(async () => {
 }, 60_000);
 
 describe("PostgreSQL schema and adapters", () => {
+  it("encrypts a mailbox credential and restricts lookup to its owner", async () => {
+    const storeResult = createMailboxStore(db, key);
+    if (storeResult.isErr()) throw new Error(storeResult.error.message);
+    const store = storeResult.value;
+    const owner = `mail-owner-${randomUUID()}`;
+    const other = `mail-other-${randomUUID()}`;
+    await db.user.createMany({
+      data: [
+        { id: owner, email: `${owner}@example.test`, name: "Owner" },
+        { id: other, email: `${other}@example.test`, name: "Other" },
+      ],
+    });
+    const accountId = `mail-${randomUUID()}`;
+    const secret = "one-time-application-password";
+    expect(
+      (
+        await store.create({
+          userId: owner,
+          accountId,
+          address: `${owner}@example.test`,
+          credentialId: "credential",
+          secret,
+        })
+      ).isOk(),
+    ).toBe(true);
+    const row = await db.mailboxLink.findUniqueOrThrow({
+      where: { userId: owner },
+    });
+    expect(row.secret).not.toContain(secret);
+    const owned = await store.getForOwner(owner, accountId);
+    expect(owned.isOk() ? owned.value.secret : undefined).toBe(secret);
+    expect((await store.getForOwner(other, accountId)).isErr()).toBe(true);
+    await db.user.update({ where: { id: owner }, data: { disabled: true } });
+    expect((await store.getForOwner(owner, accountId)).isErr()).toBe(true);
+  });
   it("applies migrations from an empty database and records their checksums", async () => {
     const rows = z
       .array(
@@ -108,8 +144,10 @@ describe("PostgreSQL schema and adapters", () => {
       .parse(
         await db.$queryRaw`SELECT migration_name, checksum, finished_at FROM "_prisma_migrations"`,
       );
-    expect(rows).toHaveLength(1);
-    const migration = rows[0];
+    expect(rows).toHaveLength(3);
+    const migration = rows.find(
+      (row) => row.migration_name === "20261029000000_initial",
+    );
     expect(migration?.migration_name).toBe("20261029000000_initial");
     expect(migration?.finished_at).not.toBeNull();
     const sql = await readFile(

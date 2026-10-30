@@ -10,20 +10,57 @@ datasource db {
 
 // Better Auth's core schema: https://better-auth.com/docs/concepts/database
 model User {
-  id            String   @id
-  name          String
-  email         String   @unique
-  emailVerified Boolean  @default(false)
-  image         String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  sessions      Session[]
-  accounts      Account[]
-  domains       Domain[]
-  addresses     Address[]
-  providers     ProviderConfig[]
-  ingestions    IngestionRecord[]
-  auditEvents   AuditEvent[]
+  id               String            @id
+  name             String
+  email            String            @unique
+  emailVerified    Boolean           @default(false)
+  twoFactorEnabled Boolean           @default(false)
+  role             String            @default("user")
+  disabled         Boolean           @default(false)
+  image            String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  sessions         Session[]
+  accounts         Account[]
+  domains          Domain[]
+  addresses        Address[]
+  providers        ProviderConfig[]
+  ingestions       IngestionRecord[]
+  auditEvents      AuditEvent[]
+  twoFactor        TwoFactor?
+  mailbox          MailboxLink?
+  mailboxProvision MailboxProvision?
+}
+
+model MailboxProvision {
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId String?
+  address   String?
+  state     String   @default("pending")
+  updatedAt DateTime @updatedAt
+}
+
+model TwoFactor {
+  id                      String    @id
+  userId                  String    @unique
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secret                  String
+  backupCodes             String
+  verified                Boolean   @default(true)
+  failedVerificationCount Int       @default(0)
+  lockedUntil             DateTime?
+}
+
+model MailboxLink {
+  userId       String   @id
+  user         User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId    String   @unique
+  address      String   @unique
+  credentialId String
+  secret       String
+  status       String   @default("active")
+  createdAt    DateTime @default(now())
 }
 
 model Session {
@@ -41,11 +78,11 @@ model Session {
 }
 
 model Account {
-  id                    String   @id
+  id                    String    @id
   accountId             String
   providerId            String
   userId                String
-  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   accessToken           String?
   refreshToken          String?
   idToken               String?
@@ -53,11 +90,11 @@ model Account {
   refreshTokenExpiresAt DateTime?
   scope                 String?
   password              String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
-  @@index([userId])
   @@unique([providerId, accountId])
+  @@index([userId])
 }
 
 model Verification {
@@ -123,8 +160,8 @@ model IngestionRecord {
 
 model AuditEvent {
   id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Restrict)
   action    String
   detail    Json
   createdAt DateTime @default(now())

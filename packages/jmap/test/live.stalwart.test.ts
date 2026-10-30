@@ -134,6 +134,34 @@ describe("Stalwart JMAP integration", () => {
     await compose("down", "--volumes", "--remove-orphans");
   }, 60_000);
 
+  it("issues an application credential and suspends the mailbox", async () => {
+    const account = value(
+      await admin.createAccount("suspended", domainId, password),
+    );
+    const credential = value(await admin.createAppPassword(account.id));
+    const authorization = `Basic ${Buffer.from(`suspended@example.test:${credential.secret}`).toString("base64")}`;
+    const client = new JmapClient(base, { authorization });
+    expect((await client.discover()).isOk()).toBe(true);
+    value(await admin.suspendAccount(account.id));
+    expect(
+      (await new JmapClient(base, { authorization }).discover()).isErr(),
+    ).toBe(true);
+    value(await admin.revokeApplicationPasswords(account.id));
+    value(await admin.resumeAccount(account.id));
+    expect(
+      (await new JmapClient(base, { authorization }).discover()).isErr(),
+    ).toBe(true);
+    const replacement = value(await admin.createAppPassword(account.id));
+    const replacementAuth = `Basic ${Buffer.from(`suspended@example.test:${replacement.secret}`).toString("base64")}`;
+    expect(
+      (
+        await new JmapClient(base, {
+          authorization: replacementAuth,
+        }).discover()
+      ).isOk(),
+    ).toBe(true);
+  });
+
   it("provisions idempotently and adds an account alias", async () => {
     expect(value(await admin.createDomain("example.test")).id).toBe(domainId);
     const first = value(await admin.createAccount("alice", domainId, password));

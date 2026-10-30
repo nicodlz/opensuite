@@ -67,7 +67,9 @@ The `migrate` job waits for PostgreSQL and applies versioned Prisma migrations
 before the API starts. It checks applied migration checksums before deploying;
 never change or remove an applied migration. See [the database package](../packages/db/README.md)
 for development, encrypted provider secrets, and test instructions. The API
-does not yet use the database or register its readiness probe.
+uses a separate application database login and registers a database readiness
+probe. The migration job configures that login after applying migrations;
+it can append and read audit rows but cannot change or truncate them.
 
 ### Local AWS substitutes
 
@@ -140,6 +142,21 @@ CLI, and a random loopback port. It exercises a
 message with an attachment, a storage outage and a stopped-store restore,
 then removes its containers and volumes. The local substitute does not verify
 real object-storage providers. Docker is required.
+
+### Authentication work in progress
+
+The Better Auth factory and Fastify adapter are exercised in the `http` test
+project with a throwaway PostgreSQL container and synthetic provisioning. They
+are not wired into the standard API startup. Signup's provisioning callback
+runs after the database transaction commits; a failed callback can leave an
+unlinked application account. The session gate rejects an unlinked account,
+but repair and reconciliation are not implemented. An app-password response
+can be lost after Stalwart creates it; do not retry issuance automatically until
+the orphan credential has been identified and revoked.
+
+The production provisioning adapter, mailbox disablement workflow, audit events,
+per-IP and per-account rate limiting, roles and protected procedures are still
+required. Do not expose the test adapter as a production authentication service.
 
 ## Known limitations
 

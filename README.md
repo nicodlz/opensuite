@@ -29,10 +29,15 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
   - `GET /ready`: readiness over the declared backing services; `200` when all
-    are up, `503` with per-dependency status otherwise. No backing service is
-    declared yet, so it currently always reports ready.
+    are up, `503` with per-dependency status otherwise. The standard API
+    checks its application database.
   - `GET /openapi.json`: OpenAPI 3.1 document generated from the contracts.
   - Behind Caddy, these are served under `/api/`.
+
+Authentication components are under development and are not wired into the
+standard startup. They must not be used as a production login yet; mailbox
+provisioning and lifecycle reconciliation, audit coverage, account-based
+rate limits and authorization procedures remain to be integrated.
 
 ## Installation
 
@@ -53,6 +58,7 @@ Requirements: Node.js 22.18 or later, pnpm 12.
 ```sh
 pnpm install
 cp deploy/env.example .env   # optional; defaults match the template
+# Set DATABASE_URL to a PostgreSQL application-role connection for local API development.
 pnpm --filter @opensuite/api dev
 # In another terminal: pnpm --filter @opensuite/web dev
 curl http://127.0.0.1:3000/health
