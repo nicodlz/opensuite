@@ -189,7 +189,7 @@ export function AppShell({
         <AppLink
           href={hrefOf("mail")}
           className="shell-logo"
-          aria-label="OpenSuite home"
+          aria-label="Esuno home"
         >
           <img src="/mark.svg" alt="" />
         </AppLink>

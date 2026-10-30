@@ -239,7 +239,7 @@ function StatusPage() {
           <p className="eyebrow">YOUR INSTALLATION</p>
           <h1>System status</h1>
           <p className="page-subtitle">
-            A live view of your OpenSuite API and its dependencies.
+            A live view of your Esuno API and its dependencies.
           </p>
         </div>
         <Button

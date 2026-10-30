@@ -19,7 +19,7 @@ Start with the [project overview](../README.md). Guides describe the current che
 
 - [Component and security overview](architecture/overview.md); [Pass threat model and alias design](architecture/pass.md).
 - [Inbound ingestion](architecture/ingestion.md), [JMAP behaviour](architecture/jmap-behaviour.md), [provider boundaries](architecture/providers.md), and [Stalwart integration evidence](architecture/stalwart.md).
-- [ADR 0001: mail engine, identity and reliability](adr/0001-architecture.md); [ADR 0002: single-server production target](adr/0002-production-target.md); [ADR 0003: OpenSuite Pass](adr/0003-pass.md). These are dated decisions and proof gates, not a live feature checklist.
+- [ADR 0001: mail engine, identity and reliability](adr/0001-architecture.md); [ADR 0002: single-server production target](adr/0002-production-target.md); [ADR 0003: Esuno Pass](adr/0003-pass.md). These are dated decisions and proof gates, not a live feature checklist.
 - [Risks and open questions](risks.md).
 
 For code contributions, see [CONTRIBUTING.md](../CONTRIBUTING.md); release notes are in [CHANGELOG.md](../CHANGELOG.md).

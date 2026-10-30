@@ -22,7 +22,7 @@ Date: 2026-10-29. All items are open. **Unverified** marks a proposed property o
 | **Unverified:** the optional clustered topology achieves its recovery objectives; RocksDB is not a shared cluster data store. This is separate from the single-VPS target.                                                                                                                  | **OM-STALWART** tests a shared-store/coordinator topology and edition restrictions; **OM-BACKUP** tests restoration; operators choose measured objectives.                                                                                                                                                                                                                                |
 | License and encryption obligations depend on the actual components, modifications and delivery model; server-side access and JMAP drafts/Sent copies limit encryption claims.                                                                                                               | **OM-STALWART** inventories licenses and tests storage-layer protection; **OM-DOCS** documents obligations, key recovery and accurate security claims; owner/legal review resolves distribution and network-use questions.                                                                                                                                                                |
 
-## OpenSuite Pass
+## Esuno Pass
 
 Added 2026-10-30. These are open implementation and proof gates, not claims that Pass is deployed. See [ADR 0003](adr/0003-pass.md) and the [threat model and alias contract](architecture/pass.md).
 

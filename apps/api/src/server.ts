@@ -281,7 +281,7 @@ export const buildServer = async (
   const openapi = await new OpenAPIGenerator({
     schemaConverters: [new ZodToJsonSchemaConverter()],
   }).generate(router, {
-    info: { title: "OpenSuite API", version: "0.0.0" },
+    info: { title: "Esuno API", version: "0.0.0" },
   });
 
   app.get("/openapi.json", () => openapi);

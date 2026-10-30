@@ -9,6 +9,10 @@ wildcard change are a **separate owner-approved cutover**; this procedure does
 not authorize them. Real AWS and B2 integration has not been tested here.
 Do not cut over until the preservation and verification gates below are met.
 
+The intended interface hosts are `mail.esuno.net` and `calendar.esuno.net`.
+The generic examples below still need to be adapted to the actual installation;
+these target names do not imply that DNS, hosting or mail routing is configured.
+
 ## Prerequisites and DNS
 
 1. Prepare an Ubuntu VPS with adequate RAM, encrypted storage and space for

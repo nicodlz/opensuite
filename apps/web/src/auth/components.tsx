@@ -133,10 +133,8 @@ export function LoginPage() {
     <main className="auth-page">
       <div className="auth-card">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            ✳
-          </span>{" "}
-          OpenSuite
+          <img className="brand-mark" src="/mark.svg" alt="" />
+          Esuno
         </div>
         <h1>{challenge ? "Verify your identity" : "Sign in"}</h1>
         <p>

@@ -24,7 +24,7 @@ export interface IdentityDependencies {
 export const createIdentity = (dependencies: IdentityDependencies) => {
   const build = (disableSignUp: boolean) =>
     betterAuth({
-      appName: "OpenSuite",
+      appName: "Esuno",
       baseURL: dependencies.publicOrigin,
       basePath: "/api/auth",
       secret: dependencies.secret,

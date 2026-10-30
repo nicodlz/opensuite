@@ -1,6 +1,6 @@
 # User guide
 
-OpenSuite provides Mail and Drive workspaces. Calendar and Contacts in the web app are placeholders. Availability depends on your administrator completing setup and provisioning your account.
+Esuno provides Mail and Drive workspaces. Calendar and Contacts in the web app are placeholders. Availability depends on your administrator completing setup and provisioning your account.
 
 The sign-in and MFA interface described below is implemented on the `om-web-fix` branch and is **not yet merged into this checkout**. Until it lands, ask your administrator for a trusted same-origin client using the authentication API. The Vite development server uses synthetic data, not real accounts or mail.
 

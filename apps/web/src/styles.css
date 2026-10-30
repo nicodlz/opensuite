@@ -102,14 +102,12 @@ h3 {
   letter-spacing: -0.045em;
 }
 .brand-mark {
-  display: grid;
-  place-items: center;
   width: 30px;
   height: 30px;
+  padding: 3px;
   border-radius: 8px;
-  background: var(--green);
-  color: var(--night);
-  font-size: 23px;
+  background: var(--ivory);
+  object-fit: contain;
 }
 .workspace-caption,
 .nav-heading {

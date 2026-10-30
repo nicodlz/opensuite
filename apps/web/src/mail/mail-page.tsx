@@ -372,8 +372,8 @@ export function MailPage() {
   }, [notice, undo]);
   useEffect(() => {
     document.title = current
-      ? `${current.name}${current.unread ? ` (${current.unread})` : ""} · OpenSuite Mail`
-      : "OpenSuite Mail";
+      ? `${current.name}${current.unread ? ` (${current.unread})` : ""} · Esuno Mail`
+      : "Esuno Mail";
   }, [current]);
 
   const filterCount = Object.values(filters).filter(

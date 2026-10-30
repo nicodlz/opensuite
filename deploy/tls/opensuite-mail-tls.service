@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh OpenSuite mail TLS from Caddy
+Description=Refresh Esuno mail TLS from Caddy
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
