@@ -40,8 +40,10 @@ attachment. Access was denied. The
 [Vaultwarden item route](https://github.com/dani-garcia/vaultwarden/blob/1.37.4/src/api/core/ciphers.rs)
 uses different errors for inaccessible and nonexistent items, creating an
 existence oracle for guessed item IDs. These IDs are random UUIDv4 values, so
-guessing one is infeasible. This upstream behavior should be reported to
-Vaultwarden; no report has been submitted.
+guessing one is infeasible. IDs are not secret to former organization or
+collection members, or when exposed in URL logs. The test asserts the different
+errors. This upstream behavior should be reported to Vaultwarden; no report has
+been submitted.
 
 A trusted public certificate is recommended. Local test certificates require
 client trust configuration; never disable TLS verification. Vaultwarden

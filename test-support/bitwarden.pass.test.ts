@@ -1,10 +1,11 @@
 // Sequential requests are intentional for client state and rate-limit assertions.
 /* oxlint-disable eslint/no-await-in-loop */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   createHash,
   createHmac,
   randomBytes,
+  randomUUID,
   X509Certificate,
 } from "node:crypto";
 import {
@@ -24,56 +25,16 @@ import { argon2id } from "@noble/hashes/argon2";
 import { chromium, type BrowserContext } from "@playwright/test";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { z } from "zod";
+import { createPassFixture } from "./pass-fixture.js";
 
 const run = promisify(execFile);
 const id = randomBytes(5).toString("hex");
-const project = `opensuite-bw-${id}`;
-const octet = (randomBytes(1).readUInt8() % 200) + 20;
-const env = {
-  ...process.env,
-  COMPOSE_PROFILES: "",
-  HTTPS_PORT: "443",
-  DRIVE_S3_ENDPOINT: "http://fixture.invalid",
-  DRIVE_S3_PUBLIC_ENDPOINT: "http://fixture.invalid",
-  DRIVE_S3_BUCKET: "fixture",
-  DRIVE_S3_REGION: "fixture",
-  DRIVE_S3_ACCESS_KEY: "fixture",
-  DRIVE_S3_SECRET_FILE: "/dev/null",
-  PASS_PUBLIC_HOST: "pass.localhost",
-  PASS_ALLOW_SAVED_SIGNUPS: "false",
-  PASS_TEST_API_SUBNET: `10.237.${octet}.0/24`,
-  PASS_TEST_API_IP: `10.237.${octet}.2`,
-  PASS_TEST_SUBNET: `10.238.${octet}.0/24`,
-  PASS_TEST_DYNAMIC_RANGE: `10.238.${octet}.128/25`,
-  PASS_TEST_PROXY_IP: `10.238.${octet}.2`,
-  PASS_CADDY_IP: `10.238.${octet}.2`,
-  PASS_TEST_DOMAIN: "https://pass.localhost",
-  PASS_SIGNUPS_ALLOWED: "false",
-  PASS_INVITATIONS_ALLOWED: "true",
-  PASS_SMTP_HOST: "",
-};
-const composeArgs = [
-  "compose",
-  "--project-name",
-  project,
-  "--profile",
-  "pass",
-  "--env-file",
-  "deploy/env.example",
-  "-f",
-  "compose.yaml",
-  "-f",
-  "compose.test.yaml",
-  "-f",
-  "test-support/pass-compose.yaml",
-];
-const compose = async (...args: string[]) =>
-  (
-    await run("docker", [...composeArgs, ...args], {
-      env,
-      maxBuffer: 64 * 1024 * 1024,
-    })
-  ).stdout;
+const {
+  env,
+  args: composeArgs,
+  compose,
+  chooseSubnets,
+} = createPassFixture("bw");
 const secret = () => randomBytes(24).toString("base64url");
 const b64 = (b: Uint8Array) =>
   Buffer.from(b).toString("base64").replace(/=+$/, "");
@@ -90,6 +51,7 @@ const seedBase32 =
     ?.map((bits) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[parseInt(bits, 2)])
     .join("") ?? "";
 let temp = "";
+let privateDir = "";
 let origin = "";
 let caPath = "";
 let ca = "";
@@ -102,13 +64,9 @@ let attachmentId = "";
 let folderId = "";
 let file = "";
 
-async function bw(
-  user: number,
-  args: string[],
-  session = sessions[user] ?? "",
-) {
-  try {
-    const result = await run(
+async function bw(user: number, args: string[], stdin?: string) {
+  return new Promise<string>((resolveResult, reject) => {
+    const child = spawn(
       resolve("node_modules/.bin/bw"),
       [...args, "--nointeraction"],
       {
@@ -117,23 +75,31 @@ async function bw(
           BITWARDENCLI_APPDATA_DIR: homes[user],
           NODE_EXTRA_CA_CERTS: caPath,
           TEST_MASTER_PASSWORD: masterPassword,
-          BW_SESSION: session,
+          BW_SESSION: sessions[user] ?? "",
           TMPDIR: temp,
         },
-        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
         timeout: 90_000,
       },
     );
-    return result.stdout.trim();
-  } catch (error) {
-    const detail =
-      error instanceof Error
-        ? error.message.split("\n").slice(1).join("\n")
-        : "unknown error";
-    // Do not attach the original error: its command line can contain fixture plaintext.
-    // oxlint-disable-next-line eslint/preserve-caught-error
-    throw new Error(`bw ${args[0] ?? "command"} failed: ${detail}`);
-  }
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.on("error", reject);
+    child.stdin.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0)
+        resolveResult(Buffer.concat(stdout).toString("utf8").trim());
+      else
+        reject(
+          new Error(
+            `bw ${args[0] ?? "command"} failed: ${Buffer.concat(stderr).toString("utf8").trim()}`,
+          ),
+        );
+    });
+    child.stdin.end(stdin);
+  });
 }
 const encoded = (value: unknown) =>
   Buffer.from(JSON.stringify(value)).toString("base64");
@@ -193,6 +159,20 @@ function codeAt(time: number) {
     "0",
   );
 }
+async function accessToken(user: number) {
+  const data = z
+    .record(z.string(), z.unknown())
+    .parse(
+      parseJson(await readFile(join(homes[user] ?? "", "data.json"), "utf8")),
+    );
+  const entry = Object.entries(data).find(
+    ([key, value]) =>
+      key.toLowerCase().includes("accesstoken") && typeof value === "string",
+  );
+  if (!entry || typeof entry[1] !== "string")
+    throw new Error("CLI access token not found in test state");
+  return entry[1];
+}
 async function cleanup() {
   try {
     await context?.close();
@@ -243,23 +223,19 @@ async function register(
       `${new URL(req.url()).pathname}: ${req.failure()?.errorText ?? "request failed"}`,
     ),
   );
-  // Concurrent Docker network creation can interrupt Chromium's initial asset
-  // requests with ERR_NETWORK_CHANGED. Reload only that failed bootstrap,
-  // before submitting any registration data.
+  // Concurrent Docker network changes or a slow host can interrupt initial
+  // asset loading. Retry only before submitting any registration data.
   for (let attempt = 0; ; attempt++) {
     errors.length = 0;
-    const initial = await page.goto(`${origin}/#/register`);
     try {
-      await page.getByLabel("Email address").waitFor({ timeout: 15_000 });
+      if (attempt === 0) await page.goto(`${origin}/#/register`);
+      else await page.reload();
+      await page.getByLabel("Email address").waitFor({ timeout: 30_000 });
       break;
     } catch (error) {
-      if (
-        attempt < 3 &&
-        errors.some((message) => message.includes("ERR_NETWORK_CHANGED"))
-      )
-        continue;
+      if (attempt < 3) continue;
       throw new Error(
-        `Registration ${index} page ${initial?.status()}: ${errors.join("; ")}`,
+        `Registration ${index} page failed to load: ${errors.join("; ")}`,
         { cause: error },
       );
     }
@@ -289,7 +265,10 @@ async function register(
 describe("Bitwarden CLI against Pass", () => {
   beforeAll(async () => {
     try {
+      await chooseSubnets();
       temp = await mkdtemp(join(tmpdir(), "opensuite-pass-"));
+      privateDir = join(temp, "private");
+      await mkdir(privateDir, { mode: 0o700 });
       homes[0] = join(temp, "user-a");
       homes[1] = join(temp, "user-b");
       await Promise.all(homes.map((home) => mkdir(home, { mode: 0o700 })));
@@ -367,7 +346,7 @@ describe("Bitwarden CLI against Pass", () => {
         throw new Error("Admin login failed");
       await register(emails[0] ?? "", pin, 0, cookie);
       await register(emails[1] ?? "", pin, 1, cookie);
-      file = join(temp, "attachment.bin");
+      file = join(privateDir, "attachment.bin");
       await writeFile(
         file,
         Buffer.concat([Buffer.from(marker), randomBytes(128)]),
@@ -381,15 +360,16 @@ describe("Bitwarden CLI against Pass", () => {
   afterAll(cleanup, 90_000);
 
   test("invited accounts log in and sync with signups closed", async () => {
-    expect(
-      (
-        await request("/identity/accounts/register/send-verification-email", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ email: `uninvited-${id}@example.invalid` }),
-        })
-      ).status,
-    ).toBe(400);
+    const registration = await request(
+      "/identity/accounts/register/send-verification-email",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: `uninvited-${id}@example.invalid` }),
+      },
+    );
+    expect(registration.status).toBe(400);
+    expect(registration.body).toContain("Registration not allowed");
     for (const user of [0, 1]) {
       await bw(user, ["config", "server", origin]);
       sessions[user] = await bw(user, [
@@ -406,7 +386,7 @@ describe("Bitwarden CLI against Pass", () => {
 
   test("login, TOTP, secure note, card, folder and favorite round trip", async () => {
     const folder = object(
-      await bw(0, ["create", "folder", encoded({ name: `folder-${id}` })]),
+      await bw(0, ["create", "folder"], encoded({ name: `folder-${id}` })),
     );
     folderId = folder.id ?? "";
     const template = object(await bw(0, ["get", "template", "item"]));
@@ -424,10 +404,10 @@ describe("Bitwarden CLI against Pass", () => {
         totp: seedBase32,
       },
     };
-    itemId = object(await bw(0, ["create", "item", encoded(login)])).id ?? "";
-    await bw(0, [
-      "create",
-      "item",
+    itemId = object(await bw(0, ["create", "item"], encoded(login))).id ?? "";
+    await bw(
+      0,
+      ["create", "item"],
       encoded({
         ...template,
         type: 2,
@@ -435,10 +415,10 @@ describe("Bitwarden CLI against Pass", () => {
         notes: marker,
         secureNote: { type: 0 },
       }),
-    ]);
-    await bw(0, [
-      "create",
-      "item",
+    );
+    await bw(
+      0,
+      ["create", "item"],
       encoded({
         ...template,
         type: 3,
@@ -452,7 +432,7 @@ describe("Bitwarden CLI against Pass", () => {
           code: "123",
         },
       }),
-    ]);
+    );
     await bw(0, ["sync"]);
     const got = object(await bw(0, ["get", "item", itemId]));
     expect(got).toMatchObject({
@@ -490,7 +470,7 @@ describe("Bitwarden CLI against Pass", () => {
     await bw(0, ["create", "attachment", "--file", file, "--itemid", itemId]);
     const item = object(await bw(0, ["get", "item", itemId]));
     attachmentId = item.attachments?.[0]?.id ?? "";
-    const output = join(temp, "download.bin");
+    const output = join(privateDir, "download.bin");
     await bw(0, [
       "get",
       "attachment",
@@ -525,7 +505,7 @@ describe("Bitwarden CLI against Pass", () => {
     ]);
     await bw(0, ["sync"]);
     expect(object(await bw(0, ["get", "item", itemId])).name).toBe(marker);
-    const output = join(temp, "restart-download.bin");
+    const output = join(privateDir, "restart-download.bin");
     await bw(0, [
       "get",
       "attachment",
@@ -540,7 +520,7 @@ describe("Bitwarden CLI against Pass", () => {
 
   test("second user cannot list or fetch the first user's item or attachment", async () => {
     const ownerBefore = object(await bw(0, ["get", "item", itemId]));
-    const beforeFile = join(temp, "isolation-before.bin");
+    const beforeFile = join(privateDir, "isolation-before.bin");
     await bw(0, [
       "get",
       "attachment",
@@ -564,21 +544,29 @@ describe("Bitwarden CLI against Pass", () => {
         "--itemid",
         itemId,
         "--output",
-        join(temp, "denied"),
+        join(privateDir, "denied"),
       ]),
     ).rejects.toThrow("failed");
-    const data = z
-      .record(z.string(), z.unknown())
+    const headers = { authorization: `Bearer ${await accessToken(1)}` };
+    const ownerToken = await accessToken(0);
+    const ownerRaw = await request(`/api/ciphers/${itemId}`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(ownerRaw.status).toBe(200);
+    const ownerId = z
+      .object({ sub: z.string().uuid() })
       .parse(
-        parseJson(await readFile(join(homes[1] ?? "", "data.json"), "utf8")),
-      );
-    const tokenEntry = Object.entries(data).find(
-      ([key, value]) =>
-        key.toLowerCase().includes("accesstoken") && typeof value === "string",
-    );
-    if (!tokenEntry || typeof tokenEntry[1] !== "string")
-      throw new Error("CLI access token not found in test state");
-    const headers = { authorization: `Bearer ${tokenEntry[1]}` };
+        parseJson(
+          Buffer.from(ownerToken.split(".")[1] ?? "", "base64url").toString(
+            "utf8",
+          ),
+        ),
+      ).sub;
+    // The response omits the required encryptedFor field used in PUT requests.
+    const updateBody = JSON.stringify({
+      ...z.record(z.string(), z.unknown()).parse(parseJson(ownerRaw.body)),
+      encryptedFor: ownerId,
+    });
     const list = await request("/api/sync", { headers });
     expect(list.status).toBe(200);
     expect(list.body).not.toContain(itemId);
@@ -607,9 +595,35 @@ describe("Bitwarden CLI against Pass", () => {
         object: "error",
       });
     }
+    const missing = await request(`/api/ciphers/${randomUUID()}`, { headers });
+    expect(missing.status).toBe(400);
+    expect(
+      z.object({ message: z.string() }).parse(parseJson(missing.body)).message,
+    ).toBe("Cipher doesn't exist");
+    const forbiddenUpdate = await request(`/api/ciphers/${itemId}`, {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: updateBody,
+    });
+    expect(forbiddenUpdate.status).toBe(400);
+    expect(forbiddenUpdate.body).toContain("Cipher is not write accessible");
+    for (const path of [
+      `/api/ciphers/${itemId}`,
+      `/api/ciphers/${itemId}/attachment/${attachmentId}`,
+    ]) {
+      for (const method of ["PUT", "DELETE"]) {
+        const response = await request(path, {
+          method,
+          headers: { ...headers, "content-type": "application/json" },
+          ...(method === "PUT" ? { body: updateBody } : {}),
+        });
+        expect(response.status).toBeGreaterThanOrEqual(400);
+        expect(response.status).toBeLessThan(500);
+      }
+    }
     await bw(0, ["sync"]);
     expect(object(await bw(0, ["get", "item", itemId]))).toEqual(ownerBefore);
-    const afterFile = join(temp, "isolation-after.bin");
+    const afterFile = join(privateDir, "isolation-after.bin");
     await bw(0, [
       "get",
       "attachment",
@@ -620,9 +634,11 @@ describe("Bitwarden CLI against Pass", () => {
       afterFile,
     ]);
     expect(await readFile(afterFile)).toEqual(await readFile(beforeFile));
-  }, 120_000);
+  }, 180_000);
 
-  test("plaintext marker is absent from database, Pass volume and logs", async () => {
+  // This helper groups assertions shared by the two storage checks.
+  // oxlint-disable-next-line unicorn/consistent-function-scoping
+  async function scanStorage(sendPath?: string) {
     const dump = await compose(
       "exec",
       "-T",
@@ -651,17 +667,48 @@ describe("Bitwarden CLI against Pass", () => {
       ],
       { env, encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
     );
+    expect(
+      archive.stdout.includes(
+        Buffer.from(`attachments/${itemId}/${attachmentId}`),
+      ),
+    ).toBe(true);
+    const paths = sendPath ? [sendPath] : [];
+    expect(
+      paths.every((path) => archive.stdout.includes(Buffer.from(path))),
+    ).toBe(true);
     expect(archive.stdout.includes(Buffer.from(marker))).toBe(false);
     for (const service of ["pass", "caddy"])
       expect(await compose("logs", "--no-color", service)).not.toContain(
         marker,
       );
+  }
+
+  test("plaintext marker is absent from database, Pass volume and logs", async () => {
+    expect(attachmentId).toBeTruthy();
+    await scanStorage();
   }, 120_000);
+
+  test("file Send creation and receipt", async () => {
+    const send = z
+      .object({
+        accessUrl: z.string().url(),
+        id: z.string(),
+        file: z.object({ id: z.string() }),
+      })
+      .parse(parseJson(await bw(0, ["send", "--file", file, "--raw"])));
+    const link = send.accessUrl;
+    const output = join(privateDir, "send-download.bin");
+    // bw receive requires a URL positional argument and offers no stdin option.
+    // This disposable Send link and its key fragment are therefore visible in argv.
+    await bw(1, ["receive", link, "--output", output]);
+    expect(await readFile(output)).toEqual(await readFile(file));
+    await scanStorage(`sends/${send.id}/${send.file.id}`);
+  }, 180_000);
 
   test("edit, trash, restore, permanent delete and attachment deletion", async () => {
     const item = object(await bw(0, ["get", "item", itemId]));
     item.name = `edited-${id}`;
-    await bw(0, ["edit", "item", itemId, encoded(item)]);
+    await bw(0, ["edit", "item", itemId], encoded(item));
     expect(object(await bw(0, ["get", "item", itemId])).name).toBe(
       `edited-${id}`,
     );
@@ -680,43 +727,4 @@ describe("Bitwarden CLI against Pass", () => {
     await bw(0, ["delete", "item", itemId, "--permanent"]);
     await expect(bw(0, ["get", "item", itemId])).rejects.toThrow("failed");
   }, 180_000);
-
-  test("file Send creation and receipt", async () => {
-    const send = z
-      .object({ accessUrl: z.string().url() })
-      .parse(parseJson(await bw(0, ["send", "--file", file, "--raw"])));
-    const link = send.accessUrl;
-    const output = join(temp, "send-download.bin");
-    await bw(1, ["receive", link, "--output", output]);
-    expect(await readFile(output)).toEqual(await readFile(file));
-  }, 120_000);
-
-  test("login rate limit resists forged client IP headers", async () => {
-    const body = new URLSearchParams({
-      grant_type: "password",
-      client_id: "cli",
-      password: secret(),
-      scope: "api offline_access",
-      username: emails[0] ?? "",
-      device_identifier: id,
-      device_name: "test",
-      device_type: "8",
-    }).toString();
-    const statuses: number[] = [];
-    for (let i = 0; i < 20; i++) {
-      const response = await request("/identity/connect/token", {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          "x-real-ip": `198.51.100.${i + 1}`,
-          "x-forwarded-for": `203.0.113.${i + 1}`,
-        },
-        body,
-      });
-      statuses.push(response.status);
-    }
-    expect(statuses[0]).toBe(400);
-    expect(statuses).toContain(429);
-    expect(statuses.at(-1)).toBe(429);
-  }, 120_000);
 });
