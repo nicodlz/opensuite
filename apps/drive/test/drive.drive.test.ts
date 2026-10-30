@@ -337,6 +337,53 @@ it("handles multipart and reserves quota before signing", async () => {
   await command("a", { action: "delete", id: begin.id });
 }, 120_000);
 
+it("reserves a file above 5 GB, enforces quota and issues short-lived part URLs", async () => {
+  const large = createDrive(db, storage, 10_000_000_000);
+  const input = {
+    action: "upload" as const,
+    name: "large.bin",
+    parentId: null,
+    size: 5_000_000_001,
+    checksum: digest(Buffer.alloc(0)),
+    contentType: "application/octet-stream",
+    multipart: true,
+  };
+  await expect(
+    large.command("large-owner", { ...input, multipart: false }),
+  ).rejects.toThrow(/multipart/);
+  const begin = signed.parse(await large.command("large-owner", input));
+  const reservation = await db.entry.findUniqueOrThrow({
+    where: { id: begin.id },
+  });
+  expect(reservation.size).toBe(5_000_000_001n);
+  expect(reservation.expiresAt?.getTime()).toBeGreaterThan(
+    Date.now() + 23 * 60 * 60 * 1000,
+  );
+  const part = z
+    .object({ url: z.url(), expiresIn: z.number() })
+    .parse(
+      await large.command("large-owner", {
+        action: "part",
+        id: begin.id,
+        partNumber: 1,
+      }),
+    );
+  expect(part.expiresIn).toBeLessThanOrEqual(300);
+  await expect(
+    large.command("other", { action: "part", id: begin.id, partNumber: 1 }),
+  ).rejects.toThrow(/not found/i);
+  await expect(
+    large.command("large-owner", {
+      action: "part",
+      id: begin.id,
+      partNumber: 955,
+    }),
+  ).rejects.toThrow(/reserved size/i);
+  await expect(large.command("large-owner", input)).rejects.toThrow(/quota/i);
+  await large.command("large-owner", { action: "trash", id: begin.id });
+  await large.command("large-owner", { action: "delete", id: begin.id });
+}, 120_000);
+
 it("rejects invalid bytes and never previews active content", async () => {
   const bytes = Buffer.from("<svg onload=alert(1)></svg>");
   const begin = signed.parse(

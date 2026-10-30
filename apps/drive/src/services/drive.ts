@@ -1,3 +1,4 @@
+import { drivePartSize } from "@opensuite/contracts";
 import type { DriveCommand, DriveOutput } from "@opensuite/contracts";
 import { ORPCError } from "@orpc/server";
 import { randomUUID } from "node:crypto";
@@ -188,6 +189,8 @@ export const createDrive = (
         });
       }
       case "upload": {
+        if (!input.multipart && input.size > 5_000_000_000)
+          throw invalid("Large files require multipart upload");
         const owner = await destinationOwner(db, user, input.parentId);
         const id = randomUUID();
         const uploadState: { id: string | null } = { id: null };
@@ -221,7 +224,9 @@ export const createDrive = (
                   size: BigInt(input.size),
                   checksum: input.checksum,
                   contentType: input.contentType,
-                  expiresAt: new Date(Date.now() + 300_000),
+                  expiresAt: new Date(
+                    Date.now() + (input.multipart ? 86_400_000 : 300_000),
+                  ),
                 },
               });
               const started = await storage.initiate(
@@ -259,7 +264,7 @@ export const createDrive = (
             Math.floor((entry.expiresAt.getTime() - Date.now()) / 1000),
           ),
         );
-        const partSize = 5 * 1024 * 1024;
+        const partSize = drivePartSize(Number(entry.size));
         const remaining =
           Number(entry.size) - (input.partNumber - 1) * partSize;
         if (remaining <= 0) throw invalid("Part exceeds reserved size");
@@ -290,7 +295,7 @@ export const createDrive = (
         if (
           input.parts !== undefined &&
           (input.parts.length !==
-            Math.ceil(Number(entry.size) / (5 * 1024 * 1024)) ||
+            Math.ceil(Number(entry.size) / drivePartSize(Number(entry.size))) ||
             input.parts.length === 0 ||
             input.parts.some((p, index) => p.partNumber !== index + 1))
         )

@@ -1,5 +1,4 @@
 import * as React from "react";
-import { themeChoices, type ThemeChoice } from "@opensuite/design-tokens";
 import {
   QueryClient,
   QueryCache,
@@ -16,30 +15,73 @@ import {
   createRouter,
   useRouterState,
 } from "@tanstack/react-router";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { createRoot } from "react-dom/client";
-import { SetupPage } from "./setup/setup-page.tsx";
-import { DomainsPage } from "./domains/domains-page.tsx";
 
 import { ORPCError } from "@orpc/client";
 import { AuthError } from "./auth/client.ts";
 import { LoginPage, Protected, expireSession } from "./auth/components.tsx";
-import { MailPage } from "./mail/mail-page.tsx";
-import { DrivePage } from "./drive/drive-page.tsx";
-import { getHealth, getReadiness } from "./api.ts";
-import { Button } from "./ui/button.tsx";
-import { Dialog, DialogContent, DialogTrigger } from "./ui/dialog.tsx";
+import { CallbackPage, HandoffPage, startHandoff } from "./auth/handoff.tsx";
 import {
-  DropdownContent,
-  DropdownItemIndicator,
-  DropdownMenu,
-  DropdownRadioGroup,
-  DropdownRadioItem,
-  DropdownTrigger,
-} from "./ui/dropdown-menu.tsx";
+  loadOrigins,
+  redirectFor,
+  resolveLayout,
+  rewriteFor,
+  setActiveLayout,
+} from "./origins.ts";
+import { MailPage } from "./mail/mail-page.tsx";
+import { getHealth, getReadiness } from "./api.ts";
+import {
+  AppShell,
+  SidebarItem,
+  SidebarLink,
+  type Product,
+} from "./shell/app-shell.tsx";
+import { Button } from "./ui/button.tsx";
+import { Dialog, DialogContent } from "./ui/dialog.tsx";
 import { useKeyboardShortcut } from "./ui/keyboard-shortcut.ts";
 import { TextField } from "./ui/text-field.tsx";
 import { Toast, ToastProvider } from "./ui/toast.tsx";
+
+// Each application may have its own origin; decide routing before render.
+const layout = resolveLayout(await loadOrigins(), window.location.origin);
+setActiveLayout(layout);
+const moved = redirectFor(
+  layout,
+  window.location.pathname,
+  window.location.search,
+  window.location.hash,
+);
+if (moved !== null && /^https?:/.test(moved)) window.location.replace(moved);
+else if (moved !== null) window.history.replaceState(null, "", moved);
+
+const DrivePage = lazy(() =>
+  import("./drive/drive-page.tsx").then((module) => ({
+    default: module.DrivePage,
+  })),
+);
+const CalendarPage = lazy(() =>
+  import("./calendar/calendar-page.tsx").then((module) => ({
+    default: module.CalendarPage,
+  })),
+);
+const SetupPage = lazy(() =>
+  import("./setup/setup-page.tsx").then((module) => ({
+    default: module.SetupPage,
+  })),
+);
+const DomainsPage = lazy(() =>
+  import("./domains/domains-page.tsx").then((module) => ({
+    default: module.DomainsPage,
+  })),
+);
 
 function onRequestError(error: unknown) {
   if (
@@ -51,19 +93,29 @@ function onRequestError(error: unknown) {
 const queryClient = new QueryClient({
   queryCache: new QueryCache({ onError: onRequestError }),
   mutationCache: new MutationCache({ onError: onRequestError }),
-  defaultOptions: { queries: { retry: false, refetchInterval: 30_000 } },
+  defaultOptions: {
+    queries: { retry: false, staleTime: 30_000, refetchOnWindowFocus: true },
+  },
 });
 
-function initialTheme(): ThemeChoice {
-  const stored = localStorage.getItem("opensuite-theme");
-  return stored === "light" || stored === "dark" ? stored : "system";
+function PageLoading() {
+  return <div className="page-loading" aria-busy="true" />;
+}
+function Lazy({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<PageLoading />}>{children}</Suspense>;
 }
 
-function Shell() {
-  const product = useRouterState({
-    select: (state) => state.location.pathname,
-  });
-  const [theme, setTheme] = useState<ThemeChoice>(initialTheme);
+/** Frame for the administration pages and the Contacts placeholder. */
+function AdminShell({
+  product = "admin",
+  signedIn = true,
+  children,
+}: {
+  product?: Product;
+  signedIn?: boolean;
+  children: ReactNode;
+}) {
+  const path = useRouterState({ select: (state) => state.location.pathname });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [label, setLabel] = useState(
     () => localStorage.getItem("opensuite-label") || "My workspace",
@@ -71,12 +123,11 @@ function Shell() {
   const [draft, setDraft] = useState(label);
   const [error, setError] = useState("");
   const [toastOpen, setToastOpen] = useState(false);
-  useEffect(() => {
-    if (theme === "system") delete document.documentElement.dataset["theme"];
-    else document.documentElement.dataset["theme"] = theme;
-    localStorage.setItem("opensuite-theme", theme);
-  }, [theme]);
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openSettings = useCallback(() => {
+    setDraft(label);
+    setError("");
+    setSettingsOpen(true);
+  }, [label]);
   useKeyboardShortcut("s", openSettings);
   function saveLabel(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -91,174 +142,63 @@ function Shell() {
     setSettingsOpen(false);
     setToastOpen(true);
   }
-  function changeTheme(value: string) {
-    if (value === "system" || value === "light" || value === "dark")
-      setTheme(value);
-  }
-  if (product === "/login") return <Outlet />;
-  if (product === "/mail")
-    return (
-      <Protected>
-        <MailPage />
-      </Protected>
-    );
-  if (product === "/drive")
-    return (
-      <Protected>
-        <DrivePage />
-      </Protected>
-    );
+  const links = [
+    { to: "/", label: "System status", icon: "status" },
+    { to: "/setup", label: "Setup wizard", icon: "sparkle" },
+    { to: "/domains", label: "Domains", icon: "globe" },
+  ] as const;
   return (
     <ToastProvider>
-      <a href="#main-content" className="skip-link">
-        Skip to content
-      </a>
-      <div className="app-shell bg-canvas text-ink font-sans">
-        <aside className="sidebar">
-          <Link to="/" className="brand">
-            <span className="brand-mark" aria-hidden="true">
-              ✳
-            </span>
-            <span>OpenSuite</span>
-          </Link>
-          <div className="workspace-caption">WORKSPACE</div>
-          <p className="workspace-name">{label}</p>
-          <Button
-            className="compose-button"
-            disabled
-            title="Mail is not available yet"
-          >
-            <span aria-hidden="true">＋</span> New message
-          </Button>
-          <p className="sidebar-hint">Mail is not available yet</p>
-          <nav aria-label="Products" className="product-nav">
-            <span className="nav-heading">PRODUCTS</span>
-            <Link to="/mail" className="nav-link">
-              <span aria-hidden="true">✉</span> Mail
-            </Link>
-            <Link to="/calendar" className="nav-link">
-              <span aria-hidden="true">▦</span> Calendar
-            </Link>
-            <Link to="/contacts" className="nav-link">
-              <span aria-hidden="true">♙</span> Contacts
-            </Link>
-            <Link to="/drive" className="nav-link">
-              <span aria-hidden="true">◇</span> Drive
-            </Link>
-          </nav>
-          <div className="folders" aria-label="Mail folders">
-            <span className="nav-heading">MAIL FOLDERS</span>
-            <span>
-              Inbox <small>Unavailable</small>
-            </span>
-            <span>Drafts</span>
-            <span>Sent</span>
-            <span>Archive</span>
-            <span className="nav-heading labels-heading">LABELS</span>
-            <span>No labels yet</span>
-          </div>
-          <div className="sidebar-bottom">
-            <Link to="/setup" className="nav-link">
-              <span aria-hidden="true">✧</span> Setup wizard
-            </Link>
-            <Link to="/domains" className="nav-link">
-              <span aria-hidden="true">◎</span> Domains
-            </Link>
-            <Link to="/" className="nav-link">
-              <span aria-hidden="true">◉</span> System status
-            </Link>
-          </div>
-        </aside>
-        <div className="app-body">
-          <header className="topbar">
-            <div className="search-shell">
-              <span aria-hidden="true">⌕</span>
-              <label htmlFor="search">Search</label>
-              <input
-                id="search"
-                placeholder="Search is not available yet"
-                disabled
+      <AppShell
+        product={product}
+        signedIn={signedIn}
+        sidebar={
+          product === "admin" && (
+            <>
+              <p className="shell-nav-heading">Workspace</p>
+              <p className="admin-workspace-name">{label}</p>
+              <p className="shell-nav-heading">Administration</p>
+              {links.map((link) => (
+                <SidebarLink
+                  key={link.to}
+                  to={link.to}
+                  icon={link.icon}
+                  label={link.label}
+                  active={path === link.to}
+                />
+              ))}
+              <SidebarItem
+                icon="settings"
+                label="Workspace settings"
+                onClick={openSettings}
+                aria-keyshortcuts="S"
               />
+            </>
+          )
+        }
+      >
+        {children}
+      </AppShell>
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent
+          title="Workspace settings"
+          description="Choose a label for this browser. It is stored locally."
+        >
+          <form onSubmit={saveLabel} noValidate>
+            <TextField
+              label="Workspace label"
+              description="Visible in the sidebar on this device."
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              maxLength={40}
+              error={error}
+            />
+            <div className="dialog-actions">
+              <Button type="submit">Save label</Button>
             </div>
-            <div className="top-actions">
-              <span className="top-caption">YOUR WORKSPACE</span>
-              <Dialog
-                open={settingsOpen}
-                onOpenChange={(open) => {
-                  setSettingsOpen(open);
-                  if (open) {
-                    setDraft(label);
-                    setError("");
-                  }
-                }}
-              >
-                <DialogTrigger asChild>
-                  <Button variant="ghost" size="small">
-                    Settings <kbd>S</kbd>
-                  </Button>
-                </DialogTrigger>
-                <DialogContent
-                  title="Workspace settings"
-                  description="Choose a label for this browser. It is stored locally."
-                >
-                  <form onSubmit={saveLabel} noValidate>
-                    <TextField
-                      label="Workspace label"
-                      description="Visible in the sidebar on this device."
-                      value={draft}
-                      onChange={(event) => setDraft(event.target.value)}
-                      maxLength={40}
-                      error={error}
-                    />
-                    <div className="dialog-actions">
-                      <Button type="submit">Save label</Button>
-                    </div>
-                  </form>
-                </DialogContent>
-              </Dialog>
-              <DropdownMenu>
-                <DropdownTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="small"
-                    aria-label="Account and appearance menu"
-                  >
-                    <span className="avatar" aria-hidden="true">
-                      O
-                    </span>
-                    <span className="account-text">Account</span>
-                    <span aria-hidden="true">⌄</span>
-                  </Button>
-                </DropdownTrigger>
-                <DropdownContent>
-                  <div className="menu-label">Account unavailable</div>
-                  <div className="menu-separator" />
-                  <div className="menu-label">Appearance</div>
-                  <DropdownRadioGroup value={theme} onValueChange={changeTheme}>
-                    {themeChoices.map((choice) => (
-                      <DropdownRadioItem
-                        key={choice}
-                        className="menu-item"
-                        value={choice}
-                      >
-                        <span className="menu-indicator">
-                          <DropdownItemIndicator>✓</DropdownItemIndicator>
-                        </span>
-                        {choice === "system"
-                          ? "Use system theme"
-                          : `${choice.charAt(0).toUpperCase()}${choice.slice(1)} theme`}
-                      </DropdownRadioItem>
-                    ))}
-                  </DropdownRadioGroup>
-                </DropdownContent>
-              </DropdownMenu>
-            </div>
-          </header>
-          <main id="main-content" tabIndex={-1}>
-            <Outlet />
-          </main>
-        </div>
-      </div>
+          </form>
+        </DialogContent>
+      </Dialog>
       <Toast
         open={toastOpen}
         onOpenChange={setToastOpen}
@@ -269,10 +209,15 @@ function Shell() {
 }
 
 function StatusPage() {
-  const health = useQuery({ queryKey: ["health"], queryFn: getHealth });
+  const health = useQuery({
+    queryKey: ["health"],
+    queryFn: getHealth,
+    refetchInterval: 30_000,
+  });
   const readiness = useQuery({
     queryKey: ["readiness"],
     queryFn: getReadiness,
+    refetchInterval: 30_000,
   });
   const loading = health.isPending || readiness.isPending;
   const unavailable = health.isError || readiness.isError;
@@ -463,11 +408,34 @@ function ProductPlaceholder({ name }: { name: string }) {
   );
 }
 
-const rootRoute = createRootRoute({ component: Shell });
+const rootRoute = createRootRoute({ component: Outlet });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: StatusPage,
+  component: () => (
+    <AdminShell signedIn={false}>
+      <StatusPage />
+    </AdminShell>
+  ),
+});
+const statusRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/status",
+  component: () => (
+    <AdminShell signedIn={false}>
+      <StatusPage />
+    </AdminShell>
+  ),
+});
+const handoffRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/auth/handoff",
+  component: HandoffPage,
+});
+const callbackRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/auth/callback",
+  component: CallbackPage,
 });
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -477,29 +445,55 @@ const loginRoute = createRoute({
 const mailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mail",
-  component: MailPage,
+  component: () => (
+    <Protected>
+      <MailPage />
+    </Protected>
+  ),
 });
 const calendarRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/calendar",
-  component: () => <ProductPlaceholder name="Calendar" />,
+  component: () => (
+    <Protected>
+      <Lazy>
+        <CalendarPage />
+      </Lazy>
+    </Protected>
+  ),
 });
 const contactsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/contacts",
-  component: () => <ProductPlaceholder name="Contacts" />,
+  component: () => (
+    <Protected>
+      <AdminShell product="contacts">
+        <ProductPlaceholder name="Contacts" />
+      </AdminShell>
+    </Protected>
+  ),
 });
 const driveRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/drive",
-  component: DrivePage,
+  component: () => (
+    <Protected>
+      <Lazy>
+        <DrivePage />
+      </Lazy>
+    </Protected>
+  ),
 });
 const domainsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/domains",
   component: () => (
     <Protected>
-      <DomainsPage />
+      <AdminShell>
+        <Lazy>
+          <DomainsPage />
+        </Lazy>
+      </AdminShell>
     </Protected>
   ),
 });
@@ -508,13 +502,22 @@ const setupRoute = createRoute({
   path: "/setup",
   component: () => (
     <Protected>
-      <SetupPage />
+      <AdminShell>
+        <Lazy>
+          <SetupPage />
+        </Lazy>
+      </AdminShell>
     </Protected>
   ),
 });
+const rewrite = rewriteFor(layout);
 const router = createRouter({
+  ...(rewrite === undefined ? {} : { rewrite }),
   routeTree: rootRoute.addChildren([
     indexRoute,
+    statusRoute,
+    handoffRoute,
+    callbackRoute,
     loginRoute,
     mailRoute,
     calendarRoute,
@@ -527,6 +530,9 @@ const router = createRouter({
 window.addEventListener("opensuite-session-expired", () => {
   void queryClient.cancelQueries().then(() => {
     queryClient.clear();
+    // Sibling origins sign in again through the sign-in origin.
+    if (layout.split && layout.host !== "mail" && startHandoff())
+      return undefined;
     return router.navigate({ to: "/login" });
   });
 });
@@ -537,8 +543,10 @@ declare module "@tanstack/react-router" {
 }
 const root = document.getElementById("root");
 if (!root) throw new Error("Root element missing");
-createRoot(root).render(
-  <QueryClientProvider client={queryClient}>
-    <RouterProvider router={router} />
-  </QueryClientProvider>,
-);
+// A move to another origin is already under way; do not start this one.
+if (moved === null || !/^https?:/.test(moved))
+  createRoot(root).render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );

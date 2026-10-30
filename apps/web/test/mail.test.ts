@@ -5,6 +5,7 @@ import {
   emptyDraft,
   formatDate,
   initials,
+  parseAddresses,
   replyDraft,
   selectionReducer,
 } from "../src/mail/model.ts";
@@ -15,6 +16,25 @@ describe("mail helpers", () => {
     expect(initials("  Maya Chen ")).toBe("MC");
     expect(initials("")).toBe("?");
     expect(formatDate("2026-10-28T10:30:00Z")).toContain("28");
+    const now = new Date(2026, 9, 30, 15, 0);
+    expect(formatDate(new Date(2026, 9, 30, 9, 5).toISOString(), now)).toMatch(
+      /9.05|09.05/,
+    );
+    expect(formatDate(new Date(2025, 2, 3).toISOString(), now)).toContain(
+      "2025",
+    );
+    expect(
+      formatDate(new Date(2026, 2, 3).toISOString(), now),
+    ).not.toContain("2026");
+  });
+  it("parses recipient fields and reports invalid addresses", () => {
+    expect(
+      parseAddresses("a@example.test, Maya <maya@example.test>; ,bad"),
+    ).toEqual({
+      addresses: [{ email: "a@example.test" }, { email: "maya@example.test" }],
+      invalid: ["bad"],
+    });
+    expect(parseAddresses("  ")).toEqual({ addresses: [], invalid: [] });
   });
   it("moves selection within the list", () => {
     const base: ThreadSummary = {

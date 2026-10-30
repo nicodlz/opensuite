@@ -1,5 +1,6 @@
 import type { DomainService } from "./routes/domains.ts";
 import { randomBytes } from "node:crypto";
+import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
@@ -14,7 +15,12 @@ import Fastify, {
   type FastifyRequest,
 } from "fastify";
 import type { ApiConfig } from "./config.ts";
-import { createAuthLimiter } from "./auth/limits.ts";
+import { createHandoffRegistry } from "./auth/handoff.ts";
+import {
+  createAuthLimiter,
+  hasDuplicateAuthCookie,
+  legacyAuthCookies,
+} from "./auth/limits.ts";
 import { z } from "zod";
 import { router, type ApiContext } from "./routes/index.ts";
 
@@ -33,6 +39,9 @@ export interface ServerDependencies {
       }) => Promise<Response>;
     };
     readonly publicOrigin: string;
+    /** Exact origins allowed to send state-changing requests. */
+    readonly trustedOrigins?: readonly string[];
+    readonly productOrigins?: Readonly<Record<string, string>>;
     readonly mailDomain?: string;
     readonly actor?: (headers: Headers) => Promise<Actor | null>;
     readonly userIdForEmail?: (email: string) => Promise<string | null>;
@@ -43,6 +52,7 @@ export interface ServerDependencies {
   };
   readonly accounts?: AccountService;
   readonly mail?: MailService;
+  readonly calendar?: CalendarService;
   readonly domains?: DomainService;
   readonly setupStatus?: ApiContext["setupStatus"];
 }
@@ -97,9 +107,19 @@ export const buildServer = async (
     }
     if (
       identity !== undefined &&
+      hasDuplicateAuthCookie(request.headers.cookie)
+    )
+      return reply.code(400).send({
+        code: "BAD_REQUEST",
+        message: "Duplicate authentication cookie",
+      });
+    if (
+      identity !== undefined &&
       request.method !== "GET" &&
       request.method !== "HEAD" &&
-      request.headers.origin !== identity.publicOrigin
+      !(identity.trustedOrigins ?? [identity.publicOrigin]).includes(
+        request.headers.origin ?? "",
+      )
     ) {
       return reply
         .code(403)
@@ -269,6 +289,46 @@ export const buildServer = async (
   if (dependencies.identity !== undefined) {
     const identity = dependencies.identity;
     const limiter = createAuthLimiter();
+    const handoffs = createHandoffRegistry();
+    const siblings = Object.values(identity.productOrigins ?? {}).filter(
+      (origin) => origin !== identity.publicOrigin,
+    );
+    // The sign-in origin issues a token for one listed sibling application.
+    // The token returns in a URL fragment and is redeemed by that origin only.
+    app.post("/session/handoff", async (request, reply) => {
+      reply.header("cache-control", "no-store");
+      if (request.headers.origin !== identity.publicOrigin)
+        return reply
+          .code(403)
+          .send({ code: "FORBIDDEN", message: "Invalid origin" });
+      const input = z.object({ target: z.string() }).safeParse(request.body);
+      if (!input.success || !siblings.includes(input.data.target))
+        return reply
+          .code(400)
+          .send({ code: "BAD_REQUEST", message: "Unknown application" });
+      const headers = new Headers();
+      const cookie = request.headers.cookie;
+      if (cookie !== undefined) headers.set("cookie", cookie);
+      if ((await identity.actor?.(headers)) == null)
+        return reply
+          .code(401)
+          .send({ code: "UNAUTHORIZED", message: "Unauthorized" });
+      const response = await identity.handler(
+        new Request(
+          new URL("/api/auth/one-time-token/generate", identity.publicOrigin),
+          { headers },
+        ),
+      );
+      const result = z
+        .object({ token: z.string().min(16) })
+        .safeParse(await response.json().catch(() => null));
+      if (!response.ok || !result.success)
+        return reply
+          .code(response.status === 401 ? 401 : 503)
+          .send({ code: "UNAVAILABLE", message: "Sign-in handoff failed" });
+      handoffs.bind(result.data.token, input.data.target);
+      return reply.send({ token: result.data.token });
+    });
     for (const route of ["/auth/*", "/api/auth/*"])
       app.all(route, async (request, reply) => {
         const url = new URL(
@@ -278,6 +338,11 @@ export const buildServer = async (
           identity.publicOrigin,
         );
         const path = url.pathname.replace(/^\/api(?=\/auth\/)/, "");
+        // Tokens are only issued through /session/handoff.
+        if (path === "/auth/one-time-token/generate")
+          return reply
+            .code(404)
+            .send({ code: "NOT_FOUND", message: "No such route" });
         if (limiter.hasDuplicateChallenge(request.headers.cookie)) {
           return reply.code(400).send({
             code: "BAD_REQUEST",
@@ -312,6 +377,20 @@ export const buildServer = async (
           if (Array.isArray(value)) {
             for (const part of value) headers.append(name, part);
           } else headers.set(name, value);
+        }
+        if (path === "/auth/one-time-token/verify") {
+          const token = z
+            .object({ token: z.string().min(16).max(256) })
+            .safeParse(request.body);
+          if (
+            request.method !== "POST" ||
+            !token.success ||
+            !handoffs.consume(token.data.token, request.headers.origin ?? "")
+          )
+            return reply.code(400).send({
+              code: "BAD_REQUEST",
+              message: "Invalid or expired sign-in link",
+            });
         }
         const actor = (await identity.actor?.(headers)) ?? null;
         if (path === "/auth/sign-up/email" && actor?.role !== "admin") {
@@ -420,7 +499,14 @@ export const buildServer = async (
             action: `${action}.${response.ok ? (challenge ? "challenge" : "success") : "failure"}`,
           });
         }
+        // Clear cookies left by the previous naming on this host. A cookie
+        // planted for a parent domain is ignored by name and left alone.
+        for (const name of legacyAuthCookies(request.headers.cookie))
+          cookies.push(`${name}=; Max-Age=0; Path=/; Secure; HttpOnly`);
         if (cookies.length > 0) reply.header("set-cookie", cookies);
+        // Never hand the session token itself to page scripts.
+        if (path === "/auth/one-time-token/verify")
+          return reply.send(response.ok ? { success: true } : null);
         return reply.send(await response.text());
       });
   }
@@ -444,6 +530,8 @@ export const buildServer = async (
         setupIdentity: dependencies.identity,
         audit: dependencies.identity?.audit,
         mail: dependencies.mail,
+        calendar: dependencies.calendar,
+        productOrigins: dependencies.identity?.productOrigins ?? {},
         downloads,
         accounts: dependencies.accounts,
         domains: dependencies.domains,

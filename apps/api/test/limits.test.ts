@@ -57,7 +57,7 @@ describe("account-wide authentication limits", () => {
   });
   it("limits MFA attempts across IPs for the account associated with a challenge", () => {
     const limiter = createAuthLimiter(() => 0);
-    const cookie = "__Secure-better-auth.two_factor=challenge";
+    const cookie = "__Host-opensuite.two_factor=challenge";
     limiter.remember({ email: "victim@example.test" }, [`${cookie}; Secure`]);
     for (let i = 0; i < 5; i++)
       expect(

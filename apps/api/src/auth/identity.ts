@@ -1,11 +1,21 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
-import { twoFactor } from "better-auth/plugins";
+import { oneTimeToken, twoFactor } from "better-auth/plugins";
+
+/**
+ * `__Host-` cookies cannot carry a Domain attribute, so a sibling subdomain
+ * cannot plant a cookie of the same name for these origins (RFC 6265bis
+ * section 4.1.3.2). Better Auth only adds `__Secure-` itself, hence the
+ * explicit prefix with its own secure-cookie switch off and Secure forced.
+ */
+export const authCookiePrefix = "__Host-opensuite";
 
 /** Trusted composition supplies an adapter and lifecycle callbacks. */
 export interface IdentityDependencies {
   readonly database: object;
   readonly publicOrigin: string;
+  /** Exact origins of the mail, drive and calendar applications. */
+  readonly trustedOrigins?: readonly string[];
   readonly secret: string;
   readonly provision: (user: { id: string; email: string }) => Promise<void>;
   readonly mayStartSession: (userId: string) => Promise<boolean>;
@@ -22,7 +32,12 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
         provider: "postgresql",
         transaction: true,
       }),
-      trustedOrigins: [dependencies.publicOrigin],
+      trustedOrigins: [
+        ...new Set([
+          dependencies.publicOrigin,
+          ...(dependencies.trustedOrigins ?? []),
+        ]),
+      ],
       // Provisioning runs after the user transaction commits. A session is only
       // issued by a later sign-in after the mailbox link has been checked.
       emailAndPassword: {
@@ -31,13 +46,20 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
         minPasswordLength: 12,
         autoSignIn: false,
       },
-      plugins: [twoFactor()],
+      // Sibling applications receive the signed-in session through a
+      // single-use, one-minute token; cookies stay host-only on each origin.
+      plugins: [
+        twoFactor(),
+        oneTimeToken({ expiresIn: 1, storeToken: "hashed" }),
+      ],
       advanced: {
-        useSecureCookies: true,
+        useSecureCookies: false,
+        cookiePrefix: authCookiePrefix,
         defaultCookieAttributes: {
           httpOnly: true,
           secure: true,
           sameSite: "lax",
+          path: "/",
         },
       },
       databaseHooks: {

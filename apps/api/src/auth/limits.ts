@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { authCookiePrefix } from "./identity.ts";
 
 type Bucket = { count: number; until: number };
 const EmailBody = z.object({ email: z.email() });
@@ -11,7 +12,7 @@ const challengeValues = (cookie: string | undefined) =>
   (cookie ?? "")
     .split(";")
     .map((part) => part.trim())
-    .filter((part) => part.split("=")[0] === "__Secure-better-auth.two_factor");
+    .filter((part) => part.split("=")[0] === `${authCookiePrefix}.two_factor`);
 const challengeCookie = (cookie: string | undefined): string | undefined => {
   const values = challengeValues(cookie);
   const value = values.length === 1 ? values[0] : undefined;
@@ -19,6 +20,27 @@ const challengeCookie = (cookie: string | undefined): string | undefined => {
     ? undefined
     : createHash("sha256").update(value).digest("hex");
 };
+
+const cookieNames = (cookie: string | undefined) =>
+  (cookie ?? "")
+    .split(";")
+    .map((part) => part.trim().split("=")[0] ?? "")
+    .filter(Boolean);
+/** Two values for one authentication cookie mean a planted cookie. */
+export const hasDuplicateAuthCookie = (cookie: string | undefined) => {
+  const names = cookieNames(cookie).filter((name) =>
+    name.startsWith(`${authCookiePrefix}.`),
+  );
+  return new Set(names).size !== names.length;
+};
+/** Cookies from the previous `__Secure-` naming, ignored and then cleared. */
+export const legacyAuthCookies = (cookie: string | undefined) => [
+  ...new Set(
+    cookieNames(cookie).filter((name) =>
+      name.startsWith("__Secure-better-auth."),
+    ),
+  ),
+];
 
 /** In-memory single-node limits. State resets on restart and is not shared. */
 export const createAuthLimiter = (now: () => number = Date.now) => {

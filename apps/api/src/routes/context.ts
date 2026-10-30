@@ -1,6 +1,7 @@
 import type { SetupStatus } from "@opensuite/contracts";
 import type { DomainService } from "./domains.ts";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
+import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { FastifyBaseLogger } from "fastify";
@@ -17,6 +18,9 @@ export interface ApiContext {
       }
     | undefined;
   readonly mail: MailService | undefined;
+  /** Public origin of each application when they are served separately. */
+  readonly productOrigins: Readonly<Record<string, string>>;
+  readonly calendar: CalendarService | undefined;
   readonly downloads: {
     issue(
       userId: string,

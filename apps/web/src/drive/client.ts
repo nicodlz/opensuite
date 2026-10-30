@@ -2,13 +2,16 @@ import {
   driveContract,
   DriveCommandSchema,
   DriveOutputSchema,
+  DRIVE_MIN_PART_SIZE,
+  DRIVE_MAX_FILE_SIZE,
+  drivePartSize,
 } from "@opensuite/contracts";
 import type { DriveCommand, DriveOutput } from "@opensuite/contracts";
 import { createORPCClient } from "@orpc/client";
 import type { ContractRouterClient } from "@orpc/contract";
 import { OpenAPILink } from "@orpc/openapi-client/fetch";
 import { hashFile } from "./hash.ts";
-import { contentType, PART_SIZE } from "./model.ts";
+import { contentType } from "./model.ts";
 
 const link = new OpenAPILink(driveContract, {
   url: `${window.location.origin}/drive/api`,
@@ -85,12 +88,13 @@ export async function uploadFile(
   signal: AbortSignal,
   progress: (phase: string, fraction: number) => void,
 ) {
-  if (file.size > 5_000_000_000)
-    throw new Error("Files must be 5 GB or smaller.");
+  if (file.size > DRIVE_MAX_FILE_SIZE)
+    throw new Error("File exceeds the maximum supported size.");
   const checksum = await hashFile(file, signal, (fraction) =>
     progress("Checking file", fraction),
   );
-  const multipart = file.size > PART_SIZE;
+  const multipart = file.size > DRIVE_MIN_PART_SIZE;
+  const partSize = drivePartSize(file.size);
   const type = contentType(file);
   signal.throwIfAborted();
   const reservation = await command({
@@ -109,17 +113,19 @@ export async function uploadFile(
     signal.throwIfAborted();
     if (multipart) {
       const parts: { partNumber: number; etag: string }[] = [];
-      const uploadPart = async (
-        offset: number,
-        partNumber: number,
-      ): Promise<void> => {
-        if (offset >= file.size) return;
+      await Array.from(
+        { length: Math.ceil(file.size / partSize) },
+        (_, index) => index,
+      ).reduce<Promise<void>>(async (previous, index) => {
+        await previous;
+        const offset = index * partSize;
+        const partNumber = index + 1;
         signal.throwIfAborted();
         const part = await command({ action: "part", id, partNumber });
         if (!("url" in part) || !part.url) throw new Error("Missing part URL");
         const etag = await driveTransport.put(
           part.url,
-          file.slice(offset, offset + PART_SIZE),
+          file.slice(offset, offset + partSize),
           null,
           signal,
           (loaded) => progress("Uploading", (offset + loaded) / file.size),
@@ -129,9 +135,7 @@ export async function uploadFile(
             "Storage did not expose the part ETag. Check storage CORS settings.",
           );
         parts.push({ partNumber, etag });
-        await uploadPart(offset + PART_SIZE, partNumber + 1);
-      };
-      await uploadPart(0, 1);
+      }, Promise.resolve());
       signal.throwIfAborted();
       progress("Finalizing", 1);
       await command({ action: "finish", id, parts });

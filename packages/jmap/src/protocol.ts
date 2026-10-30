@@ -6,6 +6,7 @@ export const JmapCapability = {
   mail: "urn:ietf:params:jmap:mail",
   submission: "urn:ietf:params:jmap:submission",
   blob: "urn:ietf:params:jmap:blob",
+  calendars: "urn:ietf:params:jmap:calendars",
   management: "urn:stalwart:jmap",
 } as const;
 

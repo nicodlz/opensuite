@@ -61,6 +61,22 @@ export function createAuthClient(fetcher: typeof fetch = fetch) {
     async disable(password: string) {
       await request("two-factor/disable", { password });
     },
+    /** Asks the sign-in origin for a token valid on one sibling origin. */
+    async handoff(target: string) {
+      const response = await fetcher("/api/session/handoff", {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
+      if (!response.ok)
+        throw new AuthError(response.status, "Could not continue sign-in.");
+      return z.object({ token: z.string() }).parse(await response.json()).token;
+    },
+    async redeem(token: string) {
+      await request("one-time-token/verify", { token });
+    },
   };
 }
 const live = createAuthClient();

@@ -4,11 +4,43 @@ import type {
   Message,
   ThreadSummary,
 } from "@opensuite/contracts";
-export function formatDate(value: string) {
+/** List date: time today, day and month this year, full date otherwise. */
+export function formatDate(value: string, now = new Date()) {
+  const date = new Date(value);
+  const sameDay = date.toDateString() === now.toDateString();
+  return new Intl.DateTimeFormat(
+    undefined,
+    sameDay
+      ? { hour: "numeric", minute: "2-digit" }
+      : date.getFullYear() === now.getFullYear()
+        ? { month: "short", day: "numeric" }
+        : { year: "numeric", month: "short", day: "numeric" },
+  ).format(date);
+}
+export function formatFullDate(value: string) {
   return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    year: "numeric",
     month: "short",
     day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   }).format(new Date(value));
+}
+const emailPattern = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+/** Split a comma or semicolon separated recipient field. */
+export function parseAddresses(value: string) {
+  const parts = value
+    .split(/[,;]/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => /<([^>]+)>\s*$/.exec(part)?.[1]?.trim() ?? part);
+  return {
+    addresses: parts
+      .filter((email) => emailPattern.test(email))
+      .map((email) => ({ email })),
+    invalid: parts.filter((email) => !emailPattern.test(email)),
+  };
 }
 export function initials(value: string) {
   return (

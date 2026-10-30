@@ -15,6 +15,7 @@ export const buildServer = (
   storage: Storage,
   sessions: SessionVerifier,
   readiness?: ReadinessService,
+  trustedOrigins?: readonly string[],
 ) => {
   const app = Fastify({
     logger: true,
@@ -23,6 +24,20 @@ export const buildServer = (
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("x-request-id", request.id);
     done();
+  });
+  // Session cookies are SameSite=Lax, which does not separate sibling
+  // subdomains. Refuse writes whose Origin is not an application origin.
+  app.addHook("onRequest", async (request, reply) => {
+    if (
+      trustedOrigins !== undefined &&
+      request.method !== "GET" &&
+      request.method !== "HEAD" &&
+      !trustedOrigins.includes(request.headers.origin ?? "")
+    )
+      return reply
+        .code(403)
+        .send({ code: "FORBIDDEN", message: "Invalid origin" });
+    return undefined;
   });
   app.addHook("onResponse", (request, reply, done) => {
     request.log.info(

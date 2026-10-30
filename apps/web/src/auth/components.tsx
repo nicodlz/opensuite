@@ -8,7 +8,9 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { activeLayout } from "../origins.ts";
 import { auth, AuthError } from "./client.ts";
+import { returnKey, startHandoff } from "./handoff.tsx";
 import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import {
@@ -33,13 +35,27 @@ export function Protected({ children }: { children: ReactNode }) {
   const session = useQuery(sessionQuery);
   const navigate = useNavigate();
   const hadSession = useRef(false);
+  const [stuck, setStuck] = useState(false);
   useEffect(() => {
     if (session.data) hadSession.current = true;
     if (session.isSuccess && session.data === null) {
-      if (hadSession.current) expireSession();
+      const layout = activeLayout();
+      if (layout.split && layout.host !== "mail") {
+        // Sibling origins obtain their session from the sign-in origin.
+        if (!startHandoff()) setStuck(true);
+      } else if (hadSession.current) expireSession();
       else void navigate({ to: "/login" });
     }
   }, [session.isSuccess, session.data, navigate]);
+  if (stuck)
+    return (
+      <main className="auth-loading" role="alert">
+        Could not sign you in automatically.{" "}
+        <Button asChild>
+          <a href={`${activeLayout().hub}/login`}>Sign in</a>
+        </Button>
+      </main>
+    );
   if (session.isPending)
     return <main className="auth-loading">Checking your session…</main>;
   if (session.isError)
@@ -76,6 +92,12 @@ export function LoginPage() {
   });
   const client = useQueryClient();
   const navigate = useNavigate();
+  useEffect(() => {
+    // Only the sign-in origin shows the sign-in form.
+    const layout = activeLayout();
+    if (layout.split && layout.host !== "mail")
+      window.location.replace(`${layout.hub}/login`);
+  }, []);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -94,6 +116,12 @@ export function LoginPage() {
       if (session === null)
         throw new Error("Could not establish a session. Please sign in again.");
       client.setQueryData(sessionKey, session);
+      const pending = sessionStorage.getItem(returnKey);
+      sessionStorage.removeItem(returnKey);
+      if (pending?.startsWith("/auth/handoff?")) {
+        window.location.assign(pending);
+        return;
+      }
       void navigate({ to: "/mail" });
     } catch (failure) {
       setError(errorMessage(failure));
@@ -177,7 +205,7 @@ export function LoginPage() {
     </main>
   );
 }
-export function AccountMenu() {
+export function AccountMenu({ children }: { children?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -241,12 +269,21 @@ export function AccountMenu() {
     <>
       <DropdownMenu>
         <DropdownTrigger asChild>
-          <Button variant="ghost" size="small" aria-label="Account menu">
-            Account ⌄
+          <Button
+            variant="ghost"
+            size="small"
+            className="shell-avatar-button"
+            aria-label="Account menu"
+          >
+            <span className="avatar" aria-hidden="true">
+              {(session.data?.user.email ?? "?").charAt(0).toUpperCase()}
+            </span>
           </Button>
         </DropdownTrigger>
         <DropdownContent>
-          <div className="menu-label">{session.data?.user.email}</div>
+          <div className="menu-label menu-account">
+            {session.data?.user.email}
+          </div>
           <DropdownItem
             className="menu-item"
             onSelect={() => {
@@ -257,6 +294,13 @@ export function AccountMenu() {
           >
             Account security
           </DropdownItem>
+          {children && (
+            <>
+              <div className="menu-separator" />
+              {children}
+              <div className="menu-separator" />
+            </>
+          )}
           <DropdownItem
             className="menu-item"
             onSelect={() => {

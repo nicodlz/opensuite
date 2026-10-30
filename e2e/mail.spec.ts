@@ -88,7 +88,8 @@ test("archive, delete and move support undo", async ({ page }) => {
   await page.getByRole("button", { name: "Undo" }).click();
   await expect(page.getByRole("button", { name: /Maya Chen/ })).toBeVisible();
   await page.getByRole("button", { name: /Maya Chen/ }).click();
-  await page.getByLabel("Move to folder").selectOption("sent");
+  await page.getByRole("button", { name: "Move to folder" }).click();
+  await page.getByRole("menuitem", { name: "Sent" }).click();
   await page.getByRole("button", { name: "Undo" }).click();
   await expect(page.getByRole("button", { name: /Maya Chen/ })).toBeVisible();
 });
@@ -99,7 +100,7 @@ test("mobile reading and back navigation", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "A little update for Friday" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "← Back" }).click();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(page.getByRole("button", { name: /Maya Chen/ })).toBeVisible();
   await axe(page);
 });
@@ -164,7 +165,9 @@ test("multiple drafts can be saved, reopened and sent with an attachment", async
     mimeType: "text/plain",
     buffer: Buffer.from("example attachment"),
   });
-  await expect(first.getByText("1 attachment(s)")).toBeVisible();
+  await expect(
+    first.getByRole("list", { name: "Attachments" }).getByText("note.txt"),
+  ).toBeVisible();
   await first.getByRole("button", { name: "Minimize draft" }).click();
   await expect(
     first.getByRole("button", { name: "Restore draft" }),
@@ -222,4 +225,59 @@ test("plain-text messages preserve literal markup and line breaks", async ({
   await expect(body).toContainText("Plain text with <b>literal markup</b>");
   await expect(body.locator("b")).toHaveCount(0);
   await expect(body.locator("br")).toHaveCount(1);
+});
+
+test("bulk selection, quick row actions and the large composer", async ({
+  page,
+}) => {
+  await page.goto("/mail");
+  const list = page.getByRole("region", { name: "Conversations" });
+  await expect(list.getByRole("button", { name: /Maya Chen/ })).toBeVisible();
+  await list
+    .getByRole("checkbox", { name: "Select all conversations" })
+    .check();
+  await expect(list.getByText("3 selected")).toBeVisible();
+  await list.getByRole("button", { name: "Mark selected as read" }).click();
+  await page.keyboard.press("Escape");
+  await expect(list.getByText("3 selected")).toHaveCount(0);
+  await expect(list.getByText("3 conversations")).toBeVisible();
+  await list.getByRole("button", { name: /Alex Rivera/ }).hover();
+  await list
+    .getByRole("listitem")
+    .filter({ hasText: "Alex Rivera" })
+    .getByRole("button", { name: "Archive conversation" })
+    .click();
+  await expect(list.getByRole("button", { name: /Alex Rivera/ })).toHaveCount(
+    0,
+  );
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(list.getByRole("button", { name: /Alex Rivera/ })).toBeVisible();
+
+  await page.keyboard.press("c");
+  const composer = page.getByRole("region", { name: "Compose message" });
+  await expect(composer.getByLabel("To", { exact: true })).toBeFocused();
+  const box = await composer.boundingBox();
+  expect(box?.width).toBeGreaterThan(600);
+  expect(box?.height).toBeGreaterThan(600);
+  await composer.getByLabel("To", { exact: true }).fill("not-an-address");
+  await composer.getByRole("button", { name: /Send/ }).click();
+  await expect(composer.getByText(/Check these addresses/)).toBeVisible();
+  const drop = await page.evaluateHandle(() => {
+    const data = new DataTransfer();
+    data.items.add(new File(["hello"], "dropped.txt", { type: "text/plain" }));
+    return data;
+  });
+  await composer.dispatchEvent("dragenter", { dataTransfer: drop });
+  await composer.dispatchEvent("drop", { dataTransfer: drop });
+  await expect(
+    composer
+      .getByRole("list", { name: "Attachments" })
+      .getByText("dropped.txt"),
+  ).toBeVisible();
+  await composer.getByRole("button", { name: "Maximize draft" }).click();
+  const expanded = await composer.boundingBox();
+  expect(expanded?.width).toBeGreaterThan(1000);
+  await composer.getByLabel("Message body").press("Escape");
+  await composer.getByRole("button", { name: "Discard draft" }).click();
+  await expect(composer).toHaveCount(0);
 });

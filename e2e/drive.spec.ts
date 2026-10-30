@@ -10,6 +10,19 @@ async function checkAxe(page: Page) {
     ),
   ).toEqual([]);
 }
+function osFiles(page: Page, names: string[]) {
+  return page.evaluateHandle((list) => {
+    const transfer = new DataTransfer();
+    for (const name of list)
+      transfer.items.add(new File([name], name, { type: "text/plain" }));
+    return transfer;
+  }, names);
+}
+function row(page: Page, name: string) {
+  return page.locator(".drive-item", {
+    has: page.getByRole("button", { name, exact: true }),
+  });
+}
 const themes: ("light" | "dark")[] = ["light", "dark"];
 for (const theme of themes) {
   test(`${theme} Drive navigation and accessibility`, async ({ page }) => {
@@ -198,4 +211,132 @@ test("guarded preview, permanent deletion and cancellation", async ({
   await expect(
     page.getByRole("toolbar").getByRole("button", { name: "Preview" }),
   ).toBeDisabled();
+});
+
+test("OS files dropped on the page, a folder row or a breadcrumb upload there", async ({
+  page,
+}) => {
+  await page.goto("/drive");
+  await expect(
+    page.getByRole("button", { name: "Projects, folder" }),
+  ).toBeVisible();
+  const files = await osFiles(page, ["dropped.txt", "second.txt"]);
+  const heading = page.getByRole("heading", { name: "My drive" });
+  await heading.dispatchEvent("dragenter", { dataTransfer: files });
+  await heading.dispatchEvent("dragover", { dataTransfer: files });
+  await expect(
+    page.getByText("Drop files to upload to My drive"),
+  ).toBeVisible();
+  await heading.dispatchEvent("drop", { dataTransfer: files });
+  await expect(page.getByText("Drop files to upload to My drive")).toHaveCount(
+    0,
+  );
+  await expect(page.getByText("Files uploaded.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "second.txt, file" }),
+  ).toBeVisible();
+
+  const single = await osFiles(page, ["into-folder.txt"]);
+  const projects = row(page, "Projects, folder");
+  await projects.dispatchEvent("dragenter", { dataTransfer: single });
+  await projects.dispatchEvent("dragover", { dataTransfer: single });
+  await expect(projects).toHaveClass(/drop-target/);
+  await expect(
+    page.getByText("Drop files to upload to Projects"),
+  ).toBeVisible();
+  await projects.dispatchEvent("drop", { dataTransfer: single });
+  await expect(page.getByText("File uploaded to Projects.")).toBeVisible();
+  await expect(projects).not.toHaveClass(/drop-target/);
+  await expect(
+    page.getByRole("button", { name: "into-folder.txt, file" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Projects, folder" }).dblclick();
+  await expect(
+    page.getByRole("button", { name: "into-folder.txt, file" }),
+  ).toBeVisible();
+
+  const up = await osFiles(page, ["to-root.txt"]);
+  const crumb = page
+    .getByRole("navigation", { name: "Breadcrumb" })
+    .getByRole("button", { name: "My drive" });
+  await crumb.dispatchEvent("dragenter", { dataTransfer: up });
+  await crumb.dispatchEvent("dragover", { dataTransfer: up });
+  await expect(crumb).toHaveClass(/drop-target/);
+  await crumb.dispatchEvent("drop", { dataTransfer: up });
+  await expect(page.getByText("File uploaded to My drive.")).toBeVisible();
+  await crumb.click();
+  await expect(
+    page.getByRole("button", { name: "to-root.txt, file" }),
+  ).toBeVisible();
+});
+
+test("dragging items moves them, trashes them and refuses invalid drops", async ({
+  page,
+}) => {
+  await page.goto("/drive");
+  const pdf = page.getByRole("button", { name: "Welcome to Drive.pdf, file" });
+  await pdf.dragTo(page.getByRole("button", { name: "Photos, folder" }));
+  await expect(
+    page.getByText("Moved Welcome to Drive.pdf to Photos."),
+  ).toBeVisible();
+  await expect(pdf).toHaveCount(0);
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("Move undone.")).toBeVisible();
+  await expect(pdf).toBeVisible();
+
+  await page.getByLabel("Choose files to upload").setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("notes"),
+  });
+  await expect(page.getByText("File uploaded.")).toBeVisible();
+  await pdf.click();
+  await page
+    .getByRole("button", { name: "notes.txt, file" })
+    .click({ modifiers: ["ControlOrMeta"] });
+  await expect(
+    page.getByRole("toolbar", { name: "Actions for 2 items" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Select notes.txt")).toBeChecked();
+  await checkAxe(page);
+  await page
+    .getByRole("button", { name: "notes.txt, file" })
+    .dragTo(page.getByRole("button", { name: "Projects", exact: true }));
+  await expect(page.getByText("Moved 2 items to Projects.")).toBeVisible();
+  await expect(pdf).toHaveCount(0);
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(pdf).toBeVisible();
+
+  await pdf.dragTo(page.getByRole("button", { name: "Trash", exact: true }));
+  await expect(page.getByText("Moved to trash.")).toBeVisible();
+  await expect(pdf).toHaveCount(0);
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("Item restored.")).toBeVisible();
+  await expect(pdf).toBeVisible();
+
+  const drag = await page.evaluateHandle(() => new DataTransfer());
+  const projects = row(page, "Projects, folder");
+  await projects.dispatchEvent("dragstart", { dataTransfer: drag });
+  await projects.dispatchEvent("dragover", { dataTransfer: drag });
+  await expect(projects).toHaveClass(/drop-refused/);
+  await projects.dispatchEvent("drop", { dataTransfer: drag });
+  await expect(
+    page.getByText("A folder cannot be moved into itself"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Projects, folder" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+  await expect(page.getByText("Trash is empty")).toBeVisible();
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "New folder" }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "My drive", exact: true }).click();
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await checkAxe(page);
+  await page.getByRole("menuitem", { name: "New folder" }).click();
+  await expect(page.getByRole("dialog", { name: "New folder" })).toBeVisible();
 });

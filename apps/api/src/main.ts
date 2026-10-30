@@ -5,6 +5,7 @@ import {
   createDomainStore,
   createMailboxStore,
 } from "@opensuite/db";
+import { createCalendarService } from "@opensuite/core/services/calendar";
 import { createMailService } from "@opensuite/core/services/mail";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
@@ -76,6 +77,13 @@ const mail = createMailService({
   },
   origin: authConfig.value.stalwartOrigin,
 });
+const calendar = createCalendarService({
+  store: {
+    getForOwner: async (userId, accountId) =>
+      mailboxStore.getForOwner(userId, accountId),
+  },
+  origin: authConfig.value.stalwartOrigin,
+});
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
 const app = await buildServer({
@@ -106,6 +114,7 @@ const app = await buildServer({
   accounts: auth.accounts,
   ...(domains === undefined ? {} : { domains }),
   mail,
+  calendar,
 });
 const stopDomainJob =
   domains === undefined

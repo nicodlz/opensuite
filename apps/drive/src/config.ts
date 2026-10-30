@@ -18,6 +18,24 @@ const Env = z.object({
   DRIVE_S3_ACCESS_KEY: z.string().min(1),
   DRIVE_S3_SECRET_KEY: z.string().min(1),
   DRIVE_S3_PATH_STYLE: z.enum(["true", "false"]).default("true"),
+  // Exact origins whose pages may send state-changing requests.
+  DRIVE_TRUSTED_ORIGINS: z
+    .string()
+    .transform((value) => value.split(/[\s,]+/).filter(Boolean))
+    .pipe(
+      z
+        .array(
+          z.url().refine((origin) => {
+            const url = new URL(origin);
+            return (
+              ["http:", "https:"].includes(url.protocol) &&
+              url.origin === origin &&
+              !url.hostname.includes("*")
+            );
+          }),
+        )
+        .min(1),
+    ),
   DRIVE_QUOTA_BYTES: z.coerce
     .number()
     .int()

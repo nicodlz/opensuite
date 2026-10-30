@@ -24,6 +24,11 @@ const name = z
   );
 const parentId = id.nullable();
 const checksum = z.string().regex(/^[a-f0-9]{64}$/);
+export const DRIVE_MIN_PART_SIZE = 5 * 1024 * 1024;
+export const DRIVE_MAX_PARTS = 10_000;
+export const DRIVE_MAX_FILE_SIZE = DRIVE_MAX_PARTS * 5 * 1024 * 1024 * 1024;
+export const drivePartSize = (size: number) =>
+  Math.max(DRIVE_MIN_PART_SIZE, Math.ceil(size / DRIVE_MAX_PARTS));
 export const DriveCommandSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("list"),
@@ -36,7 +41,7 @@ export const DriveCommandSchema = z.discriminatedUnion("action", [
     action: z.literal("upload"),
     name,
     parentId,
-    size: z.number().int().nonnegative().max(5_000_000_000),
+    size: z.number().int().nonnegative().max(DRIVE_MAX_FILE_SIZE),
     checksum,
     contentType: z
       .string()

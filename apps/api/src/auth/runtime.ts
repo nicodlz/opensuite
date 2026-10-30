@@ -19,6 +19,7 @@ import { createIdentity } from "./identity.ts";
 
 interface RuntimeConfig {
   readonly publicOrigin: string;
+  readonly productOrigins?: Readonly<Record<string, string>>;
   readonly mailDomain: string;
   readonly stalwartOrigin: string;
   readonly secret: string;
@@ -36,6 +37,12 @@ export const createAuthRuntime = (
   config: RuntimeConfig,
   fetcher: typeof fetch = fetch,
 ) => {
+  const productOrigins = config.productOrigins ?? {
+    mail: config.publicOrigin,
+  };
+  const trustedOrigins = [
+    ...new Set([config.publicOrigin, ...Object.values(productOrigins)]),
+  ];
   const accounts = createAccountStore(db);
   const storeResult = createProvisioningStore(db, config.mailboxKey);
   if (storeResult.isErr()) throw new Error("invalid mailbox encryption key");
@@ -133,6 +140,7 @@ export const createAuthRuntime = (
   const identity = createIdentity({
     database: db,
     publicOrigin: config.publicOrigin,
+    trustedOrigins: trustedOrigins,
     secret: config.secret,
     provision: async (user) => {
       const result = await provisioning.ensure(user.id);
@@ -181,6 +189,8 @@ export const createAuthRuntime = (
     identity: {
       handler: identity.handler,
       publicOrigin: config.publicOrigin,
+      trustedOrigins,
+      productOrigins,
       mailDomain: config.mailDomain,
       actor: async (headers: Headers) => {
         const session = await identity.api.getSession({

@@ -120,6 +120,9 @@ services:
       APP_DATABASE_PASSWORD_FILE: /run/opensuite/app-database/password
       TRUSTED_PROXY_IP: 172.28.254.2
       AUTH_PUBLIC_ORIGIN: https://${OPENSUITE_PUBLIC_HOST:-localhost}
+      # Optional separate application origins, e.g.
+      # drive=https://drive.example.org,calendar=https://calendar.example.org
+      AUTH_PRODUCT_ORIGINS: ${AUTH_PRODUCT_ORIGINS:-}
       MAIL_DOMAIN: ${MAIL_DOMAIN:-localhost.test}
       STALWART_INTERNAL_ORIGIN: http://stalwart-management:8080
       STALWART_MANAGEMENT_CLIENT_IP: ${MAIL_MANAGEMENT_API_IP:-172.30.248.10}
@@ -237,6 +240,8 @@ services:
       POSTGRES_DRIVE_DB: ${POSTGRES_DRIVE_DB:-opensuite_drive}
       DRIVE_DATABASE_PASSWORD_FILE: /run/opensuite/drive-database/password
       DRIVE_SESSION_API: ${DRIVE_SESSION_API:-http://api:3000}
+      # Every origin that serves the web application (space or comma separated).
+      DRIVE_TRUSTED_ORIGINS: ${DRIVE_TRUSTED_ORIGINS:-https://${OPENSUITE_PUBLIC_HOST:-localhost}}
       DRIVE_S3_ENDPOINT: ${DRIVE_S3_ENDPOINT:?set DRIVE_S3_ENDPOINT}
       DRIVE_S3_PUBLIC_ENDPOINT: ${DRIVE_S3_PUBLIC_ENDPOINT:?set DRIVE_S3_PUBLIC_ENDPOINT}
       DRIVE_S3_BUCKET: ${DRIVE_S3_BUCKET:?set DRIVE_S3_BUCKET}

@@ -66,6 +66,7 @@ const app = buildServer(
   storage,
   httpSessionVerifier(config.DRIVE_SESSION_API),
   readiness,
+  config.DRIVE_TRUSTED_ORIGINS,
 );
 let sweepTask: Promise<void> | undefined;
 const runSweep = async () => {

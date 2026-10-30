@@ -302,8 +302,10 @@ the owner.
 The oRPC endpoint `POST /drive/api/v1/command` accepts the discriminated actions
 in `packages/contracts/src/drive.ts`. Uploads reserve quota first and return a
 five-minute URL. Single uploads require the specified content type and length;
-multipart clients request consecutive 5 MiB parts (the last may be smaller),
-retain each ETag, and submit them to `finish`. Finalization streams and hashes
+multipart clients request consecutive parts of at least 5 MiB, sized to fit at
+most 10,000 parts (the last may be smaller), retain each ETag, and submit them
+to `finish`. Multipart reservations expire after 24 hours; each signed part URL
+still expires within five minutes. Finalization streams and hashes
 the complete object, checks size and content type, and copies it to a key which
 is never exposed for upload. Clients must calculate a hexadecimal SHA-256 first.
 Ready files and unexpired reservations, including trashed entries, count against
@@ -315,7 +317,7 @@ marks an upload failed, and finish attempts are limited to 10 per user per minut
 per Drive process (the in-memory limit resets on restart and is not shared across
 replicas). Pending and failed uploads can also be trashed and deleted.
 Configure storage lifecycle rules to clean orphaned `pending/` objects and
-incomplete multipart uploads; a still-valid signed URL can recreate a staging
+incomplete multipart uploads under both `pending/` and `objects/`; a still-valid signed URL can recreate a staging
 object after finalization. Monitor for orphaned objects and interrupted
 finalizations; automatic reconciliation is not implemented.
 

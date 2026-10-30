@@ -18,6 +18,7 @@ import { buildServer } from "../src/server.ts";
 const run = promisify(execFile);
 const container = `opensuite-auth-test-${randomUUID().slice(0, 8)}`;
 const origin = "https://suite.example.test";
+const calendarOrigin = "https://calendar.example.test";
 let app: FastifyInstance | undefined;
 let base: string;
 let databaseUrl: string;
@@ -77,6 +78,7 @@ beforeAll(async () => {
     const identity = createIdentity({
       database: db,
       publicOrigin: origin,
+      trustedOrigins: [calendarOrigin],
       secret: "test-secret-at-least-32-characters-long",
       provision: (user) => {
         provisioned.add(user.id);
@@ -121,6 +123,8 @@ beforeAll(async () => {
       identity: {
         handler: identity.handler,
         publicOrigin: origin,
+        trustedOrigins: [origin, calendarOrigin],
+        productOrigins: { mail: origin, calendar: calendarOrigin },
         actor: async (headers) => {
           const session = await identity.api.getSession({ headers });
           if (session === null) return null;
@@ -192,6 +196,189 @@ const post = (
     },
     body: JSON.stringify(body),
   });
+
+const cookieOf = (response: Response) =>
+  response.headers
+    .getSetCookie()
+    .map((item) => item.split(";")[0])
+    .join("; ");
+const session = async (cookie: string) =>
+  (await fetch(`${base}/auth/get-session`, { headers: { cookie } })).json();
+const handoff = (
+  cookie: string,
+  requestOrigin = origin,
+  target = calendarOrigin,
+) =>
+  fetch(`${base}/session/handoff`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: requestOrigin,
+      cookie,
+    },
+    body: JSON.stringify({ target }),
+  });
+
+describe("sign-in handoff to sibling application origins", () => {
+  it("issues origin-bound single-use tokens and shares sign-out", async () => {
+    const data = {
+      email: "handoff@example.test",
+      name: "Handoff",
+      password: "handoff-strong-password",
+    };
+    expect((await post("sign-up/email", data)).status).toBe(200);
+    const hubCookie = cookieOf(
+      await post("sign-in/email", {
+        email: data.email,
+        password: data.password,
+      }),
+    );
+    expect(hubCookie).toContain("session_token");
+
+    // Only the sign-in origin issues, only for a listed sibling, only when signed in.
+    expect((await handoff(hubCookie, calendarOrigin)).status).toBe(403);
+    expect(
+      (await handoff(hubCookie, origin, "https://evil.example.test")).status,
+    ).toBe(400);
+    expect((await handoff(hubCookie, origin, origin)).status).toBe(400);
+    expect((await handoff("", origin)).status).toBe(401);
+    expect(
+      (
+        await fetch(`${base}/auth/one-time-token/generate`, {
+          headers: { cookie: hubCookie },
+        })
+      ).status,
+    ).toBe(404);
+
+    const issued = await handoff(hubCookie);
+    expect(issued.status).toBe(200);
+    expect(issued.headers.get("cache-control")).toBe("no-store");
+    const { token } = z
+      .object({ token: z.string() })
+      .parse(await issued.json());
+
+    // Redemption from any other origin fails and burns the token.
+    const stolen = await post("one-time-token/verify", { token }, "", origin);
+    expect(stolen.status).toBe(400);
+    expect(
+      (await post("one-time-token/verify", { token }, "", calendarOrigin))
+        .status,
+    ).toBe(400);
+
+    const fresh = z
+      .object({ token: z.string() })
+      .parse(await (await handoff(hubCookie)).json()).token;
+    const redeemed = await post(
+      "one-time-token/verify",
+      { token: fresh },
+      "",
+      calendarOrigin,
+    );
+    expect(redeemed.status).toBe(200);
+    expect(await redeemed.json()).toEqual({ success: true });
+    const setCookie = redeemed.headers.getSetCookie().join("\n");
+    expect(setCookie).toMatch(/session_token=/);
+    expect(setCookie).toMatch(/HttpOnly/i);
+    expect(setCookie).toMatch(/Secure/i);
+    expect(setCookie).not.toMatch(/Domain=/i);
+    const calendarCookie = cookieOf(redeemed);
+    expect(await session(calendarCookie)).toMatchObject({
+      user: { email: data.email },
+    });
+    // Replay is refused.
+    expect(
+      (
+        await post(
+          "one-time-token/verify",
+          { token: fresh },
+          "",
+          calendarOrigin,
+        )
+      ).status,
+    ).toBe(400);
+
+    // Signing out on one origin revokes the session everywhere.
+    expect(
+      (await post("sign-out", {}, calendarCookie, calendarOrigin)).status,
+    ).toBe(200);
+    expect(await session(hubCookie)).toBeNull();
+    expect(await session(calendarCookie)).toBeNull();
+    expect((await handoff(hubCookie)).status).toBe(401);
+  });
+
+  it("expires unused tokens", async () => {
+    const { createHandoffRegistry } = await import("../src/auth/handoff.ts");
+    let clock = 0;
+    const registry = createHandoffRegistry(() => clock, 60_000);
+    registry.bind("token-a", calendarOrigin);
+    clock = 60_001;
+    expect(registry.consume("token-a", calendarOrigin)).toBe(false);
+    registry.bind("token-b", calendarOrigin);
+    expect(registry.consume("token-b", calendarOrigin)).toBe(true);
+    expect(registry.consume("token-b", calendarOrigin)).toBe(false);
+  });
+});
+
+describe("cookie isolation from sibling subdomains", () => {
+  it("uses __Host- cookies and ignores or refuses planted cookies", async () => {
+    const victim = {
+      email: "victim@example.test",
+      name: "Victim",
+      password: "victim-strong-password",
+    };
+    const attacker = {
+      email: "attacker@example.test",
+      name: "Attacker",
+      password: "attacker-strong-password",
+    };
+    for (const user of [victim, attacker])
+      expect((await post("sign-up/email", user)).status).toBe(200);
+    const signIn = await post("sign-in/email", {
+      email: victim.email,
+      password: victim.password,
+    });
+    const raw = signIn.headers.getSetCookie();
+    expect(raw.length).toBeGreaterThan(0);
+    for (const cookie of raw) {
+      // RFC 6265bis 4.1.3.2: __Host- requires Secure, Path=/ and no Domain.
+      expect(cookie).toMatch(/^__Host-opensuite\./);
+      expect(cookie).toMatch(/;\s*Secure/i);
+      expect(cookie).toMatch(/;\s*Path=\/(;|$)/i);
+      expect(cookie).not.toMatch(/Domain=/i);
+    }
+    const victimCookie = cookieOf(signIn);
+    const attackerCookie = cookieOf(
+      await post("sign-in/email", {
+        email: attacker.email,
+        password: attacker.password,
+      }),
+    );
+    const attackerValue = attackerCookie.split("=").slice(1).join("=");
+
+    // A parent-domain cookie can only use another name; it is ignored.
+    const planted = `__Secure-better-auth.session_token=${attackerValue}`;
+    expect(await session(planted)).toBeNull();
+    expect(await session(`${planted}; ${victimCookie}`)).toMatchObject({
+      user: { email: victim.email },
+    });
+    // Two values for one authentication cookie are refused everywhere.
+    const duplicate = `${victimCookie}; __Host-opensuite.session_token=${attackerValue}`;
+    for (const path of ["/auth/get-session", "/account/me"]) {
+      const response = await fetch(`${base}${path}`, {
+        headers: { cookie: duplicate },
+      });
+      expect(response.status).toBe(400);
+    }
+    expect((await handoff(duplicate)).status).toBe(400);
+    // Legacy cookies on this host are cleared on the next auth response.
+    const cleared = await fetch(`${base}/auth/get-session`, {
+      headers: { cookie: `${planted}; ${victimCookie}` },
+    });
+    expect(cleared.headers.getSetCookie().join("\n")).toMatch(
+      /__Secure-better-auth\.session_token=; Max-Age=0/,
+    );
+  });
+});
 
 describe("identity over HTTP", () => {
   it("disables sign-up on the public Better Auth handler", () => {
@@ -532,17 +719,18 @@ describe("identity over HTTP", () => {
       .getSetCookie()
       .map((item) => item.split(";")[0])
       .join("; ");
+    expect(challengeCookie).toContain("__Host-opensuite.two_factor=");
+    // No sibling-origin token before the second factor is verified.
+    expect((await handoff(challengeCookie)).status).toBe(401);
     const backup = parsed.backupCodes[0];
     if (backup === undefined) throw new Error("Backup code missing");
-    expect(
-      (
-        await post(
-          "two-factor/verify-backup-code",
-          { code: backup },
-          challengeCookie,
-        )
-      ).status,
-    ).toBe(200);
+    const verified = await post(
+      "two-factor/verify-backup-code",
+      { code: backup },
+      challengeCookie,
+    );
+    expect(verified.status).toBe(200);
+    expect((await handoff(cookieOf(verified))).status).toBe(200);
     const result = createDatabase(databaseUrl);
     if (result.isErr()) throw new Error("database unavailable");
     try {

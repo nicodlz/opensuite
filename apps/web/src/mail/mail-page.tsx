@@ -1,222 +1,308 @@
-import { AccountMenu, expireSession } from "../auth/components.tsx";
 import * as React from "react";
-import { themeChoices, type ThemeChoice } from "@opensuite/design-tokens";
 import type {
-  Draft,
   DraftContent,
   MailAction,
   MailSearch,
   Message,
   ThreadSummary,
 } from "@opensuite/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { useEffect, useReducer, useRef, useState } from "react";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AppShell, SidebarItem } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
-import {
-  DropdownContent,
-  DropdownItemIndicator,
-  DropdownMenu,
-  DropdownRadioGroup,
-  DropdownRadioItem,
-  DropdownTrigger,
-} from "../ui/dropdown-menu.tsx";
+import { Icon, type IconName } from "../ui/icons.tsx";
 import { accountId, mailClient } from "./client.ts";
-import {
-  emptyDraft,
-  formatDate,
-  initials,
-  replyDraft,
-  selectionReducer,
-} from "./model.ts";
-import { sanitizeEmail } from "./sanitize.ts";
+import { Composer, type ComposerState } from "./composer.tsx";
+import { emptyDraft, replyDraft } from "./model.ts";
+import { ReadingPane } from "./reading-pane.tsx";
+import { ThreadRow } from "./thread-list.tsx";
 
-const key = ["mail", accountId];
-const folderIcons: Record<string, string> = {
-  inbox: "▣",
-  drafts: "▤",
-  sent: "➤",
-  archive: "▱",
-  trash: "♲",
-  work: "◇",
+const key = ["mail", accountId] as const;
+const threadKey = (id: string) => [...key, "thread", id] as const;
+const folderIcons: Record<string, IconName> = {
+  inbox: "inbox",
+  drafts: "draft",
+  sent: "send",
+  archive: "archive",
+  trash: "trash",
+  junk: "junk",
 };
-function themeInitial(): ThemeChoice {
-  const value = localStorage.getItem("opensuite-theme");
-  return value === "light" || value === "dark" ? value : "system";
+type ThreadPage = { threads: ThreadSummary[]; nextCursor: string | null };
+type Undo = { threadIds: string[]; mailboxId: string };
+const removes = (change: MailAction) =>
+  change.type === "archive" ||
+  change.type === "trash" ||
+  change.type === "delete" ||
+  change.type === "move";
+
+function useDebounced<T>(value: T, delay: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
 }
-function splitAddresses(value: string) {
-  return value
-    .split(",")
-    .map((email) => email.trim())
-    .filter(Boolean)
-    .map((email) => ({ email }));
-}
-function contentOf(draft: Draft): DraftContent {
-  const { id: _id, ...content } = draft;
-  return content;
-}
+const isTyping = (target: EventTarget | null) =>
+  target instanceof HTMLElement &&
+  (target.isContentEditable ||
+    ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 
 export function MailPage() {
   const queryClient = useQueryClient();
-  const [theme, setTheme] = useState<ThemeChoice>(themeInitial);
   const [selectedFolder, setFolder] = useState("");
   const [search, setSearch] = useState("");
+  const query = useDebounced(search.trim(), 250);
   const [filters, setFilters] = useState<MailSearch>({});
   const [showFilters, setShowFilters] = useState(false);
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [cursor, setCursor] = useState<string | undefined>();
-  const [selected, dispatch] = useReducer(selectionReducer, null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
-  const [composers, setComposers] = useState<Draft[]>([]);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const lastChecked = useRef<string | null>(null);
+  const [composers, setComposers] = useState<ComposerState[]>([]);
+  const [minimized, setMinimized] = useState<Set<string>>(new Set());
   const [help, setHelp] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const [notice, setNotice] = useState("");
-  const [undo, setUndo] = useState<{
-    threadId: string;
-    mailboxId: string;
-  } | null>(null);
+  const [undo, setUndo] = useState<Undo | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (theme === "system") delete document.documentElement.dataset["theme"];
-    else document.documentElement.dataset["theme"] = theme;
-    localStorage.setItem("opensuite-theme", theme);
-  }, [theme]);
+
   const identity = useQuery({
     queryKey: [...key, "identity"],
     queryFn: () => mailClient.identity({ accountId }),
+    staleTime: Infinity,
   });
   const mailboxes = useQuery({
     queryKey: [...key, "mailboxes"],
     queryFn: () => mailClient.mailboxes({ accountId }),
+    refetchInterval: 60_000,
   });
+  const boxes = mailboxes.data?.mailboxes ?? [];
   const folder =
-    selectedFolder ||
-    mailboxes.data?.mailboxes.find((item) => item.role === "inbox")?.id ||
-    "";
+    selectedFolder || boxes.find((item) => item.role === "inbox")?.id || "";
+  const current = boxes.find((item) => item.id === folder);
+  const isDrafts = current?.role === "drafts";
   const draftList = useQuery({
     queryKey: [...key, "drafts"],
     queryFn: () => mailClient.drafts({ accountId }),
+    enabled: isDrafts,
   });
-  const listKey = [...key, "threads", folder, search, filters, sort, cursor];
+  const searchInput: MailSearch = { ...filters, ...(query ? { query } : {}) };
+  const listKey = [...key, "threads", folder, searchInput, sort, cursor];
   const threads = useQuery({
     queryKey: listKey,
-    enabled: Boolean(folder),
+    enabled: Boolean(folder) && !isDrafts,
+    placeholderData: keepPreviousData,
+    refetchInterval: 60_000,
     queryFn: () =>
       mailClient.threads({
         accountId,
         mailboxId: folder,
-        limit: 30,
+        limit: 50,
         sort,
-        search: { ...filters, ...(search ? { query: search } : {}) },
+        search: searchInput,
         ...(cursor ? { cursor } : {}),
       }),
   });
-  const detail = useQuery({
-    queryKey: [...key, "thread", selected],
-    queryFn: () => {
-      if (!selected) throw new Error("No conversation selected");
-      return mailClient.thread({ accountId, threadId: selected });
-    },
-    enabled: Boolean(selected && reading),
-  });
   const list = threads.data?.threads ?? [];
-  const current = detail.data?.messages.at(-1);
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: key });
+  const fetchThread = useCallback(
+    (threadId: string) => mailClient.thread({ accountId, threadId }),
+    [],
+  );
+  const detail = useQuery({
+    queryKey: threadKey(selected ?? ""),
+    queryFn: () => fetchThread(selected ?? ""),
+    enabled: Boolean(selected && reading),
+    staleTime: 60_000,
+  });
+  const prefetch = useCallback(
+    (threadId: string) => {
+      void queryClient.prefetchQuery({
+        queryKey: threadKey(threadId),
+        queryFn: () => fetchThread(threadId),
+        staleTime: 60_000,
+      });
+    },
+    [queryClient, fetchThread],
+  );
+
+  const updateList = (threadIds: string[], change: MailAction) => {
+    const ids = new Set(threadIds);
+    queryClient.setQueryData<ThreadPage>(listKey, (previous) =>
+      previous
+        ? {
+            ...previous,
+            threads: previous.threads.flatMap((thread) => {
+              if (!ids.has(thread.id)) return [thread];
+              if (removes(change)) return [];
+              if (change.type === "read")
+                return [{ ...thread, unread: !change.value }];
+              if (change.type === "star")
+                return [{ ...thread, starred: change.value }];
+              return [{ ...thread, labels: change.labels }];
+            }),
+          }
+        : previous,
+    );
+  };
   const action = useMutation({
-    mutationFn: ({
-      threadId,
+    mutationFn: async ({
+      threadIds,
       change,
     }: {
-      threadId: string;
+      threadIds: string[];
       change: MailAction;
-    }) => mailClient.action({ accountId, threadId, action: change }),
-    onMutate: async ({ threadId, change }) => {
+    }) => {
+      const results = await Promise.allSettled(
+        threadIds.map((threadId) =>
+          mailClient.action({ accountId, threadId, action: change }),
+        ),
+      );
+      if (results.some((result) => result.status === "rejected"))
+        throw new Error("Action failed");
+    },
+    onMutate: async ({ threadIds, change }) => {
       await queryClient.cancelQueries({ queryKey: listKey });
-      const previous = queryClient.getQueryData<{
-        threads: ThreadSummary[];
-        nextCursor: string | null;
-      }>(listKey);
-      if (previous)
-        queryClient.setQueryData(listKey, {
-          ...previous,
-          threads: previous.threads.flatMap((thread) => {
-            if (thread.id !== threadId) return [thread];
-            if (
-              change.type === "archive" ||
-              change.type === "trash" ||
-              change.type === "delete" ||
-              change.type === "move"
-            )
-              return [];
-            if (change.type === "read")
-              return [{ ...thread, unread: !change.value }];
-            if (change.type === "star")
-              return [{ ...thread, starred: change.value }];
-            return [{ ...thread, labels: change.labels }];
-          }),
-        });
+      const previous = queryClient.getQueryData<ThreadPage>(listKey);
+      updateList(threadIds, change);
       return { previous };
     },
     onError: (_error, variables, context) => {
       if (context?.previous)
         queryClient.setQueryData(listKey, context.previous);
       setUndo(null);
-      if (
-        variables.change.type === "move" ||
-        variables.change.type === "archive" ||
-        variables.change.type === "trash" ||
-        variables.change.type === "delete"
-      ) {
-        dispatch({ type: "select", id: variables.threadId });
+      const first = variables.threadIds[0];
+      if (removes(variables.change) && first && variables.threadIds.length === 1) {
+        setSelected(first);
         setReading(true);
       }
       setNotice("Could not update the conversation. Please try again.");
     },
-    onSettled: () => invalidate(),
+    onSettled: (_data, _error, { change }) => {
+      void queryClient.invalidateQueries({ queryKey: [...key, "mailboxes"] });
+      if (change.type !== "read" && change.type !== "star")
+        void queryClient.invalidateQueries({ queryKey: [...key, "threads"] });
+    },
   });
-  async function compose(content: DraftContent = emptyDraft()) {
-    try {
-      const draft = await mailClient.createDraft({ accountId, draft: content });
-      setComposers((items) => [...items, draft]);
-      void invalidate();
-    } catch {
-      setNotice("Could not create a draft. Please try again.");
-    }
-  }
-  function openThread(id: string) {
-    dispatch({ type: "select", id });
-    setReading(true);
-    const thread = list.find((item) => item.id === id);
-    if (thread?.unread)
-      action.mutate({ threadId: id, change: { type: "read", value: true } });
-  }
-  function perform(change: MailAction) {
-    if (!selected) return;
-    if (
-      change.type === "archive" ||
-      change.type === "trash" ||
-      change.type === "delete" ||
-      change.type === "move"
-    ) {
+
+  function perform(threadIds: string[], change: MailAction) {
+    if (!threadIds.length) return;
+    if (removes(change)) {
+      const label =
+        threadIds.length > 1
+          ? `${threadIds.length} conversations`
+          : "Conversation";
       setUndo(
-        change.type === "delete"
-          ? null
-          : { threadId: selected, mailboxId: folder },
+        change.type === "delete" ? null : { threadIds, mailboxId: folder },
       );
       setNotice(
         change.type === "archive"
-          ? "Conversation archived."
+          ? `${label} archived.`
           : change.type === "trash"
-            ? "Conversation moved to trash."
+            ? `${label} moved to trash.`
             : change.type === "delete"
-              ? "Conversation deleted."
-              : "Conversation moved.",
+              ? `${label} deleted.`
+              : `${label} moved.`,
       );
-      setReading(false);
-      dispatch({ type: "select", id: null });
+      if (selected && threadIds.includes(selected)) {
+        // Keep the keyboard position on the following conversation.
+        const index = list.findIndex((thread) => thread.id === selected);
+        const rest = list.filter((thread) => !threadIds.includes(thread.id));
+        setSelected(rest[Math.min(index, rest.length - 1)]?.id ?? null);
+        setReading(false);
+      }
+      setChecked(new Set());
     }
-    action.mutate({ threadId: selected, change });
+    action.mutate({ threadIds, change });
   }
+  function request(threadIds: string[], change: MailAction) {
+    if (change.type === "delete") setConfirmDelete(threadIds);
+    else perform(threadIds, change);
+  }
+  function openThread(id: string) {
+    setSelected(id);
+    setReading(true);
+    const thread = list.find((item) => item.id === id);
+    if (thread?.unread) perform([id], { type: "read", value: true });
+  }
+  function step(direction: "next" | "previous") {
+    const index = list.findIndex((thread) => thread.id === selected);
+    const next =
+      list[
+        direction === "next"
+          ? Math.min(index + 1, list.length - 1)
+          : Math.max(index - 1, 0)
+      ];
+    if (!next) return;
+    if (reading) openThread(next.id);
+    else {
+      setSelected(next.id);
+      prefetch(next.id);
+    }
+  }
+  function compose(content: DraftContent = emptyDraft(), draftId?: string) {
+    const existing = draftId
+      ? composers.find((item) => item.draftId === draftId)
+      : undefined;
+    if (existing) {
+      setMinimized((value) => {
+        const next = new Set(value);
+        next.delete(existing.key);
+        return next;
+      });
+      return;
+    }
+    const state = {
+      key: crypto.randomUUID(),
+      draftId: draftId ?? null,
+      content,
+    };
+    // Keep at most two open windows; older ones collapse to their title bar.
+    setMinimized(
+      (value) =>
+        new Set([
+          ...value,
+          ...composers.slice(0, Math.max(0, composers.length - 1)).map((item) => item.key),
+        ]),
+    );
+    setComposers((items) => [...items, state]);
+  }
+  function reply(message: Message, mode: "reply" | "all" | "forward") {
+    compose(replyDraft(message, mode, identity.data?.address.email));
+  }
+  function selectFolder(id: string) {
+    setFolder(id);
+    setCursor(undefined);
+    setSelected(null);
+    setReading(false);
+    setChecked(new Set());
+  }
+  function toggleCheck(id: string, value: boolean, range: boolean) {
+    const next = new Set(checked);
+    const anchor = lastChecked.current;
+    if (range && anchor) {
+      const a = list.findIndex((thread) => thread.id === anchor);
+      const b = list.findIndex((thread) => thread.id === id);
+      if (a >= 0 && b >= 0)
+        for (const thread of list.slice(Math.min(a, b), Math.max(a, b) + 1))
+          if (value) next.add(thread.id);
+          else next.delete(thread.id);
+    } else if (value) next.add(id);
+    else next.delete(id);
+    lastChecked.current = id;
+    setChecked(next);
+  }
+
+  const selectedThread = list.find((thread) => thread.id === selected);
+  const targets = checked.size ? [...checked] : selected ? [selected] : [];
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (
@@ -224,1234 +310,721 @@ export function MailPage() {
         event.ctrlKey ||
         event.metaKey ||
         event.altKey ||
-        event.repeat ||
         help ||
-        composers.length
+        isTyping(event.target)
       )
         return;
-      const target = event.target;
       if (
-        target instanceof HTMLElement &&
-        (target.isContentEditable ||
-          ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
-          (target.tagName === "BUTTON" && event.key === "Enter"))
+        event.target instanceof HTMLElement &&
+        event.target.closest(".composer, [role=dialog], [role=menu]")
       )
         return;
-      switch (event.key) {
-        case "j":
-        case "k":
-          event.preventDefault();
-          dispatch({
-            type: event.key === "j" ? "next" : "previous",
-            threads: list,
-          });
-          setReading(false);
-          break;
-        case "Enter":
-          if (selected) {
-            event.preventDefault();
-            openThread(selected);
-          }
-          break;
-        case "e":
-          if (selected) {
-            event.preventDefault();
-            perform({ type: "archive" });
-          }
-          break;
-        case "#":
-          if (selected) {
-            event.preventDefault();
-            perform({ type: "trash" });
-          }
-          break;
-        case "r":
-        case "a":
-        case "f":
-          if (current) {
-            event.preventDefault();
-            void compose(
-              replyDraft(
-                current,
-                event.key === "r"
-                  ? "reply"
-                  : event.key === "a"
-                    ? "all"
-                    : "forward",
-                identity.data?.address.email,
-              ),
-            );
-          }
-          break;
-        case "c":
-          event.preventDefault();
-          void compose();
-          break;
-        case "/":
-          event.preventDefault();
-          searchRef.current?.focus();
-          break;
-        case "?":
-          event.preventDefault();
-          setHelp(true);
-          break;
-      }
+      const last = detail.data?.messages.at(-1);
+      const handlers: Record<string, () => void> = {
+        j: () => step("next"),
+        k: () => step("previous"),
+        Enter: () => selected && !reading && openThread(selected),
+        o: () => selected && openThread(selected),
+        u: () => setReading(false),
+        Escape: () => {
+          if (checked.size) setChecked(new Set());
+          else setReading(false);
+        },
+        x: () => selected && toggleCheck(selected, !checked.has(selected), false),
+        e: () => perform(targets, { type: "archive" }),
+        "#": () =>
+          request(targets, {
+            type: current?.role === "trash" ? "delete" : "trash",
+          }),
+        s: () =>
+          selectedThread &&
+          perform([selectedThread.id], {
+            type: "star",
+            value: !selectedThread.starred,
+          }),
+        U: () => perform(targets, { type: "read", value: false }),
+        I: () => perform(targets, { type: "read", value: true }),
+        r: () => last && reading && reply(last, "reply"),
+        a: () => last && reading && reply(last, "all"),
+        f: () => last && reading && reply(last, "forward"),
+        c: () => compose(),
+        "/": () => searchRef.current?.focus(),
+        "?": () => setHelp(true),
+      };
+      if (
+        event.key === "Enter" &&
+        event.target instanceof HTMLElement &&
+        event.target.tagName === "BUTTON"
+      )
+        return;
+      const handler = handlers[event.key];
+      if (!handler || event.repeat) return;
+      event.preventDefault();
+      handler();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   });
-  function selectFolder(id: string) {
-    setFolder(id);
-    setCursor(undefined);
-    dispatch({ type: "select", id: null });
-    setReading(false);
-  }
-  const folderName =
-    mailboxes.data?.mailboxes.find((item) => item.id === folder)?.name ??
-    "Mail";
+  useEffect(() => {
+    if (!notice || undo) return undefined;
+    const timer = window.setTimeout(() => setNotice(""), 6000);
+    return () => window.clearTimeout(timer);
+  }, [notice, undo]);
+  useEffect(() => {
+    document.title = current
+      ? `${current.name}${current.unread ? ` (${current.unread})` : ""} · OpenSuite Mail`
+      : "OpenSuite Mail";
+  }, [current]);
+
+  const filterCount = Object.values(filters).filter(
+    (value) => value !== undefined && value !== "",
+  ).length;
+  const position = {
+    index: list.findIndex((thread) => thread.id === selected),
+    total: list.length,
+  };
+  const allChecked = list.length > 0 && list.every((thread) => checked.has(thread.id));
+  const system = boxes.filter((item) => item.role !== "custom");
+  const custom = boxes.filter((item) => item.role === "custom");
   return (
-    <div className="mail-app">
-      <a href="#mail-main" className="skip-link">
-        Skip to content
-      </a>
-      <aside className="mail-sidebar">
-        <Link to="/mail" className="mail-brand">
-          <img src="/mark.svg" alt="" />
-          <span>OpenSuite</span>
-        </Link>
-        <details className="product-switcher">
-          <summary className="mail-product">
-            <span className="mail-product-icon">✉</span>
-            <span>
-              <strong>Mail</strong>
-              <small>Personal workspace</small>
-            </span>
-            <span aria-hidden="true">⌄</span>
-          </summary>
-          <nav aria-label="Products" className="product-switcher-menu">
-            <Link to="/calendar">Calendar</Link>
-            <Link to="/contacts">Contacts</Link>
-            <Link to="/drive">Drive</Link>
-            <Link to="/">System status</Link>
-          </nav>
-        </details>
-        <Button
-          className="mail-compose"
-          onClick={() => {
-            void compose();
-          }}
-        >
-          <span aria-hidden="true">＋</span> New message <kbd>C</kbd>
-        </Button>
-        <nav aria-label="Mail folders" className="mail-folders">
-          <p className="mail-nav-label">YOUR MAIL</p>
-          {mailboxes.data?.mailboxes
-            .filter((item) => item.role !== "custom")
-            .map((item) => (
-              <button
-                type="button"
-                key={item.id}
-                className={
-                  folder === item.id ? "mail-folder active" : "mail-folder"
-                }
-                aria-current={folder === item.id ? "page" : undefined}
-                onClick={() => selectFolder(item.id)}
-              >
-                <span aria-hidden="true">{folderIcons[item.role] ?? "▱"}</span>
-                <span>{item.name}</span>
-                {item.unread > 0 && <strong>{item.unread}</strong>}
-              </button>
-            ))}
-          <p className="mail-nav-label label-title">LABELS</p>
-          {mailboxes.data?.mailboxes
-            .filter((item) => item.role === "custom")
-            .map((item) => (
-              <button
-                type="button"
-                key={item.id}
-                className={
-                  folder === item.id ? "mail-folder active" : "mail-folder"
-                }
-                onClick={() => selectFolder(item.id)}
-              >
-                <span aria-hidden="true">◇</span>
-                <span>{item.name}</span>
-                {item.unread > 0 && <strong>{item.unread}</strong>}
-              </button>
-            ))}
+    <AppShell
+      product="mail"
+      mainId="mail-main"
+      mainClassName="mail-main"
+      primaryAction={{
+        label: "New message",
+        icon: "edit",
+        shortcut: "C",
+        onClick: () => compose(),
+      }}
+      sidebar={
+        <nav aria-label="Mail folders">
+          {mailboxes.isPending && (
+            <div className="sidebar-skeleton" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
+          {system.map((item) => (
+            <SidebarItem
+              key={item.id}
+              icon={folderIcons[item.role] ?? "drive"}
+              label={item.name}
+              count={item.role === "drafts" ? item.total : item.unread}
+              active={folder === item.id}
+              onClick={() => selectFolder(item.id)}
+            />
+          ))}
+          {custom.length > 0 && <p className="shell-nav-heading">Labels</p>}
+          {custom.map((item) => (
+            <SidebarItem
+              key={item.id}
+              icon="label"
+              label={item.name}
+              count={item.unread}
+              active={folder === item.id}
+              onClick={() => selectFolder(item.id)}
+            />
+          ))}
         </nav>
-        <div className="mail-sidebar-bottom">
-          <Link to="/calendar">▦ &nbsp; Calendar</Link>
-          <Link to="/contacts">♙ &nbsp; Contacts</Link>
-          <Link to="/drive">◇ &nbsp; Drive</Link>
-          <Link to="/">◉ &nbsp; System status</Link>
-        </div>
-      </aside>
-      <div className="mail-body">
-        <header className="mail-topbar">
-          <div className="mail-search">
-            <span aria-hidden="true">⌕</span>
+      }
+      search={
+        <div className="mail-search-wrap">
+          <div className="shell-searchbox">
+            <Icon name="search" />
             <label className="visually-hidden" htmlFor="mail-search">
               Search mail
             </label>
             <input
               ref={searchRef}
               id="mail-search"
+              type="search"
               value={search}
               onChange={(event) => {
                 setSearch(event.target.value);
                 setCursor(undefined);
               }}
-              placeholder="Search your mail"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setSearch("");
+                  event.currentTarget.blur();
+                }
+              }}
+              placeholder="Search mail"
+              autoComplete="off"
             />
+            {search && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => {
+                  setSearch("");
+                  searchRef.current?.focus();
+                }}
+              >
+                <Icon name="close" size={16} />
+              </button>
+            )}
             <button
               type="button"
               aria-label="Search filters"
+              aria-expanded={showFilters}
+              aria-pressed={filterCount > 0}
               onClick={() => setShowFilters(!showFilters)}
             >
-              ☷
+              <Icon name="filter" />
             </button>
           </div>
-          <div className="mail-top-actions">
-            <AccountMenu />
-            <Button
-              variant="ghost"
-              size="small"
-              aria-label="Keyboard shortcuts"
-              onClick={() => setHelp(true)}
-            >
-              ?
-            </Button>
-            <DropdownMenu>
-              <DropdownTrigger asChild>
+          {showFilters && (
+            <fieldset className="search-filters">
+              <legend className="visually-hidden">Search filters</legend>
+              <label>
+                From
+                <input
+                  value={filters.from ?? ""}
+                  onChange={(event) =>
+                    setFilters({ ...filters, from: event.target.value || undefined })
+                  }
+                />
+              </label>
+              <label>
+                To
+                <input
+                  value={filters.to ?? ""}
+                  onChange={(event) =>
+                    setFilters({ ...filters, to: event.target.value || undefined })
+                  }
+                />
+              </label>
+              <label>
+                After
+                <input
+                  type="date"
+                  value={filters.after?.slice(0, 10) ?? ""}
+                  onChange={(event) =>
+                    setFilters({
+                      ...filters,
+                      after: event.target.value
+                        ? `${event.target.value}T00:00:00.000Z`
+                        : undefined,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                Before
+                <input
+                  type="date"
+                  value={filters.before?.slice(0, 10) ?? ""}
+                  onChange={(event) =>
+                    setFilters({
+                      ...filters,
+                      before: event.target.value
+                        ? `${event.target.value}T23:59:59.999Z`
+                        : undefined,
+                    })
+                  }
+                />
+              </label>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={filters.unread === true}
+                  onChange={(event) =>
+                    setFilters({
+                      ...filters,
+                      unread: event.target.checked ? true : undefined,
+                    })
+                  }
+                />
+                Unread only
+              </label>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={filters.hasAttachment === true}
+                  onChange={(event) =>
+                    setFilters({
+                      ...filters,
+                      hasAttachment: event.target.checked ? true : undefined,
+                    })
+                  }
+                />
+                Has attachment
+              </label>
+              <div className="search-filter-actions">
                 <Button
                   variant="ghost"
                   size="small"
-                  aria-label="Account and appearance menu"
-                >
-                  <span className="avatar">O</span>
-                  <span className="account-text">My account</span> ⌄
-                </Button>
-              </DropdownTrigger>
-              <DropdownContent>
-                <div className="menu-label">Appearance</div>
-                <DropdownRadioGroup
-                  value={theme}
-                  onValueChange={(value) => {
-                    if (
-                      value === "system" ||
-                      value === "light" ||
-                      value === "dark"
-                    )
-                      setTheme(value);
+                  onClick={() => {
+                    setFilters({});
+                    setCursor(undefined);
                   }}
                 >
-                  {themeChoices.map((choice) => (
-                    <DropdownRadioItem
-                      key={choice}
-                      value={choice}
-                      className="menu-item"
-                    >
-                      <span className="menu-indicator">
-                        <DropdownItemIndicator>✓</DropdownItemIndicator>
-                      </span>
-                      {choice === "system"
-                        ? "Use system theme"
-                        : `${choice.charAt(0).toUpperCase()}${choice.slice(1)} theme`}
-                    </DropdownRadioItem>
-                  ))}
-                </DropdownRadioGroup>
-              </DropdownContent>
-            </DropdownMenu>
-          </div>
-        </header>
-        {showFilters && (
-          <div className="search-filters">
-            <label>
-              From
-              <input
-                value={filters.from ?? ""}
-                onChange={(event) =>
-                  setFilters({ ...filters, from: event.target.value })
-                }
-              />
-            </label>
-            <label>
-              To
-              <input
-                value={filters.to ?? ""}
-                onChange={(event) =>
-                  setFilters({ ...filters, to: event.target.value })
-                }
-              />
-            </label>
-            <label>
-              After
-              <input
-                type="date"
-                onChange={(event) =>
-                  setFilters({
-                    ...filters,
-                    after: event.target.value
-                      ? `${event.target.value}T00:00:00.000Z`
-                      : undefined,
-                  })
-                }
-              />
-            </label>
-            <label>
-              Before
-              <input
-                type="date"
-                onChange={(event) =>
-                  setFilters({
-                    ...filters,
-                    before: event.target.value
-                      ? `${event.target.value}T23:59:59.999Z`
-                      : undefined,
-                  })
-                }
-              />
-            </label>
-            <label>
+                  Clear filters
+                </Button>
+                <Button size="small" onClick={() => setShowFilters(false)}>
+                  Done
+                </Button>
+              </div>
+            </fieldset>
+          )}
+        </div>
+      }
+      actions={
+        <button
+          type="button"
+          className="shell-icon-button"
+          aria-label="Keyboard shortcuts"
+          onClick={() => setHelp(true)}
+        >
+          <Icon name="help" size={20} />
+        </button>
+      }
+    >
+      <div className={`mail-panes ${reading ? "show-reading" : ""}`}>
+        <section className="thread-list" aria-label="Conversations">
+          <div className="list-heading">
+            {!isDrafts && list.length > 0 && (
               <input
                 type="checkbox"
-                checked={filters.unread === true}
-                onChange={(event) =>
-                  setFilters({
-                    ...filters,
-                    unread: event.target.checked ? true : undefined,
-                  })
+                className="list-check"
+                aria-label="Select all conversations"
+                checked={allChecked}
+                ref={(element) => {
+                  if (element)
+                    element.indeterminate = checked.size > 0 && !allChecked;
+                }}
+                onChange={() =>
+                  setChecked(
+                    allChecked ? new Set() : new Set(list.map((thread) => thread.id)),
+                  )
                 }
-              />{" "}
-              Unread
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={filters.hasAttachment === true}
-                onChange={(event) =>
-                  setFilters({
-                    ...filters,
-                    hasAttachment: event.target.checked ? true : undefined,
-                  })
-                }
-              />{" "}
-              Has attachment
-            </label>
-            <Button
-              variant="ghost"
-              size="small"
-              onClick={() => {
-                setFilters({});
-                setCursor(undefined);
-              }}
-            >
-              Clear filters
-            </Button>
-          </div>
-        )}
-        <main id="mail-main" tabIndex={-1} className="mail-content">
-          <div className="mail-heading">
-            <div>
-              <p className="mail-eyebrow">YOUR WORKSPACE / MAIL</p>
-              <h1>{folderName}</h1>
-              <p className="mail-heading-subtitle">
-                Your conversations, all in one place.
-              </p>
-            </div>
-            <Button
-              className="mobile-compose"
-              onClick={() => {
-                void compose();
-              }}
-            >
-              ＋ New message
-            </Button>
-          </div>
-          <div className={`mail-panes ${reading ? "show-reading" : ""}`}>
-            <section className="thread-list" aria-label="Conversations">
-              <div className="list-heading">
-                <div>
-                  <strong>Conversations</strong>
-                  <span>{threads.data?.threads.length ?? 0} shown</span>
-                </div>
+              />
+            )}
+            {checked.size > 0 ? (
+              <div className="bulk-actions">
+                <span>{checked.size} selected</span>
+                <button
+                  type="button"
+                  className="tool-button"
+                  aria-label="Archive selected"
+                  title="Archive (E)"
+                  onClick={() => perform([...checked], { type: "archive" })}
+                >
+                  <Icon name="archive" />
+                </button>
+                <button
+                  type="button"
+                  className="tool-button"
+                  aria-label="Move selected to trash"
+                  title="Move to trash (#)"
+                  onClick={() =>
+                    request([...checked], {
+                      type: current?.role === "trash" ? "delete" : "trash",
+                    })
+                  }
+                >
+                  <Icon name="trash" />
+                </button>
+                <button
+                  type="button"
+                  className="tool-button"
+                  aria-label="Mark selected as read"
+                  title="Mark as read (Shift+I)"
+                  onClick={() =>
+                    perform([...checked], { type: "read", value: true })
+                  }
+                >
+                  <Icon name="check" />
+                </button>
+                <button
+                  type="button"
+                  className="tool-button"
+                  aria-label="Mark selected as unread"
+                  title="Mark as unread (Shift+U)"
+                  onClick={() =>
+                    perform([...checked], { type: "read", value: false })
+                  }
+                >
+                  <Icon name="unread" />
+                </button>
+              </div>
+            ) : (
+              <div className="list-title">
+                <h1>{current?.name ?? "Mail"}</h1>
+                <span>
+                  {isDrafts
+                    ? `${draftList.data?.drafts.length ?? 0} drafts`
+                    : query || filterCount
+                      ? `${list.length} results`
+                      : current?.unread
+                        ? `${current.unread} unread`
+                        : `${list.length} conversations`}
+                </span>
+              </div>
+            )}
+            {!isDrafts && (
+              <div className="list-tools">
                 <label>
                   <span className="visually-hidden">Sort conversations</span>
                   <select
                     value={sort}
                     onChange={(event) => {
-                      setSort(
-                        event.target.value === "oldest" ? "oldest" : "newest",
-                      );
+                      setSort(event.target.value === "oldest" ? "oldest" : "newest");
                       setCursor(undefined);
                     }}
                   >
-                    <option value="newest">Newest</option>
-                    <option value="oldest">Oldest</option>
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
                   </select>
                 </label>
+                <button
+                  type="button"
+                  className="tool-button"
+                  aria-label="Refresh"
+                  title="Refresh"
+                  onClick={() => {
+                    void threads.refetch();
+                    void mailboxes.refetch();
+                  }}
+                >
+                  <Icon name="repeat" size={16} />
+                </button>
               </div>
-              {mailboxes.data?.mailboxes.find((item) => item.id === folder)
-                ?.role === "drafts" ? (
-                <div>
-                  {draftList.data?.drafts.length ? (
-                    draftList.data.drafts.map((draft) => (
+            )}
+          </div>
+          {(threads.isFetching && threads.isPlaceholderData) && (
+            <div className="page-loading" aria-hidden="true" />
+          )}
+          {filterCount > 0 && (
+            <div className="filter-chips">
+              {Object.entries(filters).map(([name, value]) =>
+                value === undefined || value === "" ? null : (
+                  <button
+                    type="button"
+                    key={name}
+                    onClick={() => setFilters({ ...filters, [name]: undefined })}
+                    aria-label={`Remove filter ${name}`}
+                  >
+                    {name === "hasAttachment"
+                      ? "Has attachment"
+                      : name === "unread"
+                        ? "Unread"
+                        : `${name}: ${String(value).slice(0, 10)}`}
+                    <Icon name="close" size={12} />
+                  </button>
+                ),
+              )}
+            </div>
+          )}
+          <div className="thread-scroll">
+            {isDrafts ? (
+              draftList.isPending ? (
+                <ListSkeleton />
+              ) : draftList.data?.drafts.length ? (
+                <ul className="thread-items">
+                  {draftList.data.drafts.map((draft) => (
+                    <li key={draft.id} className="draft-row">
                       <button
-                        className="draft-row"
-                        key={draft.id}
                         type="button"
-                        onClick={() =>
-                          setComposers((items) =>
-                            items.some((item) => item.id === draft.id)
-                              ? items
-                              : [...items, draft],
-                          )
-                        }
+                        onClick={() => {
+                          const { id, ...content } = draft;
+                          compose(content, id);
+                        }}
                       >
+                        <span className="draft-label">Draft</span>
                         <strong>{draft.subject || "(No subject)"}</strong>
                         <span>
-                          {draft.to
-                            .map((address) => address.email)
-                            .join(", ") || "No recipients"}
+                          {draft.to.map((address) => address.email).join(", ") ||
+                            "No recipients"}
                         </span>
                       </button>
-                    ))
-                  ) : (
-                    <div className="mail-empty">
-                      <strong>No drafts yet</strong>
-                      <p>Start a message and it will appear here.</p>
-                    </div>
-                  )}
-                </div>
-              ) : threads.isPending ? (
-                <div
-                  className="skeleton-list"
-                  aria-label="Loading conversations"
-                >
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              ) : threads.isError || mailboxes.isError ? (
-                <div className="mail-empty" role="alert">
-                  <strong>
-                    {navigator.onLine
-                      ? "Mail is unavailable"
-                      : "You’re offline"}
-                  </strong>
-                  <p>Check your connection and try again.</p>
-                  <Button
-                    variant="secondary"
-                    onClick={() => {
-                      void threads.refetch();
-                      void mailboxes.refetch();
-                    }}
-                  >
-                    Retry
-                  </Button>
-                </div>
-              ) : !list.length ? (
-                <div className="mail-empty">
-                  <div className="empty-icon">✉</div>
-                  <strong>Nothing here yet</strong>
-                  <p>
-                    {search || Object.keys(filters).length
-                      ? "Try a different search."
-                      : "This folder is clear."}
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  {list.map((thread) => (
-                    <button
-                      type="button"
-                      key={thread.id}
-                      className={`thread-row ${selected === thread.id ? "selected" : ""} ${thread.unread ? "unread" : ""}`}
-                      onClick={() => openThread(thread.id)}
-                    >
-                      <span className="thread-avatar">
-                        {initials(
-                          thread.participants[0]?.name ??
-                            thread.participants[0]?.email ??
-                            "?",
-                        )}
-                      </span>
-                      <span className="thread-copy">
-                        <span className="thread-top">
-                          <strong>
-                            {thread.participants[0]?.name ??
-                              thread.participants[0]?.email}
-                          </strong>
-                          <time dateTime={thread.updatedAt}>
-                            {formatDate(thread.updatedAt)}
-                          </time>
-                        </span>
-                        <span className="thread-subject">
-                          {thread.subject || "(No subject)"}{" "}
-                          {thread.messageCount > 1 && (
-                            <small>({thread.messageCount})</small>
-                          )}
-                        </span>
-                        <span className="thread-preview">{thread.preview}</span>
-                        <span className="thread-tags">
-                          {thread.labels.map((label) => (
-                            <span key={label}>{label}</span>
-                          ))}
-                          {thread.starred && (
-                            <span aria-label="Starred">★</span>
-                          )}
-                        </span>
-                      </span>
-                      {thread.unread && (
-                        <span className="unread-dot" aria-label="Unread" />
-                      )}
-                    </button>
+                    </li>
                   ))}
-                </div>
-              )}
-              {(cursor || threads.data?.nextCursor) && (
-                <div className="pagination">
-                  <Button
-                    variant="ghost"
-                    size="small"
-                    disabled={!cursor}
-                    onClick={() => setCursor(undefined)}
-                  >
-                    First page
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="small"
-                    disabled={!threads.data?.nextCursor}
-                    onClick={() =>
-                      setCursor(threads.data?.nextCursor ?? undefined)
-                    }
-                  >
-                    Next page →
-                  </Button>
-                </div>
-              )}
-            </section>
-            <section className="reading-pane" aria-label="Reading pane">
-              {reading && selected ? (
-                detail.isPending ? (
-                  <div className="skeleton-list" aria-label="Loading message">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                ) : detail.isError ? (
-                  <div className="mail-empty" role="alert">
-                    <strong>Could not load this conversation</strong>
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        void detail.refetch();
-                      }}
-                    >
-                      Retry
-                    </Button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="reading-toolbar">
-                      <Button
-                        className="mobile-back"
-                        variant="ghost"
-                        size="small"
-                        onClick={() => setReading(false)}
-                      >
-                        ← Back
-                      </Button>
-                      <div className="toolbar-buttons">
-                        <Button
-                          variant="ghost"
-                          size="small"
-                          aria-label="Archive"
-                          onClick={() => perform({ type: "archive" })}
-                        >
-                          ▱ <span>Archive</span>
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="small"
-                          aria-label={
-                            mailboxes.data?.mailboxes.find(
-                              (item) => item.id === folder,
-                            )?.role === "trash"
-                              ? "Delete permanently"
-                              : "Delete"
-                          }
-                          onClick={() => {
-                            const inTrash =
-                              mailboxes.data?.mailboxes.find(
-                                (item) => item.id === folder,
-                              )?.role === "trash";
-                            if (!inTrash) perform({ type: "trash" });
-                            else if (
-                              window.confirm(
-                                "Permanently delete this conversation?",
-                              )
-                            )
-                              perform({ type: "delete" });
-                          }}
-                        >
-                          ♲{" "}
-                          <span>
-                            {mailboxes.data?.mailboxes.find(
-                              (item) => item.id === folder,
-                            )?.role === "trash"
-                              ? "Delete permanently"
-                              : "Delete"}
-                          </span>
-                        </Button>
-                        <label className="move-label">
-                          <span className="visually-hidden">
-                            Move to folder
-                          </span>
-                          <select
-                            value=""
-                            onChange={(event) => {
-                              if (event.target.value)
-                                perform({
-                                  type: "move",
-                                  mailboxId: event.target.value,
-                                });
-                            }}
-                          >
-                            <option value="">Move to</option>
-                            {mailboxes.data?.mailboxes
-                              .filter(
-                                (item) =>
-                                  item.role !== "custom" &&
-                                  item.role !== "drafts" &&
-                                  item.id !== folder,
-                              )
-                              .map((item) => (
-                                <option key={item.id} value={item.id}>
-                                  {item.name}
-                                </option>
-                              ))}
-                          </select>
-                        </label>
-                        <Button
-                          variant="ghost"
-                          size="small"
-                          aria-label="Mark unread"
-                          onClick={() =>
-                            perform({ type: "read", value: false })
-                          }
-                        >
-                          ✉
-                        </Button>
-                        <label className="move-label">
-                          <span className="visually-hidden">
-                            Add or remove label
-                          </span>
-                          <select
-                            value=""
-                            onChange={(event) => {
-                              const label = event.target.value;
-                              const existing =
-                                list.find((item) => item.id === selected)
-                                  ?.labels ?? [];
-                              if (label)
-                                perform({
-                                  type: "labels",
-                                  labels: existing.includes(label)
-                                    ? existing.filter((id) => id !== label)
-                                    : [...existing, label],
-                                });
-                            }}
-                          >
-                            <option value="">Labels</option>
-                            {mailboxes.data?.mailboxes
-                              .filter((item) => item.role === "custom")
-                              .map((item) => (
-                                <option key={item.id} value={item.id}>
-                                  {list
-                                    .find((thread) => thread.id === selected)
-                                    ?.labels.includes(item.id)
-                                    ? "✓ "
-                                    : ""}
-                                  {item.name}
-                                </option>
-                              ))}
-                          </select>
-                        </label>
-                        <Button
-                          variant="ghost"
-                          size="small"
-                          aria-label="Toggle star"
-                          onClick={() =>
-                            perform({
-                              type: "star",
-                              value: !list.find((item) => item.id === selected)
-                                ?.starred,
-                            })
-                          }
-                        >
-                          ☆
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="reading-scroll">
-                      <div className="reading-subject">
-                        <p className="mail-eyebrow">CONVERSATION</p>
-                        <h2>
-                          {detail.data.messages[0]?.subject || "(No subject)"}
-                        </h2>
-                        <span className="folder-pill">{folderName}</span>
-                      </div>
-                      {detail.data.messages.map((message) => (
-                        <MessageView key={message.id} message={message} />
-                      ))}
-                      {current && (
-                        <div className="reply-actions">
-                          <Button
-                            variant="secondary"
-                            onClick={() => {
-                              void compose(
-                                replyDraft(
-                                  current,
-                                  "reply",
-                                  identity.data?.address.email,
-                                ),
-                              );
-                            }}
-                          >
-                            ↶ Reply
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            onClick={() => {
-                              void compose(
-                                replyDraft(
-                                  current,
-                                  "all",
-                                  identity.data?.address.email,
-                                ),
-                              );
-                            }}
-                          >
-                            Reply all
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            onClick={() => {
-                              void compose(
-                                replyDraft(
-                                  current,
-                                  "forward",
-                                  identity.data?.address.email,
-                                ),
-                              );
-                            }}
-                          >
-                            Forward →
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  </>
-                )
+                </ul>
               ) : (
-                <div className="reading-empty">
-                  <div className="reading-illustration">✉</div>
-                  <h2>Your space to focus</h2>
-                  <p>Select a conversation to read it here.</p>
-                  <span>MAIL, MADE SIMPLE</span>
+                <div className="mail-empty">
+                  <Icon name="draft" size={28} />
+                  <strong>No drafts</strong>
+                  <p>Messages you start and don't send are saved here.</p>
                 </div>
-              )}
-            </section>
-          </div>
-        </main>
-        {notice && (
-          <output className="mail-notice">
-            {notice}{" "}
-            {undo && (
-              <button
-                type="button"
-                disabled={action.isPending}
-                onClick={() => {
-                  action.mutate({
-                    threadId: undo.threadId,
-                    change: { type: "move", mailboxId: undo.mailboxId },
-                  });
-                  setUndo(null);
-                  setNotice("Conversation restored.");
-                }}
+              )
+            ) : threads.isPending || mailboxes.isPending ? (
+              <ListSkeleton />
+            ) : threads.isError || mailboxes.isError ? (
+              <div className="mail-empty" role="alert">
+                <strong>
+                  {navigator.onLine ? "Mail is unavailable" : "You’re offline"}
+                </strong>
+                <p>Check your connection and try again.</p>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    void threads.refetch();
+                    void mailboxes.refetch();
+                  }}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : !list.length ? (
+              <div className="mail-empty">
+                <Icon name={query || filterCount ? "search" : "inbox"} size={28} />
+                <strong>
+                  {query || filterCount ? "No matching conversations" : "All clear"}
+                </strong>
+                <p>
+                  {query || filterCount
+                    ? "Try different words or remove a filter."
+                    : `Nothing in ${current?.name ?? "this folder"}.`}
+                </p>
+              </div>
+            ) : (
+              <ul
+                className={`thread-items ${threads.isPlaceholderData ? "stale" : ""}`}
               >
-                Undo
-              </button>
+                {list.map((thread) => (
+                  <ThreadRow
+                    key={thread.id}
+                    thread={thread}
+                    selected={selected === thread.id}
+                    checked={checked.has(thread.id)}
+                    labels={custom.filter(
+                      (label) =>
+                        thread.labels.includes(label.id) && label.id !== folder,
+                    )}
+                    onOpen={() => openThread(thread.id)}
+                    onCheck={(value, range) => toggleCheck(thread.id, value, range)}
+                    onPrefetch={() => prefetch(thread.id)}
+                    onQuick={(change) =>
+                      request(
+                        [thread.id],
+                        change.type === "trash" && current?.role === "trash"
+                          ? { type: "delete" }
+                          : change,
+                      )
+                    }
+                  />
+                ))}
+              </ul>
             )}
+            {!isDrafts && (cursor || threads.data?.nextCursor) && (
+              <div className="pagination">
+                <Button
+                  variant="ghost"
+                  size="small"
+                  disabled={!cursor}
+                  onClick={() => setCursor(undefined)}
+                >
+                  First page
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="small"
+                  disabled={!threads.data?.nextCursor}
+                  onClick={() => setCursor(threads.data?.nextCursor ?? undefined)}
+                >
+                  Older <Icon name="chevronRight" size={14} />
+                </Button>
+              </div>
+            )}
+          </div>
+        </section>
+        <section className="reading-pane" aria-label="Reading pane">
+          {reading && selected ? (
+            detail.isPending ? (
+              <div className="reading-loading" aria-label="Loading conversation">
+                <span />
+                <span />
+                <span />
+              </div>
+            ) : detail.isError ? (
+              <div className="mail-empty" role="alert">
+                <strong>Could not load this conversation</strong>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    void detail.refetch();
+                  }}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : (
+              <ReadingPane
+                key={selected}
+                messages={detail.data.messages}
+                folder={current}
+                mailboxes={boxes}
+                labels={selectedThread?.labels ?? []}
+                starred={
+                  selectedThread?.starred ??
+                  detail.data.messages.some((message) => message.starred)
+                }
+                position={position}
+                onBack={() => setReading(false)}
+                onAction={(change) => request([selected], change)}
+                onReply={reply}
+                onStep={step}
+              />
+            )
+          ) : (
+            <div className="reading-empty">
+              <span className="reading-illustration" aria-hidden="true">
+                <img
+                  className="product-mark"
+                  src="/mail-mark.svg"
+                  alt=""
+                />
+              </span>
+              <h2>
+                {checked.size
+                  ? `${checked.size} conversation${checked.size > 1 ? "s" : ""} selected`
+                  : "No conversation selected"}
+              </h2>
+              <p>
+                {checked.size
+                  ? "Use the actions above the list."
+                  : "Choose a conversation to read it here."}
+              </p>
+              <p className="reading-hint">
+                Press <kbd>?</kbd> for keyboard shortcuts
+              </p>
+            </div>
+          )}
+        </section>
+      </div>
+      {notice && (
+        <output className="mail-notice">
+          <span>{notice}</span>
+          {undo && (
             <button
               type="button"
-              aria-label="Dismiss notification"
+              disabled={action.isPending}
               onClick={() => {
-                setNotice("");
+                action.mutate({
+                  threadIds: undo.threadIds,
+                  change: { type: "move", mailboxId: undo.mailboxId },
+                });
                 setUndo(null);
+                setNotice(
+                  undo.threadIds.length > 1
+                    ? "Conversations restored."
+                    : "Conversation restored.",
+                );
               }}
             >
-              ×
+              Undo
             </button>
-          </output>
-        )}
-        <div className="compose-dock">
-          {composers.map((draft) => (
-            <Composer
-              key={draft.id}
-              draft={draft}
-              onClose={() => {
-                setComposers((items) =>
-                  items.filter((item) => item.id !== draft.id),
-                );
-                void invalidate();
-              }}
-              onNotice={setNotice}
-              onRefresh={() => {
-                void invalidate();
-              }}
-            />
-          ))}
-        </div>
-        <Dialog open={help} onOpenChange={setHelp}>
-          <DialogContent
-            title="Keyboard shortcuts"
-            description="Use these shortcuts when you are not typing."
-          >
-            <div className="shortcut-grid">
-              <span>Next / previous conversation</span>
-              <kbd>J / K</kbd>
-              <span>Open conversation</span>
-              <kbd>Enter</kbd>
-              <span>Archive / delete</span>
-              <kbd>E / #</kbd>
-              <span>Reply / reply all / forward</span>
-              <kbd>R / A / F</kbd>
-              <span>New message</span>
-              <kbd>C</kbd>
-              <span>Search</span>
-              <kbd>/</kbd>
-              <span>Show shortcuts</span>
-              <kbd>?</kbd>
-            </div>
-          </DialogContent>
-        </Dialog>
-      </div>
-    </div>
-  );
-}
-
-async function download(blobId: string, name: string) {
-  try {
-    const { url } = await mailClient.download({ accountId, blobId });
-    const response = await fetch(url);
-    if (response.status === 401) expireSession();
-    if (!response.ok) throw new Error("Download failed");
-    const objectUrl = URL.createObjectURL(
-      new Blob([await response.blob()], { type: "application/octet-stream" }),
-    );
-    const link = document.createElement("a");
-    link.href = objectUrl;
-    link.download = name;
-    link.rel = "noopener noreferrer";
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function MessageView({ message }: { message: Message }) {
-  const [images, setImages] = useState(false);
-  const [attachmentError, setAttachmentError] = useState(false);
-  const [inlineImages, setInlineImages] = useState<Record<string, string>>({});
-  useEffect(() => {
-    let cancelled = false;
-    const urls: string[] = [];
-    async function loadInline() {
-      const entries = await Promise.all(
-        message.attachments
-          .filter(
-            (part) =>
-              part.cid && /^image\/(png|jpeg|gif|webp)$/i.test(part.type),
-          )
-          .map(async (part) => {
-            try {
-              const { url } = await mailClient.download({
-                accountId,
-                blobId: part.blobId,
-              });
-              const target = new URL(url, window.location.origin);
-              if (
-                target.origin !== window.location.origin &&
-                target.protocol !== "blob:"
-              )
-                return null;
-              const response = await fetch(target);
-              if (response.status === 401) expireSession();
-              if (!response.ok) return null;
-              const objectUrl = URL.createObjectURL(
-                new Blob([await response.blob()], { type: part.type }),
-              );
-              if (cancelled) {
-                URL.revokeObjectURL(objectUrl);
-                return null;
-              }
-              urls.push(objectUrl);
-              return [
-                part.cid?.replace(/^<|>$/g, "") ?? "",
-                objectUrl,
-              ] satisfies [string, string];
-            } catch {
-              return null;
-            }
-          }),
-      );
-      if (!cancelled)
-        setInlineImages(
-          Object.fromEntries(entries.filter((entry) => entry !== null)),
-        );
-    }
-    void loadInline();
-    return () => {
-      cancelled = true;
-      for (const url of urls) URL.revokeObjectURL(url);
-    };
-  }, [message.attachments]);
-  const sanitized = sanitizeEmail(
-    message.htmlBody ||
-      `<p>${escapeHtml(message.textBody).replaceAll("\n", "<br>")}</p>`,
-    images,
-    inlineImages,
-  );
-  return (
-    <article className="message">
-      <div className="message-header">
-        <span className="message-avatar">
-          {initials(message.from.name ?? message.from.email)}
-        </span>
-        <div>
-          <strong>{message.from.name ?? message.from.email}</strong>
-          <span>&lt;{message.from.email}&gt;</span>
-          <p>
-            To{" "}
-            {message.to
-              .map((address) => address.name ?? address.email)
-              .join(", ")}
-          </p>
-        </div>
-        <time dateTime={message.sentAt}>{formatDate(message.sentAt)}</time>
-      </div>
-      {sanitized.blockedImages && (
-        <div className="image-notice">
-          Remote images are blocked for your privacy.{" "}
-          <button type="button" onClick={() => setImages(true)}>
-            Load images
-          </button>
-        </div>
-      )}
-      <iframe
-        title={`Message from ${message.from.name ?? message.from.email}`}
-        sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-        referrerPolicy="no-referrer"
-        srcDoc={sanitized.srcDoc}
-        className="message-frame"
-      />
-      {attachmentError && (
-        <p role="alert">Could not download the attachment. Please try again.</p>
-      )}
-      {message.attachments.length > 0 && (
-        <div className="attachment-list">
-          {message.attachments.map((attachment) => (
-            <Button
-              variant="ghost"
-              key={attachment.id}
-              onClick={() => {
-                void download(attachment.blobId, attachment.name).then(
-                  (success) => setAttachmentError(!success),
-                );
-              }}
-            >
-              ⇩ {attachment.name} ({Math.ceil(attachment.size / 1024)} KB)
-            </Button>
-          ))}
-        </div>
-      )}
-    </article>
-  );
-}
-function escapeHtml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function Composer({
-  draft,
-  onClose,
-  onNotice,
-  onRefresh,
-}: {
-  draft: Draft;
-  onClose: () => void;
-  onNotice: (value: string) => void;
-  onRefresh: () => void;
-}) {
-  const [content, setContent] = useState(() => contentOf(draft));
-  const [to, setTo] = useState(() =>
-    draft.to.map((address) => address.email).join(", "),
-  );
-  const [cc, setCc] = useState(() =>
-    draft.cc.map((address) => address.email).join(", "),
-  );
-  const [bcc, setBcc] = useState(() =>
-    draft.bcc.map((address) => address.email).join(", "),
-  );
-  const [expanded, setExpanded] = useState(false);
-  const [minimized, setMinimized] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const saveQueue = useRef<Promise<void>>(Promise.resolve());
-  const draftId = useRef(draft.id);
-  useEffect(() => {
-    if (busy) return undefined;
-    const timer = window.setTimeout(() => {
-      const value: DraftContent = {
-        ...content,
-        to: splitAddresses(to),
-        cc: splitAddresses(cc),
-        bcc: splitAddresses(bcc),
-        htmlBody: `<p>${escapeHtml(content.textBody).replaceAll("\n", "<br>")}</p>`,
-      };
-      saveQueue.current = saveQueue.current
-        .then(async () => {
-          const saved = await mailClient.updateDraft({
-            accountId,
-            draftId: draftId.current,
-            draft: value,
-          });
-          draftId.current = saved.id;
-          return undefined;
-        })
-        .catch(() => {
-          setError("Could not save this draft. Try again.");
-          return undefined;
-        });
-    }, 1000);
-    return () => window.clearTimeout(timer);
-  }, [content, to, cc, bcc, busy]);
-  function build(): DraftContent {
-    return {
-      ...content,
-      to: splitAddresses(to),
-      cc: splitAddresses(cc),
-      bcc: splitAddresses(bcc),
-      htmlBody: `<p>${escapeHtml(content.textBody).replaceAll("\n", "<br>")}</p>`,
-    };
-  }
-  async function save() {
-    await saveQueue.current;
-    const saved = await mailClient.updateDraft({
-      accountId,
-      draftId: draftId.current,
-      draft: build(),
-    });
-    draftId.current = saved.id;
-    onRefresh();
-  }
-  async function close() {
-    setBusy(true);
-    try {
-      await save();
-      onClose();
-    } catch {
-      setError("Could not save this draft. Try again.");
-      setBusy(false);
-    }
-  }
-  async function send() {
-    setBusy(true);
-    setError("");
-    try {
-      const value = build();
-      if (!value.to.length) {
-        setError("Add at least one recipient.");
-        return;
-      }
-      await saveQueue.current;
-      const saved = await mailClient.updateDraft({
-        accountId,
-        draftId: draftId.current,
-        draft: value,
-      });
-      draftId.current = saved.id;
-      await mailClient.send({ accountId, draftId: draftId.current });
-      onNotice("Message sent.");
-      onClose();
-    } catch {
-      setError(
-        "Sending could not be confirmed. Check Sent before trying again.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function remove() {
-    setBusy(true);
-    try {
-      await saveQueue.current;
-      await mailClient.deleteDraft({ accountId, draftId: draftId.current });
-      onNotice("Draft discarded.");
-      onClose();
-    } catch {
-      setError("Could not discard this draft.");
-      setBusy(false);
-    }
-  }
-  async function upload(file: File) {
-    try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      let binary = "";
-      for (const byte of bytes) binary += String.fromCharCode(byte);
-      const attachment = await mailClient.upload({
-        accountId,
-        name: file.name,
-        type: file.type || "application/octet-stream",
-        base64: btoa(binary),
-      });
-      setContent((value) => ({
-        ...value,
-        attachmentBlobIds: [...value.attachmentBlobIds, attachment.blobId],
-      }));
-      onNotice(`Attached ${file.name}.`);
-    } catch {
-      setError("Could not upload the attachment.");
-    }
-  }
-  return (
-    <section
-      className={`composer ${expanded ? "expanded" : ""} ${minimized ? "minimized" : ""}`}
-      aria-label="Compose message"
-    >
-      <div className="compose-header">
-        <strong>{content.subject || "New message"}</strong>
-        <div>
+          )}
           <button
             type="button"
-            aria-label={minimized ? "Restore draft" : "Minimize draft"}
-            onClick={() => setMinimized(!minimized)}
-          >
-            −
-          </button>
-          <button
-            type="button"
-            aria-label={expanded ? "Restore size" : "Maximize draft"}
+            aria-label="Dismiss notification"
             onClick={() => {
-              setExpanded(!expanded);
-              setMinimized(false);
+              setNotice("");
+              setUndo(null);
             }}
           >
-            □
+            <Icon name="close" size={16} />
           </button>
-          <button
-            type="button"
-            aria-label="Save and close draft"
-            onClick={() => {
-              void close();
-            }}
-          >
-            ×
-          </button>
-        </div>
-      </div>
-      {!minimized && (
-        <div className="compose-fields">
-          <label>
-            To
-            <input
-              value={to}
-              onChange={(event) => setTo(event.target.value)}
-              placeholder="Recipients, separated by commas"
-            />
-          </label>
-          <label>
-            Cc
-            <input value={cc} onChange={(event) => setCc(event.target.value)} />
-          </label>
-          <label>
-            Bcc
-            <input
-              value={bcc}
-              onChange={(event) => setBcc(event.target.value)}
-            />
-          </label>
-          <label>
-            Subject
-            <input
-              value={content.subject}
-              onChange={(event) =>
-                setContent({ ...content, subject: event.target.value })
-              }
-            />
-          </label>
-          <label className="visually-hidden" htmlFor={`body-${draft.id}`}>
-            Message body
-          </label>
-          <textarea
-            id={`body-${draft.id}`}
-            value={content.textBody}
-            onChange={(event) =>
-              setContent({ ...content, textBody: event.target.value })
+        </output>
+      )}
+      <div className="compose-dock">
+        {composers.map((state) => (
+          <Composer
+            key={state.key}
+            state={state}
+            from={identity.data?.address.email}
+            minimized={minimized.has(state.key)}
+            onMinimize={(value) =>
+              setMinimized((previous) => {
+                const next = new Set(previous);
+                if (value) next.add(state.key);
+                else next.delete(state.key);
+                return next;
+              })
             }
-            placeholder="Write your message…"
+            onClose={() =>
+              setComposers((items) => items.filter((item) => item.key !== state.key))
+            }
+            onNotice={setNotice}
+            onSaved={() => {
+              void queryClient.invalidateQueries({ queryKey: [...key, "drafts"] });
+              void queryClient.invalidateQueries({ queryKey: [...key, "threads"] });
+              void queryClient.invalidateQueries({ queryKey: [...key, "mailboxes"] });
+            }}
           />
-          {content.attachmentBlobIds.length > 0 && (
-            <p>{content.attachmentBlobIds.length} attachment(s)</p>
-          )}
-          {error && (
-            <p className="compose-error" role="alert">
-              {error}
-            </p>
-          )}
-          <div className="compose-footer">
-            <Button
-              disabled={busy}
-              onClick={() => {
-                void send();
-              }}
-            >
-              Send ↗
+        ))}
+      </div>
+      <Dialog
+        open={confirmDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDelete(null);
+        }}
+      >
+        <DialogContent
+          title="Delete permanently?"
+          description="These conversations will be deleted forever. This cannot be undone."
+        >
+          <div className="dialog-actions">
+            <Button variant="ghost" onClick={() => setConfirmDelete(null)}>
+              Cancel
             </Button>
-            <label className="attach-button">
-              ＋ Attach
-              <input
-                type="file"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) void upload(file);
-                }}
-              />
-            </label>
             <Button
-              variant="ghost"
-              size="small"
+              className="button-danger"
               onClick={() => {
-                void remove();
+                if (confirmDelete) perform(confirmDelete, { type: "delete" });
+                setConfirmDelete(null);
               }}
-              aria-label="Discard draft"
             >
-              ♲
+              Delete forever
             </Button>
           </div>
-        </div>
-      )}
-    </section>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={help} onOpenChange={setHelp}>
+        <DialogContent
+          title="Keyboard shortcuts"
+          description="Use these shortcuts when you are not typing."
+        >
+          <div className="shortcut-grid">
+            {(
+              [
+                ["Next / previous conversation", "J / K"],
+                ["Open conversation", "Enter or O"],
+                ["Back to list", "U"],
+                ["Select conversation", "X"],
+                ["Archive", "E"],
+                ["Move to trash", "#"],
+                ["Star", "S"],
+                ["Mark read / unread", "Shift+I / Shift+U"],
+                ["Reply / reply all / forward", "R / A / F"],
+                ["New message", "C"],
+                ["Send message", "Ctrl+Enter"],
+                ["Search", "/"],
+                ["Show shortcuts", "?"],
+              ] as const
+            ).map(([label, keys]) => (
+              <React.Fragment key={label}>
+                <span>{label}</span>
+                <kbd>{keys}</kbd>
+              </React.Fragment>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </AppShell>
+  );
+}
+
+function ListSkeleton() {
+  return (
+    <div className="skeleton-list" aria-label="Loading conversations">
+      {Array.from({ length: 6 }, (_, index) => (
+        <span key={index} />
+      ))}
+    </div>
   );
 }

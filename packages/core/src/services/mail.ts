@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type {
   Draft,
   DraftContent,
@@ -8,85 +7,27 @@ import type {
   Message,
   ThreadSummary,
 } from "@opensuite/contracts";
-import {
-  JmapCapability,
-  JmapClient,
-  type Email,
-  type JmapError,
-  type JmapResult,
-  type Session,
-} from "@opensuite/jmap";
-import { err, ok, type Result } from "neverthrow";
+import { JmapCapability, type Email, type JmapClient } from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
+import {
+  createJmapAccess,
+  fail,
+  value,
+  type AccessFailureKind,
+  type MailCredentialStore,
+} from "./jmap-access.ts";
 
-export type MailFailureKind =
-  "forbidden" | "not_found" | "validation" | "conflict" | "unavailable";
+export type MailFailureKind = AccessFailureKind;
 export interface MailFailure {
   kind: MailFailureKind;
 }
-export interface MailCredentialStore {
-  getForOwner(
-    userId: string,
-    accountId: string,
-  ): PromiseLike<
-    Result<
-      { accountId: string; address: string; secret: string },
-      { kind: string }
-    >
-  >;
-}
+export type { MailCredentialStore } from "./jmap-access.ts";
 export interface ThreadOptions {
   mailboxId: string;
   cursor?: string | undefined;
   limit: number;
   search?: MailSearch | undefined;
   sort: "newest" | "oldest";
-}
-class Failure extends Error {
-  readonly kind: MailFailureKind;
-  constructor(kind: MailFailureKind) {
-    super(kind);
-    this.kind = kind;
-  }
-}
-const fail = (kind: MailFailureKind): never => {
-  throw new Failure(kind);
-};
-function value<T>(result: JmapResult<T>): T {
-  if (result.isOk()) return result.value;
-  const error: JmapError = result.error;
-  if (
-    (error.kind === "http" || error.kind === "request") &&
-    error.status === 404
-  )
-    return fail("not_found");
-  if (
-    (error.kind === "http" || error.kind === "request") &&
-    error.status === 403
-  )
-    return fail("forbidden");
-  if (
-    (error.kind === "set" || error.kind === "method") &&
-    ["notFound", "blobNotFound"].includes(error.type)
-  )
-    return fail("not_found");
-  if (
-    (error.kind === "set" || error.kind === "method") &&
-    [
-      "invalidProperties",
-      "invalidArguments",
-      "invalidEmail",
-      "forbiddenFrom",
-      "tooLarge",
-    ].includes(error.type)
-  )
-    return fail("validation");
-  if (
-    (error.kind === "set" || error.kind === "method") &&
-    error.type === "stateMismatch"
-  )
-    return fail("conflict");
-  return fail("unavailable");
 }
 const address = (item: { name: string | null; email: string }) => ({
   email: item.email,
@@ -223,104 +164,13 @@ export function createMailService(dependencies: {
   client?: (credential: { address: string; secret: string }) => JmapClient;
   now?: () => number;
 }) {
-  const now = dependencies.now ?? Date.now;
-  let active = 0;
-  const waiting: (() => void)[] = [];
-  const run = async <T>(
-    work: () => Promise<T>,
-  ): Promise<Result<T, MailFailure>> => {
-    if (active >= 8) {
-      if (waiting.length >= 256) return err({ kind: "unavailable" });
-      await new Promise<void>((resolve) => {
-        waiting.push(resolve);
-      });
-    } else active += 1;
-    try {
-      return ok(await work());
-    } catch (error) {
-      return err({
-        kind: error instanceof Failure ? error.kind : "unavailable",
-      });
-    } finally {
-      const next = waiting.shift();
-      if (next === undefined) active -= 1;
-      else next();
-    }
-  };
-  const sessions = new Map<
-    string,
-    {
-      expires: number;
-      connection: Promise<{
-        session: Session;
-        id: string;
-      }>;
-    }
-  >();
+  const { run, connect: open, now } = createJmapAccess(dependencies);
   const uploads = new Map<
     string,
     { name: string; type: string; size: number; expires: number }
   >();
-  const connect = async (actor: Actor, accountId: string) => {
-    const credential = await dependencies.store.getForOwner(
-      actor.id,
-      accountId,
-    );
-    if (credential.isErr())
-      return fail(
-        credential.error.kind === "not_found" ||
-          credential.error.kind === "forbidden"
-          ? "forbidden"
-          : "unavailable",
-      );
-    if (accountId !== "default" && credential.value.accountId !== accountId)
-      return fail("forbidden");
-    const key = createHash("sha256")
-      .update(
-        JSON.stringify([
-          actor.id,
-          credential.value.accountId,
-          credential.value.address,
-          credential.value.secret,
-        ]),
-      )
-      .digest("hex");
-    const current = now();
-    for (const [cachedKey, entry] of sessions)
-      if (entry.expires <= current) sessions.delete(cachedKey);
-    const client =
-      dependencies.client?.(credential.value) ??
-      new JmapClient(dependencies.origin, {
-        authorization: `Basic ${Buffer.from(`${credential.value.address}:${credential.value.secret}`).toString("base64")}`,
-        rewriteSessionUrlsToOrigin: dependencies.origin,
-      });
-    let entry = sessions.get(key);
-    if (entry === undefined) {
-      const connection = (async () => {
-        const session = value(await client.discover());
-        const id = session.primaryAccounts[JmapCapability.mail];
-        if (id === undefined) return fail("unavailable");
-        return { session, id };
-      })();
-      entry = { expires: current + 30_000, connection };
-      if (sessions.size >= 256) {
-        const oldest = sessions.keys().next().value;
-        if (oldest !== undefined) sessions.delete(oldest);
-      }
-      sessions.set(key, entry);
-      void connection.catch(() => {
-        if (sessions.get(key)?.connection === connection) sessions.delete(key);
-      });
-    }
-    const { session, id } = await entry.connection;
-    return {
-      client,
-      session,
-      id,
-      address: credential.value.address,
-      owner: actor.id,
-    };
-  };
+  const connect = (actor: Actor, accountId: string) =>
+    open(actor, accountId, JmapCapability.mail);
   type Connection = Awaited<ReturnType<typeof connect>>;
   const boxes = async (c: Connection): Promise<Mailbox[]> =>
     value(await c.client.mailboxes(c.session, c.id)).list.map((box) => ({

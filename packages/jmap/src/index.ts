@@ -115,11 +115,79 @@ const UploadSchema = z.object({
   size: z.number(),
 });
 
+// Calendar data is user-editable and may come from other clients; tolerate
+// unexpected values instead of failing the whole response.
+const CalendarSchema = z.object({
+  id: z.string(),
+  name: z.string().catch(""),
+  color: z.string().nullable().catch(null),
+  isDefault: z.boolean().catch(false),
+  sortOrder: z.number().catch(0),
+  myRights: z
+    .object({ mayWriteAll: z.boolean().catch(true) })
+    .nullable()
+    .catch(null),
+});
+const RecurrenceRuleSchema = z.looseObject({
+  frequency: z.string(),
+  interval: z.number().optional(),
+  count: z.number().optional(),
+  until: z.string().optional(),
+});
+const CalendarEventSchema = z.object({
+  id: z.string(),
+  calendarIds: z.record(z.string(), z.boolean()).catch({}),
+  title: z.string().catch(""),
+  description: z.string().catch(""),
+  locations: z
+    .record(z.string(), z.looseObject({ name: z.string().nullish() }))
+    .nullable()
+    .catch(null),
+  start: z.string().catch(""),
+  duration: z.string().catch("PT0S"),
+  timeZone: z.string().nullable().catch(null),
+  showWithoutTime: z.boolean().catch(false),
+  recurrenceRules: z.array(RecurrenceRuleSchema).nullable().catch(null),
+  excludedRecurrenceRules: z.array(RecurrenceRuleSchema).nullable().catch(null),
+  recurrenceOverrides: z
+    .record(z.string(), z.record(z.string(), z.unknown()))
+    .nullable()
+    .catch(null),
+});
+
 type Mailbox = z.infer<typeof MailboxSchema>;
 type Email = z.infer<typeof EmailSchema>;
 type Identity = z.infer<typeof IdentitySchema>;
-export type { Mailbox, Email, Identity };
+type Calendar = z.infer<typeof CalendarSchema>;
+type CalendarEvent = z.infer<typeof CalendarEventSchema>;
+type RecurrenceRule = z.infer<typeof RecurrenceRuleSchema>;
+export type {
+  Mailbox,
+  Email,
+  Identity,
+  Calendar,
+  CalendarEvent,
+  RecurrenceRule,
+};
 
+// Thread lists need headers and flags only; bodies load with the conversation.
+const summaryProperties = [
+  "id",
+  "blobId",
+  "threadId",
+  "mailboxIds",
+  "keywords",
+  "receivedAt",
+  "subject",
+  "from",
+  "to",
+  "cc",
+  "messageId",
+  "sentAt",
+  "preview",
+  "hasAttachment",
+  "attachments",
+];
 const emailProperties = [
   "id",
   "blobId",
@@ -147,6 +215,7 @@ const emailProperties = [
 ];
 
 const usingMail = [JmapCapability.core, JmapCapability.mail];
+const usingCalendars = [JmapCapability.core, JmapCapability.calendars];
 const expand = (template: string, values: Record<string, string>) =>
   template.replace(/\{([^}]+)\}/g, (_match, key: string) =>
     encodeURIComponent(values[key] ?? ""),
@@ -345,8 +414,7 @@ export class JmapClient {
                   name: "Thread/get",
                   path: "/list/*/emailIds/*",
                 },
-                properties: emailProperties,
-                fetchAllBodyValues: true,
+                properties: summaryProperties,
               },
               "emails",
             ],
@@ -631,5 +699,212 @@ export class JmapClient {
           message: "Missing EmailSubmission/set result",
         })
       : ok(item);
+  }
+  calendars(session: Session, accountId: string) {
+    return this.#transport.call(
+      session.apiUrl,
+      "Calendar/get",
+      { accountId },
+      usingCalendars,
+      GetSchema(CalendarSchema),
+    );
+  }
+  async createCalendar(
+    session: Session,
+    accountId: string,
+    calendar: { name: string; color: string },
+    isDefault = false,
+  ): Promise<JmapResult<{ id: string }>> {
+    // Stalwart rejects `isDefault` as a created property; the default is set
+    // with the RFC `onSuccessSetIsDefault` argument instead.
+    const method = "Calendar/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      {
+        accountId,
+        create: { item: calendar },
+        ...(isDefault ? { onSuccessSetIsDefault: "#item" } : {}),
+      },
+      usingCalendars,
+      SetSchema(z.object({ id: z.string() })),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notCreated);
+    if (failure !== undefined) return err(failure);
+    const item = result.value.created?.["item"];
+    return item === undefined
+      ? err({ kind: "invalidResponse", message: "Missing Calendar/set result" })
+      : ok(item);
+  }
+  /** One page of event ids and their full objects, in a single request. */
+  async calendarEventPage(
+    session: Session,
+    accountId: string,
+    options: { filter: object; position: number; limit: number },
+  ): Promise<
+    JmapResult<{
+      query: z.infer<typeof QuerySchema>;
+      events: { list: CalendarEvent[]; notFound: string[] };
+    }>
+  > {
+    const result = await this.#transport.json(
+      session.apiUrl,
+      z.object({
+        methodResponses: z.array(
+          z.tuple([z.string(), z.unknown(), z.string()]),
+        ),
+        sessionState: z.string(),
+      }),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          using: usingCalendars,
+          methodCalls: [
+            ["CalendarEvent/query", { accountId, ...options }, "query"],
+            [
+              // Full objects: see `calendarEvents`.
+              "CalendarEvent/get",
+              {
+                accountId,
+                "#ids": {
+                  resultOf: "query",
+                  name: "CalendarEvent/query",
+                  path: "/ids",
+                },
+              },
+              "events",
+            ],
+          ],
+        }),
+      },
+    );
+    if (result.isErr()) return err(result.error);
+    const calls = result.value.methodResponses;
+    const expected = [
+      ["CalendarEvent/query", "query"],
+      ["CalendarEvent/get", "events"],
+    ];
+    if (calls.length !== expected.length)
+      return err({
+        kind: "invalidResponse",
+        message: "Unexpected method response count",
+      });
+    for (const [index, call] of calls.entries()) {
+      const method = expected[index];
+      if (method === undefined || call[2] !== method[1])
+        return err({
+          kind: "invalidResponse",
+          message: "Unexpected method response id",
+        });
+      if (call[0] === "error") {
+        const failure = SetErrorSchema.safeParse(call[1]);
+        return failure.success
+          ? err({
+              kind: "method",
+              method: method[0] ?? "unknown",
+              ...failure.data,
+            })
+          : err({ kind: "invalidResponse", message: "Invalid method error" });
+      }
+      if (call[0] !== method[0])
+        return err({
+          kind: "invalidResponse",
+          message: "Unexpected method response name",
+        });
+    }
+    const query = QuerySchema.safeParse(calls[0]?.[1]);
+    const events = GetSchema(CalendarEventSchema).safeParse(calls[1]?.[1]);
+    if (!query.success || !events.success)
+      return err({
+        kind: "invalidResponse",
+        message: "Invalid calendar event page response",
+      });
+    return ok({ query: query.data, events: events.data });
+  }
+  calendarEvents(session: Session, accountId: string, ids: readonly string[]) {
+    // Stalwart v1.0.1 omits `recurrenceRules` when it is listed in
+    // `properties`, so full objects are requested.
+    return this.#transport.call(
+      session.apiUrl,
+      "CalendarEvent/get",
+      { accountId, ids },
+      usingCalendars,
+      GetSchema(CalendarEventSchema),
+    );
+  }
+  async createCalendarEvent(
+    session: Session,
+    accountId: string,
+    event: object,
+  ): Promise<JmapResult<{ id: string }>> {
+    const method = "CalendarEvent/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      { accountId, create: { item: event } },
+      usingCalendars,
+      SetSchema(z.object({ id: z.string() })),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notCreated);
+    if (failure !== undefined) return err(failure);
+    const item = result.value.created?.["item"];
+    return item === undefined
+      ? err({
+          kind: "invalidResponse",
+          message: "Missing CalendarEvent/set result",
+        })
+      : ok(item);
+  }
+  async updateCalendarEvent(
+    session: Session,
+    accountId: string,
+    id: string,
+    patch: Record<string, unknown>,
+  ): Promise<JmapResult<void>> {
+    const method = "CalendarEvent/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      { accountId, update: { [id]: patch } },
+      usingCalendars,
+      SetSchema(z.unknown()),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notUpdated);
+    if (failure !== undefined) return err(failure);
+    return result.value.updated !== null &&
+      result.value.updated !== undefined &&
+      Object.hasOwn(result.value.updated, id)
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "Missing CalendarEvent/set result",
+        });
+  }
+  async destroyCalendarEvent(
+    session: Session,
+    accountId: string,
+    id: string,
+  ): Promise<JmapResult<void>> {
+    const method = "CalendarEvent/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      { accountId, destroy: [id] },
+      usingCalendars,
+      SetSchema(z.unknown()),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notDestroyed);
+    if (failure !== undefined) return err(failure);
+    return result.value.destroyed?.includes(id)
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "Missing CalendarEvent/set result",
+        });
   }
 }

@@ -3,7 +3,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadAuthConfig, loadConfig } from "../src/config.ts";
+import {
+  parseProductOrigins,
+  loadAuthConfig,
+  loadConfig,
+} from "../src/config.ts";
 
 describe("loadConfig", () => {
   it("applies safe defaults", () => {
@@ -93,4 +97,34 @@ it("requires valid mail configuration and derives readiness from the internal or
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+describe("application origins", () => {
+  const hub = "https://mail.example.test";
+  it("accepts exact HTTPS origins for drive and calendar", () => {
+    expect(
+      parseProductOrigins(
+        hub,
+        "drive=https://drive.example.test, calendar=https://calendar.example.test",
+      ),
+    ).toEqual({
+      mail: hub,
+      drive: "https://drive.example.test",
+      calendar: "https://calendar.example.test",
+    });
+    expect(parseProductOrigins(hub, undefined)).toEqual({ mail: hub });
+  });
+  it.each([
+    "drive=http://drive.example.test",
+    "drive=https://drive.example.test/",
+    "drive=https://*.example.test",
+    "drive=https://drive.example.test/app",
+    "mail=https://other.example.test",
+    "contacts=https://contacts.example.test",
+    "drive=https://drive.example.test,drive=https://d2.example.test",
+    "calendar=https://mail.example.test",
+    "drive",
+  ])("refuses %s", (value) => {
+    expect(parseProductOrigins(hub, value)).toBeNull();
+  });
 });

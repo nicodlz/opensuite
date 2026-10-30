@@ -1,7 +1,6 @@
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
-  CopyObjectCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -14,6 +13,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { createHash } from "node:crypto";
 import { verifiedType } from "../domain/content.ts";
+import { copyVerifiedObject } from "./copy.ts";
 
 export class UploadMismatchError extends Error {}
 
@@ -156,16 +156,14 @@ export const createStorage = (config: StorageConfig) => {
       if (length !== size || hash.digest("hex") !== checksum)
         throw new UploadMismatchError("upload checksum mismatch");
       const safeType = verifiedType(contentType, first);
-      await client.send(
-        new CopyObjectCommand({
-          Bucket,
-          Key: key(id, false),
-          CopySource: `${encodeURIComponent(Bucket)}/${Key.split("/").map(encodeURIComponent).join("/")}`,
-          CopySourceIfMatch: head.ETag,
-          MetadataDirective: "REPLACE",
-          ContentType: safeType,
-          ContentDisposition: "attachment",
-        }),
+      await copyVerifiedObject(
+        client,
+        Bucket,
+        Key,
+        key(id, false),
+        size,
+        head.ETag,
+        safeType,
       );
       return safeType;
     },

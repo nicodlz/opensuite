@@ -90,9 +90,7 @@ for (const theme of ["light", "dark"]) {
       theme === "light" ? "dark" : "light",
     );
     await page.getByRole("link", { name: "Calendar" }).click();
-    await expect(
-      page.getByText("Calendar is not available in the web app yet."),
-    ).toBeVisible();
+    await expect(page).toHaveURL(/\/calendar$/);
   });
 }
 

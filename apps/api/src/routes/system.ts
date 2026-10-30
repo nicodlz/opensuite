@@ -5,6 +5,17 @@ import type { ApiContext } from "./context.ts";
 const system = implement(contract.system).$context<ApiContext>();
 
 export const systemRouter = system.router({
+  origins: system.origins.handler(({ context }) => ({
+    ...(context.productOrigins["mail"]
+      ? { mail: context.productOrigins["mail"] }
+      : {}),
+    ...(context.productOrigins["drive"]
+      ? { drive: context.productOrigins["drive"] }
+      : {}),
+    ...(context.productOrigins["calendar"]
+      ? { calendar: context.productOrigins["calendar"] }
+      : {}),
+  })),
   health: system.health.handler(({ context }) => ({
     status: "ok" as const,
     uptimeSeconds: context.uptimeSeconds(),

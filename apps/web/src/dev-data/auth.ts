@@ -48,4 +48,14 @@ export const fakeAuth: AuthClient = {
     sessionStorage.removeItem("auth-fixture-mfa");
     return Promise.resolve();
   },
+  handoff: () =>
+    signedOut()
+      ? Promise.reject(new Error("Signed out"))
+      : Promise.resolve("synthetic-handoff-token-0000000000"),
+  redeem(token) {
+    if (token !== "synthetic-handoff-token-0000000000")
+      return Promise.reject(new Error("Invalid or expired sign-in link"));
+    sessionStorage.removeItem("auth-fixture-signed-out");
+    return Promise.resolve();
+  },
 };

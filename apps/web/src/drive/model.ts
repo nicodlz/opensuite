@@ -1,7 +1,6 @@
 import type { DriveOutput } from "@opensuite/contracts";
 
 export type DriveEntry = Extract<DriveOutput, { kind: string }>;
-export const PART_SIZE = 5 * 1024 * 1024;
 const previewTypes = new Set([
   "image/png",
   "image/jpeg",

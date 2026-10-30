@@ -130,7 +130,7 @@ it("trusts only the configured proxy, limits before lookups and bounds audit eve
         headers: {
           origin: "https://suite.example.test",
           cookie:
-            "__Secure-better-auth.two_factor=a; __Secure-better-auth.two_factor=b",
+            "__Host-opensuite.two_factor=a; __Host-opensuite.two_factor=b",
         },
         payload: { code: "123456" },
       })
@@ -157,7 +157,7 @@ it("associates MFA challenges only with the exact cookie, even with a decoy", as
             headers: request.url.includes("sign-in")
               ? {
                   "set-cookie":
-                    "__Secure-better-auth.two_factor=real; HttpOnly; Secure",
+                    "__Host-opensuite.two_factor=real; HttpOnly; Secure",
                 }
               : {},
           }),
@@ -178,7 +178,7 @@ it("associates MFA challenges only with the exact cookie, even with a decoy", as
       url: "/auth/two-factor/verify-totp",
       headers: {
         origin: "https://suite.example.test",
-        cookie: "decoy.two_factor=fake; __Secure-better-auth.two_factor=real",
+        cookie: "decoy.two_factor=fake; __Host-opensuite.two_factor=real",
       },
       payload: { code: "000000" },
     });

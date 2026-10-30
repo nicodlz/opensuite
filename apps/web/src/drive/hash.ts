@@ -106,16 +106,24 @@ export async function hashFile(
 ) {
   const hash = new Sha256();
   const chunk = 1024 * 1024;
-  const read = async (offset: number): Promise<void> => {
-    if (offset >= file.size) return;
-    signal.throwIfAborted();
-    hash.update(
-      new Uint8Array(await file.slice(offset, offset + chunk).arrayBuffer()),
-    );
-    progress(Math.min(offset + chunk, file.size) / file.size);
-    await read(offset + chunk);
-  };
-  await read(0);
+  await new Promise<void>((resolve, reject) => {
+    const read = (offset: number) => {
+      if (offset >= file.size) return resolve();
+      Promise.resolve()
+        .then(async () => {
+          signal.throwIfAborted();
+          hash.update(
+            new Uint8Array(
+              await file.slice(offset, offset + chunk).arrayBuffer(),
+            ),
+          );
+          progress(Math.min(offset + chunk, file.size) / file.size);
+          return null;
+        })
+        .then(() => read(offset + chunk), reject);
+    };
+    read(0);
+  });
   signal.throwIfAborted();
   return hash.digest();
 }

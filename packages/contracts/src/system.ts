@@ -28,7 +28,23 @@ export const ReadinessSchema = z.object({
 });
 export type Readiness = z.infer<typeof ReadinessSchema>;
 
+export const ProductOriginsSchema = z.object({
+  mail: z.url().optional(),
+  drive: z.url().optional(),
+  calendar: z.url().optional(),
+});
+export type ProductOrigins = z.infer<typeof ProductOriginsSchema>;
+
 export const systemContract = {
+  origins: oc
+    .route({
+      method: "GET",
+      path: "/origins",
+      summary: "Public origin of each application",
+      tags: ["system"],
+    })
+    .input(NoInputSchema)
+    .output(ProductOriginsSchema),
   health: oc
     .route({
       method: "GET",

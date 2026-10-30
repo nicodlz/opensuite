@@ -28,7 +28,7 @@ Use **Share** on an item to grant another user ID read or write access. Sharing 
 
 In the share dialog, create a public link with an expiry. Copy the link **and its link ID** when shown: the token is shown only once and the ID is needed to revoke it. Anyone with an unexpired link can download the file. Revocation is checked on public requests, but an already issued signed download URL can remain valid for up to five minutes. Avoid sharing links publicly unless intended.
 
-Quota is enforced per owner, including trashed files and unexpired upload reservations, but the current interface cannot display usage or the limit. If an upload fails because of quota, ask your administrator; deleting unneeded items or expired reservations can free space. The default configured quota is 10,000,000,000 bytes per owner, and an operator may set a different limit.
+Quota is enforced per owner, including trashed files and unexpired upload reservations, but the current interface cannot display usage or the limit. If an upload fails because of quota, ask your administrator; deleting unneeded items or expired reservations can free space. The default configured quota is 10,000,000,000 bytes per owner, and an operator may set a different limit. Large files are also subject to the object storage provider's limits, and multipart uploads must finish within 24 hours.
 
 ## IMAP and SMTP clients
 

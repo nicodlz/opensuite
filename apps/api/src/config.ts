@@ -113,10 +113,52 @@ const AuthEnvironment = z.object({
     return ["http:", "https:"].includes(url.protocol) && url.origin === value;
   }),
   STALWART_MANAGEMENT_CLIENT_IP: z.ipv4().optional(),
+  AUTH_PRODUCT_ORIGINS: z.string().optional(),
   AUTH_SECRET_FILE: z.string().min(1),
   MAILBOX_KEY_FILE: z.string().min(1),
   STALWART_MANAGEMENT_PASSWORD_FILE: z.string().min(1),
 });
+
+const productNames = ["mail", "drive", "calendar"] as const;
+export type ProductName = (typeof productNames)[number];
+/**
+ * Parses `drive=https://drive.example,calendar=https://calendar.example`.
+ * Mail is always served by the public authentication origin. Every origin
+ * must be an exact HTTPS origin; wildcards and parent domains are refused.
+ */
+export const parseProductOrigins = (
+  publicOrigin: string,
+  value: string | undefined,
+): Partial<Record<ProductName, string>> | null => {
+  const origins: Partial<Record<ProductName, string>> = { mail: publicOrigin };
+  for (const entry of (value ?? "").split(",")) {
+    const item = entry.trim();
+    if (item === "") continue;
+    const separator = item.indexOf("=");
+    const name = item.slice(0, separator);
+    const origin = item.slice(separator + 1);
+    const product = productNames.find((candidate) => candidate === name);
+    if (separator < 1 || product === undefined || product === "mail")
+      return null;
+    if (origins[product] !== undefined) return null;
+    try {
+      const url = new URL(origin);
+      if (
+        url.protocol !== "https:" ||
+        url.origin !== origin ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(
+          url.hostname,
+        )
+      )
+        return null;
+    } catch {
+      return null;
+    }
+    if (Object.values(origins).includes(origin)) return null;
+    origins[product] = origin;
+  }
+  return origins;
+};
 
 export const loadAuthConfig = async (
   env: Readonly<Record<string, string | undefined>>,
@@ -149,8 +191,18 @@ export const loadAuthConfig = async (
         kind: "invalid_environment",
         issues: ["invalid authentication secrets"],
       });
+    const productOrigins = parseProductOrigins(
+      parsed.data.AUTH_PUBLIC_ORIGIN,
+      parsed.data.AUTH_PRODUCT_ORIGINS,
+    );
+    if (productOrigins === null)
+      return err<never, ConfigError>({
+        kind: "invalid_environment",
+        issues: ["invalid product origins"],
+      });
     return ok({
       publicOrigin: parsed.data.AUTH_PUBLIC_ORIGIN,
+      productOrigins,
       mailDomain: parsed.data.MAIL_DOMAIN,
       trustedProxyIp: parsed.data.TRUSTED_PROXY_IP,
       stalwartOrigin: parsed.data.STALWART_INTERNAL_ORIGIN,
