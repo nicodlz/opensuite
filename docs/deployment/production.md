@@ -9,10 +9,6 @@ wildcard change are a **separate owner-approved cutover**; this procedure does
 not authorize them. Real AWS and B2 integration has not been tested here.
 Do not cut over until the preservation and verification gates below are met.
 
-The intended interface hosts are `mail.esuno.net` and `calendar.esuno.net`.
-The generic examples below still need to be adapted to the actual installation;
-these target names do not imply that DNS, hosting or mail routing is configured.
-
 ## Prerequisites and DNS
 
 1. Prepare an Ubuntu VPS with adequate RAM, encrypted storage and space for
@@ -155,6 +151,79 @@ them. A sibling origin receives the session through a single-use token valid
 for one minute, bound to that origin and carried in the URL fragment. After
 upgrading from a release with `__Secure-better-auth.*` cookies, every user
 signs in once again.
+
+## Moving to a new domain
+
+Schedule a maintenance window and notify users that old hostnames will stop
+working. Replace `example.com` with the new domain in the examples below;
+keep the existing Vault hostname if it is not moving.
+
+1. Create DNS A records pointing to the server for `mail.example.com`,
+   `drive.example.com`, `calendar.example.com`, and, only if moving it,
+   `vault.example.com`. Leave MX, wildcard and SPF records unchanged. Confirm
+   DNS resolves and ports 80 and 443 are reachable for Caddy's ACME validation.
+2. Update the Drive bucket's S3-compatible CORS configuration before moving
+   users. Replace these example origins with the exact new origins serving the
+   app; preserve any other required rules. For example, save this JSON outside
+   Git and use the B2 S3-compatible API to apply it to the Drive bucket:
+
+   ```json
+   {
+     "CORSRules": [
+       {
+         "AllowedOrigins": [
+           "https://mail.example.com",
+           "https://drive.example.com",
+           "https://calendar.example.com"
+         ],
+         "AllowedMethods": ["GET", "HEAD", "PUT"],
+         "AllowedHeaders": ["Content-Type", "Content-Length"],
+         "ExposeHeaders": ["ETag"],
+         "MaxAgeSeconds": 3600
+       }
+     ]
+   }
+   ```
+
+   B2 S3 CORS requires removing native B2 CORS rules first. Confirm browser
+   preflight, upload and download after the move; see [B2 CORS](https://www.backblaze.com/docs/cloud-storage-enable-cors-with-the-s3-compatible-api).
+
+3. Update `.env` with the new hosts, retaining the existing Vault host if it is
+   not moving. Do not include the old hosts in the application or trusted
+   origins. Keep existing storage and secret settings. With Vault enabled:
+
+   ```dotenv
+   OPENSUITE_SITE_ADDRESS="mail.example.com, drive.example.com, calendar.example.com"
+   OPENSUITE_PUBLIC_HOST=mail.example.com
+   AUTH_PRODUCT_ORIGINS=drive=https://drive.example.com,calendar=https://calendar.example.com,vault=https://vault.example.com
+   DRIVE_TRUSTED_ORIGINS=https://mail.example.com,https://drive.example.com,https://calendar.example.com
+   VAULT_PUBLIC_HOST=vault.example.com
+   MAIL_HOSTNAME=mail.example.com
+   COMPOSE_PROFILES=vault
+   ```
+
+   Compose derives `AUTH_PUBLIC_ORIGIN` from `OPENSUITE_PUBLIC_HOST` and
+   Caddy's Vault site and Vaultwarden's `DOMAIN` from `VAULT_PUBLIC_HOST`.
+   The Vault origin must match `VAULT_PUBLIC_HOST` and is not an application
+   authentication origin. Validate with `docker compose config` (the output
+   includes operational configuration, so handle it as sensitive).
+
+4. Recreate Caddy with `docker compose up -d --no-deps caddy`. Wait for a
+   valid public certificate on the new mail hostname. Then run
+   `sudo /opt/opensuite/deploy/tls/renew.sh` to install its Caddy certificate
+   for SMTP/IMAP and recreate Stalwart. The renewal timer already selects the
+   Caddy certificate named by `MAIL_HOSTNAME`. Run `docker compose up -d` to
+   recreate services with their new configuration. Wait for the
+   `stalwart-setup` job to exit successfully and inspect its logs, then perform
+   the checks in [Mail TLS](#mail-tls), including certificate hostname on ports
+   465 and 993.
+   Verify the three web origins, sign-in and handoff, Vault, and Drive uploads,
+   downloads and public links. If Vault moves, update its clients' server URL.
+5. Users must sign in again because application cookies are host-only. Update
+   the Bitwarden SimpleLogin alias generator's Server URL to
+   `https://mail.example.com` (without `/api`). Update IMAP and SMTP server
+   hostnames in mail clients to `mail.example.com`; a certificate for the new
+   name does not validate for the old name, and mail protocols do not redirect.
 
 ## Bootstrap and mail storage
 
