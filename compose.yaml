@@ -73,7 +73,7 @@ services:
     networks:
       default:
       api-proxy:
-        ipv4_address: 172.28.254.2
+        ipv4_address: ${API_PROXY_CADDY_IP:-172.28.254.2}
       pass-network:
         ipv4_address: ${PASS_CADDY_IP:-172.28.253.2}
     image: caddy:2.11.7@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8
@@ -115,6 +115,7 @@ services:
       default:
       api-proxy:
         aliases: [api-proxy]
+        ipv4_address: ${API_PROXY_API_IP:-172.28.254.3}
       mail-management:
         ipv4_address: ${MAIL_MANAGEMENT_API_IP:-172.30.248.10}
     build:
@@ -129,7 +130,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-opensuite}
       APP_DATABASE_PASSWORD_FILE: /run/opensuite/app-database/password
-      TRUSTED_PROXY_IP: 172.28.254.2
+      TRUSTED_PROXY_IP: ${API_PROXY_CADDY_IP:-172.28.254.2}
       AUTH_PUBLIC_ORIGIN: https://${OPENSUITE_PUBLIC_HOST:-localhost}
       # Optional separate application origins, e.g.
       # drive=https://drive.example.org,calendar=https://calendar.example.org
@@ -536,6 +537,7 @@ services:
       default:
       mail-management:
         aliases: [stalwart-management]
+        ipv4_address: ${MAIL_MANAGEMENT_STALWART_IP:-172.30.248.20}
     healthcheck:
       # Stalwart trusts X-Forwarded-For (set by the proxy) and rejects loopback
       # values, so the probe identifies itself with the container address.
@@ -590,7 +592,8 @@ services:
         volume:
           subpath: stalwart-management
     networks:
-      - mail-management
+      mail-management:
+        ipv4_address: ${MAIL_MANAGEMENT_SETUP_IP:-172.30.248.21}
     depends_on:
       stalwart:
         condition: service_healthy
@@ -602,7 +605,9 @@ services:
     entrypoint: ["/bin/sh", "/opt/opensuite/management.sh"]
     environment:
       MAIL_RELAY_CONFIGURED: ${MAIL_RELAY_CONFIGURED:-0}
-    networks: [mail-management]
+    networks:
+      mail-management:
+        ipv4_address: ${MAIL_MANAGEMENT_OPS_IP:-172.30.248.22}
     volumes:
       - ./deploy/stalwart/management.sh:/opt/opensuite/management.sh:ro
       - ./scripts/outbound.mjs:/app/scripts/outbound.mjs:ro

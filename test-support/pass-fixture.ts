@@ -33,12 +33,21 @@ export function createPassFixture(label: string) {
     PASS_SMTP_HOST: "",
     PASS_TEST_API_SUBNET: `10.240.${String(octet)}.0/24`,
     PASS_TEST_API_IP: `10.240.${String(octet)}.2`,
+    API_PROXY_CADDY_IP: `10.240.${String(octet)}.2`,
+    API_PROXY_API_IP: `10.240.${String(octet)}.3`,
+    MAIL_MANAGEMENT_SUBNET: `10.238.${String(octet)}.0/24`,
+    MAIL_MANAGEMENT_API_IP: `10.238.${String(octet)}.10`,
+    MAIL_MANAGEMENT_STALWART_IP: `10.238.${String(octet)}.20`,
+    MAIL_MANAGEMENT_SETUP_IP: `10.238.${String(octet)}.21`,
+    MAIL_MANAGEMENT_OPS_IP: `10.238.${String(octet)}.22`,
+    MAIL_MANAGEMENT_BACKUP_IP: `10.238.${String(octet)}.23`,
+    MAIL_MANAGEMENT_BOOTSTRAP_IP: `10.238.${String(octet)}.24`,
     PASS_TEST_SUBNET: `10.239.${String(octet)}.0/24`,
     PASS_TEST_DYNAMIC_RANGE: `10.239.${String(octet)}.128/25`,
     PASS_TEST_PROXY_IP: `10.239.${String(octet)}.2`,
   };
-  // Select unused /24s from Docker's current IPAM allocations. Each run uses
-  // separate networks for the API proxy and the Pass proxy.
+  // Select unused /24s from Docker's current IPAM allocations for the API,
+  // Pass proxy and management networks used by disposable fixtures.
   const chooseSubnets = async () => {
     const ids = (await run("docker", ["network", "ls", "-q"])).stdout
       .trim()
@@ -71,7 +80,7 @@ export function createPassFixture(label: string) {
     );
     for (let offset = 0; offset < 200; offset += 1) {
       const candidate = ((octet + offset - 20) % 200) + 20;
-      const bases = [239, 240].map((second) =>
+      const bases = [238, 239, 240].map((second) =>
         ipNumber(`10.${String(second)}.${String(candidate)}.0`),
       );
       if (
@@ -85,6 +94,16 @@ export function createPassFixture(label: string) {
         env.PASS_CADDY_IP = env.PASS_TEST_PROXY_IP;
         env.PASS_TEST_API_SUBNET = `10.240.${String(candidate)}.0/24`;
         env.PASS_TEST_API_IP = `10.240.${String(candidate)}.2`;
+        env.API_PROXY_CADDY_IP = env.PASS_TEST_API_IP;
+        env.API_PROXY_API_IP = `10.240.${String(candidate)}.3`;
+        const management = `10.238.${String(candidate)}`;
+        env.MAIL_MANAGEMENT_SUBNET = `${management}.0/24`;
+        env.MAIL_MANAGEMENT_API_IP = `${management}.10`;
+        env.MAIL_MANAGEMENT_STALWART_IP = `${management}.20`;
+        env.MAIL_MANAGEMENT_SETUP_IP = `${management}.21`;
+        env.MAIL_MANAGEMENT_OPS_IP = `${management}.22`;
+        env.MAIL_MANAGEMENT_BACKUP_IP = `${management}.23`;
+        env.MAIL_MANAGEMENT_BOOTSTRAP_IP = `${management}.24`;
         return;
       }
     }
