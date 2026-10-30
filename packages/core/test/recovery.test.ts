@@ -213,6 +213,13 @@ describe("recovery from the Firehose archive", () => {
     expect(report.isErr() && report.error.message).toBe(
       "Prefix is inside the message buffer",
     );
+    // Nor a parent of it, which would list every buffered message.
+    const parent = await recoverFirehose(
+      fake.store,
+      { ...scope, bufferPrefix: "messages/" },
+      { prefix: "m", apply: false },
+    );
+    expect(parent.isErr()).toBe(true);
   });
 });
 

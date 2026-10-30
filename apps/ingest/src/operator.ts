@@ -38,7 +38,7 @@ const reasonSchema = z.string().trim().min(8).max(1000);
 
 const unconfigured = "Destination is not configured";
 const notRejectable =
-  "Only a held recipient or one whose destination is not configured can be rejected";
+  "Only a held recipient, one whose destination is not configured or a permanent failure can be rejected";
 export async function operatorCommand(
   deps: Dependencies,
   args: string[],
@@ -112,14 +112,18 @@ export async function operatorCommand(
         row === null ||
         !(
           row.state === "held" ||
-          (row.state === "failed" && row.error === unconfigured)
+          (row.state === "failed" &&
+            (row.error === unconfigured || row.permanent))
         )
       )
         throw new Error(notRejectable);
       // A mailbox that is usable again (re-enabled, or linked delivery off)
-      // would receive this mail on the next replay: never discard it.
+      // would receive this mail on the next replay: never discard it. A
+      // permanent failure (a copy elsewhere in the mailbox, an original that
+      // is gone) is the operator's decision to close.
       if (
         row.state === "failed" &&
+        !row.permanent &&
         (await tx.mailboxLink.count({
           where: {
             accountId: row.destination,
@@ -323,12 +327,20 @@ export const recoveryIncomplete = (report: unknown) => {
       failed: z.number(),
       unreadable: z.number().optional(),
       unrecoverable: z.array(z.unknown()).optional(),
+      // Messages replay skips: object recovery lists their IDs, Firehose
+      // recovery every variant group with whether it can be merged.
+      divergent: z
+        .array(z.union([z.string(), z.object({ mergeable: z.boolean() })]))
+        .optional(),
     })
     .safeParse(report);
   return (
     parsed.success &&
     (parsed.data.failed > 0 ||
       (parsed.data.unreadable ?? 0) > 0 ||
-      (parsed.data.unrecoverable ?? []).length > 0)
+      (parsed.data.unrecoverable ?? []).length > 0 ||
+      (parsed.data.divergent ?? []).some(
+        (item) => typeof item === "string" || !item.mergeable,
+      ))
   );
 };

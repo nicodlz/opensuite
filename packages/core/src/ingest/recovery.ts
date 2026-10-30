@@ -139,7 +139,8 @@ export async function recoverFirehose(
   // The Firehose prefix only: never read the buffered messages themselves.
   if (
     scope.bufferPrefix !== "" &&
-    options.prefix.startsWith(scope.bufferPrefix)
+    (options.prefix.startsWith(scope.bufferPrefix) ||
+      scope.bufferPrefix.startsWith(options.prefix))
   )
     return err({ message: "Prefix is inside the message buffer" });
   const listed = await store.firehoseObjects(options.prefix);

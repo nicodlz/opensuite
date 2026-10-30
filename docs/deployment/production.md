@@ -505,6 +505,11 @@ INGEST_ROUTES='[{"address":"user@example.com","destination":"ACCOUNT_ID"}]'
 INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","authorization":"Basic <encoded-credential>","quarantineMailbox":"JUNK_ID","rewriteSessionUrls":true}]'
 ```
 
+`INBOUND_BUFFER_PREFIX` must equal the receipt rule's object key prefix
+(`messages/` in the AWS module): the worker refuses a notification whose
+object key is not that prefix followed by its message ID. Before upgrading
+to a release with this check, confirm it on one archived real notification.
+
 Mailboxes created in the admin console, with their addresses, aliases and
 domain addresses, need no entry: Compose gives the worker the mailbox key
 (`MAILBOX_KEY_FILE`) and the internal Stalwart origin
@@ -670,18 +675,24 @@ ingestion and subscription DLQs before their 14 days run out.
    The values stay visible to `docker inspect` while a run lasts. Reports
    list addresses and message IDs: write them to protected files.
 
-3. Run `recover firehose <operator> metadata/YYYY/MM/ [since] [until]
-   > firehose.json`. Firehose writes under `metadata/YYYY/MM/DD/HH/`in UTC,
-so name the narrowest prefix that covers the incident, and set`since`to
-the incident or backup time minus 24 hours (Firehose retries delivery for
-up to a day);`since`and`until` select notifications by their receipt
-time. Read the report: notifications found, already archived, missing,
-unreadable, invalid, foreign and outside the window, and divergent
-message IDs (`mergeable: false`ones are skipped by replay and need an
-operator). Run it again with`--apply`.
-4. Run `recover objects <operator> > objects.json`, then with `--apply`.
-   Investigate every `unrecoverable` message (its original is gone) and
-   every `divergent` one.
+3. Recover notifications from Firehose:
+
+   ```sh
+   recover firehose OPERATOR metadata/YYYY/MM/ SINCE [UNTIL] > firehose.json
+   ```
+
+   Firehose writes under `metadata/YYYY/MM/DD/HH/` in UTC, so name the
+   narrowest prefix that covers the incident, and set `SINCE` to the incident
+   or backup time minus 24 hours (Firehose retries delivery for up to a
+   day); `SINCE` and `UNTIL` (ISO 8601) select notifications by their
+   receipt time. Read the report: notifications found, already archived,
+   missing, unreadable, invalid, foreign and outside the window, and
+   divergent message IDs (`mergeable: false` ones are skipped by replay and
+   need an operator). Run it again with `--apply` as last argument.
+
+4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
+   `--apply`. Investigate every `unrecoverable` message (its original is
+   gone) and every `divergent` one.
 5. Run replay once by hand (`deploy/ingest/replay.sh`). It must exit 0; then
    check that a second dry run of both commands reports `missing` and
    `restorable` at 0, that `operator list` holds nothing unexpected, that no

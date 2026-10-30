@@ -606,7 +606,7 @@ describe("local ingestion pipeline", () => {
               "rerouted",
               0,
               1,
-              "Only a held recipient or one whose destination is not configured can be rejected",
+              "Only a held recipient, one whose destination is not configured or a permanent failure can be rejected",
             ],
       );
       // Finish the message either way: the object goes once nothing is left.
@@ -1591,5 +1591,63 @@ describe("local ingestion pipeline", () => {
       await alice.client.emails(alice.session, alice.account, ids),
     ).list[0];
     expect(email?.mailboxIds).toEqual({ [alice.inbox]: true });
+  }, 90_000);
+  it("lets an operator close a permanent failure that replay cannot settle", async () => {
+    if (s3 === undefined || db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    const prisma = db.value;
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-stuck",
+        Body: Buffer.from(
+          "From: sender@example.test\r\nTo: alice@example.test\r\nSubject: Stuck\r\n\r\nHello\r\n",
+        ),
+      }),
+    );
+    expect(
+      (
+        await service.process(
+          recent(["alice@example.test"], "PASS", "ses-stuck"),
+        )
+      ).isOk(),
+    ).toBe(true);
+    // As replay leaves it when the copy moved elsewhere or the original is
+    // gone.
+    const row = await prisma.inboundRecipient.findFirstOrThrow({
+      where: { messageId: "ses-stuck" },
+    });
+    await prisma.inboundRecipient.update({
+      where: { idempotencyKey: row.idempotencyKey },
+      data: {
+        state: "failed",
+        permanent: true,
+        error: "Keyword candidates do not all match the original message",
+      },
+    });
+    await operatorCommand(
+      {
+        db: prisma,
+        ledger: databaseLedger(prisma),
+        delivery: jmapDelivery([]),
+        storage: awsStorage(s3, s3, "inbound", "archive", "notifications/", ""),
+      },
+      [
+        "reject",
+        row.idempotencyKey,
+        "operator",
+        "Copy kept in Archive by owner",
+      ],
+    );
+    expect(
+      await prisma.inboundRecipient.findUniqueOrThrow({
+        where: { idempotencyKey: row.idempotencyKey },
+      }),
+    ).toMatchObject({ state: "rejected" });
+    expect(
+      await prisma.inboundResolutionAudit.findFirstOrThrow({
+        where: { recipientKey: row.idempotencyKey },
+      }),
+    ).toMatchObject({ action: "reject", previousState: "failed" });
   }, 90_000);
 });

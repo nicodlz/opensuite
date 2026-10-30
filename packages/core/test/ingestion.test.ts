@@ -524,6 +524,65 @@ const routed = (extra: { address: string; destination: string }[]) => {
   return { memory, service, provision: () => known.push(...extra) };
 };
 
+describe("replay of archived notifications", () => {
+  it("skips foreign and disagreeing notifications, and leaves a lost original to an operator", async () => {
+    const memory = synthetic();
+    const stages: unknown[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event, fields) {
+          if (event === "ingest_failure") stages.push(fields["stage"]);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    const base = notification(["alice@example.test"], "PASS", "ses-a");
+    // Names another message's object.
+    memory.archives.set(
+      "notifications/foreign.json",
+      JSON.stringify({
+        ...base,
+        receipt: {
+          ...base.receipt,
+          action: { ...base.receipt.action, objectKey: "ses-b" },
+        },
+      }),
+    );
+    // Two variants of ses-c that disagree on a verdict.
+    memory.buffers.set("ses-c", new Uint8Array([1]));
+    memory.archives.set(
+      "notifications/c1.json",
+      JSON.stringify(notification(["alice@example.test"], "PASS", "ses-c")),
+    );
+    memory.archives.set(
+      "notifications/c2.json",
+      JSON.stringify(notification(["hidden@example.test"], "FAIL", "ses-c")),
+    );
+    // ses-d's original is gone.
+    memory.archives.set(
+      "notifications/d.json",
+      JSON.stringify(notification(["alice@example.test"], "PASS", "ses-d")),
+    );
+    const replay = await service.reconcile(86_400 * 3650);
+    expect(replay.isErr()).toBe(true);
+    expect(stages).toEqual(
+      expect.arrayContaining(["archive_foreign", "replay_divergent"]),
+    );
+    expect(memory.imports).toHaveLength(0);
+    expect(memory.buffers.has("ses-c")).toBe(true);
+    expect(
+      [...memory.records.values()].map((r) => [r.state, r.permanent]),
+    ).toEqual([["failed", true]]);
+  });
+});
+
 describe("held unknown recipients", () => {
   it("imports a held recipient once its address is provisioned, then deletes the object", async () => {
     const { memory, service, provision } = routed([

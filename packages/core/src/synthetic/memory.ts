@@ -41,7 +41,9 @@ export function synthetic() {
     readBuffer(_bucket, key) {
       const body = buffers.get(key);
       return Promise.resolve(
-        body === undefined ? err({ message: "Missing buffer" }) : ok(body),
+        body === undefined
+          ? err({ message: "Missing buffer", code: "NoSuchKey" })
+          : ok(body),
       );
     },
     deleteBuffer(_bucket, key) {
