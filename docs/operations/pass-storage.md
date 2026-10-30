@@ -14,30 +14,33 @@ and the Playwright Chromium installed for the repository's pinned version
 ```sh
 pnpm install --frozen-lockfile
 ./deploy/vaultwarden-s3-poc/build.sh
-node scripts/pass-storage-poc.mjs --report /tmp/pass-storage.json
+node scripts/pass-storage-poc.mjs --report /tmp/pass-storage-proof.json
 ```
 
 The build script checks out upstream tag 1.37.4 at commit
 `7c188967e7a467b19b2757bc3326f9cf3ccae327` into a temporary directory. It
 uses upstream's Debian Dockerfile and `DB=postgresql,s3` build argument, with
-the two otherwise mutable Rust and Debian base tags replaced by pinned digests;
+the two otherwise mutable Rust and Debian base tags replaced by pinned digests.
+All `FROM` images are checked for digests and Cargo builds use `--locked`;
 upstream's web vault and cross-build helper are already pinned. Source files
 are not changed. OS packages are still fetched from mutable Debian repositories;
 this is not a reproducible or attested supply-chain build. The image is named
-`opensuite-vaultwarden-s3-poc:1.37.4` and must not be deployed.
+`esuno-vaultwarden-s3-poc-not-for-production:1.37.4` and must not be deployed.
+Production `PASS_IMAGE` must be the digest-pinned official Vaultwarden image.
 
 The runner creates a unique Compose project and prefix, random loopback ports,
 a loopback HTTPS proxy with a temporary self-signed certificate, a temporary
 account and random files. Because Vaultwarden returns presigned S3 download
 URLs, a second temporary HTTP relay binds only to the Docker host bridge on a
 random port; it lets both Vaultwarden and the host CLI reach the same LocalStack
-endpoint. Do not expose this relay beyond the local Docker host. The bundled web vault creates the account; pinned
-Bitwarden CLI 2026.8.0 encrypts and handles items, attachments and Sends. The
+endpoint. Do not expose this relay beyond the local Docker host. The bundled web vault creates the account; the catalog-pinned
+Bitwarden CLI encrypts and handles items, attachments and Sends. The
 instance permits signup and disables the admin token **only for the proof**.
 PostgreSQL and LocalStack are disposable; PostgreSQL fsync is disabled. The
 runner disconnects Vaultwarden from its S3 network while leaving its database
-network connected through a test-only Caddy gateway, then reconnects it. In LocalStack mode it also makes the
-client-facing relay unavailable. In B2 mode the client may still be able to
+network connected through a test-only Caddy gateway, then reconnects it. The test verifies from inside Vaultwarden that the S3 endpoint is unreachable.
+For LocalStack, the relay remains available while the server upload is attempted;
+it is made unavailable only for the separate client download check. In B2 mode the client may still be able to
 read an already presigned URL directly even when the server cannot reach B2;
 the test reports this distinction. It writes a JSON report and removes its
 containers, volumes, networks and temporary client state on normal completion,
@@ -48,9 +51,9 @@ not evidence of B2 compatibility or durability.
 
 ## Optional B2 run
 
-The same command runs the local cases first and then the B2 cases only if all
-four required variables are set. Otherwise the report says `not run: no
-credentials`. Use an empty, private test bucket or a key constrained to a
+The command runs the official-image and local cases first and then the B2 cases
+only if all four required variables are set. The report distinguishes no
+credentials, partial credentials, and interruption. Use an empty, private test bucket or a key constrained to a
 nonempty test prefix. Obtain the test key securely, keep it out of shell
 history, and export it in the operator's environment before running:
 
@@ -62,16 +65,17 @@ export PASS_B2_TEST_PREFIX='pass-storage-tests/'
 read -r -s -p 'Test key ID: ' PASS_B2_TEST_KEY_ID; printf '\n'
 read -r -s -p 'Test application key: ' PASS_B2_TEST_APP_KEY; printf '\n'
 export PASS_B2_TEST_KEY_ID PASS_B2_TEST_APP_KEY
-node scripts/pass-storage-poc.mjs --report /tmp/pass-storage-b2.json
+node scripts/pass-storage-poc.mjs --report /tmp/pass-storage-proof.json
 ```
 
 `PASS_B2_TEST_REGION` is optional for a standard B2 hostname and required if
 the region cannot be inferred. Prefix must end in `/`; the runner appends a
 random project ID and removes only that unique subprefix. The key must allow
-list, read, write, and deletion of objects and their versions/delete markers
-within that prefix; verify B2's actual prefix restrictions before using it. The
-runner lists and deletes every version and marker it created, verifies the
-prefix is empty, and reports cleanup failures. Retention, legal holds, missing
+list, read, write, deletion of objects and their versions/delete markers, and
+listing and aborting multipart uploads within that prefix; verify B2's actual prefix restrictions before using it. The
+runner stops Compose before it lists and deletes every version and marker and
+aborts incomplete multipart uploads under the unique prefix; it then verifies
+the prefix is empty, and reports cleanup failures. Retention, legal holds, missing
 permissions, interruption or network failure can prevent deletion; inspect the
 reported prefix and clean it manually. Requests incur provider charges. Docker
 administrators can inspect container environment variables. Credentials are
@@ -119,15 +123,17 @@ crashes during writes, throttling, key rotation, B2 retention, or restoration.
 
 ## Observed result (2026-10-30)
 
-The release POC build took 1,619 seconds on this linux/amd64 host. Docker
-reported 88,174,562 bytes for the loaded image. The final LocalStack report
+The earlier release POC build took 1,619 seconds on this linux/amd64 host. Docker
+reported 88,174,562 bytes for the loaded image. The earlier LocalStack report
 contained eight passing cases plus successful cleanup; B2 was not run because
 the required credentials were absent. The 8,192-byte attachment and
 6,144-byte Send downloaded byte-for-byte before and after a Vaultwarden
 restart. The fixture bucket contained one object for each under the run prefix;
 the attachment object disappeared on deletion, and the RSA key and saved
-configuration were local. During the simulated outage the vault and PostgreSQL
-remained reachable, while attachment download and upload returned errors. After
-reconnection the original files, object listing and attachment metadata were
-unchanged. These checks cover one small failure scenario; they do not establish
+configuration were local. In the earlier outage run the vault and PostgreSQL remained reachable, but the
+relay was unavailable during the upload, so that run alone did not isolate the
+server-side storage failure. The revised runner verifies that Vaultwarden cannot reach the endpoint while
+the relay remains available, then performs a new attachment round trip after
+reconnecting and checks that local attachment and Send directories are empty.
+The report records the Git SHA, worktree state and image IDs. These checks cover one small failure scenario; they do not establish
 behavior under all partial writes, concurrent operations or real B2 failures.
