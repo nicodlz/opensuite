@@ -11,6 +11,7 @@ import {
   covered,
   isSetupNotice,
   mergeVariants,
+  namedAfter,
 } from "./recovery.ts";
 import type {
   Failure,
@@ -442,6 +443,11 @@ export class IngestService {
           stage: "archive_read",
           code: body.error.code ?? "unknown",
         });
+        return;
+      }
+      if (!namedAfter(key, body.value)) {
+        failures++;
+        this.deps.events.emit("ingest_failure", { stage: "archive_mismatch" });
         return;
       }
       const n = parseNotification(body.value);

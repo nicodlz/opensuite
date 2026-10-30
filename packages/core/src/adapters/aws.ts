@@ -304,19 +304,40 @@ export function awsRecovery(
         failure,
       );
     },
-    archiveIfAbsent(key, body) {
+    archiveIfAbsent(key, body, options) {
+      const write = (condition: boolean) =>
+        archive.send(
+          new PutObjectCommand({
+            Bucket: archiveBucket,
+            Key: prefix + key,
+            Body: body,
+            ContentType: "application/json",
+            ...(condition ? { IfNoneMatch: "*" } : {}),
+          }),
+        );
       return ResultAsync.fromPromise(
-        unlessPresent(() =>
-          archive.send(
-            new PutObjectCommand({
-              Bucket: archiveBucket,
-              Key: prefix + key,
-              Body: body,
-              ContentType: "application/json",
-              IfNoneMatch: "*",
-            }),
-          ),
-        ).then((written) => (written ? "written" : "present")),
+        (async () => {
+          try {
+            return (await unlessPresent(() => write(true)))
+              ? ("written" as const)
+              : ("present" as const);
+          } catch (cause) {
+            // B2 answers 501 to If-None-Match. Without a conditional write,
+            // only a fenced run (no other writer) may check, then write
+            // and read back; an existing entry is never rewritten.
+            if (statusOf(cause) !== 501 || options?.fenced !== true)
+              throw cause;
+          }
+          if (await exists(archive, archiveBucket, prefix + key))
+            return "present" as const;
+          await write(false);
+          const stored = new TextDecoder().decode(
+            await read(archive, archiveBucket, prefix + key),
+          );
+          if (stored !== body)
+            throw new Error("Archive entry changed while it was written");
+          return "written" as const;
+        })(),
         failure,
       );
     },

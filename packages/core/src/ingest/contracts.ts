@@ -33,8 +33,18 @@ export interface RecoveryStore {
   firehoseObjects(prefix: string): Outcome<{ key: string; modified: Date }[]>;
   readFirehose(key: string): Outcome<Uint8Array>;
   archiveExists(key: string): Outcome<boolean>;
-  /** Creates an archive entry unless one exists, as a conditional write. */
-  archiveIfAbsent(key: string, body: string): Outcome<"written" | "present">;
+  /**
+   * Creates an archive entry unless one exists, as a conditional write. A
+   * provider without conditional writes refuses it (`NotImplemented`);
+   * `fenced` then checks for the entry and writes it, which the operator
+   * may only ask for when no other writer of the archive can run, and reads
+   * it back to compare.
+   */
+  archiveIfAbsent(
+    key: string,
+    body: string,
+    options?: { fenced?: boolean },
+  ): Outcome<"written" | "present">;
   bufferExists(bucket: string, key: string): Outcome<boolean>;
   /** Newest stored version of an object, ignoring deletion markers. */
   latestVersion(bucket: string, key: string): Outcome<string | null>;

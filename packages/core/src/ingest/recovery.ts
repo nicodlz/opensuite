@@ -18,6 +18,13 @@ const inTurn = <T>(items: T[], work: (item: T) => Promise<void>) =>
 /** Archive entries are named after the exact notification text. */
 export const archiveKey = (body: string) =>
   `${createHash("sha256").update(body).digest("hex")}.json`;
+/**
+ * Whether an archive entry still holds the text it is named after. Another
+ * writer replacing an entry with different content is detected here, as no
+ * archive can exclude every writer.
+ */
+export const namedAfter = (key: string, body: string) =>
+  key.split("/").at(-1) === archiveKey(body);
 
 /** The bucket, topic and buffer prefix this installation accepts. */
 export interface RecoveryScope {
@@ -192,7 +199,14 @@ export interface FirehoseReport {
 export async function recoverFirehose(
   store: RecoveryStore,
   scope: RecoveryScope,
-  options: { prefix: string; since?: Date; until?: Date; apply: boolean },
+  options: {
+    prefix: string;
+    since?: Date;
+    until?: Date;
+    apply: boolean;
+    /** The operator stopped every other archive writer (see the runbook). */
+    fenced?: boolean;
+  },
 ): Promise<Result<FirehoseReport, Failure>> {
   // The Firehose prefix only: never read the buffered messages themselves.
   const overlaps = (prefix: string) =>
@@ -302,7 +316,9 @@ export async function recoverFirehose(
     }
     report.missing++;
     if (!options.apply) return;
-    const written = await store.archiveIfAbsent(key, body);
+    const written = await store.archiveIfAbsent(key, body, {
+      fenced: options.fenced === true,
+    });
     if (written.isErr()) report.failed++;
     else if (written.value === "written") report.written++;
     // Written concurrently since the check: present, nothing lost.
@@ -353,7 +369,10 @@ export async function recoverObjects(
   let foreign = 0;
   await inTurn(keys.value, async (key) => {
     const body = await storage.readArchive(key);
-    const parsed = body.isOk() ? parseNotification(body.value) : undefined;
+    const parsed =
+      body.isOk() && namedAfter(key, body.value)
+        ? parseNotification(body.value)
+        : undefined;
     if (parsed === undefined || parsed.isErr()) {
       failed++;
       return;

@@ -116,6 +116,11 @@ const owned = (id: string, object: string, prefixes?: string[]) => {
     objectPrefixes: prefixes,
   });
 };
+// An archive entry named after its content.
+const named = (text: string): [string, string] => [
+  `notifications/${archiveKey(text)}`,
+  text,
+];
 describe("notification ownership", () => {
   it("accepts every configured rule prefix exactly, and nothing else", () => {
     const prefixes = ["messages/", "messages/esuno/"];
@@ -329,8 +334,8 @@ describe("recovery of buffered MIME objects", () => {
   it("skips an imported message whose variants add no recipient", async () => {
     const fake = fakeStore({});
     const archived = new Map([
-      ["notifications/a.json", body(["alice@example.test"], "ses-v")],
-      ["notifications/b.json", body(["hidden@example.test"], "ses-v")],
+      named(body(["alice@example.test"], "ses-v")),
+      named(body(["hidden@example.test"], "ses-v")),
     ]);
     const storage: Storage = {
       archive: () => Promise.resolve(ok(undefined)),
@@ -369,14 +374,11 @@ describe("recovery of buffered MIME objects", () => {
   it("restores only missing objects of unfinished messages that have a version", async () => {
     const fake = fakeStore({});
     const archived = new Map([
-      ["notifications/a.json", body(["alice@example.test"], "ses-done")],
-      ["notifications/b.json", body(["alice@example.test"], "ses-present")],
-      ["notifications/c.json", body(["alice@example.test"], "ses-restore")],
-      ["notifications/d.json", body(["alice@example.test"], "ses-lost")],
-      [
-        "notifications/e.json",
-        body(["alice@example.test"], "ses-far", { bucket: "far" }),
-      ],
+      named(body(["alice@example.test"], "ses-done")),
+      named(body(["alice@example.test"], "ses-present")),
+      named(body(["alice@example.test"], "ses-restore")),
+      named(body(["alice@example.test"], "ses-lost")),
+      named(body(["alice@example.test"], "ses-far", { bucket: "far" })),
       ["notifications/f.json", "corrupt"],
     ]);
     const storage: Storage = {

@@ -5,6 +5,7 @@ import {
   resolveRecipients,
   verdictPolicy,
 } from "../src/domain/notification.ts";
+import { archiveKey } from "../src/ingest/recovery.ts";
 import { IngestService } from "../src/ingest/service.ts";
 import { synthetic } from "../src/synthetic/memory.ts";
 import { notification } from "./fixtures.ts";
@@ -14,6 +15,9 @@ const routes = [
   { address: "alias@other.test", destination: "alice" },
   { address: "hidden@example.test", destination: "bob" },
 ];
+// Archive entries are named after their content, as the worker names them.
+const archive = (memory: ReturnType<typeof synthetic>, body: string) =>
+  memory.archives.set(`notifications/${archiveKey(body)}`, body);
 const create = () => {
   const memory = synthetic();
   const service = new IngestService({
@@ -134,7 +138,7 @@ describe("SES ingestion", () => {
   });
   it("replays archived notifications and reports orphan objects", async () => {
     const { memory, service } = create();
-    memory.archives.set("saved", JSON.stringify(notification()));
+    archive(memory, JSON.stringify(notification()));
     memory.buffers.set("ses-1", new Uint8Array([1]));
     memory.buffers.set("orphan", new Uint8Array([2]));
     expect((await service.reconcile(1)).isOk()).toBe(true);
@@ -284,10 +288,7 @@ it("reads once and serializes recipient imports without charging infrastructure 
 
 it("replays archives when listing the buffer fails and reports the listing failure", async () => {
   const { memory } = create();
-  memory.archives.set(
-    "saved",
-    JSON.stringify(notification(["alice@example.test"])),
-  );
+  archive(memory, JSON.stringify(notification(["alice@example.test"])));
   memory.buffers.set("ses-1", new Uint8Array([1]));
   const service = new IngestService({
     storage: {
@@ -545,8 +546,8 @@ describe("replay of archived notifications", () => {
     });
     const base = notification(["alice@example.test"], "PASS", "ses-a");
     // Names another message's object.
-    memory.archives.set(
-      "notifications/foreign.json",
+    archive(
+      memory,
       JSON.stringify({
         ...base,
         receipt: {
@@ -557,17 +558,17 @@ describe("replay of archived notifications", () => {
     );
     // Two variants of ses-c that disagree on a verdict.
     memory.buffers.set("ses-c", new Uint8Array([1]));
-    memory.archives.set(
-      "notifications/c1.json",
+    archive(
+      memory,
       JSON.stringify(notification(["alice@example.test"], "PASS", "ses-c")),
     );
-    memory.archives.set(
-      "notifications/c2.json",
+    archive(
+      memory,
       JSON.stringify(notification(["hidden@example.test"], "FAIL", "ses-c")),
     );
     // ses-d's original is gone.
-    memory.archives.set(
-      "notifications/d.json",
+    archive(
+      memory,
       JSON.stringify(notification(["alice@example.test"], "PASS", "ses-d")),
     );
     const replay = await service.reconcile(86_400 * 3650);
@@ -594,6 +595,38 @@ const atObject = (id: string, object: string) => {
     },
   });
 };
+describe("archive integrity", () => {
+  it("refuses an entry whose content no longer matches its name", async () => {
+    const memory = synthetic();
+    const stages: unknown[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event, fields) {
+          if (event === "ingest_failure") stages.push(fields["stage"]);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    // Another writer replaced the entry: it now names other recipients.
+    const original = JSON.stringify(notification(["alice@example.test"]));
+    memory.archives.set(
+      `notifications/${archiveKey(original)}`,
+      JSON.stringify(notification(["hidden@example.test"])),
+    );
+    expect((await service.reconcile(86_400 * 3650)).isErr()).toBe(true);
+    expect(stages).toEqual(["archive_mismatch"]);
+    expect(memory.imports).toHaveLength(0);
+  });
+});
+
 describe("SES setup tests", () => {
   it("acknowledges SES's setup test without archiving or delivering it", async () => {
     const memory = synthetic();
@@ -657,14 +690,8 @@ describe("receipt rule prefixes", () => {
     });
     memory.buffers.set("messages/old", new Uint8Array([1]));
     memory.buffers.set("messages/esuno/new", new Uint8Array([2]));
-    memory.archives.set(
-      "notifications/old.json",
-      atObject("old", "messages/old"),
-    );
-    memory.archives.set(
-      "notifications/new.json",
-      atObject("new", "messages/esuno/new"),
-    );
+    archive(memory, atObject("old", "messages/old"));
+    archive(memory, atObject("new", "messages/esuno/new"));
     expect((await service.reconcile(86_400 * 3650)).isOk()).toBe(true);
     expect(stages).toEqual([]);
     expect(memory.imports).toHaveLength(2);
@@ -757,14 +784,8 @@ describe("held unknown recipients", () => {
     memory.buffers.set("ses-1", new Uint8Array([1]));
     // Same SES message, two envelopes: the first variant alone would
     // complete the message and delete its object before Bob's copy.
-    memory.archives.set(
-      "notifications/a.json",
-      JSON.stringify(notification(["alice@example.test"])),
-    );
-    memory.archives.set(
-      "notifications/b.json",
-      JSON.stringify(notification(["hidden@example.test"])),
-    );
+    archive(memory, JSON.stringify(notification(["alice@example.test"])));
+    archive(memory, JSON.stringify(notification(["hidden@example.test"])));
     await service.reconcile(86_400 * 3650);
     expect(memory.imports.map((item) => item.destination).toSorted()).toEqual([
       "alice",
@@ -801,10 +822,7 @@ describe("held unknown recipients", () => {
       maxAttempts: 3,
     });
     memory.buffers.set("ses-1", new Uint8Array([1]));
-    memory.archives.set(
-      "notifications/a.json",
-      JSON.stringify(notification(["alice@example.test"])),
-    );
+    archive(memory, JSON.stringify(notification(["alice@example.test"])));
     await service.reconcile(86_400 * 3650);
     // Replay searched first and did not import; the row is permanent, so it
     // is listed for an operator instead of retried every hour.

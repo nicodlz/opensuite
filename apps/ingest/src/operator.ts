@@ -265,8 +265,18 @@ const isoDate = z.iso
 async function recover(deps: Dependencies, args: string[]) {
   if (deps.recovery === undefined)
     throw new Error("Recovery is not configured");
-  const apply = args.at(-1) === "--apply";
-  const [kind, rawOperator, ...rest] = apply ? args.slice(0, -1) : args;
+  // Trailing flags: `--apply`, and `--fenced` for an archive without
+  // conditional writes once every other archive writer is stopped.
+  const flags = new Set<string>();
+  const positional = [...args];
+  while (positional.at(-1)?.startsWith("--") === true)
+    flags.add(positional.pop() ?? "");
+  if ([...flags].some((flag) => flag !== "--apply" && flag !== "--fenced"))
+    throw new Error("Invalid operator command");
+  const apply = flags.has("--apply");
+  const fenced = flags.has("--fenced");
+  if (fenced && !apply) throw new Error("--fenced requires --apply");
+  const [kind, rawOperator, ...rest] = positional;
   const operator = identitySchema.parse(rawOperator);
   const { store, scope } = deps.recovery;
   let result;
@@ -276,11 +286,12 @@ async function recover(deps: Dependencies, args: string[]) {
     const options = {
       prefix: z.string().min(1).parse(prefix),
       apply,
+      fenced,
       ...(since === undefined ? {} : { since: isoDate.parse(since) }),
       ...(until === undefined ? {} : { until: isoDate.parse(until) }),
     };
     result = await recoverFirehose(store, scope, options);
-    detail = { prefix, since, until };
+    detail = { prefix, since, until, fenced };
   } else if (kind === "objects" && rest.length === 0) {
     result = await recoverObjects(store, deps.storage, deps.ledger, scope, {
       apply,

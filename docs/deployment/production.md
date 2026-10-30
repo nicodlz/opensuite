@@ -735,7 +735,42 @@ ingestion and subscription DLQs before their 14 days run out.
    divergent message IDs (`mergeable: false` ones are skipped by replay and
    need an operator). The topic is this installation's, so `foreign`
    records usually mean `INBOUND_OBJECT_PREFIXES` lacks a rule's prefix: fix
-   it before applying (both commands exit with an error while any remain). Run it again with `--apply` as last argument.
+   it before applying (both commands exit with an error while any remain).
+   Run it again with `--apply` as last argument.
+
+   B2 does not implement conditional writes (`If-None-Match` answers 501
+   `NotImplemented`), so on a B2 archive `--apply` fails without writing.
+   A fenced run is then possible, but its guarantee rests on an operational
+   assumption the command cannot check: that nothing else writes under the
+   archive prefix during the run. Writers are not only on this host: the
+   worker, any script or person using the archive's application key on an
+   administration machine, the B2 account (master) key and any other
+   application key with write access to the bucket. The lock and container
+   check below only fence this host. Before a fenced run, stop the worker
+   and wait for its drain, stop the replay and backup timers, list the B2
+   application keys able to write to the bucket (B2 console or `b2 key
+list`) and make sure none of them is used meanwhile, then hold the lock
+   replay and backup share for the whole run:
+
+   ```sh
+   [ -z "$(docker ps -q --filter label=com.docker.compose.service=ingest)" ] &&
+     flock -n "${BACKUP_SCRATCH:?}/opensuite-backup.lock" \
+       docker compose --profile ingest run --rm --no-deps -T \
+       -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+       ingest node apps/ingest/src/main.ts operator recover firehose \
+       OPERATOR metadata/YYYY/MM/ SINCE --apply --fenced
+   ```
+
+   `--fenced` records that the operator asserts this fence (in the audit
+   log); it does not enforce it and is no global exclusion. What the
+   command does guarantee: it checks the archive again for each missing
+   entry, writes only an absent one and reads it back, failing if it
+   differs, and never rewrites an existing entry. Should another writer
+   still replace an entry, the replacement is detected rather than used:
+   entries are named after the SHA-256 of their content, and replay and
+   `recover objects` refuse an entry whose content no longer matches its
+   name (`archive_mismatch`). B2 keeps the earlier versions, from which the
+   entry can be restored by hand.
 
 4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
    `--apply`. Investigate every `unrecoverable` message (its original is
@@ -768,8 +803,8 @@ exactly one must succeed and the other answer 412 (a 409, which S3 may return
 when a write races a deletion, is reported as a failure to retry, not
 expected from two writes alone), all
 existing versions must remain, and the restored object must be encrypted;
-B2 must answer 412 to `If-None-Match` too (a B2 that ignores it rewrites
-identical bytes, harmless as entries are named after their content). Check
+on B2, a conditional write answers 501 and a fenced run (step 3) writes
+only absent entries, each read back. Check
 once that a Firehose record and the worker's archive entry of the same mail
 have the same SHA-256, and rehearse on an isolated stack: an expired queue
 message, a database and mail store restored before recent mail, and repeated
