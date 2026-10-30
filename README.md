@@ -1,13 +1,13 @@
 # OpenSuite
 
-A self-hostable suite for mail, calendar, contacts and file storage.
+OpenSuite is a self-hosted mail and file suite, intended as an alternative to hosted mail, calendar and Drive services. It combines a web workspace and application API with the Stalwart mail server, PostgreSQL and S3-compatible storage.
 
 > **Status: early development.** The mail API, mailbox provisioning, Drive,
 > ingestion and backup tools are implemented. Real SES/B2 behavior and the
 > complete production recovery process still require operator verification.
 > Calendar and contacts interfaces and the setup wizard remain planned.
 
-## What works today
+This first release is an early, single-server baseline. The repository contains:
 
 - **Docker Compose stack** (`compose.yaml`): Caddy (automatic HTTPS), the API,
   the Stalwart mail server (SMTP, IMAP, JMAP, CalDAV, CardDAV on embedded
@@ -35,6 +35,14 @@ A self-hostable suite for mail, calendar, contacts and file storage.
     checks PostgreSQL and Stalwart.
   - `GET /openapi.json`: OpenAPI 3.1 document generated from the contracts.
   - Behind Caddy, these are served under `/api/`.
+
+## Start here
+
+- [Documentation map](docs/index.md)
+- [User guide](docs/user/index.md) and [administrator guide](docs/admin/index.md)
+- [Local development](docs/development.md) and the [production deployment runbook](docs/deployment/production.md)
+- [Architecture and security](docs/architecture/overview.md)
+- [Operations](docs/index.md#operations-and-deployment), [contributing](CONTRIBUTING.md), and [changelog](CHANGELOG.md)
 
 ## Installation
 
@@ -81,55 +89,9 @@ established real SES/B2 behavior.
    observer alerts using the linked runbook. Exercise delivery, replay, B2,
    restore and independent archive recovery before the approved DNS cutover.
 
-## Development
+## Repository
 
-Requirements: Node.js 22.18 or later, pnpm 12.
-
-```sh
-pnpm install
-cp deploy/env.example .env   # optional; defaults match the template
-# Set DATABASE_URL to a PostgreSQL application-role connection for local API development.
-pnpm --filter @opensuite/api dev
-# In another terminal: pnpm --filter @opensuite/web dev
-curl http://127.0.0.1:3000/health
-```
-
-Checks:
-
-```sh
-pnpm typecheck
-pnpm lint          # oxlint, type-aware
-pnpm format:check  # Prettier
-pnpm knip          # unused files, exports and dependencies
-node scripts/iac-validate.mjs # offline AWS module checks (Docker required)
-pnpm test          # Vitest unit project
-pnpm build         # static web client
-pnpm test:e2e      # Vite preview and a local API; install Chromium first
-pnpm exec vitest run --project stalwart  # real server; Docker required
-pnpm exec vitest run --project drive     # disposable PostgreSQL and LocalStack
-OPENSUITE_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
-```
-
-Vitest projects are selected by file suffix: `*.test.ts` runs in `unit`;
-`*.db.test.ts`, `*.http.test.ts`, `*.stalwart.test.ts`, `*.ingest.test.ts`
-and `*.drive.test.ts` run in the projects of the same name, which need the
-corresponding infrastructure.
-
-## Repository layout
-
-| Path                         | Contents                                               |
-| ---------------------------- | ------------------------------------------------------ |
-| `apps/api`                   | HTTP API server                                        |
-| `apps/web`                   | Mail workspace and API status page                     |
-| `apps/ingest`                | Inbound mail ingestion worker                          |
-| `apps/drive`                 | Independent file storage service                       |
-| `packages/contracts`         | Shared API schemas and procedure contracts             |
-| `packages/core`              | Domain, services and provider adapters                 |
-| `packages/jmap`              | JMAP and server-side provisioning clients              |
-| `packages/db`                | PostgreSQL schema, migration job, and provider storage |
-| `packages/design-tokens`     | Shared light and dark theme tokens                     |
-| `packages/typescript-config` | Shared strict TypeScript configuration                 |
-| `packages/oxlint-config`     | Shared oxlint configuration                            |
+`apps/api`, `apps/web`, `apps/drive`, `apps/ingest` and `apps/observe` contain the services and client. Shared contracts, domain services, database code, JMAP adapters and configuration live under `packages/`. Compose configuration is in `compose.yaml`; operator assets are in `deploy/`.
 
 ## License
 

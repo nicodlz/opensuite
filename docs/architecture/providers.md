@@ -1,6 +1,6 @@
 # Provider boundaries and availability
 
-Date: 2026-10-29. The adapters and HA profile described here are planned, not implemented.
+Date: 2026-10-29; updated for the current checkout. Inbound, outbound and domain adapters exist, but provider behavior is not proven. The HA profile remains a proposal.
 
 ## Boundaries
 
@@ -11,7 +11,7 @@ Date: 2026-10-29. The adapters and HA profile described here are planned, not im
 
 ## Deployment and service outcomes
 
-The planned single-VPS Compose installation prioritizes simplicity: Stalwart uses persistent RocksDB; the application and Drive use separate PostgreSQL databases; B2 stores mail blobs, Drive objects and encrypted backups with separate access. LocalStack substitutes for external AWS services in development only. The production integration is not deployed. It has single-host failure modes and requires tested backup and restoration. No HA claim follows from service restarts.
+The single-VPS target prioritizes simplicity: Stalwart uses persistent RocksDB; the application and Drive use separate PostgreSQL databases; B2 stores mail blobs, Drive objects and encrypted backups with separate access. LocalStack substitutes for external AWS services in development only. The production integration is not deployed. It has single-host failure modes and requires tested backup and restoration. No HA claim follows from service restarts.
 
 An optional HA design needs independent failure domains, replicated shared stores and coordination, redundant ingress, recovery and monitoring. [Stalwart's cluster requirements](https://stalw.art/docs/cluster/), accessed 2026-10-29, describe the shared PostgreSQL/S3-compatible/Redis components and coordinator needed for the proposed profile; validate the selected versions, edition and actual failover. Regional SES reception, DNS and object replication are separate decisions, not automatic consequences of a Stalwart cluster. Recovery objectives and service-level targets must be measured and agreed by operators; no numeric availability guarantee is asserted.
 

@@ -11,8 +11,10 @@ Default listeners were observed on ports 25, 465, 993, 995, 4190, 443 and 8080; 
 ## Management and mail TLS in Compose
 
 The recovery administrator is present only during the explicit bootstrap or
-recovery override. Normal setup and provisioning use a separate Admin account
-whose credential allows the private Compose management subnet. Caddy removes
+recovery override. Normal setup uses a separate Admin account
+whose credential allows the private Compose management subnet. The current
+API provisioning runtime instead uses the inactive recovery identity; see
+[authentication and provisioning](../development.md#authentication-and-mailbox-provisioning). Caddy removes
 untrusted forwarded-address values and blocks clients from that subnet, while
 the mail server trusts one forwarded hop. Direct access to the internal mail
 listener is trusted; a compromised container on any network attached to
