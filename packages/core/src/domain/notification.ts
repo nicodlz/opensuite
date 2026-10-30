@@ -98,17 +98,54 @@ export function resolveRecipients(
   }
   return [...result.values()];
 }
+/** Why a message is quarantined; `null` when it goes to the inbox. */
+export type QuarantineReason =
+  | "spam"
+  | "virus"
+  | "dmarc_fail"
+  | "dmarc_unchecked"
+  | "spf_fail"
+  | "dkim_fail";
+/**
+ * Inbox or quarantine, from the SES verdicts. See
+ * https://docs.aws.amazon.com/ses/latest/dg/receiving-email-notifications-contents.html
+ *
+ * Content scans must pass: a spam or virus verdict of FAIL, GRAY (scanned
+ * but undecided) or PROCESSING_FAILED (not scanned) quarantines.
+ *
+ * For authentication, AWS documents GRAY as an absence of proof, not a
+ * failure: SPF none, softfail or neutral; DKIM unsigned or signed for
+ * another domain than From; DMARC for a domain without a policy or with
+ * p=none. Real mail from a Google Workspace domain without SPF, DMARC or
+ * its own DKIM key arrives with all three GRAY: its signature is valid but
+ * made for Google's domain, not aligned with From. GRAY therefore proves
+ * nothing about the sender: on its own it does not quarantine, so ordinary
+ * mail reaches the inbox, and it is never treated as authentication. A failure
+ * quarantines: DMARC FAIL whatever the domain's requested policy; SPF or
+ * DKIM FAIL unless DMARC passed, as forwarding and mailing lists break them
+ * while the aligned identifier holds. DMARC that could not be checked
+ * (PROCESSING_FAILED, for instance a DNS error or a malformed signature)
+ * quarantines unless DKIM passed: SES reports DKIM PASS only for a
+ * signature aligned with From, whereas SPF PASS concerns the envelope
+ * sender, which a forger controls.
+ */
+export function quarantineReason(
+  notification: Notification,
+): QuarantineReason | null {
+  const r = notification.receipt;
+  if (r.spamVerdict.status !== "PASS") return "spam";
+  if (r.virusVerdict.status !== "PASS") return "virus";
+  const dmarc = r.dmarcVerdict.status;
+  if (dmarc === "FAIL") return "dmarc_fail";
+  if (dmarc === "PASS") return null;
+  if (r.spfVerdict.status === "FAIL") return "spf_fail";
+  if (r.dkimVerdict.status === "FAIL") return "dkim_fail";
+  if (dmarc === "PROCESSING_FAILED" && r.dkimVerdict.status !== "PASS")
+    return "dmarc_unchecked";
+  return null;
+}
 export function verdictPolicy(
   notification: Notification,
 ): "deliver" | "quarantine" {
-  const r = notification.receipt;
-  return [
-    r.spamVerdict,
-    r.virusVerdict,
-    r.spfVerdict,
-    r.dkimVerdict,
-    r.dmarcVerdict,
-  ].every((v) => v.status === "PASS")
-    ? "deliver"
-    : "quarantine";
+  return quarantineReason(notification) === null ? "deliver" : "quarantine";
 }

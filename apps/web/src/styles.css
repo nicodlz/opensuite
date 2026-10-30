@@ -104,9 +104,6 @@ h3 {
 .brand-mark {
   width: 30px;
   height: 30px;
-  padding: 3px;
-  border-radius: 8px;
-  background: var(--ivory);
   object-fit: contain;
 }
 .workspace-caption,
@@ -1678,6 +1675,12 @@ h1 {
   border-radius: 16px;
   background: var(--surface);
   box-shadow: 0 12px 48px #24123a18;
+}
+.auth-card .brand {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--night-card);
+  color: var(--ivory);
 }
 .auth-card h1 {
   margin: 32px 0 8px;

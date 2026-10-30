@@ -3,6 +3,8 @@ import type { Notification, Recipient, Route } from "../domain/notification.ts";
 
 export type Failure = {
   message: string;
+  /** Provider error name, safe to log (no keys or addresses). */
+  code?: string;
   ambiguous?: boolean;
   permanent?: boolean;
 };

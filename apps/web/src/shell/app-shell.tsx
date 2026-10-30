@@ -37,7 +37,12 @@ const products: {
     icon: "calendar",
     mark: "/calendar-mark.svg",
   },
-  { id: "contacts", label: "Contacts", icon: "contacts" },
+  {
+    id: "contacts",
+    label: "Contacts",
+    icon: "contacts",
+    mark: "/contacts-mark.svg",
+  },
   { id: "vault", label: "Vault", icon: "vault", mark: "/vault-mark.svg" },
   {
     id: "drive",

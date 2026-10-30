@@ -7,6 +7,7 @@ import { createMailService } from "@opensuite/core/services/mail";
 import {
   configureApplicationRole,
   createDatabase,
+  createDomainStore,
   createMailboxStore,
 } from "@opensuite/db";
 import { JmapClient } from "@opensuite/jmap";
@@ -234,6 +235,7 @@ beforeAll(async () => {
       {
         publicOrigin: origin,
         mailDomain: "example.test",
+        mailDomains: ["example.test", "second.test"],
         stalwartOrigin: mailUrl,
         secret: "test-secret-at-least-32-characters-long",
         mailboxKey: "ab".repeat(32),
@@ -510,4 +512,177 @@ it("provisions, repairs, authenticates and suspends real local mailboxes", async
       })
     ).json(),
   ).toBeNull();
+  // The following multi-domain case shares this bootstrapped account.
+  const verified = await post(
+    "/api/auth/two-factor/verify-totp",
+    { code: totp(secret) },
+    cookieOf(challenged),
+  );
+  expect(verified.status).toBe(200);
+  const verifiedCookie = cookieOf(verified);
+  expect(
+    (
+      await post(
+        "/api/auth/two-factor/disable",
+        { password: admin.password },
+        verifiedCookie,
+      )
+    ).status,
+  ).toBe(200);
+  await post("/api/auth/sign-out", {}, verifiedCookie);
+}, 120_000);
+
+const account = (email: string) => ({
+  name: "Second",
+  email,
+  password: "long-test-password-789",
+});
+it("provisions and authenticates accounts on every configured or managed domain only", async () => {
+  await wait(async () => (await fetch(`${mailUrl}/healthz/ready`)).ok);
+  const adminLogin = await post("/api/auth/sign-in/email", {
+    email: "admin@example.test",
+    password: "long-test-password-123",
+  });
+  expect(adminLogin.status).toBe(200);
+  const adminCookie = cookieOf(adminLogin);
+  const db = createDatabase(databaseUrl);
+  if (db.isErr()) throw new Error("database unavailable");
+  try {
+    // Configured with MAIL_DOMAINS beside the primary domain.
+    const second = account("nicolas@second.test");
+    expect(
+      (await post("/api/auth/sign-up/email", second, adminCookie)).status,
+    ).toBe(200);
+    const login = await post("/api/auth/sign-in/email", second);
+    expect(login.status).toBe(200);
+    expect(
+      (await post("/mail/mailboxes", { accountId: "default" }, cookieOf(login)))
+        .status,
+    ).toBe(200);
+    const id = await userId(second.email);
+    const link = await db.value.mailboxLink.findUniqueOrThrow({
+      where: { userId: id },
+    });
+    expect(link.address).toBe(second.email);
+    const store = createMailboxStore(db.value, "ab".repeat(32));
+    if (store.isErr()) throw new Error("store unavailable");
+    const credential = await store.value.getForOwner(id, link.accountId);
+    if (credential.isErr()) throw new Error("credential unavailable");
+    const client = new JmapClient(mailUrl, {
+      authorization: `Basic ${Buffer.from(`${second.email}:${credential.value.secret}`).toString("base64")}`,
+    });
+    const session = await client.discover();
+    expect(
+      session.isOk() &&
+        session.value.primaryAccounts["urn:ietf:params:jmap:mail"],
+    ).toBe(link.accountId);
+
+    // A domain an administrator manages, until its removal starts.
+    const managed = account("someone@managed.test");
+    expect(
+      (await post("/api/auth/sign-up/email", managed, adminCookie)).status,
+    ).toBe(400);
+    const adminId = await userId("admin@example.test");
+    const row = await db.value.domain.create({
+      data: { userId: adminId, name: "managed.test" },
+    });
+    expect(
+      (await post("/api/auth/sign-up/email", managed, adminCookie)).status,
+    ).toBe(200);
+    expect((await post("/api/auth/sign-in/email", managed)).status).toBe(200);
+    // An address record of the account itself does not block it.
+    await db.value.user.create({
+      data: { id: "self", name: "Self", email: "self@managed.test" },
+    });
+    await db.value.address.create({
+      data: { userId: "self", domainId: row.id, localPart: "self" },
+    });
+    await reconcile();
+    expect(
+      await db.value.mailboxLink.count({
+        where: { userId: "self", status: "active" },
+      }),
+    ).toBe(1);
+    // Its accounts keep the domain from removal.
+    const removal = await createDomainStore(db.value).beginRemoval(row.id);
+    expect(removal.isOk() && removal.value).toBe(false);
+    // An address another user already holds is never provisioned again.
+    await db.value.address.create({
+      data: { userId: adminId, domainId: row.id, localPart: "taken" },
+    });
+    expect(
+      (
+        await post(
+          "/api/auth/sign-up/email",
+          account("taken@managed.test"),
+          adminCookie,
+        )
+      ).ok,
+    ).toBe(false);
+    expect(
+      await db.value.mailboxLink.count({
+        where: { address: "taken@managed.test" },
+      }),
+    ).toBe(0);
+    await db.value.domain.update({
+      where: { name: "managed.test" },
+      data: { removalPending: true },
+    });
+    expect(
+      (
+        await post(
+          "/api/auth/sign-up/email",
+          account("late@managed.test"),
+          adminCookie,
+        )
+      ).status,
+    ).toBe(400);
+
+    // A removal in progress wins over MAIL_DOMAINS.
+    await db.value.domain.create({
+      data: { userId: adminId, name: "second.test", removalPending: true },
+    });
+    expect(
+      (
+        await post(
+          "/api/auth/sign-up/email",
+          account("late@second.test"),
+          adminCookie,
+        )
+      ).status,
+    ).toBe(400);
+    // Any other domain stays refused on every path.
+    expect(
+      (
+        await post(
+          "/api/auth/sign-up/email",
+          account("nobody@third.test"),
+          adminCookie,
+        )
+      ).status,
+    ).toBe(400);
+    await expect(
+      bootstrap("nobody@third.test", "long-test-password-789", "Nobody"),
+    ).rejects.toThrow("email domain is not configured");
+    // Provisioning checks the domain itself, not only signup: an account
+    // that bypassed signup is never given a mailbox.
+    await db.value.user.create({
+      data: { id: "outsider", name: "Outsider", email: "outsider@third.test" },
+    });
+    expect(await reconcile()).toBeGreaterThanOrEqual(1);
+    expect(
+      await db.value.mailboxLink.count({ where: { userId: "outsider" } }),
+    ).toBe(0);
+    await db.value.mailboxProvision.deleteMany({
+      where: { userId: "outsider" },
+    });
+    await db.value.user.delete({ where: { id: "outsider" } });
+    expect(
+      await db.value.user.count({
+        where: { email: { endsWith: "@third.test" } },
+      }),
+    ).toBe(0);
+  } finally {
+    await db.value.$disconnect();
+  }
 }, 120_000);

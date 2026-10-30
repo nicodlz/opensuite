@@ -73,6 +73,8 @@ const types: Record<string, string> = {
   ".js": "text/javascript",
   ".css": "text/css",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".webmanifest": "application/manifest+json",
   ".woff2": "font/woff2",
 };
 async function body(request: IncomingMessage) {
@@ -153,6 +155,8 @@ async function serve(
   response.writeHead(200, {
     "content-type": types[extname(target)] ?? "application/octet-stream",
     "referrer-policy": "no-referrer",
+    "content-security-policy":
+      "default-src 'self'; connect-src 'self' https: http:; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self'; object-src 'none'; base-uri 'none'; form-action 'self'",
   });
   response.end(await readFile(target));
 }
@@ -338,6 +342,148 @@ const visited = (page: Page) => {
   });
   return urls;
 };
+
+for (const [product, label, startUrl] of [
+  ["mail", "Mail", "/mail"],
+  ["drive", "Drive", "/"],
+  ["calendar", "Calendar", "/"],
+] as const) {
+  test(`${label} origin supplies its installable app metadata`, async ({
+    page,
+  }) => {
+    const origin = { mail, drive, calendar }[product];
+    const violations: string[] = [];
+    page.on("console", (message) => {
+      if (
+        message.type() === "error" &&
+        message.text().includes("Content Security Policy")
+      )
+        violations.push(message.text());
+    });
+    // This public route stays on the product origin without a session.
+    await page.goto(`${origin}/auth/callback`);
+    const links = [
+      [
+        'link[rel="icon"][type="image/svg+xml"]',
+        `/icons/${product}-favicon.svg`,
+        "image/svg+xml",
+      ],
+      [
+        'link[rel="icon"][type="image/png"]',
+        `/icons/${product}-32.png`,
+        "image/png",
+      ],
+      [
+        'link[rel="apple-touch-icon"]',
+        `/icons/${product}-180.png`,
+        "image/png",
+      ],
+    ] as const;
+    await Promise.all(
+      links.map(async ([selector, href, contentType]) => {
+        await expect(page.locator(selector)).toHaveAttribute("href", href);
+        const response = await page.request.get(`${origin}${href}`);
+        expect(response.status()).toBe(200);
+        expect(response.headers()["content-type"]).toContain(contentType);
+      }),
+    );
+    const manifestPath = `/manifest-${product}.webmanifest`;
+    await expect(page.locator('link[rel="manifest"]')).toHaveAttribute(
+      "href",
+      manifestPath,
+    );
+    const response = await page.request.get(`${origin}${manifestPath}`);
+    expect(response.status()).toBe(200);
+    expect(response.headers()["content-type"]).toContain(
+      "application/manifest+json",
+    );
+    const manifest = z
+      .object({
+        icons: z.array(
+          z.object({
+            src: z.string(),
+            sizes: z.string(),
+            type: z.string(),
+            purpose: z.string(),
+          }),
+        ),
+      })
+      .passthrough()
+      .parse(await response.json());
+    expect(manifest).toMatchObject({
+      name: `Esuno ${label}`,
+      short_name: label,
+      start_url: startUrl,
+      scope: "/",
+      display: "standalone",
+      theme_color: "#1c1427",
+      background_color: "#1c1427",
+      icons: [
+        {
+          src: `/icons/${product}-192.png`,
+          sizes: "192x192",
+          type: "image/png",
+          purpose: "any",
+        },
+        {
+          src: `/icons/${product}-512.png`,
+          sizes: "512x512",
+          type: "image/png",
+          purpose: "any",
+        },
+        {
+          src: `/icons/${product}-maskable-512.png`,
+          sizes: "512x512",
+          type: "image/png",
+          purpose: "maskable",
+        },
+      ],
+    });
+    await Promise.all(
+      manifest.icons.map(async (icon) => {
+        const image = await page.request.get(`${origin}${icon.src}`);
+        expect(image.status()).toBe(200);
+        expect(image.headers()["content-type"]).toContain("image/png");
+        const png = await image.body();
+        expect(png.subarray(0, 8)).toEqual(
+          Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        );
+        const size = Number(icon.sizes.split("x")[0]);
+        expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([
+          size,
+          size,
+        ]);
+      }),
+    );
+    await expect(
+      page.getByRole("heading", { name: "Sign-in link expired" }),
+    ).toBeVisible();
+    expect(violations).toEqual([]);
+  });
+}
+
+test("single-origin and unavailable origin maps default to Mail metadata", async ({
+  page,
+}) => {
+  await page.goto(`${single}/auth/callback`);
+  await expect(page.locator('link[rel="manifest"]')).toHaveAttribute(
+    "href",
+    "/manifest-mail.webmanifest",
+  );
+  await page.route("**/api/origins", (route) => route.abort());
+  await page.goto(`${drive}/auth/callback`);
+  await expect(
+    page.getByRole("heading", { name: "Sign-in link expired" }),
+  ).toBeVisible();
+  await expect(page.locator('link[rel="manifest"]')).toHaveAttribute(
+    "href",
+    "/manifest-mail.webmanifest",
+  );
+  await expect(page.locator('link[rel="apple-touch-icon"]')).toHaveAttribute(
+    "href",
+    "/icons/mail-180.png",
+  );
+});
 
 test("sign in once on mail, then reach calendar and drive at their root", async ({
   page,

@@ -15,6 +15,9 @@ export interface ApiContext {
         readonly handler: (request: Request) => Promise<Response>;
         readonly publicOrigin: string;
         readonly mailDomain?: string;
+        readonly isMailDomain?: (
+          domain: string | undefined,
+        ) => Promise<boolean>;
         readonly userIdForEmail?: (email: string) => Promise<string | null>;
       }
     | undefined;

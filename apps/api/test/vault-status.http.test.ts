@@ -2,6 +2,7 @@ import { createReadinessService } from "@opensuite/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer, type ServerDependencies } from "../src/server.ts";
+import { createVaultStatus } from "../src/routes/vault-status.ts";
 
 const urlText = (url: Parameters<typeof fetch>[0]) =>
   typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -129,6 +130,35 @@ describe("Vault status", () => {
     expect((await server.inject("/vault/status")).statusCode).toBe(200);
     expect(cancel).toHaveBeenCalledOnce();
   });
+  it.each([
+    { size: 16_384, version: "1.2.3", cancelled: false },
+    { size: 16_385, version: null, cancelled: true },
+  ])(
+    "bounds chunked configuration bodies at $size bytes",
+    async ({ size, version, cancelled }) => {
+      const cancel = vi.fn<() => void>();
+      const json = JSON.stringify({ version: "1.2.3" });
+      const bytes = new TextEncoder().encode(json.padEnd(size, " "));
+      const fetcher: typeof fetch = (url) => {
+        if (urlText(url).endsWith("/alive"))
+          return Promise.resolve(new Response("ok"));
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(bytes.slice(0, 12));
+            controller.enqueue(bytes.slice(12));
+            if (!cancelled) controller.close();
+          },
+          cancel,
+        });
+        return Promise.resolve(new Response(body));
+      };
+      const status = await createVaultStatus("https://vault.example.test", {
+        fetcher,
+      })();
+      expect(status).toMatchObject({ enabled: true, reachable: true, version });
+      expect(cancel).toHaveBeenCalledTimes(cancelled ? 1 : 0);
+    },
+  );
   it("times out an unreachable vault without affecting readiness", async () => {
     const server = await start("https://vault.example.test", {
       fetcher: timeoutFetcher,

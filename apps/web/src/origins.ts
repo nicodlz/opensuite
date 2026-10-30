@@ -48,6 +48,11 @@ export function resolveLayout(
   };
 }
 
+/** Installation metadata follows the app on a split origin, or Mail by default. */
+export function installProduct(layout: OriginLayout): AppProduct {
+  return layout.host ?? "mail";
+}
+
 /** URL of an application: absolute on another origin, a route path otherwise. */
 export function productHref(layout: OriginLayout, product: AppProduct) {
   if (!layout.split) return productPaths[product];

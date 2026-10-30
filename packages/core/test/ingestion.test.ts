@@ -605,9 +605,42 @@ describe("held unknown recipients", () => {
     expect(memory.messageStates.get("ses-1")).toBe("imported");
   });
 
+  it("logs where each import went and why", async () => {
+    const memory = synthetic();
+    const seen: Record<string, string | number>[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event, fields) {
+          if (event === "ingest_imported") seen.push(fields);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    memory.buffers.set("ses-2", new Uint8Array([1]));
+    await service.process(
+      JSON.stringify(notification(["alice@example.test"], "PASS", "ses-1")),
+    );
+    await service.process(
+      JSON.stringify(notification(["alice@example.test"], "FAIL", "ses-2")),
+    );
+    expect(seen.map((fields) => fields["placement"])).toEqual([
+      "inbox",
+      "spam",
+    ]);
+  });
+
   it("keeps a completed message for replay when deleting its object fails", async () => {
     const memory = synthetic();
     let failures = 1;
+    const seen: Record<string, string | number>[] = [];
     const service = new IngestService({
       storage: {
         ...memory.storage,
@@ -615,13 +648,19 @@ describe("held unknown recipients", () => {
           // Completion must not be recorded before the object is gone.
           expect(memory.messageStates.get("ses-1")).not.toBe("imported");
           return failures-- > 0
-            ? Promise.resolve(err({ message: "storage unavailable" }))
+            ? Promise.resolve(
+                err({ message: "Access denied to key", code: "AccessDenied" }),
+              )
             : memory.storage.deleteBuffer(bucket, key);
         },
       },
       ledger: memory.ledger,
       delivery: memory.delivery,
-      events: memory.sink,
+      events: {
+        emit(event, fields) {
+          seen.push({ event, ...fields });
+        },
+      },
       routes,
       bucket: "inbound",
       bufferPrefix: "",
@@ -634,6 +673,12 @@ describe("held unknown recipients", () => {
     expect((await service.process(body)).isErr()).toBe(true);
     expect(memory.messageStates.get("ses-1")).toBe("failed");
     expect(memory.buffers.has("ses-1")).toBe(true);
+    // The cause is logged without the object key.
+    expect(seen).toContainEqual({
+      event: "ingest_failure",
+      stage: "buffer_delete",
+      code: "AccessDenied",
+    });
     expect((await service.reconcile(86_400)).isOk()).toBe(true);
     expect(memory.buffers.has("ses-1")).toBe(false);
     expect(memory.messageStates.get("ses-1")).toBe("imported");

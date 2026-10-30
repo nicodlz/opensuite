@@ -65,6 +65,7 @@ export function SetupPage() {
   const domain =
     domains.data?.find((item) => item.name === status.data?.mailDomain) ??
     domains.data?.[0];
+  const managedDomains = domains.data?.map((item) => item.name) ?? [];
   const steps = stepStatuses(
     status.data,
     domain,
@@ -190,8 +191,8 @@ export function SetupPage() {
       );
       return;
     }
-    if (email.toLowerCase().split("@")[1] !== status.data?.mailDomain) {
-      setMessage("The address must use the configured mailbox domain.");
+    if (!managedDomains.includes(email.toLowerCase().split("@")[1] ?? "")) {
+      setMessage("The address must use a managed domain.");
       return;
     }
     create.mutate();
@@ -491,13 +492,14 @@ export function SetupPage() {
         {step === 3 && (
           <>
             <p>
-              Create an account with an initial password. Mailbox provisioning
-              currently accepts only{" "}
+              Create an account with an initial password. The address must be in
+              a managed domain:{" "}
               <strong>
-                {status.data?.mailDomain ?? "the configured MAIL_DOMAIN"}
+                {managedDomains.length > 0
+                  ? managedDomains.join(", ")
+                  : (status.data?.mailDomain ?? "the configured MAIL_DOMAIN")}
               </strong>
-              . The matching managed domain must be added first. Public sign-up
-              remains disabled.
+              . Add a domain first to use it. Public sign-up remains disabled.
             </p>
             <form onSubmit={createUser}>
               <TextField

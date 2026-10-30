@@ -7,7 +7,7 @@ Start with the [project overview](../README.md). Guides describe the current che
 - [User guide](user/index.md): accounts, Mail, Drive, Vault and aliases; [Vault client setup and compatibility](user/vault-clients.md).
 - [Administrator guide](admin/index.md): setup, users, domains, outbound mail and suspension.
 - [Development and local installation](development.md): Compose, bootstrap, testing and service configuration.
-- [Web client](../apps/web/README.md) and [database package](../packages/db/README.md).
+- [Web client](../apps/web/README.md), [project website](../apps/landing/README.md) and [database package](../packages/db/README.md).
 
 ## Operations and deployment
 

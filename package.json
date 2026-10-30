@@ -15,9 +15,10 @@
     "format:check": "prettier --ignore-path .prettierignore --ignore-path .gitignore --ignore-path packages/db/.gitignore --check .",
     "knip": "knip",
     "test": "vitest run --project unit",
-    "build": "pnpm --filter @opensuite/web build",
+    "build": "pnpm --filter @opensuite/web --filter @opensuite/landing build",
     "test:e2e": "playwright test",
-    "iac:validate": "node scripts/iac-validate.mjs"
+    "iac:validate": "node scripts/iac-validate.mjs",
+    "icons:generate": "node apps/web/generate-icons.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "catalog:",

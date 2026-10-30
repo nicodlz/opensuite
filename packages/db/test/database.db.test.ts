@@ -188,8 +188,33 @@ describe("PostgreSQL schema and adapters", () => {
     const owned = await store.getForOwner(owner, accountId);
     expect(owned.isOk() ? owned.value.secret : undefined).toBe(secret);
     expect((await store.getForOwner(other, accountId)).isErr()).toBe(true);
+    // Server-side delivery reads it by account, only while it is usable.
+    const delivered = await store.getForAccount(accountId);
+    expect(delivered.isOk() && delivered.value).toEqual({
+      address: `${owner}@example.test`,
+      secret,
+    });
+    const kind = async (id: string, using = store) => {
+      const result = await using.getForAccount(id);
+      return result.isErr() ? result.error.kind : "ok";
+    };
+    expect(await kind("")).toBe("invalid_input");
+    expect(await kind(`missing-${randomUUID()}`)).toBe("not_found");
+    const wrongKey = createMailboxStore(db, "cd".repeat(32));
+    if (wrongKey.isErr()) throw new Error(wrongKey.error.message);
+    expect(await kind(accountId, wrongKey.value)).toBe("crypto_error");
+    await db.mailboxLink.update({
+      where: { userId: owner },
+      data: { status: "disabling" },
+    });
+    expect(await kind(accountId)).toBe("not_found");
+    await db.mailboxLink.update({
+      where: { userId: owner },
+      data: { status: "active" },
+    });
     await db.user.update({ where: { id: owner }, data: { disabled: true } });
     expect((await store.getForOwner(owner, accountId)).isErr()).toBe(true);
+    expect(await kind(accountId)).toBe("not_found");
   });
   it("applies migrations from an empty database and records their checksums", async () => {
     const rows = z
@@ -509,6 +534,78 @@ describe("PostgreSQL schema and adapters", () => {
 });
 
 describe("alias reservations", () => {
+  it("keeps a mailbox's primary address from other users and its domain from removal", async () => {
+    const suffix = randomUUID();
+    const owner = `primary-owner-${suffix}`;
+    const other = `primary-other-${suffix}`;
+    const name = `${suffix}.example.test`;
+    await db.user.createMany({
+      data: [
+        { id: owner, email: `owner@${name}`, name: owner },
+        { id: other, email: `other@${name}`, name: other },
+        // Signed up, still waiting for its mailbox.
+        { id: `pending-${suffix}`, email: `pending@${name}`, name: "Pending" },
+      ],
+    });
+    const domain = await db.domain.create({
+      data: { name, userId: owner, status: "verified", stalwartId: "d" },
+    });
+    await db.mailboxLink.createMany({
+      data: [owner, other].map((userId, index) => ({
+        userId,
+        accountId: `${suffix}-${String(index)}`,
+        address: `${index === 0 ? "owner" : "other"}@${name}`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      })),
+    });
+    const { createAliasStore, createDomainStore } =
+      await import("../src/index.ts");
+    const domains = createDomainStore(db);
+    const removal = await domains.beginRemoval(domain.id);
+    expect(removal.isOk() && removal.value).toBe(false);
+    // So does a domain whose only account is still waiting for its mailbox.
+    const waiting = `waiting-${suffix}.example.test`;
+    await db.user.create({
+      data: { id: `waiting-${suffix}`, email: `w@${waiting}`, name: "W" },
+    });
+    const quiet = await db.domain.create({
+      data: { name: waiting, userId: owner, status: "verified" },
+    });
+    const blocked = await domains.beginRemoval(quiet.id);
+    expect(blocked.isOk() && blocked.value).toBe(false);
+    expect(
+      (
+        await domains.addAddress(owner, domain.id, other, "OWNER", false)
+      ).isErr(),
+    ).toBe(true);
+    const alias = await createAliasStore(db).reserve(
+      other,
+      { domainId: domain.id },
+      "owner",
+      10,
+    );
+    expect(alias.isErr() && alias.error).toEqual({ kind: "conflict" });
+    expect(
+      (
+        await domains.addAddress(owner, domain.id, other, "pending", false)
+      ).isErr(),
+    ).toBe(true);
+    const early = await createAliasStore(db).reserve(
+      other,
+      { domainId: domain.id },
+      "pending",
+      10,
+    );
+    expect(early.isErr() && early.error).toEqual({ kind: "conflict" });
+    expect(await db.address.count({ where: { domainId: domain.id } })).toBe(0);
+    expect(
+      (
+        await domains.addAddress(owner, domain.id, owner, "owner", false)
+      ).isOk(),
+    ).toBe(true);
+  });
+
   it("reserves deleted addresses permanently and routes only active aliases", async () => {
     const suffix = randomUUID();
     const owner = `alias-owner-${suffix}`;
@@ -580,6 +677,17 @@ describe("alias reservations", () => {
     });
     const inactive = await store.routes([full]);
     expect(inactive.isOk() && inactive.value).toEqual([]);
+    // A mailbox's primary address routes without an address record, until
+    // its user is disabled.
+    const primary = `${owner}@example.test`.toLowerCase();
+    const routed = await store.routes([primary.toUpperCase()]);
+    expect(routed.isOk() && routed.value).toEqual([
+      { address: primary, destination: suffix },
+    ]);
+    await db.user.update({ where: { id: owner }, data: { disabled: true } });
+    const disabled = await store.routes([primary]);
+    expect(disabled.isOk() && disabled.value).toEqual([]);
+    await db.user.update({ where: { id: owner }, data: { disabled: false } });
     const tombstoneBlocked = await store.beginRemoval(domain.id);
     expect(tombstoneBlocked.isOk() && tombstoneBlocked.value).toBe(false);
     await expect(

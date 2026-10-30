@@ -33,6 +33,7 @@ const password = "cobalt-rocket-forest-9381!";
 let origin: string;
 let quarantine: string;
 let client: JmapClient;
+let account: string;
 
 beforeAll(async () => {
   try {
@@ -65,8 +66,9 @@ beforeAll(async () => {
       rewriteSessionUrlsToOrigin: origin,
     });
     const session = unwrap(await client.discover());
-    const account = session.primaryAccounts[JmapCapability.mail];
-    if (account === undefined) throw new Error("Missing account");
+    const primary = session.primaryAccounts[JmapCapability.mail];
+    if (primary === undefined) throw new Error("Missing account");
+    account = primary;
     const box = unwrap(await client.mailboxes(session, account)).list.find(
       (item) => item.role === "junk",
     );
@@ -84,7 +86,7 @@ afterAll(async () => {
 it("confirms an imported message using keyword, date, Message-ID and bytes", async () => {
   const delivery = jmapDelivery([
     {
-      id: "alice",
+      id: account,
       origin,
       authorization: `Basic ${Buffer.from(`alice@example.test:${password}`).toString("base64")}`,
       quarantineMailbox: quarantine,
@@ -97,17 +99,17 @@ it("confirms an imported message using keyword, date, Message-ID and bytes", asy
   const date = "2026-01-02T03:04:05.321Z";
   const key = "a".repeat(64);
   const imported = unwrap(
-    await delivery.import("alice", bytes, false, date, key, new Map(), () =>
+    await delivery.import(account, bytes, false, date, key, new Map(), () =>
       Promise.resolve(ok(undefined)),
     ),
   );
   expect(
-    unwrap(await delivery.reconcile("alice", bytes, false, date, key)),
+    unwrap(await delivery.reconcile(account, bytes, false, date, key)),
   ).toEqual([imported]);
   expect(
     (
       await delivery.reconcile(
-        "alice",
+        account,
         Buffer.from("different"),
         false,
         date,
@@ -117,12 +119,10 @@ it("confirms an imported message using keyword, date, Message-ID and bytes", asy
   ).toBe(true);
   expect(
     unwrap(
-      await delivery.reconcile("alice", bytes, false, date, "b".repeat(64)),
+      await delivery.reconcile(account, bytes, false, date, "b".repeat(64)),
     ),
   ).toEqual([]);
   const session = unwrap(await client.discover());
-  const account = session.primaryAccounts[JmapCapability.mail];
-  if (account === undefined) throw new Error("Missing account");
   const email = unwrap(await client.emails(session, account, [imported]))
     .list[0];
   expect(email?.receivedAt).toBe("2026-01-02T03:04:05Z");

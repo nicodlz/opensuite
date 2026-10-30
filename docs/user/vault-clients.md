@@ -18,6 +18,10 @@ For YubiKey OTP, operators may set `VAULT_YUBICO_CLIENT_ID` and
 empty. These are unnecessary for FIDO2 or TOTP. Protect the environment file
 and Compose configuration output because the Yubico secret is included there.
 
+The Esuno theme applies to the bundled web vault only. Official mobile and
+desktop applications and browser extensions ship their own interface and
+branding; the server cannot theme them.
+
 ## Server selection and evidence
 
 On the login or registration screen, choose the self-hosted server and save the
