@@ -11,10 +11,12 @@ import {
   bucketProbe,
   queueProbe,
 } from "@opensuite/core";
+import { readFile } from "node:fs/promises";
 import {
   createDatabase,
   createDatabaseProbe,
   createDomainStore,
+  createMailboxStore,
 } from "@opensuite/db";
 import { z } from "zod";
 import { createHealthServer } from "./health.ts";
@@ -29,6 +31,8 @@ const destination = z.object({
   quarantineMailbox: z.string().min(1),
   rewriteSessionUrls: z.boolean().default(false),
 });
+const unset = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((value) => (value === "" ? undefined : value), schema);
 const configSchema = z
   .object({
     DATABASE_URL: z.string().min(1),
@@ -44,22 +48,35 @@ const configSchema = z
     ARCHIVE_REGION: z.string().default("eu-north-1"),
     ARCHIVE_ACCESS_KEY_ID: z.string().optional(),
     ARCHIVE_SECRET_ACCESS_KEY: z.string().optional(),
-    INGEST_ROUTES: z.string().transform((s, ctx) => {
-      try {
-        return route.array().parse(JSON.parse(s));
-      } catch {
-        ctx.addIssue({ code: "custom", message: "Invalid routes JSON" });
-        return z.NEVER;
-      }
-    }),
-    INGEST_DESTINATIONS: z.string().transform((s, ctx) => {
-      try {
-        return destination.array().min(1).parse(JSON.parse(s));
-      } catch {
-        ctx.addIssue({ code: "custom", message: "Invalid destinations JSON" });
-        return z.NEVER;
-      }
-    }),
+    INGEST_ROUTES: z
+      .string()
+      .default("[]")
+      .transform((s, ctx) => {
+        try {
+          return route.array().parse(JSON.parse(s));
+        } catch {
+          ctx.addIssue({ code: "custom", message: "Invalid routes JSON" });
+          return z.NEVER;
+        }
+      }),
+    INGEST_DESTINATIONS: z
+      .string()
+      .default("[]")
+      .transform((s, ctx) => {
+        try {
+          return destination.array().parse(JSON.parse(s));
+        } catch {
+          ctx.addIssue({
+            code: "custom",
+            message: "Invalid destinations JSON",
+          });
+          return z.NEVER;
+        }
+      }),
+    // Delivery to mailboxes linked in the database, without a restart.
+    // An empty value turns it off, as Compose cannot remove a variable.
+    MAILBOX_KEY_FILE: unset(z.string().min(1).optional()),
+    INGEST_MAILBOX_ORIGIN: unset(z.url().optional()),
     INGEST_HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(3002),
     INGEST_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(5),
     INGEST_AGE_SECONDS: z.coerce.number().int().min(1).default(3600),
@@ -84,6 +101,14 @@ const configSchema = z
       value.INGEST_DESTINATIONS.length
     )
       ctx.addIssue({ code: "custom", message: "Duplicate destination" });
+    const linked = value.MAILBOX_KEY_FILE !== undefined;
+    if (linked !== (value.INGEST_MAILBOX_ORIGIN !== undefined))
+      ctx.addIssue({
+        code: "custom",
+        message: "MAILBOX_KEY_FILE and INGEST_MAILBOX_ORIGIN go together",
+      });
+    if (!linked && value.INGEST_DESTINATIONS.length === 0)
+      ctx.addIssue({ code: "custom", message: "No destination" });
     if (
       value.INGEST_ROUTES.some(
         (r) => !value.INGEST_DESTINATIONS.some((d) => d.id === r.destination),
@@ -116,6 +141,42 @@ if (db.isErr()) {
     `${JSON.stringify({ level: "fatal", event: "invalid_database_configuration" })}\n`,
   );
   process.exit(1);
+}
+function fatal(event: string): never {
+  process.stderr.write(`${JSON.stringify({ level: "fatal", event })}\n`);
+  process.exit(1);
+}
+/**
+ * Stored mailbox credentials, checked at start by decrypting one: a key that
+ * differs from the API's would otherwise only fail deliveries.
+ */
+async function linkedMailboxes() {
+  if (c.MAILBOX_KEY_FILE === undefined || c.INGEST_MAILBOX_ORIGIN === undefined)
+    return undefined;
+  const key = await readFile(c.MAILBOX_KEY_FILE, "utf8").catch(() => null);
+  if (key === null) return fatal("mailbox_key_unavailable");
+  if (db.isErr()) return fatal("invalid_database_configuration");
+  const store = createMailboxStore(db.value, key.trim());
+  if (store.isErr()) return fatal("invalid_mailbox_key");
+  const sample = await db.value.mailboxLink
+    .findFirst({
+      where: { status: "active", user: { disabled: false } },
+      select: { accountId: true },
+    })
+    .catch(() => fatal("mailbox_key_check_failed"));
+  if (sample !== null) {
+    const opened = await store.value.getForAccount(sample.accountId);
+    // A mailbox disabled meanwhile proves nothing either way.
+    if (opened.isErr() && opened.error.kind === "database_error")
+      return fatal("mailbox_key_check_failed");
+    if (opened.isErr() && opened.error.kind === "crypto_error")
+      return fatal("invalid_mailbox_key");
+  }
+  return {
+    origin: c.INGEST_MAILBOX_ORIGIN,
+    credential: async (accountId: string) =>
+      store.value.getForAccount(accountId),
+  };
 }
 const s3 = new S3Client({
   requestHandler: {
@@ -167,7 +228,8 @@ const storage = awsStorage(
   c.ARCHIVE_PREFIX,
   c.INBOUND_BUFFER_PREFIX,
 );
-const delivery = jmapDelivery(c.INGEST_DESTINATIONS);
+const mailboxes = await linkedMailboxes();
+const delivery = jmapDelivery(c.INGEST_DESTINATIONS, mailboxes);
 const service = new IngestService({
   storage,
   ledger,
@@ -192,6 +254,8 @@ const service = new IngestService({
         delaySeconds: fields["delaySeconds"],
         matches: fields["matches"],
         recipientKey: fields["recipientKey"],
+        placement: fields["placement"],
+        code: fields["code"],
       };
       process.stdout.write(
         `${JSON.stringify({ level: event === "ingest_duplicate" ? "error" : "info", event, count, ...safe })}\n`,
@@ -207,10 +271,13 @@ const readiness = createReadinessService({
     queueProbe(sqs, c.INBOUND_QUEUE_URL),
     bucketProbe("buffer-storage", s3, c.INBOUND_BUCKET),
     bucketProbe("archive-storage", archive, c.ARCHIVE_BUCKET),
-    ...c.INGEST_DESTINATIONS.map((target, index) =>
+    ...[
+      ...c.INGEST_DESTINATIONS.map((target) => target.origin),
+      ...(mailboxes === undefined ? [] : [mailboxes.origin]),
+    ].map((target, index) =>
       httpProbe(
         `mail-server-${String(index + 1)}`,
-        new URL("/healthz/ready", target.origin).toString(),
+        new URL("/healthz/ready", target).toString(),
       ),
     ),
   ],

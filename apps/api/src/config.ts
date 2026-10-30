@@ -99,18 +99,30 @@ export const loadApplicationDatabaseUrl = async (
   }
 };
 
+const mailDomain = z
+  .string()
+  .min(1)
+  .regex(
+    /^(?=.{1,253}$)[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?)+$/,
+  );
 const AuthEnvironment = z.object({
   TRUSTED_PROXY_IP: z.ipv4(),
   AUTH_PUBLIC_ORIGIN: z.url().refine((value) => {
     const url = new URL(value);
     return url.protocol === "https:" && url.origin === value;
   }),
-  MAIL_DOMAIN: z
+  MAIL_DOMAIN: mailDomain,
+  // Further domains accepted for accounts, comma separated.
+  MAIL_DOMAINS: z
     .string()
-    .min(1)
-    .regex(
-      /^(?=.{1,253}$)[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?)+$/,
-    ),
+    .default("")
+    .transform((value) =>
+      value
+        .split(",")
+        .map((item) => item.trim().toLowerCase())
+        .filter((item) => item !== ""),
+    )
+    .pipe(z.array(mailDomain)),
   STALWART_INTERNAL_ORIGIN: z.url().refine((value) => {
     const url = new URL(value);
     return ["http:", "https:"].includes(url.protocol) && url.origin === value;
@@ -219,6 +231,9 @@ export const loadAuthConfig = async (
       productOrigins: appOrigins,
       ...(vaultOrigin === undefined ? {} : { vaultOrigin }),
       mailDomain: parsed.data.MAIL_DOMAIN,
+      mailDomains: [
+        ...new Set([parsed.data.MAIL_DOMAIN, ...parsed.data.MAIL_DOMAINS]),
+      ],
       trustedProxyIp: parsed.data.TRUSTED_PROXY_IP,
       stalwartOrigin: parsed.data.STALWART_INTERNAL_ORIGIN,
       mailReadyUrl: new URL(

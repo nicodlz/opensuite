@@ -95,6 +95,20 @@ type Alias = z.infer<typeof AliasSchema>;
 type AdminResult<T> = Result<T, JmapError>;
 const using = [JmapCapability.core, JmapCapability.management];
 
+// Stalwart's own DKIM signing. Through the SES relay it is off: SES signs
+// with each domain's Easy DKIM, it refused messages already carrying
+// Stalwart's signatures (554 Duplicate header 'DKIM-Signature'), and a
+// single Stalwart signature failed at the recipient after relaying.
+const relaySigning = { match: {}, else: "false" };
+const defaultSigning = {
+  match: {
+    "0": branch(
+      "is_local_domain(sender_domain) && !is_empty(authenticated_as)",
+      "sender_domain",
+    ),
+  },
+  else: "false",
+};
 // Connect to the private Stalwart listener with the network-restricted
 // management account. Never pass a public proxy URL or recovery credentials.
 export class StalwartAdmin {
@@ -178,6 +192,38 @@ export class StalwartAdmin {
     return id === undefined
       ? err({ kind: "invalidResponse", message: `Missing ${method} result` })
       : ok(id);
+  }
+  async #signingRule(): Promise<AdminResult<unknown>> {
+    const read = await this.#transport.call(
+      this.#api,
+      "x:MtaStageData/get",
+      { ids: ["singleton"] },
+      using,
+      GetSchema(z.object({ id: z.string() }).catchall(z.unknown())),
+    );
+    if (read.isErr()) return err(read.error);
+    const current = read.value.list[0];
+    return current === undefined
+      ? err({ kind: "invalidResponse", message: "Missing stage settings" })
+      : ok(current["dkimSignDomain"]);
+  }
+  async #setSigning(rule: object): Promise<AdminResult<void>> {
+    const current = await this.#signingRule();
+    if (current.isErr()) return err(current.error);
+    if (!isDeepStrictEqual(current.value, rule)) {
+      const updated = await this.#update("MtaStageData", "singleton", {
+        dkimSignDomain: rule,
+      });
+      if (updated.isErr()) return err(updated.error);
+    }
+    const verified = await this.#signingRule();
+    if (verified.isErr()) return err(verified.error);
+    return isDeepStrictEqual(verified.value, rule)
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "DKIM signing did not retain desired settings",
+        });
   }
   async #update(
     object: string,
@@ -264,6 +310,10 @@ export class StalwartAdmin {
         message: "Invalid relay configuration",
       });
     const config = parsed.data;
+    // Signing goes off before mail is routed to the relay: a failure here
+    // leaves the current route untouched.
+    const signing = await this.#setSigning(relaySigning);
+    if (signing.isErr()) return err(signing.error);
     const route = await this.#ensureNamed("MtaRoute", "osrelay", {
       "@type": "Relay",
       host: config.host,
@@ -374,6 +424,8 @@ export class StalwartAdmin {
       GetSchema(z.object({ id: z.string() }).catchall(z.unknown())),
     );
     if (strategy.isErr()) return err(strategy.error);
+    const signing = await this.#signingRule();
+    if (signing.isErr()) return err(signing.error);
     const current = strategy.value.list[0];
     if (current === undefined || strategy.value.notFound.length > 0)
       return err({
@@ -400,7 +452,8 @@ export class StalwartAdmin {
           match: { "0": branch("is_local_domain(rcpt_domain)", "'local'") },
           else: "'osrelay'",
         }) &&
-        isDeepStrictEqual(current["tls"], { match: {}, else: "'osrelay'" }),
+        isDeepStrictEqual(current["tls"], { match: {}, else: "'osrelay'" }) &&
+        isDeepStrictEqual(signing.value, relaySigning),
     );
   }
 
@@ -426,7 +479,9 @@ export class StalwartAdmin {
         else: "'default'",
       },
     });
-    return result.isErr() ? err(result.error) : this.#reload();
+    if (result.isErr()) return err(result.error);
+    const signing = await this.#setSigning(defaultSigning);
+    return signing.isErr() ? err(signing.error) : this.#reload();
   }
 
   /** Return public DNS records for generated, active DKIM keys; never write DNS. */

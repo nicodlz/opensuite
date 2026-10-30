@@ -76,6 +76,8 @@ vault_case_restore() {
   [ "$(docker run --rm --network none --mount "type=bind,src=$work/secrets/vault-admin,dst=/secret,readonly" alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a cat /secret)" = "$admin_hash" ]
   [ "$(compose exec -T postgres psql -U opensuite -d postgres -Atc "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='opensuite_vault'")" = opensuite_vault ]
   [ "$(compose exec -T postgres psql -U opensuite -d postgres -Atc "SELECT has_database_privilege('opensuite_app','opensuite_vault','CONNECT')")" = f ]
+  # Verify restore itself, before creating or starting Vault or rerunning secrets.
+  compose run --rm --no-deps -T backup-volumes '[ "$(stat -c "%u:%g %a" /vault-data)" = "1000:1000 700" ] && [ "$(stat -c "%u:%g" /vault-data/rsa_key.pem)" = "1000:1000" ]'
   compose --profile vault up -d --no-deps --wait --wait-timeout 180 vault
   compose up -d --no-deps --wait --wait-timeout 180 caddy
   [ "$(compose exec -T vault id -u)" = 1000 ]

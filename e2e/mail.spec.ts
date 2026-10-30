@@ -58,7 +58,9 @@ test("keyboard navigation, compose, send, reply and search", async ({
   );
   await reply.getByLabel("Message body").fill("Thanks for the update!");
   await reply.getByRole("button", { name: /Send/ }).click();
-  await expect(page.getByText("Message sent.")).toBeVisible();
+  await expect(
+    page.getByText("Message queued.", { exact: false }),
+  ).toBeVisible();
   await page.keyboard.press("c");
   const compose = page.getByRole("region", { name: "Compose message" });
   await compose.getByLabel("To", { exact: true }).fill("friend@example.test");

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
+import { z } from "zod";
 import type { Result } from "neverthrow";
 import { StalwartAdmin } from "../src/admin.ts";
 import {
@@ -153,6 +154,33 @@ test("routes authenticated external mail to the relay and keeps local mail local
       username: "admin",
       password: "integration-password",
     });
+    const stageData = async () => {
+      const response = await fetch(`${base}/jmap/`, {
+        method: "POST",
+        headers: {
+          authorization: `Basic ${Buffer.from("admin:integration-password").toString("base64")}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          using: ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"],
+          methodCalls: [["x:MtaStageData/get", { ids: ["singleton"] }, "0"]],
+        }),
+      });
+      const stage = z
+        .object({
+          methodResponses: z.tuple([
+            z.tuple([
+              z.string(),
+              z.object({
+                list: z.tuple([z.record(z.string(), z.unknown())]),
+              }),
+              z.string(),
+            ]),
+          ]),
+        })
+        .parse(await response.json());
+      return stage.methodResponses[0][1].list[0];
+    };
     const domain = value(await admin.createDomain("outbound.test"));
     value(
       await admin.createAccount("alice", domain.id, "fixture-password-123"),
@@ -170,8 +198,13 @@ test("routes authenticated external mail to the relay and keeps local mail local
       secretFile: "/run/opensuite/smtp-secret",
       tls: "insecure",
     };
+    const initialStage = await stageData();
     value(await admin.configureRelay(config));
     value(await admin.configureRelay(config));
+    expect((await stageData())["dkimSignDomain"]).toEqual({
+      match: {},
+      else: "false",
+    });
     const makeClient = (name: string) =>
       new JmapClient(base, {
         authorization: `Basic ${Buffer.from(`${name}@outbound.test:fixture-password-123`).toString("base64")}`,
@@ -237,6 +270,8 @@ test("routes authenticated external mail to the relay and keeps local mail local
     expect(messages[0]?.to).toHaveLength(1);
     expect(messages[0]?.to[0]).toMatch(/external@example\.com/i);
     expect(messages[0]?.data).toContain("External fixture");
+    // The relay signs: Stalwart must not add a DKIM signature of its own.
+    expect(messages[0]?.data).not.toMatch(/^DKIM-Signature:/im);
     const waitLocal = async (remaining: number): Promise<string[]> => {
       const ids = value(
         await bob.queryEmails(bobSession, bobId, {
@@ -253,6 +288,9 @@ test("routes authenticated external mail to the relay and keeps local mail local
     expect(messages).toHaveLength(1);
     value(await admin.configureRelay({ ...config, tls: "starttls" }));
     value(await admin.resetOutbound());
+    // Reset restores Stalwart's own default signing and leaves every other
+    // stage setting as it was.
+    expect(await stageData()).toEqual(initialStage);
   } finally {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve, reject) =>

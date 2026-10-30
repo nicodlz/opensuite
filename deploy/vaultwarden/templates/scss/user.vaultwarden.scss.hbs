@@ -1,0 +1,105 @@
+/* Esuno palette and radii derived from packages/design-tokens/src/theme.css.
+   Vaultwarden appends this partial to its own SCSS, including its feature hides. */
+:root {
+  --esuno-night: #0a0710;
+  --esuno-night-soft: #140d1b;
+  --esuno-night-card: #1c1427;
+  --esuno-ivory: #f6f4f8;
+  --esuno-ink: #1d1727;
+  --esuno-violet: #5630a8;
+  --esuno-lavender: #c9b2ff;
+  --esuno-green: #b8ef78;
+  --esuno-radius-card: 16px;
+  --esuno-radius-control: 6px;
+  /* Self-contained system fallback for Space Grotesk / DM Sans: no remote fonts. */
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --color-brand-050: #f6f4fa;
+  --color-brand-100: #ebe6f5;
+  --color-brand-200: #ddd2f5;
+  --color-brand-300: #c9b2ff;
+  --color-brand-400: #b495f1;
+  --color-brand-500: #8c6bd0;
+  --color-brand-600: #5630a8;
+  --color-brand-700: #48278e;
+  --color-brand-800: #392072;
+  --color-brand-900: #342649;
+  --color-brand-950: #21172f;
+  --color-brand-950-rgb: 33, 23, 47;
+}
+
+.theme_light {
+  --color-background: 255 255 255;
+  --color-background-alt: 246 244 248;
+  --color-background-alt2: 86 48 168;
+  --color-background-alt3: 28 20 39;
+  --color-background-alt4: 10 7 16;
+  --color-primary-100: 235 230 245;
+  --color-primary-300: 140 107 208;
+  --color-primary-600: 86 48 168;
+  --color-primary-700: 72 39 142;
+  --color-text-main: 29 23 39;
+  --color-text-muted: 99 93 108;
+  --color-text-contrast: 255 255 255;
+  --color-bw-blue: 86 48 168;
+  --color-bg-primary: #fff;
+  --color-bg-secondary: var(--esuno-ivory);
+  --color-bg-tertiary: #fdfcfe;
+  --color-bg-quaternary: #ebe6f5;
+  --color-fg-heading: var(--esuno-ink);
+  --color-fg-body: var(--esuno-ink);
+  --color-fg-body-subtle: #635d6c;
+  --color-border-base: #dbd6e1;
+  --color-nav-bg-primary: var(--esuno-night-card);
+  --color-nav-bg-primary-strong: var(--esuno-night);
+  --color-nav-bg-secondary: var(--esuno-ivory);
+  --color-illustration-outline: 86 48 168;
+  --color-illustration-bg-primary: 201 178 255;
+  --color-illustration-bg-secondary: 86 48 168;
+  --color-illustration-bg-tertiary: 246 244 248;
+}
+
+.theme_dark {
+  --color-background: 20 13 27;
+  --color-background-alt: 10 7 16;
+  --color-background-alt2: 28 20 39;
+  --color-background-alt3: 28 20 39;
+  --color-background-alt4: 10 7 16;
+  --color-primary-100: 52 38 73;
+  --color-primary-300: 140 107 208;
+  --color-primary-600: 201 178 255;
+  --color-primary-700: 221 210 245;
+  --color-text-main: 246 244 248;
+  --color-text-muted: 222 214 230;
+  --color-text-contrast: 29 23 39;
+  --color-bw-blue: 201 178 255;
+  --color-bg-primary: var(--esuno-night-soft);
+  --color-bg-secondary: var(--esuno-night-card);
+  --color-bg-tertiary: var(--esuno-night);
+  --color-bg-quaternary: #342649;
+  --color-fg-heading: var(--esuno-ivory);
+  --color-fg-body: var(--esuno-ivory);
+  --color-fg-body-subtle: #ded6e6;
+  --color-border-base: #51445d;
+  --color-nav-bg-primary: var(--esuno-night-card);
+  --color-nav-bg-secondary: var(--esuno-night-card);
+  --color-nav-bg-primary-strong: var(--esuno-night);
+  --color-nav-bg-secondary-strong: #342649;
+  --color-illustration-outline: 201 178 255;
+  --color-illustration-bg-primary: 86 48 168;
+  --color-illustration-bg-secondary: 201 178 255;
+  --color-illustration-bg-tertiary: 246 244 248;
+}
+
+/* Versioned URLs bypass old immutable copies, including Vaultwarden's nav icon. */
+.theme_light img.new-logo-themed { content: url('/esuno-vault/images/logo.svg?v=1'); }
+.theme_dark img.new-logo-themed { content: url('/esuno-vault/images/logo-white.svg?v=1'); }
+img[src$="/images/logo-dark@2x.png"] { content: url('/esuno-vault/images/logo-dark@2x.png?v=1'); }
+img[src$="/images/logo-white@2x.png"] { content: url('/esuno-vault/images/logo-white@2x.png?v=1'); }
+img[src$="/images/welcome-dialog-graphic.png"] { content: url('/esuno-vault/images/welcome-dialog-graphic.png?v=1'); }
+/* The current client renders its landing and navigation logos as inline SVGs. */
+.theme_light bit-landing-header bit-svg[aria-label="Bitwarden logo"] { content: url('/esuno-vault/images/logo.svg?v=1'); display: block; }
+.theme_dark bit-landing-header bit-svg[aria-label="Bitwarden logo"] { content: url('/esuno-vault/images/logo-white.svg?v=1'); display: block; }
+bit-nav-logo bit-svg { content: url('/esuno-vault/images/logo-white.svg?v=1'); display: block; }
+bit-nav-logo bit-nav-item a:before { background-image: url('/esuno-vault/images/icon-white.svg?v=1'); }
+.tw-rounded-lg { border-radius: var(--esuno-radius-control); }
+.tw-rounded-xl { border-radius: var(--esuno-radius-card); }

@@ -3,7 +3,7 @@ import { err, ok, type Result } from "neverthrow";
 import {
   parseNotification,
   resolveRecipients,
-  verdictPolicy,
+  quarantineReason,
 } from "../domain/notification.ts";
 import type {
   Failure,
@@ -86,7 +86,9 @@ export class IngestService {
     };
     let firstFailure: Failure | undefined;
     const uploads = new Map<string, string>();
-    const quarantine = verdictPolicy(n) === "quarantine";
+    // Logged with each import, so operators can see why mail went to Junk.
+    const reason = quarantineReason(n);
+    const quarantine = reason !== null;
     // Sequential delivery bounds memory and ensures the buffer is read only once.
     const processRecipient = async (record: LedgerRecipient): Promise<void> => {
       if (finished.has(record.state)) return;
@@ -272,6 +274,7 @@ export class IngestService {
         events.emit("ingest_imported", {
           messageId: n.mail.messageId,
           recipient: record.destination,
+          placement: reason ?? "inbox",
           delaySeconds: Math.max(
             0,
             (Date.now() - Date.parse(n.mail.timestamp)) / 1000,
@@ -303,6 +306,10 @@ export class IngestService {
         n.receipt.action.objectKey,
       );
       if (deleted.isErr()) {
+        events.emit("ingest_failure", {
+          stage: "buffer_delete",
+          code: deleted.error.code ?? "unknown",
+        });
         await ledger.messageState(n.mail.messageId, "failed");
         return deleted;
       }
@@ -364,16 +371,26 @@ export class IngestService {
     const bufferKeys = new Set(keys.isOk() ? keys.value : []);
     const referenced = new Set<string>();
     let failures = keys.isErr() ? 1 : 0;
+    if (keys.isErr())
+      this.deps.events.emit("ingest_failure", {
+        stage: "buffer_list",
+        code: keys.error.code ?? "unknown",
+      });
     const archived: { body: string; id: string }[] = [];
     const read = async (key: string): Promise<void> => {
       const body = await this.deps.storage.readArchive(key);
       if (body.isErr()) {
         failures++;
+        this.deps.events.emit("ingest_failure", {
+          stage: "archive_read",
+          code: body.error.code ?? "unknown",
+        });
         return;
       }
       const n = parseNotification(body.value);
       if (n.isErr()) {
         failures++;
+        this.deps.events.emit("ingest_failure", { stage: "archive_parse" });
         return;
       }
       referenced.add(n.value.receipt.action.objectKey);
@@ -417,8 +434,12 @@ export class IngestService {
           if (
             !completed.has(item.id) &&
             (await this.process(item.body, true)).isErr()
-          )
+          ) {
             failures++;
+            this.deps.events.emit("ingest_failure", {
+              stage: "replay_message",
+            });
+          }
           return undefined;
         }),
       Promise.resolve(),

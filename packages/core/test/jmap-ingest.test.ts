@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { z } from "zod";
-import { jmapDelivery } from "../src/adapters/jmap.ts";
+import { jmapDelivery, type LinkedMailboxes } from "../src/adapters/jmap.ts";
 
 const session = {
   capabilities: {},
@@ -129,39 +129,60 @@ describe("JMAP ingestion adapter", () => {
         quarantineMailbox: "junk",
         rewriteSessionUrls: true,
       };
-      const delivery = jmapDelivery([
-        { ...destination, id: "one" },
-        { ...destination, id: "two" },
-      ]);
+      const delivery = jmapDelivery([{ ...destination, id: "account" }]);
       const cache = new Map<string, string>();
       const date = "2026-01-02T03:04:05.000Z";
       expect(
         (
-          await delivery.import("one", bytes, false, date, "key", cache, () =>
-            Promise.resolve(ok(undefined)),
+          await delivery.import(
+            "account",
+            bytes,
+            false,
+            date,
+            "key",
+            cache,
+            () => Promise.resolve(ok(undefined)),
           )
         ).isOk(),
       ).toBe(true);
       expect(
         (
-          await delivery.import("two", bytes, false, date, "key", cache, () =>
-            Promise.resolve(ok(undefined)),
+          await delivery.import(
+            "account",
+            bytes,
+            false,
+            date,
+            "key",
+            cache,
+            () => Promise.resolve(ok(undefined)),
           )
         ).isOk(),
       ).toBe(true);
       expect(uploads).toBe(1);
+      const noJunk = await delivery.reconcile(
+        "account",
+        bytes,
+        true,
+        date,
+        "key",
+      );
+      expect(noJunk.isErr() && noJunk.error.message).toBe(
+        "Quarantine mailbox missing",
+      );
       expect(importedDate).toBe(date);
       expect(
-        (await delivery.reconcile("one", bytes, false, date, "key")).isOk(),
+        (await delivery.reconcile("account", bytes, false, date, "key")).isOk(),
       ).toBe(true);
       downloaded = Buffer.from("Message-ID: <one@example.test>\r\n\r\nother");
       expect(
-        (await delivery.reconcile("one", bytes, false, date, "key")).isErr(),
+        (
+          await delivery.reconcile("account", bytes, false, date, "key")
+        ).isErr(),
       ).toBe(true);
       expect(
         (
           await delivery.reconcile(
-            "one",
+            "account",
             bytes,
             false,
             "2025-01-02T03:04:05Z",
@@ -223,7 +244,7 @@ it("classifies a refused connection as retryable and a proxy response as uncerta
   try {
     const delivery = jmapDelivery([
       {
-        id: "one",
+        id: "account",
         origin: "http://internal.test",
         authorization: "Bearer secret",
         quarantineMailbox: "junk",
@@ -232,7 +253,7 @@ it("classifies a refused connection as retryable and a proxy response as uncerta
     ]);
     const run = () =>
       delivery.import(
-        "one",
+        "account",
         new Uint8Array([1]),
         false,
         "2026-01-02T03:04:05Z",
@@ -248,4 +269,256 @@ it("classifies a refused connection as retryable and a proxy response as uncerta
   } finally {
     vi.unstubAllGlobals();
   }
+});
+
+describe("JMAP delivery to linked mailboxes", () => {
+  const authorizations: string[] = [];
+  const fake: typeof fetch = (url, init) =>
+    Promise.resolve().then(() => {
+      const target =
+        typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      authorizations.push(
+        new Headers(init?.headers).get("authorization") ?? "",
+      );
+      if (target.endsWith("/.well-known/jmap")) return response(session);
+      if (typeof init?.body !== "string")
+        throw new Error("Missing request body");
+      const call = calls.parse(JSON.parse(init.body)).methodCalls[0];
+      if (call === undefined) throw new Error("Missing call");
+      const value =
+        call[0] === "Mailbox/get"
+          ? {
+              accountId: "account",
+              state: "s",
+              list: [
+                { id: "inbox", name: "Inbox", role: "inbox", parentId: null },
+                { id: "junk", name: "Junk", role: "junk", parentId: null },
+              ],
+              notFound: [],
+            }
+          : {
+              accountId: "account",
+              queryState: "q",
+              canCalculateChanges: false,
+              position: 0,
+              ids: [],
+            };
+      return response({
+        methodResponses: [[call[0], value, "0"]],
+        sessionState: "s",
+      });
+    });
+  const bytes = Buffer.from("Message-ID: <one@example.test>\r\n\r\nbody");
+  const date = "2026-01-02T03:04:05.000Z";
+  const credential = vi.fn<LinkedMailboxes["credential"]>((accountId) =>
+    Promise.resolve(
+      accountId === "missing"
+        ? err({ kind: "not_found" })
+        : accountId === "broken"
+          ? err({ kind: "database_error" })
+          : ok({ address: "carol@example.test", secret: "app-secret" }),
+    ),
+  );
+  const linked = { origin: "http://internal.test", credential };
+
+  it("reads the stored credential per connection and checks the account", async () => {
+    vi.stubGlobal("fetch", fake);
+    try {
+      authorizations.length = 0;
+      credential.mockClear();
+      const delivery = jmapDelivery([], linked);
+      expect(
+        (await delivery.reconcile("account", bytes, true, date, "k")).isOk(),
+      ).toBe(true);
+      expect(
+        (await delivery.reconcile("account", bytes, false, date, "k")).isOk(),
+      ).toBe(true);
+      expect(credential).toHaveBeenCalledTimes(2);
+      expect(authorizations[0]).toBe(
+        `Basic ${Buffer.from("carol@example.test:app-secret").toString("base64")}`,
+      );
+      const other = await delivery.reconcile("other", bytes, false, date, "k");
+      expect(other.isErr() && other.error.message).toBe(
+        "Destination credential is for another account",
+      );
+      const missing = await delivery.reconcile(
+        "missing",
+        bytes,
+        false,
+        date,
+        "k",
+      );
+      expect(missing.isErr() && missing.error).toEqual({
+        message: "Destination is not configured",
+      });
+      const broken = await delivery.reconcile(
+        "broken",
+        bytes,
+        false,
+        date,
+        "k",
+      );
+      expect(broken.isErr() && broken.error).toEqual({
+        message: "Destination lookup failed: database_error",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("prefers a static destination, never reads the stored credential for it and checks its account", async () => {
+    vi.stubGlobal("fetch", fake);
+    try {
+      authorizations.length = 0;
+      credential.mockClear();
+      const delivery = jmapDelivery(
+        [
+          {
+            id: "account",
+            origin: "http://internal.test",
+            authorization: "Basic static",
+            quarantineMailbox: "junk",
+            rewriteSessionUrls: true,
+          },
+        ],
+        linked,
+      );
+      expect(
+        (await delivery.reconcile("account", bytes, true, date, "k")).isOk(),
+      ).toBe(true);
+      expect(credential).not.toHaveBeenCalled();
+      expect(authorizations[0]).toBe("Basic static");
+      const misnamed = jmapDelivery(
+        [
+          {
+            id: "other",
+            origin: "http://internal.test",
+            authorization: "Basic static",
+            quarantineMailbox: "junk",
+          },
+        ],
+        linked,
+      );
+      const refused = await misnamed.reconcile(
+        "other",
+        bytes,
+        false,
+        date,
+        "k",
+      );
+      expect(refused.isErr() && refused.error.message).toBe(
+        "Destination credential is for another account",
+      );
+      expect(credential).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("JMAP reconciliation across inbox and quarantine", () => {
+  const bytes = Buffer.from("Message-ID: <moved@example.test>\r\n\r\nbody");
+  const date = "2026-01-02T03:04:05.000Z";
+  const fake =
+    (where: string): typeof fetch =>
+    (url, init) =>
+      Promise.resolve().then(() => {
+        const target =
+          typeof url === "string"
+            ? url
+            : url instanceof URL
+              ? url.href
+              : url.url;
+        if (target.endsWith("/.well-known/jmap")) return response(session);
+        if (target.includes("/download/")) return new Response(bytes);
+        if (typeof init?.body !== "string")
+          throw new Error("Missing request body");
+        const call = calls.parse(JSON.parse(init.body)).methodCalls[0];
+        if (call === undefined) throw new Error("Missing call");
+        const value =
+          call[0] === "Mailbox/get"
+            ? {
+                accountId: "account",
+                state: "s",
+                list: [
+                  { id: "inbox", name: "Inbox", role: "inbox", parentId: null },
+                  { id: "junk", name: "Junk", role: "junk", parentId: null },
+                  { id: "other", name: "Other", role: null, parentId: null },
+                ],
+                notFound: [],
+              }
+            : call[0] === "Email/query"
+              ? {
+                  accountId: "account",
+                  queryState: "q",
+                  canCalculateChanges: false,
+                  position: 0,
+                  ids: ["email"],
+                }
+              : {
+                  accountId: "account",
+                  state: "s",
+                  notFound: [],
+                  list: [
+                    {
+                      id: "email",
+                      blobId: "blob",
+                      threadId: "thread",
+                      mailboxIds: { [where]: true },
+                      keywords: { "opensuite-k": true },
+                      receivedAt: date,
+                      subject: null,
+                      from: null,
+                      to: null,
+                      messageId: ["moved@example.test"],
+                      attachments: [],
+                    },
+                  ],
+                };
+        return response({
+          methodResponses: [[call[0], value, "0"]],
+          sessionState: "s",
+        });
+      });
+  const delivery = jmapDelivery([
+    {
+      id: "account",
+      origin: "http://internal.test",
+      authorization: "Basic static",
+      rewriteSessionUrls: true,
+    },
+  ]);
+
+  it.each([
+    ["inbox", true],
+    ["junk", false],
+    ["inbox", false],
+  ] as const)(
+    "finds a copy in %s when looking for a quarantined (%s) import",
+    async (where, quarantine) => {
+      vi.stubGlobal("fetch", fake(where));
+      try {
+        const found = await delivery.reconcile(
+          "account",
+          bytes,
+          quarantine,
+          date,
+          "k",
+        );
+        expect(found.isOk() && found.value).toEqual(["email"]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("does not take a copy elsewhere for the import and never imports again", async () => {
+    vi.stubGlobal("fetch", fake("other"));
+    try {
+      const found = await delivery.reconcile("account", bytes, true, date, "k");
+      expect(found.isErr() && found.error).toMatchObject({ ambiguous: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

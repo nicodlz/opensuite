@@ -28,7 +28,10 @@ const input = {
   name: "New User",
   password: "a-long-password",
 };
-async function start(role: "admin" | "user" | "none") {
+async function start(
+  role: "admin" | "user" | "none",
+  isMailDomain?: (domain: string | undefined) => Promise<boolean>,
+) {
   let created = false;
   const handler = vi.fn<(request: Request) => Promise<Response>>((request) => {
     created = true;
@@ -55,8 +58,9 @@ async function start(role: "admin" | "user" | "none") {
   const addAddress = vi.fn<DomainService["addAddress"]>(() =>
     Promise.resolve(ok(domain)),
   );
+  const second = { ...domain, id: "second", name: "second.test" };
   const domains: DomainService = {
-    list: () => Promise.resolve(ok([domain])),
+    list: () => Promise.resolve(ok([domain, second])),
     addAddress,
     add: () => Promise.resolve(ok(domain)),
     recheck: () => Promise.resolve(ok(domain)),
@@ -72,6 +76,7 @@ async function start(role: "admin" | "user" | "none") {
     identity: {
       publicOrigin: origin,
       mailDomain: "example.test",
+      ...(isMailDomain === undefined ? {} : { isMailDomain }),
       handler,
       actor: () =>
         Promise.resolve(
@@ -169,6 +174,36 @@ describe("setup admin routes", () => {
           })
         ).statusCode,
       ).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+  it("creates accounts in any allowed domain that has a managed domain row", async () => {
+    const allowed = new Set(["example.test", "second.test", "configured.test"]);
+    const { app, addAddress } = await start("admin", (domain) =>
+      Promise.resolve(domain !== undefined && allowed.has(domain)),
+    );
+    const create = (email: string) =>
+      app.inject({
+        method: "POST",
+        url: "/admin/setup/users",
+        headers: { origin },
+        payload: { ...input, email },
+      });
+    try {
+      expect((await create("x@other.test")).statusCode).toBe(400);
+      expect((await create("x@configured.test")).statusCode).toBe(409);
+      expect(addAddress).not.toHaveBeenCalled();
+      expect((await create("nicolas@second.test")).statusCode).toBe(200);
+      expect(addAddress).toHaveBeenCalledWith(
+        expect.objectContaining({ role: "admin" }),
+        {
+          domainId: "second",
+          userId: "new-user",
+          localPart: "nicolas",
+          isAlias: false,
+        },
+      );
     } finally {
       await app.close();
     }
