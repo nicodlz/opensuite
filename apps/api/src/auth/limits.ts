@@ -4,16 +4,47 @@ import { z } from "zod";
 import { authCookiePrefix } from "./identity.ts";
 import { networkBucket } from "./alias-limits.ts";
 
+/**
+ * Every pair, duplicates included. Names are trimmed with `String.trim`, like
+ * the better-call parser Better Auth endpoints read cookies with; it removes
+ * more than HTTP whitespace (e.g. U+00A0), so a disguised name is still seen.
+ */
+const cookiePairs = (cookie: string | undefined) =>
+  (cookie ?? "").split(";").flatMap((part): [string, string][] => {
+    const eq = part.indexOf("=");
+    return eq === -1
+      ? []
+      : [[part.slice(0, eq).trim(), part.slice(eq + 1).trim()]];
+  });
+export const hasPendingFactor = (cookie: string | undefined) =>
+  cookiePairs(cookie).some(
+    ([name, value]) =>
+      name === `${authCookiePrefix}.two_factor` && value !== "",
+  );
+export const hasTrustDevice = (cookie: string | undefined) =>
+  cookiePairs(cookie).some(
+    ([name]) => name === `${authCookiePrefix}.trust_device`,
+  );
+export const withoutSessionCookie = (cookie: string) =>
+  cookie
+    .split(";")
+    .filter(
+      (part) =>
+        !cookiePairs(part).some(
+          ([name]) => name === `${authCookiePrefix}.session_token`,
+        ),
+    )
+    .join(";");
+
 const EmailBody = z.object({ email: z.email() });
 const emailFromBody = (body: unknown): string | undefined => {
   const parsed = EmailBody.safeParse(body);
   return parsed.success ? parsed.data.email.toLowerCase() : undefined;
 };
 const challengeValues = (cookie: string | undefined) =>
-  (cookie ?? "")
-    .split(";")
-    .map((part) => part.trim())
-    .filter((part) => part.split("=")[0] === `${authCookiePrefix}.two_factor`);
+  cookiePairs(cookie)
+    .filter(([name]) => name === `${authCookiePrefix}.two_factor`)
+    .map(([name, value]) => `${name}=${value}`);
 const challengeCookie = (cookie: string | undefined): string | undefined => {
   const values = challengeValues(cookie);
   const value = values.length === 1 ? values[0] : undefined;
@@ -23,10 +54,7 @@ const challengeCookie = (cookie: string | undefined): string | undefined => {
 };
 
 const cookieNames = (cookie: string | undefined) =>
-  (cookie ?? "")
-    .split(";")
-    .map((part) => part.trim().split("=")[0] ?? "")
-    .filter(Boolean);
+  cookiePairs(cookie).map(([name]) => name);
 /** Two values for one authentication cookie mean a planted cookie. */
 export const hasDuplicateAuthCookie = (cookie: string | undefined) => {
   const names = cookieNames(cookie).filter((name) =>
@@ -47,8 +75,27 @@ export const legacyAuthCookies = (cookie: string | undefined) => [
 export const createAuthLimiter = (now: () => number = Date.now) => {
   const ipBuckets = createFixedWindow(now, 10_000, true);
   const accountBuckets = createFixedWindow(now, 10_000, true);
+  const reauthBuckets = createFixedWindow(now, 10_000, true);
   const challenges = new Map<string, { email: string; until: number }>();
   return {
+    reauthenticate(path: string, userId: string | undefined) {
+      if (
+        userId === undefined ||
+        ![
+          "/auth/security-keys/register-options",
+          "/auth/security-keys/remove",
+          "/auth/two-factor/enable",
+          "/auth/two-factor/disable",
+          "/auth/two-factor/get-totp-uri",
+          "/auth/two-factor/generate-backup-codes",
+          "/auth/change-password",
+        ].includes(path)
+      )
+        return undefined;
+      // One budget for every password re-check: enough for a user setting up
+      // several factors in a minute, too small to guess from many addresses.
+      return reauthBuckets.consume(`reauth:${userId}`, 10);
+    },
     hasDuplicateChallenge: (cookie: string | undefined) =>
       challengeValues(cookie).length > 1,
     account(body: unknown, cookie: string | undefined): string | undefined {
@@ -64,6 +111,7 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
       const isSignIn = path === "/auth/sign-in/email";
       const isMfa =
         path === "/auth/two-factor/verify-totp" ||
+        path === "/auth/two-factor/verify-security-key" ||
         path === "/auth/two-factor/verify-backup-code";
       const current = now();
       for (const [key, value] of challenges)

@@ -18,6 +18,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${webPort}`,
     channel: "chromium",
     ...devices["Desktop Chrome"],
+    locale: "en-US",
   },
   webServer: [
     {

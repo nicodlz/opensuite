@@ -17,6 +17,7 @@ COPY packages/contracts/src packages/contracts/src
 COPY packages/core/src packages/core/src
 COPY packages/jmap/src packages/jmap/src
 COPY packages/db/src packages/db/src
+COPY scripts/reset-mfa.mjs scripts/reset-mfa.mjs
 COPY packages/jmap/src packages/jmap/src
 
 FROM node:24.22.2-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446

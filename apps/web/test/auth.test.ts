@@ -57,4 +57,18 @@ describe("authentication API", () => {
     });
     await expect(client.session()).rejects.toBeInstanceOf(AuthError);
   });
+  it("requires a password when replacing backup codes", async () => {
+    let sent: unknown;
+    const client = createAuthClient((_input, init) => {
+      if (typeof init?.body !== "string") throw new Error("Expected JSON body");
+      sent = JSON.parse(init.body);
+      return Promise.resolve(
+        new Response(JSON.stringify({ backupCodes: ["new-code"] })),
+      );
+    });
+    expect(await client.regenerateBackupCodes("current-password")).toEqual([
+      "new-code",
+    ]);
+    expect(sent).toEqual({ password: "current-password" });
+  });
 });

@@ -16,7 +16,11 @@ catalog:
   "@axe-core/playwright": 4.11.0
   "@bitwarden/cli": 2026.9.0
   "@noble/hashes": 1.8.0
+  "@simplewebauthn/server": 13.3.0
+  "@simplewebauthn/browser": 13.3.0
   better-auth: 1.7.13
+  "@better-auth/core": 1.7.13
+  "@better-auth/utils": 0.5.1
   class-variance-authority: 0.7.1
   dompurify: 3.3.3
   fastify: 5.12.7
@@ -35,6 +39,7 @@ catalog:
   oxlint-tsgolint: 7.0.2005
   "@playwright/test": 1.56.1
   prettier: 3.9.10
+  qrcode.react: 4.2.0
   prisma: 6.19.3
   "@prisma/client": 6.19.3
   "@radix-ui/react-dialog": 1.1.15

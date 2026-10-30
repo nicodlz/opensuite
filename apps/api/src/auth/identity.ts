@@ -1,6 +1,12 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { oneTimeToken, twoFactor } from "better-auth/plugins";
+import type { PrismaClient } from "@opensuite/db";
+import {
+  disableAuthenticator,
+  enableAuthenticator,
+  securityKeys,
+} from "./security-keys.ts";
 
 /**
  * `__Host-` cookies cannot carry a Domain attribute, so a sibling subdomain
@@ -12,7 +18,7 @@ export const authCookiePrefix = "__Host-opensuite";
 
 /** Trusted composition supplies an adapter and lifecycle callbacks. */
 export interface IdentityDependencies {
-  readonly database: object;
+  readonly database: PrismaClient;
   readonly publicOrigin: string;
   /** Exact origins of the mail, drive and calendar applications. */
   readonly trustedOrigins?: readonly string[];
@@ -22,6 +28,7 @@ export interface IdentityDependencies {
 }
 
 export const createIdentity = (dependencies: IdentityDependencies) => {
+  const totp = twoFactor();
   const build = (disableSignUp: boolean) =>
     betterAuth({
       appName: "Esuno",
@@ -49,7 +56,19 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
       // Sibling applications receive the signed-in session through a
       // single-use, one-minute token; cookies stay host-only on each origin.
       plugins: [
-        twoFactor(),
+        {
+          ...totp,
+          endpoints: {
+            ...totp.endpoints,
+            enableTwoFactor: enableAuthenticator(dependencies.database),
+            disableTwoFactor: disableAuthenticator(dependencies.database),
+          },
+        },
+        securityKeys(
+          dependencies.database,
+          dependencies.publicOrigin,
+          dependencies.mayStartSession,
+        ),
         oneTimeToken({ expiresIn: 1, storeToken: "hashed" }),
       ],
       advanced: {
@@ -71,6 +90,8 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
         },
         session: {
           create: {
+            // Security-key verification applies this same gate before its
+            // transaction creates the session; keep additional hooks in sync.
             before: async (session) =>
               (await dependencies.mayStartSession(session.userId))
                 ? undefined
