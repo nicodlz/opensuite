@@ -21,6 +21,13 @@ it("uses the API's actual internal auth route and forwards only the cookie", asy
     monotonicMs: () => 0,
     identity: {
       publicOrigin: "http://public.example",
+      // The API answers get-session only for a linked, enabled account.
+      actor: () =>
+        Promise.resolve({
+          id: "user",
+          email: "user@example.test",
+          role: "user",
+        }),
       handler: (request) => {
         received = request;
         return Promise.resolve(
