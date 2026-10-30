@@ -349,7 +349,14 @@ export class JmapClient {
     return this.#transport.json(url, UploadSchema, {
       method: "POST",
       headers: { "Content-Type": type },
-      body: new Blob([Uint8Array.from(bytes)], { type }),
+      body: new Blob(
+        [
+          bytes.buffer instanceof ArrayBuffer
+            ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+            : Uint8Array.from(bytes),
+        ],
+        { type },
+      ),
     });
   }
   async download(

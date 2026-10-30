@@ -15,7 +15,7 @@ const ErrorSchema = z.object({
 });
 export type JmapError =
   | { kind: "invalidInput"; message: string }
-  | { kind: "network"; message: string }
+  | { kind: "network"; message: string; beforeRequest?: boolean }
   | { kind: "http"; status: number; body: string }
   | {
       kind: "request";
@@ -88,6 +88,7 @@ export class Transport {
     init: RequestInit = {},
   ): Promise<JmapResult<Response>> {
     let target: URL;
+    let requests = 0;
     try {
       target = new URL(url, this.#origin);
     } catch {
@@ -107,6 +108,7 @@ export class Transport {
           : AbortSignal.any([init.signal, timeout]);
       headers.set("Authorization", this.#authorization);
       // Discovery may redirect on the same origin; never forward credentials to another origin.
+      requests++;
       let response = await this.#fetch(target, {
         ...init,
         headers,
@@ -126,6 +128,7 @@ export class Transport {
             kind: "invalidResponse",
             message: "Redirect has a different origin",
           });
+        requests++;
         response = await this.#fetch(next, {
           ...init,
           headers,
@@ -152,9 +155,13 @@ export class Transport {
       }
       return ok(response);
     } catch (cause) {
+      const refused = z
+        .object({ cause: z.object({ code: z.literal("ECONNREFUSED") }) })
+        .safeParse(cause);
       return err({
         kind: "network",
         message: cause instanceof Error ? cause.message : String(cause),
+        ...(requests === 1 && refused.success ? { beforeRequest: true } : {}),
       });
     }
   }

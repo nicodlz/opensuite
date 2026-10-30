@@ -44,7 +44,7 @@ const listResponse = z
   .passthrough();
 export function awsQueue(client: SQSClient, url: string): Queue {
   return {
-    receive() {
+    receive(signal) {
       return ResultAsync.fromPromise(
         client
           .send(
@@ -55,6 +55,7 @@ export function awsQueue(client: SQSClient, url: string): Queue {
               VisibilityTimeout: 300,
               MessageSystemAttributeNames: ["ApproximateReceiveCount"],
             }),
+            signal === undefined ? {} : { abortSignal: signal },
           )
           .then((response) =>
             (queueResponse.parse(response).Messages ?? []).map((m) => ({

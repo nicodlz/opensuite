@@ -13,7 +13,7 @@ export interface QueueMessage {
   attempts: number;
 }
 export interface Queue {
-  receive(): Outcome<QueueMessage[]>;
+  receive(signal?: AbortSignal): Outcome<QueueMessage[]>;
   delete(receipt: string): Outcome<void>;
   defer(receipt: string, seconds: number): Outcome<void>;
 }
@@ -39,6 +39,9 @@ export interface LedgerRecipient {
   attempts: number;
   destination: string;
   known: boolean;
+  permanent: boolean;
+  legacy: boolean;
+  importStartedAt: Date | null;
 }
 export interface Ledger {
   prepare(
@@ -47,7 +50,9 @@ export interface Ledger {
   ): Outcome<LedgerRecipient[]>;
   claim(key: string, owner: string): Outcome<boolean>;
   renew(key: string, owner: string): Outcome<boolean>;
+  startImport(key: string, owner: string): Outcome<boolean>;
   expireClaims(): Outcome<void>;
+  retryUncertain(key: string, before: Date): Outcome<boolean>;
   finish(
     key: string,
     state: RecipientState,
@@ -57,6 +62,7 @@ export interface Ledger {
     chargeAttempt?: boolean,
   ): Outcome<void>;
   messageState(id: string, state: string): Outcome<void>;
+  importedMessages(ids: string[]): Outcome<string[]>;
   resetFailures(): Outcome<void>;
 }
 export interface Delivery {
@@ -67,6 +73,7 @@ export interface Delivery {
     receivedAt: string,
     key: string,
     uploads: Map<string, string>,
+    beforeImport: () => Outcome<void>,
   ): Outcome<string>;
   reconcile(
     destination: string,
@@ -74,7 +81,8 @@ export interface Delivery {
     quarantine: boolean,
     receivedAt: string,
     key: string,
-  ): Outcome<string>;
+    legacy?: boolean,
+  ): Outcome<string[]>;
 }
 export interface Events {
   emit(event: string, fields: Record<string, string | number>): void;

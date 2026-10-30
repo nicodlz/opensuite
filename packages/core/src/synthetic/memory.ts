@@ -14,6 +14,7 @@ export function synthetic() {
   const records = new Map<string, LedgerRecipient>();
   const recordMessages = new Map<string, string>();
   const recordAddresses = new Map<string, string[]>();
+  const messageStates = new Map<string, string>();
   const imports: {
     destination: string;
     bytes: Uint8Array;
@@ -78,6 +79,9 @@ export function synthetic() {
             attempts: 0,
             destination: recipient.destination,
             known: recipient.known,
+            permanent: false,
+            legacy: false,
+            importStartedAt: null,
           });
       }
       return Promise.resolve(
@@ -93,13 +97,32 @@ export function synthetic() {
       if (r === undefined || !["received", "failed"].includes(r.state))
         return Promise.resolve(ok(false));
       r.state = "importing";
+      r.importStartedAt = null;
       return Promise.resolve(ok(true));
     },
     renew(key) {
       return Promise.resolve(ok(records.get(key)?.state === "importing"));
     },
+    startImport(key) {
+      const record = records.get(key);
+      if (record?.state !== "importing") return Promise.resolve(ok(false));
+      record.importStartedAt = new Date();
+      return Promise.resolve(ok(true));
+    },
     expireClaims() {
       return Promise.resolve(ok(undefined));
+    },
+    retryUncertain(key, before) {
+      const r = records.get(key);
+      if (
+        r?.state !== "uncertain" ||
+        r.legacy ||
+        r.importStartedAt === null ||
+        r.importStartedAt > before
+      )
+        return Promise.resolve(ok(false));
+      r.state = "failed";
+      return Promise.resolve(ok(true));
     },
     finish(key, state, _remoteId, _error, _owner, chargeAttempt) {
       const r = records.get(key);
@@ -107,26 +130,41 @@ export function synthetic() {
         return Promise.resolve(err({ message: "Missing recipient" }));
       r.state = state;
       if (chargeAttempt === true) r.attempts++;
+      r.permanent = chargeAttempt === true;
       return Promise.resolve(ok(undefined));
     },
     resetFailures() {
       for (const record of records.values())
-        if (record.state === "failed") record.attempts = 0;
+        if (record.state === "failed" && !record.permanent) record.attempts = 0;
       return Promise.resolve(ok(undefined));
     },
-    messageState() {
+    messageState(id, state) {
+      messageStates.set(id, state);
       return Promise.resolve(ok(undefined));
+    },
+    importedMessages(ids) {
+      return Promise.resolve(
+        ok(ids.filter((id) => messageStates.get(id) === "imported")),
+      );
     },
   };
   const delivery: Delivery = {
     reconcile() {
-      return Promise.resolve(
-        err({ message: "No matching message", ambiguous: true }),
-      );
+      return Promise.resolve(ok([]));
     },
-    import(destination, bytes, quarantine) {
+    async import(
+      destination,
+      bytes,
+      quarantine,
+      _receivedAt,
+      _key,
+      _uploads,
+      beforeImport,
+    ) {
+      const started = await beforeImport();
+      if (started.isErr()) return err(started.error);
       imports.push({ destination, bytes, quarantine });
-      return Promise.resolve(ok(`email-${String(imports.length)}`));
+      return ok(`email-${String(imports.length)}`);
     },
   };
   const sink: Events = {

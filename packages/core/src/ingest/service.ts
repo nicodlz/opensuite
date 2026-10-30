@@ -14,6 +14,8 @@ import type {
 } from "./contracts.ts";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
+// Exceeds the ten-minute lease plus the two-minute JMAP deadline.
+const uncertainGraceMs = 15 * 60_000;
 export const recipientKey = (
   messageId: string,
   destination: string,
@@ -44,8 +46,10 @@ export class IngestService {
       !n.receipt.action.objectKey.startsWith(this.deps.bufferPrefix)
     )
       return err({ message: "Unexpected bucket or topic" });
-    const archive = await storage.archive(`${digest(body)}.json`, body);
-    if (archive.isErr()) return archive;
+    if (!reconcile) {
+      const archive = await storage.archive(`${digest(body)}.json`, body);
+      if (archive.isErr()) return archive;
+    }
     const expired = await ledger.expireClaims();
     if (expired.isErr()) return expired;
     const dynamic = await this.deps.resolveRoutes?.(n.receipt.recipients);
@@ -77,12 +81,16 @@ export class IngestService {
     const processRecipient = async (record: LedgerRecipient): Promise<void> => {
       if (["imported", "quarantined", "rejected"].includes(record.state))
         return;
+      if (record.permanent) {
+        firstFailure ??= { message: "Recipient has a permanent rejection" };
+        return;
+      }
       if (record.state === "importing") {
         firstFailure ??= { message: "Import is in progress" };
         return;
       }
       if (record.state === "uncertain") {
-        if (reconcile) {
+        if (!record.legacy) {
           const source = await bytes();
           if (source.isErr()) {
             firstFailure ??= source.error;
@@ -95,17 +103,49 @@ export class IngestService {
             n.mail.timestamp,
             record.key,
           );
-          if (found.isOk()) {
+          if (found.isOk() && found.value.length > 0) {
+            const remoteId = found.value[0];
+            if (remoteId === undefined) return;
+            if (found.value.length > 1)
+              events.emit("ingest_duplicate", {
+                messageId: n.mail.messageId,
+                recipient: record.destination,
+                matches: found.value.length,
+                recipientKey: record.key,
+              });
             const saved = await ledger.finish(
               record.key,
               quarantine ? "quarantined" : "imported",
-              found.value,
+              remoteId,
             );
             if (saved.isErr()) firstFailure ??= saved.error;
             return;
           }
-          firstFailure ??= found.error;
-        } else firstFailure ??= { message: "Import requires reconciliation" };
+          if (found.isErr()) firstFailure ??= found.error;
+          else if (
+            record.importStartedAt !== null &&
+            Date.now() - record.importStartedAt.getTime() >= uncertainGraceMs
+          ) {
+            const retry = await ledger.retryUncertain(
+              record.key,
+              new Date(Date.now() - uncertainGraceMs),
+            );
+            if (retry.isErr()) firstFailure ??= retry.error;
+            else if (retry.value) {
+              await processRecipient({ ...record, state: "failed" });
+              return;
+            } else
+              firstFailure ??= {
+                message: "Recipient state changed during reconciliation",
+              };
+          } else
+            firstFailure ??= {
+              message: "Import requires reconciliation after grace period",
+            };
+        } else
+          firstFailure ??= {
+            message: "Legacy import requires operator reconciliation",
+          };
         events.emit("ingest_failure", {
           stage: "uncertain",
           messageId: n.mail.messageId,
@@ -165,6 +205,14 @@ export class IngestService {
               n.mail.timestamp,
               record.key,
               uploads,
+              async () => {
+                const started = await ledger.startImport(record.key, owner);
+                return started.isErr()
+                  ? err(started.error)
+                  : started.value
+                    ? ok(undefined)
+                    : err({ message: "Recipient claim expired before import" });
+              },
             );
         if (imported.isErr()) {
           const status =
@@ -279,9 +327,11 @@ export class IngestService {
     const list = await this.deps.storage.archives();
     if (list.isErr()) return err(list.error);
     const keys = await this.deps.storage.bufferKeys();
+    const bufferKeys = new Set(keys.isOk() ? keys.value : []);
     const referenced = new Set<string>();
     let failures = keys.isErr() ? 1 : 0;
-    const replay = async (key: string): Promise<void> => {
+    const archived: { body: string; id: string }[] = [];
+    const read = async (key: string): Promise<void> => {
       const body = await this.deps.storage.readArchive(key);
       if (body.isErr()) {
         failures++;
@@ -297,15 +347,46 @@ export class IngestService {
         keys.isOk() &&
         Date.now() - Date.parse(n.value.mail.timestamp) >
           maxAgeSeconds * 1000 &&
-        keys.value.includes(n.value.receipt.action.objectKey)
+        bufferKeys.has(n.value.receipt.action.objectKey)
       )
         this.deps.events.emit("ingest_notification_old", {
           messageId: n.value.mail.messageId,
         });
-      if ((await this.process(body.value, true)).isErr()) failures++;
+      archived.push({ body: body.value, id: n.value.mail.messageId });
     };
     await list.value.reduce<Promise<void>>(
-      (previous, key) => previous.then(() => replay(key)),
+      (previous, key) => previous.then(() => read(key)),
+      Promise.resolve(),
+    );
+    const completed = new Set<string>();
+    const batches = Array.from(
+      { length: Math.ceil(archived.length / 500) },
+      (_, i) => archived.slice(i * 500, (i + 1) * 500),
+    );
+    const lookup = await batches.reduce<Promise<Result<void, Failure>>>(
+      (previous, batch) =>
+        previous.then(async (prior) => {
+          if (prior.isErr()) return prior;
+          const result = await this.deps.ledger.importedMessages(
+            batch.map((item) => item.id),
+          );
+          if (result.isErr()) return err(result.error);
+          for (const id of result.value) completed.add(id);
+          return ok(undefined);
+        }),
+      Promise.resolve(ok(undefined)),
+    );
+    if (lookup.isErr()) return lookup;
+    await archived.reduce<Promise<void>>(
+      (previous, item) =>
+        previous.then(async () => {
+          if (
+            !completed.has(item.id) &&
+            (await this.process(item.body, true)).isErr()
+          )
+            failures++;
+          return undefined;
+        }),
       Promise.resolve(),
     );
     if (keys.isOk())

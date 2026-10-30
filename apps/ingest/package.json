@@ -16,6 +16,7 @@
   "dependencies": {
     "@opensuite/core": "workspace:*",
     "@opensuite/db": "workspace:*",
+    "neverthrow": "catalog:",
     "zod": "catalog:",
     "@aws-sdk/client-s3": "catalog:",
     "@aws-sdk/client-sqs": "catalog:"

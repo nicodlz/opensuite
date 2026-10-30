@@ -63,7 +63,15 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
     });
   };
   return {
-    async import(destination, bytes, quarantine, receivedAt, key, uploads) {
+    async import(
+      destination,
+      bytes,
+      quarantine,
+      receivedAt,
+      key,
+      uploads,
+      beforeImport,
+    ) {
       const connection = await connect(destination, quarantine);
       if (connection.isErr()) return connection;
       const { client, session, account, mailbox, origin } = connection.value;
@@ -79,6 +87,8 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
         blobId = uploaded.value.blobId;
         uploads.set(uploadKey, blobId);
       }
+      const started = await beforeImport();
+      if (started.isErr()) return err(started.error);
       const imported = await client.importEmail(session, account, {
         blobId,
         mailboxIds: { [mailbox]: true },
@@ -88,7 +98,7 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
       if (imported.isErr()) {
         const error = imported.error;
         const ambiguous =
-          error.kind === "network" ||
+          (error.kind === "network" && error.beforeRequest !== true) ||
           error.kind === "invalidResponse" ||
           error.kind === "http" ||
           (error.kind === "request" &&
@@ -120,16 +130,28 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
       }
       return ok(imported.value.id);
     },
-    async reconcile(destination, bytes, quarantine, receivedAt, key) {
+    async reconcile(
+      destination,
+      bytes,
+      quarantine,
+      receivedAt,
+      key,
+      legacy = false,
+    ) {
       const connection = await connect(destination, quarantine);
       if (connection.isErr()) return connection;
       const { client, session, account, mailbox } = connection.value;
       const matches: string[] = [];
       const expectedId = messageId(bytes);
+      if (legacy && expectedId === undefined)
+        return err({ message: "Legacy reconciliation requires a Message-ID" });
       const expectedHash = hash(bytes);
+      let candidates = 0;
       const scan = async (position: number): Promise<Result<void, Failure>> => {
         const query = await client.queryEmails(session, account, {
-          filter: { hasKeyword: keyword(key) },
+          // Legacy recovery scans the account: servers need not index Message-ID
+          // headers consistently. Exact Message-ID and raw bytes are checked below.
+          ...(legacy ? {} : { filter: { hasKeyword: keyword(key) } }),
           position,
           limit: 100,
         });
@@ -138,6 +160,7 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
             message: `JMAP reconciliation query: ${JSON.stringify(query.error)}`,
           });
         const ids = query.value.ids;
+        candidates += ids.length;
         if (ids.length === 0) return ok(undefined);
         const emails = await client.emails(session, account, ids);
         if (
@@ -155,10 +178,11 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
             previous.then(async (result) => {
               if (result.isErr()) return result;
               if (
-                email.mailboxIds[mailbox] !== true ||
-                email.keywords[keyword(key)] !== true ||
-                Date.parse(email.receivedAt) !==
-                  Date.parse(receivedDate(receivedAt)) ||
+                (!legacy &&
+                  (email.mailboxIds[mailbox] !== true ||
+                    email.keywords[keyword(key)] !== true ||
+                    Date.parse(email.receivedAt) !==
+                      Date.parse(receivedDate(receivedAt)))) ||
                 (expectedId !== undefined &&
                   !email.messageId?.includes(expectedId))
               )
@@ -182,15 +206,12 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
       };
       const scanned = await scan(0);
       if (scanned.isErr()) return err(scanned.error);
-      if (matches.length !== 1)
+      if (!legacy && candidates > 0 && matches.length !== candidates)
         return err({
-          message: `Import remains uncertain: ${String(matches.length)} matching messages`,
+          message: "Keyword candidates do not all match the original message",
           ambiguous: true,
         });
-      const match = matches[0];
-      if (match === undefined)
-        return err({ message: "Import remains uncertain", ambiguous: true });
-      return ok(match);
+      return ok(matches);
     },
   };
 }

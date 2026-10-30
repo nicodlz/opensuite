@@ -190,7 +190,7 @@ it("keeps uncertain queue items unacknowledged, then reconciles a confirmed impo
       reconcile() {
         return Promise.resolve(
           confirmed
-            ? ok("confirmed")
+            ? ok(["confirmed"])
             : err({ message: "not yet visible", ambiguous: true }),
         );
       },
@@ -378,4 +378,115 @@ it("continues processing the original durable destination after routes change", 
   });
   expect((await changed.process(body)).isOk()).toBe(true);
   expect(memory.imports.map((item) => item.destination)).toEqual(["alice"]);
+});
+
+it("retries a zero-match uncertainty only after the grace period and detects duplicates", async () => {
+  vi.useFakeTimers();
+  try {
+    const { memory } = create();
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    let imports = 0;
+    let matches: string[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      events: memory.sink,
+      delivery: {
+        async import(_d, _b, _q, _t, _k, _u, start) {
+          const result = await start();
+          if (result.isErr()) return err(result.error);
+          imports++;
+          return err({ message: "response lost", ambiguous: true });
+        },
+        reconcile: () => Promise.resolve(ok(matches)),
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    const body = JSON.stringify(notification(["alice@example.test"]));
+    expect((await service.process(body)).isErr()).toBe(true);
+    await vi.advanceTimersByTimeAsync(14 * 60_000);
+    expect((await service.process(body)).isErr()).toBe(true);
+    expect(imports).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect((await service.process(body)).isErr()).toBe(true);
+    expect(imports).toBe(2);
+    matches = ["one", "two"];
+    expect((await service.process(body)).isOk()).toBe(true);
+    expect(memory.events).toContain("ingest_duplicate");
+    expect([...memory.records.values()][0]?.state).toBe("imported");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("does not retry permanent rejections during replay", async () => {
+  const { memory } = create();
+  memory.buffers.set("ses-1", new Uint8Array([1]));
+  let imports = 0;
+  const service = new IngestService({
+    storage: memory.storage,
+    ledger: memory.ledger,
+    events: memory.sink,
+    delivery: {
+      ...memory.delivery,
+      import() {
+        imports++;
+        return Promise.resolve(
+          err({ message: "invalidEmail", permanent: true }),
+        );
+      },
+    },
+    routes,
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 3,
+  });
+  const body = JSON.stringify(notification(["alice@example.test"]));
+  expect((await service.process(body)).isErr()).toBe(true);
+  await memory.ledger.resetFailures();
+  expect((await service.reconcile(1)).isErr()).toBe(true);
+  expect(imports).toBe(1);
+  expect([...memory.records.values()][0]?.attempts).toBe(1);
+});
+
+it("skips completed archives and never rewrites archives during replay", async () => {
+  const { memory } = create();
+  memory.buffers.set("ses-1", new Uint8Array([1]));
+  let writes = 0;
+  let preparations = 0;
+  const service = new IngestService({
+    storage: {
+      ...memory.storage,
+      archive(key, body) {
+        writes++;
+        return memory.storage.archive(key, body);
+      },
+    },
+    ledger: {
+      ...memory.ledger,
+      prepare(n, recipients) {
+        preparations++;
+        return memory.ledger.prepare(n, recipients);
+      },
+    },
+    delivery: memory.delivery,
+    events: memory.sink,
+    routes,
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 3,
+  });
+  const body = JSON.stringify(notification(["alice@example.test"]));
+  expect((await service.process(body)).isOk()).toBe(true);
+  writes = 0;
+  preparations = 0;
+  expect((await service.reconcile(1)).isOk()).toBe(true);
+  expect(writes).toBe(0);
+  expect(preparations).toBe(0);
 });

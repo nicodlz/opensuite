@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { JmapCapability, JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
+import { ok } from "neverthrow";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { jmapDelivery } from "../src/adapters/jmap.ts";
 import type { Result } from "neverthrow";
@@ -96,11 +97,13 @@ it("confirms an imported message using keyword, date, Message-ID and bytes", asy
   const date = "2026-01-02T03:04:05.321Z";
   const key = "a".repeat(64);
   const imported = unwrap(
-    await delivery.import("alice", bytes, false, date, key, new Map()),
+    await delivery.import("alice", bytes, false, date, key, new Map(), () =>
+      Promise.resolve(ok(undefined)),
+    ),
   );
   expect(
     unwrap(await delivery.reconcile("alice", bytes, false, date, key)),
-  ).toBe(imported);
+  ).toEqual([imported]);
   expect(
     (
       await delivery.reconcile(
@@ -113,10 +116,10 @@ it("confirms an imported message using keyword, date, Message-ID and bytes", asy
     ).isErr(),
   ).toBe(true);
   expect(
-    (
-      await delivery.reconcile("alice", bytes, false, date, "b".repeat(64))
-    ).isErr(),
-  ).toBe(true);
+    unwrap(
+      await delivery.reconcile("alice", bytes, false, date, "b".repeat(64)),
+    ),
+  ).toEqual([]);
   const session = unwrap(await client.discover());
   const account = session.primaryAccounts[JmapCapability.mail];
   if (account === undefined) throw new Error("Missing account");
