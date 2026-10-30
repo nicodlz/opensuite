@@ -201,6 +201,10 @@ test("routes authenticated external mail to the relay and keeps local mail local
     const initialStage = await stageData();
     value(await admin.configureRelay(config));
     value(await admin.configureRelay(config));
+    expect((await stageData())["dkimSignDomain"]).toEqual({
+      match: {},
+      else: "false",
+    });
     const makeClient = (name: string) =>
       new JmapClient(base, {
         authorization: `Basic ${Buffer.from(`${name}@outbound.test:fixture-password-123`).toString("base64")}`,
@@ -284,25 +288,9 @@ test("routes authenticated external mail to the relay and keeps local mail local
     expect(messages).toHaveLength(1);
     value(await admin.configureRelay({ ...config, tls: "starttls" }));
     value(await admin.resetOutbound());
-    // Without the relay, Stalwart signs local senders again, and no other
-    // stage setting was changed along the way.
-    const after = await stageData();
-    const { dkimSignDomain, ...rest } = after;
-    expect(dkimSignDomain).toEqual({
-      match: {
-        // Built from entries: an object literal with `then` reads as a promise.
-        "0": Object.fromEntries([
-          [
-            "if",
-            "is_local_domain(sender_domain) && !is_empty(authenticated_as)",
-          ],
-          [["th", "en"].join(""), "sender_domain"],
-        ]),
-      },
-      else: "false",
-    });
-    const { dkimSignDomain: _initial, ...initialRest } = initialStage;
-    expect(rest).toEqual(initialRest);
+    // Reset restores Stalwart's own default signing and leaves every other
+    // stage setting as it was.
+    expect(await stageData()).toEqual(initialStage);
   } finally {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve, reject) =>
