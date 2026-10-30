@@ -186,3 +186,69 @@ it("associates MFA challenges only with the exact cookie, even with a decoy", as
   expect(first.every((response) => response.statusCode === 200)).toBe(true);
   expect((await verify()).statusCode).toBe(429);
 });
+
+it("keeps sign-in available after anonymous IP buckets fill", async () => {
+  app = await buildServer({
+    config: { logLevel: "silent", trustProxy: "127.0.0.1" },
+    monotonicMs,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs,
+    }),
+    identity: {
+      publicOrigin: "https://suite.example.test",
+      handler: () =>
+        Promise.resolve(
+          new Response("{}", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      actor: () => Promise.resolve(null),
+    },
+  });
+  const server = app;
+  const fill = async (start: number): Promise<void> => {
+    if (start >= 10_100) return;
+    await Promise.all(
+      Array.from({ length: Math.min(250, 10_100 - start) }, (_, offset) =>
+        server.inject({
+          method: "GET",
+          url: "/auth/get-session",
+          remoteAddress: "127.0.0.1",
+          headers: {
+            "x-forwarded-for": `2001:db8:${(start + offset).toString(16)}::1`,
+          },
+        }),
+      ),
+    );
+    return fill(start + 250);
+  };
+  await fill(0);
+  const response = await server.inject({
+    method: "POST",
+    url: "/auth/sign-in/email",
+    remoteAddress: "127.0.0.1",
+    headers: {
+      origin: "https://suite.example.test",
+      "x-forwarded-for": "2001:db9:1::1",
+    },
+    payload: { email: "fresh@example.test", password: "test-password" },
+  });
+  expect(response.statusCode).toBe(200);
+  const sameSubnet = await Promise.all(
+    Array.from({ length: 101 }, (_, index) =>
+      server.inject({
+        method: "GET",
+        url: "/auth/get-session",
+        remoteAddress: "127.0.0.1",
+        headers: {
+          "x-forwarded-for": `2001:db8:fffe:1::${(index + 1).toString(16)}`,
+        },
+      }),
+    ),
+  );
+  expect(sameSubnet.filter((item) => item.statusCode === 429)).toHaveLength(1);
+}, 120_000);

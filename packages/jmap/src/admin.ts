@@ -583,6 +583,8 @@ export class StalwartAdmin {
     );
     if (result.isErr()) return err(result.error);
     const account = result.value.list[0];
+    if (account === undefined && result.value.notFound.includes(accountId))
+      return ok(undefined);
     if (account === undefined || result.value.notFound.length !== 0)
       return err({ kind: "invalidResponse", message: "Account not found" });
     const entry = Object.entries(account.aliases).find(

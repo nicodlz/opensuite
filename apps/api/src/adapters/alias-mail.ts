@@ -8,9 +8,9 @@ import { createAliasLimiter } from "../auth/alias-limits.ts";
 
 export function createAliasSendGuard(service: AliasService) {
   const limits = createAliasLimiter();
-  return async (userId: string, address: string) => {
+  return async (userId: string, aliasId: string) => {
     if (!limits.send(userId)) return false;
-    const audited = await service.auditSubmission(userId, address);
+    const audited = await service.auditSubmission(userId, aliasId);
     if (audited.isErr()) throw new Error("alias audit unavailable");
     return true;
   };

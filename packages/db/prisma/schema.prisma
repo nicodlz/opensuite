@@ -164,6 +164,7 @@ model EmailAlias {
   ready Boolean @default(false)
   detachedByDomain Boolean @default(false)
   suspended Boolean @default(false)
+  lastAccountId String?
   revision Int @default(0)
   requestId String?
   createdAt DateTime @default(now())

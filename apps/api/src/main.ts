@@ -102,7 +102,7 @@ const mail = createMailService({
   origin: authConfig.value.stalwartOrigin,
   canSendAs: async (userId, address) => {
     const result = await aliases.canSendAs(userId, address);
-    return result.isOk() && result.value;
+    return result.isOk() ? result.value : null;
   },
   beforeAliasSend: createAliasSendGuard(aliases),
 });

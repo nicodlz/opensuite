@@ -7,7 +7,8 @@ import { requireSession } from "./session.ts";
 
 const aliases = implement(contract.aliases).$context<ApiContext>();
 const service = (context: ApiContext): AliasService => {
-  if (!context.aliases) throw new ORPCError("SERVICE_UNAVAILABLE");
+  if (!context.aliases)
+    throw new ORPCError("SERVICE_UNAVAILABLE", { defined: true });
   return context.aliases;
 };
 const value = async <T>(
@@ -35,7 +36,7 @@ const value = async <T>(
         : result.error.kind === "conflict"
           ? "CONFLICT"
           : "SERVICE_UNAVAILABLE";
-  throw new ORPCError(code);
+  throw new ORPCError(code, { defined: true });
 };
 export const aliasesRouter = aliases.router({
   domains: aliases.domains
@@ -54,14 +55,14 @@ export const aliasesRouter = aliases.router({
         instance.findRequest(context.actor.id, input.requestId),
       );
       if (!existing && !context.aliasCreationLimit(context.actor.id))
-        throw new ORPCError("TOO_MANY_REQUESTS");
+        throw new ORPCError("TOO_MANY_REQUESTS", { defined: true });
       return value(instance.create(context.actor.id, input));
     }),
-  update: aliases.update
-    .use(requireSession)
-    .handler(({ context, input }) =>
-      value(service(context).update(context.actor.id, input.id, input)),
-    ),
+  update: aliases.update.use(requireSession).handler(({ context, input }) => {
+    if (!context.aliasMutationLimit(context.actor.id))
+      throw new ORPCError("TOO_MANY_REQUESTS", { defined: true });
+    return value(service(context).update(context.actor.id, input.id, input));
+  }),
   enable: aliases.enable
     .use(requireSession)
     .handler(({ context, input }) =>
@@ -69,7 +70,7 @@ export const aliasesRouter = aliases.router({
         ? value(
             service(context).transition(context.actor.id, input.id, "enable"),
           )
-        : Promise.reject(new ORPCError("TOO_MANY_REQUESTS")),
+        : Promise.reject(new ORPCError("TOO_MANY_REQUESTS", { defined: true })),
     ),
   disable: aliases.disable
     .use(requireSession)
@@ -78,13 +79,13 @@ export const aliasesRouter = aliases.router({
         ? value(
             service(context).transition(context.actor.id, input.id, "disable"),
           )
-        : Promise.reject(new ORPCError("TOO_MANY_REQUESTS")),
+        : Promise.reject(new ORPCError("TOO_MANY_REQUESTS", { defined: true })),
     ),
   delete: aliases.delete
     .use(requireSession)
     .handler(async ({ context, input }) => {
       if (!context.aliasMutationLimit(context.actor.id))
-        throw new ORPCError("TOO_MANY_REQUESTS");
+        throw new ORPCError("TOO_MANY_REQUESTS", { defined: true });
       await value(
         service(context).transition(context.actor.id, input.id, "delete"),
       );
@@ -107,9 +108,11 @@ export const aliasesRouter = aliases.router({
     ),
   createKey: aliases.createKey
     .use(requireSession)
-    .handler(({ context, input }) =>
-      value(service(context).createKey(context.actor.id, input.name)),
-    ),
+    .handler(({ context, input }) => {
+      if (!context.aliasMutationLimit(context.actor.id))
+        throw new ORPCError("TOO_MANY_REQUESTS", { defined: true });
+      return value(service(context).createKey(context.actor.id, input.name));
+    }),
   listKeys: aliases.listKeys
     .use(requireSession)
     .handler(({ context }) =>
@@ -117,7 +120,9 @@ export const aliasesRouter = aliases.router({
     ),
   revokeKey: aliases.revokeKey
     .use(requireSession)
-    .handler(({ context, input }) =>
-      value(service(context).revokeKey(context.actor.id, input.id)),
-    ),
+    .handler(({ context, input }) => {
+      if (!context.aliasMutationLimit(context.actor.id))
+        throw new ORPCError("TOO_MANY_REQUESTS", { defined: true });
+      return value(service(context).revokeKey(context.actor.id, input.id));
+    }),
 });

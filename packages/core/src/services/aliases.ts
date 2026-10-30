@@ -83,8 +83,6 @@ export function createAliasService(
         const row = found.value;
         if (!row) return err(failure("not_found"));
         const mailbox = row.user.mailbox;
-        if (!mailbox || !row.domain.stalwartId)
-          return err(failure("unavailable"));
         const detachedByDomain =
           row.enabled &&
           row.deletedAt === null &&
@@ -92,25 +90,45 @@ export function createAliasService(
         const suspended =
           row.enabled &&
           row.deletedAt === null &&
-          (row.user.disabled || mailbox.status !== "active");
+          (row.user.disabled || !mailbox || mailbox.status !== "active");
         const enabled =
           row.enabled &&
           row.deletedAt === null &&
           !detachedByDomain &&
           !suspended;
-        const result = await mail.set(
-          mailbox.accountId,
-          row.localPart,
-          row.domain.stalwartId,
-          row.address,
-          userId,
-          enabled,
-        );
-        if (result.isErr()) return err(failure("unavailable"));
+        const accountId = mailbox?.accountId ?? row.lastAccountId;
+        if (accountId) {
+          if (!row.domain.stalwartId) return err(failure("unavailable"));
+          if (
+            mailbox &&
+            row.lastAccountId &&
+            row.lastAccountId !== mailbox.accountId
+          ) {
+            const removed = await mail.set(
+              row.lastAccountId,
+              row.localPart,
+              row.domain.stalwartId,
+              row.address,
+              userId,
+              false,
+            );
+            if (removed.isErr()) return err(failure("unavailable"));
+          }
+          const result = await mail.set(
+            accountId,
+            row.localPart,
+            row.domain.stalwartId,
+            row.address,
+            userId,
+            enabled,
+          );
+          if (result.isErr()) return err(failure("unavailable"));
+        } else if (mailbox) return err(failure("unavailable"));
         const saved = await store.finish(userId, id, token, row, {
           ready: true,
           detachedByDomain,
           suspended,
+          lastAccountId: accountId ?? null,
         });
         if (saved.isErr()) return err(saved.error);
         if (!saved.value) {
@@ -257,13 +275,9 @@ export function createAliasService(
         return ok(failures);
       }),
     canSendAs: async (userId: string, address: string) =>
-      (await store.canSendAs(userId, address)).map((row) => row !== null),
-    auditSubmission: async (userId: string, address: string) => {
-      const alias = await store.canSendAs(userId, address);
-      if (alias.isErr()) return err(alias.error);
-      if (!alias.value) return err(failure("not_found"));
-      return store.auditSubmission(userId, alias.value.id);
-    },
+      (await store.canSendAs(userId, address)).map((row) => row?.id ?? null),
+    auditSubmission: async (userId: string, aliasId: string) =>
+      store.auditSubmission(userId, aliasId),
   };
 }
 export type AliasService = ReturnType<typeof createAliasService>;

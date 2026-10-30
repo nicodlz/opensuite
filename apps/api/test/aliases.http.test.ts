@@ -31,6 +31,7 @@ let disabledId: string;
 let failMail = false;
 let aliases: AliasService;
 let mailCalls = 0;
+const mailOperations: { accountId: string; enabled: boolean }[] = [];
 let pauseMail: (() => Promise<void>) | undefined;
 const clock = () => performance.now();
 const noop = () => {};
@@ -124,8 +125,16 @@ beforeAll(async () => {
     aliases = createAliasService(
       createAliasStore(db),
       {
-        set: async () => {
+        set: async (
+          accountId,
+          _localPart,
+          _domainId,
+          _address,
+          _userId,
+          enabled,
+        ) => {
           mailCalls++;
+          mailOperations.push({ accountId, enabled });
           await pauseMail?.();
           return failMail ? err({ kind: "unavailable" }) : ok(undefined);
         },
@@ -410,6 +419,23 @@ describe("alias API", () => {
     });
     expect(malformed.statusCode).toBe(400);
     expect(malformed.json<{ error: string }>().error).toBe("Invalid request");
+    const poisoned = await Promise.all(
+      [
+        '{"__proto__":{"polluted":true}}',
+        '{"constructor":{"prototype":{"polluted":true}}}',
+      ].map((payload) =>
+        app.inject({
+          method: "POST",
+          url: "/alias/random/new",
+          headers: {
+            authentication: key.secret,
+            "content-type": "application/json",
+          },
+          payload,
+        }),
+      ),
+    );
+    expect(poisoned.map((response) => response.statusCode)).toEqual([400, 400]);
     const created = await app.inject({
       method: "POST",
       url: "/alias/random/new?hostname=example.org",
@@ -623,7 +649,7 @@ describe("alias API", () => {
     });
     const guard = createAliasSendGuard(aliases);
     const results = await Promise.all(
-      Array.from({ length: 31 }, () => guard("bob", row.address)),
+      Array.from({ length: 31 }, () => guard("bob", row.id)),
     );
     expect(results.filter(Boolean)).toHaveLength(30);
     const events = await db.auditEvent.findMany({
@@ -799,5 +825,93 @@ describe("alias API", () => {
     );
     const result = await limited.create(userId, { requestId: "new" });
     expect(result.isErr() && result.error.kind).toBe("limit");
+  });
+  it("suspends aliases when a mailbox link is deleted and requeues on restoration", async () => {
+    const row = await db.emailAlias.findFirstOrThrow({
+      where: { userId: "bob", enabled: true, deletedAt: null },
+    });
+    const mailbox = await db.mailboxLink.findUniqueOrThrow({
+      where: { userId: "bob" },
+    });
+    const operationCount = mailOperations.length;
+    await db.mailboxLink.delete({ where: { userId: "bob" } });
+    const pending = await db.emailAlias.findUniqueOrThrow({
+      where: { id: row.id },
+    });
+    expect(pending.ready).toBe(false);
+    expect(pending.lastAccountId).toBe(mailbox.accountId);
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    const suspended = await db.emailAlias.findUniqueOrThrow({
+      where: { id: row.id },
+    });
+    expect(suspended.ready && suspended.suspended).toBe(true);
+    expect(mailOperations.slice(operationCount)).toContainEqual({
+      accountId: mailbox.accountId,
+      enabled: false,
+    });
+    const count = mailCalls;
+    await aliases.reconcile();
+    expect(mailCalls).toBe(count);
+    await db.mailboxLink.create({
+      data: {
+        userId: "bob",
+        accountId: mailbox.accountId,
+        address: mailbox.address,
+        credentialId: mailbox.credentialId,
+        secret: mailbox.secret,
+        status: mailbox.status,
+      },
+    });
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    const restored = await db.emailAlias.findUniqueOrThrow({
+      where: { id: row.id },
+    });
+    expect(restored.ready && !restored.suspended).toBe(true);
+    const beforeSwap = mailOperations.length;
+    const replacementId = `${mailbox.accountId}-replacement`;
+    await db.mailboxLink.update({
+      where: { userId: "bob" },
+      data: { accountId: replacementId },
+    });
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    expect(mailOperations.slice(beforeSwap)).toEqual(
+      expect.arrayContaining([
+        { accountId: mailbox.accountId, enabled: false },
+        { accountId: replacementId, enabled: true },
+      ]),
+    );
+    expect(
+      (await db.emailAlias.findUniqueOrThrow({ where: { id: row.id } }))
+        .lastAccountId,
+    ).toBe(replacementId);
+  });
+  it("marks declared errors as defined and limits alias changes", async () => {
+    const missing = await app.inject({
+      method: "PATCH",
+      url: "/aliases/missing",
+      headers: headers("alice"),
+      payload: { note: "x" },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json<{ code: string; defined: boolean }>()).toMatchObject({
+      code: "NOT_FOUND",
+      defined: true,
+    });
+    const attempts = await Promise.all(
+      Array.from({ length: 65 }, () =>
+        app.inject({
+          method: "POST",
+          url: "/aliases/missing/disable",
+          headers: headers("alice"),
+          payload: {},
+        }),
+      ),
+    );
+    expect(attempts.some((response) => response.statusCode === 429)).toBe(true);
+    expect(
+      attempts
+        .find((response) => response.statusCode === 429)
+        ?.json<{ code: string; defined: boolean }>(),
+    ).toMatchObject({ code: "TOO_MANY_REQUESTS", defined: true });
   });
 });

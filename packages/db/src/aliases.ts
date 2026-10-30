@@ -104,7 +104,10 @@ export const createAliasStore = (db: PrismaClient) => {
               disabled: false,
               mailbox: { status: "active" },
             },
-            select: { defaultAliasDomainId: true },
+            select: {
+              defaultAliasDomainId: true,
+              mailbox: { select: { accountId: true } },
+            },
           });
           const domainId = input.domainId ?? user?.defaultAliasDomainId;
           if (!user || !domainId) return err({ kind: "invalid" });
@@ -128,6 +131,7 @@ export const createAliasStore = (db: PrismaClient) => {
               addressId: record.id,
               address: `${localPart}@${domain.name}`,
               localPart,
+              lastAccountId: user.mailbox?.accountId ?? null,
               website: input.website?.toLowerCase() ?? null,
               note: input.note ?? null,
               requestId: input.requestId ?? null,
@@ -170,7 +174,12 @@ export const createAliasStore = (db: PrismaClient) => {
         domain: { status: string };
         user: { disabled: boolean; mailbox: { status: string } | null };
       },
-      data: { ready: boolean; detachedByDomain: boolean; suspended: boolean },
+      data: {
+        ready: boolean;
+        detachedByDomain: boolean;
+        suspended: boolean;
+        lastAccountId: string | null;
+      },
     ) =>
       ResultAsync.fromPromise(
         db.emailAlias
@@ -183,7 +192,10 @@ export const createAliasStore = (db: PrismaClient) => {
               user: {
                 aliasSyncToken: token,
                 disabled: row.user.disabled,
-                mailbox: { status: row.user.mailbox?.status ?? "" },
+                mailbox:
+                  row.user.mailbox === null
+                    ? { is: null }
+                    : { is: { status: row.user.mailbox.status } },
               },
             },
             data,

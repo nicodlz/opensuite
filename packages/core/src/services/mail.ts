@@ -164,8 +164,8 @@ export function createMailService(dependencies: {
   origin: string;
   client?: (credential: { address: string; secret: string }) => JmapClient;
   now?: () => number;
-  canSendAs?: (userId: string, address: string) => Promise<boolean>;
-  beforeAliasSend?: (userId: string, address: string) => Promise<boolean>;
+  canSendAs?: (userId: string, address: string) => Promise<string | null>;
+  beforeAliasSend?: (userId: string, aliasId: string) => Promise<boolean>;
 }) {
   const { run, connect: open, now } = createJmapAccess(dependencies);
   const uploads = new Map<
@@ -498,18 +498,19 @@ export function createMailService(dependencies: {
         if (!recipients.length) return fail("validation");
         const from =
           email.from?.[0]?.email.toLowerCase() ?? c.address.toLowerCase();
-        if (
-          from !== c.address.toLowerCase() &&
-          !(await dependencies.canSendAs?.(c.owner, from))
-        )
+        const aliasId =
+          from === c.address.toLowerCase()
+            ? null
+            : await dependencies.canSendAs?.(c.owner, from);
+        if (from !== c.address.toLowerCase() && !aliasId)
           return fail("forbidden");
         const identity = value(
           await c.client.identities(c.session, c.id),
         ).list.find((item) => item.email.toLowerCase() === from);
         if (!identity) return fail("unavailable");
         if (
-          from !== c.address.toLowerCase() &&
-          !(await dependencies.beforeAliasSend?.(c.owner, from))
+          aliasId &&
+          !(await dependencies.beforeAliasSend?.(c.owner, aliasId))
         )
           return fail("rate_limited");
         value(

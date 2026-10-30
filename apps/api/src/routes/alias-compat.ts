@@ -26,16 +26,14 @@ export function registerAliasCompat(
       .send(),
   );
   app.removeContentTypeParser("application/json");
+  const parseJson = app.getDefaultJsonParser("error", "error");
   app.addContentTypeParser(
     "application/json",
     { parseAs: "string" },
-    (_request, body, done) => {
-      try {
-        const text = body.toString();
-        done(null, text.trim() ? JSON.parse(text) : {});
-      } catch {
-        done(new Error("Invalid request"), undefined);
-      }
+    (request, body, done) => {
+      const text = body.toString();
+      if (!text.trim()) done(null, {});
+      else void parseJson(request, text, done);
     },
   );
   app.setErrorHandler((error, _request, reply) => {
