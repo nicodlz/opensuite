@@ -17,124 +17,209 @@ has not been verified. Treat this as infrastructure to evaluate before cutover. 
 
 Use your own AWS account and a region supporting both SES receiving and
 Firehose. [AWS lists receiving endpoints](https://docs.aws.amazon.com/general/latest/gr/ses.html).
-SES identities, inbound resources and SMTP credentials are regional. Use an
-operator identity with permission to manage only the necessary resources. Store
-state in an encrypted, access-controlled remote backend with locking and backups;
-never commit state, variable files containing sensitive data, or credentials.
-Coordinate state ownership before importing or provisioning. This module does not
-configure a backend. OpenTofu and the provider are pinned in `versions.tf` and
-the provider lock file; the offline validation image is pinned separately.
+The application's SES domain adapter currently uses `eu-north-1`; the module's
+region must agree with the application and existing resources. Choose an unused
+resource prefix and an owned, globally unique bucket. Configure an
+access-controlled remote backend with locking and backups; this module does not
+configure one. OpenTofu and the provider are pinned in `versions.tf` and the
+provider lock file.
 
-Copy the following example into a private variables file outside the repository,
-substituting values belonging to you. The placeholders below are deliberately
-not actual domains, bucket names, or resource identifiers:
+State and saved plans use enforced OpenTofu AES-GCM encryption with a PBKDF2
+passphrase. Supply a unique, high-entropy `state_key` securely (for example,
+`TF_VAR_state_key`) **before init**, import, plan and other operations. Never
+commit or log it; back up the key separately and test recovery. Losing it makes
+the encrypted state and plans unreadable. Protect the backend and local backups
+as well; encryption is not an access-control system. The enforced configuration
+cannot read plaintext state or plans. For an existing encrypted state, first
+verify that its key, provider name, method and parameters are compatible; plan a
+key rollover if they are not. For plaintext state, back it up and follow
+[OpenTofu's migration procedure](https://opentofu.org/docs/v1.9/language/state/encryption/)
+in a controlled, separately approved transition, including its temporary
+unencrypted fallback, before returning to enforced encryption. Protect and
+retire plaintext state, saved plans and backups under the operator's retention
+policy. Do not assume that merely adding this configuration migrates them.
+
+Copy this example into a private variables file outside the repository,
+substituting your values. Supply the encryption key separately:
 
 ```hcl
-region             = "<aws-region>"
-name_prefix        = "<unique-resource-prefix>"
-buffer_bucket_name = "<globally-unique-owned-bucket-name>"
-domains            = ["<your-domain>"]
-recipients         = ["<your-domain>"]
-tags               = { environment = "<environment>" }
-alarm_actions      = ["<existing-alarm-action-arn>"]
+region                   = "<aws-region>"
+name_prefix              = "<unique-resource-prefix>"
+buffer_bucket_name       = "<globally-unique-owned-bucket-name>"
+initial_recipients       = ["<original-rule-domain>"]
+esuno_initial_recipients = ["<esuno-rule-domain>"]
+esuno_sending_domains    = ["<esuno-sending-domain>"]
+sending_iam_user_name    = "<existing-smtp-user>"
+# Optional if the existing names differ from the derived defaults:
+# ingestion_queue_name = "<existing-queue-name>"
+# ingestion_dlq_name   = "<existing-dlq-name>"
+tags          = { environment = "<environment>" }
+alarm_actions = ["<existing-alarm-action-arn>"]
 ```
 
-`domains` must be explicit lowercase domain names, and `recipients` must be a
-nonempty list of lowercase addresses and/or domains. A domain recipient matches
-addresses in that domain; individual addresses are narrower. SES acts on matched
-recipients, not every verified domain: review aliases, subdomains and Bcc coverage
-and the 500-recipient rule limit. A configured recipient must also be a verified
-SES receiving identity. Domain and recipient lists are independent: ensure they
-match your intended identities. No empty catch-all is allowed. Choose an unused
-prefix and a globally unique bucket name. Use `confirmed_expiration_days` to
-increase the default 90-day safety window; its minimum is 30 days.
+The two initial recipient lists must be nonempty, lowercase addresses and/or
+domains. SES treats an empty list as a catch-all. Choose values that match the
+intended verified receiving identities, including aliases, subdomains and Bcc,
+and consider SES's 500-recipient rule limit. Despite their historical names,
+these variables manage recipients continuously. Update them through the single
+operator-owned IaC workflow; drift appears in plans. Review the exact recipient
+list before any apply or replacement.
 
-After configuring a backend and private variables, initialize normally in your
-own controlled environment. Before creating resources, inventory the account,
-reconcile existing resources as described below, and inspect a plan. Only after
-review should the account owner apply it. This repository's validation command
-never performs these account operations.
-
-After provisioning, publish the identity and signing records in `dns_records`
-when safe; hold the receiving MX and any conflicting wildcard changes for the
-separate, owner-approved cutover in the production runbook. Merge
-SPF with existing policy rather than creating conflicting TXT records. Confirm
-SES identity and DKIM verification, MX and MAIL FROM status, region and sandbox
-status before routing real mail; request production sending access if necessary.
-The MAIL FROM behavior rejects sending when its MX fails rather than silently
-falling back. DNS cutover has service-wide effects: coordinate existing mail
-routing and verify delivery and rollback before changing MX.
-
-The rule set is **not activated by default**. SES supports one active receipt
-rule set per account and region. Activating this one replaces the existing active
-set and can interrupt other domains, even though this rule has recipients. First
-inspect and deliberately migrate all needed existing rules, ordering and
-permissions; this module manages only its own rule. Set `activate_rule_set =
-true` only when that replacement is intended, or incorporate this rule into a
-separately managed shared rule set instead. Do not have two states manage the
-same active set. Review the resulting plan carefully. Inbound sender-to-SES TLS
-is optional; SES may accept unencrypted inbound SMTP. The SMTP relay from the
-VPS must use STARTTLS, certificate verification, the `smtp_host` output and port 2587. Region-specific SMTP credentials differ from AWS secret keys: derive them
-from a separately created access key for the output sending IAM user using the
+`esuno_message_prefix` defaults to `messages/esuno/`; set it to the existing
+dedicated prefix if different. It scopes the Esuno rule's S3 action, the added
+bucket permission, the noncurrent-version lifecycle and worker deletion. The
+original rule still writes under `messages/`; deletion outside the dedicated
+prefix is no longer granted by this module. Ensure the worker's
+`INBOUND_BUFFER_PREFIX` and replay configuration match the actual paths and
+that other rules' messages have a safe, separately authorized cleanup process.
+The existing SMTP user and its credentials are managed outside this module. The
+inline policy permits `ses:SendRawEmail` only for the SES identity ARNs and
+`*@domain` From addresses in `esuno_sending_domains`. Domain adoption
+does not extend that policy: the operator must review and update it for each
+additional sending domain. Other attached policies can also grant access; review
+the user's effective permissions, including restrictions and deny cases. Derive
+regional SMTP credentials from a separately created access key using the
 [AWS procedure](https://docs.aws.amazon.com/ses/latest/dg/smtp-credentials.html).
-No keys are created or put in state. Create and rotate the ingestion user's
-credentials separately, keep both identities isolated, and protect them on the
-VPS. SMTP temporary credentials are not supported.
+No keys are created or stored in state; SMTP temporary credentials are not
+supported. Provision and rotate ingestion credentials separately.
 
-To add a domain, append its exact lowercase name to `domains`, add suitable
-recipient conditions, review the plan, publish the new DNS records, verify the
-identity, and update MX at the agreed cutover. The sender policy derives an
-explicit identity ARN and `*@<that-domain>` From-address condition for each
-listed domain. It does not grant rights to unlisted domains; the local-part
-wildcard permits any address on each listed domain. A separately verified email
-identity may require additional explicit policy handling. Test the actual SES
-SMTP authorization, including deny cases, in an authorized environment.
+## SES ownership and activation
 
-## Existing resources and imports
+The operator owns the whole receipt rule, including recipients, in one OpenTofu
+state and separately manages SES identities and verification. OpenTofu manages
+both rule sets, the rules' S3/SNS actions, bucket, topic, queues, DLQs, IAM and
+policies. It does not manage domain identities, DKIM or custom MAIL FROM.
+The API can opt into read-only adoption of explicitly approved, already verified
+domains with existing recipients; it does not create or verify an SES identity
+or update a rule. See [domain operations](../operations/domains.md).
 
-OpenTofu does not automatically adopt existing resources. Before provisioning,
-make a complete inventory in the target account/region and choose whether to
-adopt, rename, or integrate with existing resources. Never import one resource
-into multiple states. Keep the existing state and configuration backed up; check
-that the selected backend, variables and account are correct before running any
-commands. Importing associates an object with state; it does **not** make its
-configuration match. A subsequent plan can propose replacement or destructive
-changes: inspect every change, especially bucket lifecycle, bucket/topic/queue
-policies (each is managed as a whole), rule set activation and IAM permissions.
-Preserve required existing statements, rules and data or use an isolated set of
-resources. Avoid replacing a bucket containing unimported mail.
+Set `domain_adoption_domains` to approved domains to create the optional
+separate IAM user and its read-only policy; an empty set creates neither.
+`ses:GetEmailIdentity` is scoped to those identity ARNs. SES v1 requires
+`Resource: "*"` for `GetIdentityVerificationAttributes`,
+`DescribeActiveReceiptRuleSet`, and `DescribeReceiptRule`; they are constrained
+by `aws:RequestedRegion`, which limits the region but not individual identities
+or rules. They can reveal other metadata in that region. No SES write,
+`iam:PassRole`, S3, SNS or SQS permission is granted. Provision credentials
+outside state and store them in the API's protected secret file. Verify the real
+policy and its effective permissions before any approved apply.
 
-For an operator performing a deliberate adoption, substitute shell variables
-with existing values and use the same private variables file for each import.
-For example, with `DOMAIN`, `BUCKET`, `RULE_SET`, `RULE`, and `VARS` supplied by
-the operator:
+Both rule sets default to unmanaged activation. Set `activate_rule_set = true`
+only to manage the original set, or `activate_esuno_rule_set = true` only to
+manage the Esuno set. Never enable both. SES permits one active set per account
+and region. Both active-set resources and the Esuno rule set and rule use
+`prevent_destroy`: switching, replacing, or stopping their management requires
+deliberate operator reconciliation, not a routine apply. Import an already active set into exactly one state before planning;
+otherwise it is not tracked. A missing resource in state does not establish
+whether a set is active. Inspect the real active set and complete plan; never
+apply a plan that deactivates production receipt.
 
-```sh
-tofu import -var-file="$VARS" 'aws_ses_domain_identity.domain["'"$DOMAIN"'"]' "$DOMAIN"
-tofu import -var-file="$VARS" 'aws_ses_domain_dkim.domain["'"$DOMAIN"'"]' "$DOMAIN"
-tofu import -var-file="$VARS" 'aws_ses_domain_mail_from.domain["'"$DOMAIN"'"]' "$DOMAIN"
-tofu import -var-file="$VARS" aws_s3_bucket.buffer "$BUCKET"
-tofu import -var-file="$VARS" aws_s3_bucket_versioning.buffer "$BUCKET"
-tofu import -var-file="$VARS" aws_s3_bucket_public_access_block.buffer "$BUCKET"
-tofu import -var-file="$VARS" aws_s3_bucket_server_side_encryption_configuration.buffer "$BUCKET"
-tofu import -var-file="$VARS" aws_s3_bucket_lifecycle_configuration.buffer "$BUCKET"
-tofu import -var-file="$VARS" aws_s3_bucket_policy.buffer "$BUCKET"
-tofu import -var-file="$VARS" aws_ses_receipt_rule_set.inbound "$RULE_SET"
-tofu import -var-file="$VARS" aws_ses_receipt_rule.inbound "$RULE_SET:$RULE"
-```
+On 2026-10-30 the operator confirmed the active production set is
+`opensuite-esuno-inbound`, containing enabled rule `opensuite-esuno-store`,
+recipient `esuno.net`, and its S3 action in `eu-north-1`. For this account the
+private variables must include `name_prefix = "opensuite"`,
+`activate_esuno_rule_set = true`, `activate_rule_set = false`, and
+`esuno_initial_recipients = ["esuno.net"]`. These are production values, not
+module defaults. Import the active-set resource as described below and confirm
+the full rule, its order and permissions. Verify current AWS state again before
+any future plan: these values are an observation, not a guarantee. The API's
+`DOMAINS_SES_RULE_SET` and `DOMAINS_SES_RULE` must name the actual active set
+and its rule; the API verifies that the configured set is active before reading
+the rule. SES inbound TLS is optional; the VPS SMTP relay must use STARTTLS and
+certificate verification.
 
-The configured names must match the existing objects. If adopting the already
-active set and `activate_rule_set` is true, import
-`'aws_ses_active_receipt_rule_set.inbound[0]'` using the existing rule set name.
-Similarly inventory and import existing SNS topic and policy, SQS queues and
-policies, subscriptions, Firehose stream, IAM users/roles and inline policies,
-and alarms, using the IDs and resource-specific import formats in the
-[provider documentation](https://registry.terraform.io/providers/hashicorp/aws/5.100.0/docs).
-For example the topic and SQS queue use their existing ARN and URL respectively.
-If an existing resource has a different name or another state owns it, do not
-blindly import or create a duplicate: adapt ownership/configuration and review
-its plan first. Provider-managed default resources and singleton configurations
-may need separate imports even when their parent has been imported.
+## Adopting an existing account
+
+Only the infrastructure operator should perform this procedure, in the intended
+account and region. These are account and state operations, not offline checks:
+
+1. Inventory resources, ownership, rule-set activation, recipients, bucket
+   contents, all IAM grants, lifecycle rules and the **complete** bucket, topic
+   and queue policies. Back up the existing state and encryption keys. Coordinate
+   with every other state owner and pause domain management and concurrent IaC
+   operations. Never import a resource into multiple states.
+2. Configure the backend and key as above, and adapt the private variables and,
+   where necessary, configuration to match the existing objects. Both bucket
+   and topic policies and the S3 lifecycle configuration are singletons: this
+   module replaces each as a whole. Compare every existing statement and rule
+   with AWS, preserve all still required entries, and do not assume the two
+   baseline statements plus Esuno additions cover account-specific permissions.
+   The proposed lifecycle contains only 30-day noncurrent-version expiration
+   under the dedicated prefix; it removes the old multipart and confirmed-object
+   expiration rules. Review retention consequences before any change.
+3. Import every matching IaC-owned resource into the intended state using the
+   [provider's import formats](https://registry.terraform.io/providers/hashicorp/aws/5.100.0/docs).
+   For example, supply `VARS`, `BUCKET`, `RULE_SET`, `RULE`, `ESUNO_RULE_SET`
+   and `ESUNO_RULE` privately and use:
+
+   ```sh
+   tofu import -var-file="$VARS" aws_s3_bucket.buffer "$BUCKET"
+   tofu import -var-file="$VARS" aws_s3_bucket_lifecycle_configuration.buffer "$BUCKET"
+   tofu import -var-file="$VARS" aws_s3_bucket_policy.buffer "$BUCKET"
+   tofu import -var-file="$VARS" aws_ses_receipt_rule_set.inbound "$RULE_SET"
+   tofu import -var-file="$VARS" aws_ses_receipt_rule.inbound "$RULE_SET:$RULE"
+   tofu import -var-file="$VARS" aws_ses_receipt_rule_set.esuno "$ESUNO_RULE_SET"
+   tofu import -var-file="$VARS" aws_ses_receipt_rule.esuno "$ESUNO_RULE_SET:$ESUNO_RULE"
+   # Only when the Esuno set is already active and activate_esuno_rule_set is true:
+   tofu import -var-file="$VARS" 'aws_ses_active_receipt_rule_set.esuno[0]' "$ESUNO_RULE_SET"
+   ```
+
+   Also import versioning, public access block and encryption configuration,
+   SNS topic and policy, all queues, queue policies and redrive settings,
+   subscriptions, Firehose, IAM users/roles and inline policies, and alarms as
+   applicable. Import the original active-rule-set resource only if that set is
+   already active and `activate_rule_set` is true. An active set is a singleton:
+   never import it into two resources or states. If a previous state tracks a
+   different active-set address, back up state and coordinate a state-only
+   handoff before import; do not destroy or deactivate the live set. Do not import SES identities,
+   DKIM or MAIL FROM into this module. The old adopted state addresses
+   `aws_s3_bucket_lifecycle_configuration.esuno_buffer` and
+   `aws_iam_user_policy.esuno_smtp` move to
+   `aws_s3_bucket_lifecycle_configuration.buffer` and
+   `aws_iam_user_policy.sending` respectively via `moved` blocks. Do not import
+   objects already in that state; if both the old and new addresses are present,
+   stop and reconcile ownership rather than creating duplicates. A pending move
+   appears in the plan even when it proposes no remote changes. To obtain a
+   strictly empty adoption plan without applying, an operator may perform the
+   corresponding `tofu state mv` as a separately approved state-only transition
+   after backing up state and verifying both addresses. For an object not yet in
+   state, import to the new address. For example, supply the existing
+   `SENDING_USER` and `SENDING_POLICY` and use:
+
+   ```sh
+   tofu import -var-file="$VARS" aws_iam_user_policy.sending "$SENDING_USER:$SENDING_POLICY"
+   ```
+
+   Reconcile the policy name, user, and any other inline or attached policies;
+   do not leave a second broad policy attached unnoticed. If older state tracks
+   `aws_ses_domain_identity.domain`, `aws_ses_domain_dkim.domain`,
+   `aws_ses_domain_mail_from.domain` or `aws_iam_user.sending`, the module's
+   `removed` blocks protect those objects from destruction. OpenTofu 1.9.1
+   forgets them without destroying them; its `removed` syntax does not support
+   the nested lifecycle block introduced in 1.10. The plan will show pending
+   state removals, so it will not yet be empty. To meet the empty-plan adoption
+   requirement, back up and verify the state, coordinate the handoff, and have
+   the operator perform a separately approved state-only removal of those
+   addresses (for example, `tofu state rm` for each tracked resource) before
+   re-planning. Never delete the remote objects. The `removed` blocks also
+   protect against destruction if tracked instances remain in another state.
+
+4. Run a real `tofu plan` with the intended variables and encrypted state. It
+   **must be empty** after adoption: resolve every proposed creation, deletion,
+   replacement, policy, lifecycle, queue name, recipient, IAM or activation
+   change with the operator and repeat the plan. Inspect the move annotations
+   and confirm no replacements, deletions, or unintended policy changes; a
+   state move is not itself proof that the remote attributes match. Inspect
+   the full recipient lists in the plan and directly in AWS. Queue
+   `max_message_size` drift is also intentionally ignored; inspect it separately.
+   The queue defaults now derive as `<prefix>-inbound` and
+   `<prefix>-inbound-dlq`; use the optional name variables to preserve existing
+   names. Check the active set and the full resulting policies directly, and
+   verify no untracked resources or other IAM policies grant broader access.
+5. Only after an empty plan and explicit operator approval may the operator
+   apply. For any later intended change, make a new plan and obtain approval for
+   that specific change; never treat an earlier empty plan as approval for it.
+   This repository's offline validation performs none of these operations.
 
 ## Recovery, retention and monitoring
 
@@ -177,28 +262,19 @@ alarms alone cannot prove preservation. Recover from the Firehose archive and th
 [Recovering mail from the archives](production.md#recovering-mail-from-the-archives),
 which validates each payload.
 
-The buffer bucket has versioning enabled. Noncurrent `messages/` versions
-expire 30 days after becoming noncurrent, including versions of unconfirmed
-objects that were overwritten or deleted; incomplete multipart uploads across the bucket
-are aborted after 7 days. A delete creates a delete marker, and
-recovery requires restoring the prior version before expiry. Versioning is not
-an immutable backup, and it also applies to `metadata/` objects, whose
-noncurrent versions have no automatic expiry. Budget for retained versions and
-remove delete markers through a controlled reconciliation process.
-
-The current-version S3 lifecycle rule only applies to `messages/` objects tagged
-`opensuite-import=confirmed`, and only after 90 days from object creation by
-default (minimum 30). **Untagged objects never expire via this rule**, including
-unconfirmed and ambiguous imports, even after queue retention ends. The worker
-has no tagging rights: a separate, controlled reconciliation process may tag
-only after every intended recipient import is confirmed and backup/retention
-policy permits deletion. Tagging an already-old object can make it immediately
-eligible for expiration. The worker's `DeleteObject` permission likewise must be
-used only after all recipients and recovery requirements are confirmed. Do not
-tag or delete on queue acknowledgement alone. Reconcile orphan objects and
-retain their independent metadata; S3 objects and notifications are not
-transactional. Account administrators can still change policies or delete data.
-S3 is a temporary buffer, not the permanent mail or Drive store.
+The buffer bucket has versioning enabled. Only noncurrent versions under the
+dedicated Esuno prefix expire, 30 days after becoming noncurrent. Deletion
+creates a delete marker; recovery requires restoring the prior version before
+expiry. Current versions, other prefixes, metadata and incomplete multipart
+uploads have no expiration from this configuration. A bucket has just one
+lifecycle configuration, so adoption must preserve any other needed rules. The
+worker may delete only objects under the dedicated prefix and must do so only
+after all recipients and recovery requirements are confirmed, not merely after
+queue acknowledgement. Reconcile orphan objects and retain their independent
+metadata; S3 objects and notifications are not transactional. Versioning is not
+an immutable backup; monitor storage and delete markers and arrange retention
+for other prefixes separately. Account administrators can change policies or
+delete data. S3 is a temporary buffer, not the permanent mail or Drive store.
 
 ## Indicative costs
 

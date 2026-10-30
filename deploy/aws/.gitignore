@@ -3,3 +3,6 @@
 *.tfstate.*
 *.tfvars
 *.tfvars.json
+
+*.tfplan
+*.tfplan.*

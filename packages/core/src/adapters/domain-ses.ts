@@ -1,120 +1,137 @@
 import {
   DescribeActiveReceiptRuleSetCommand,
   DescribeReceiptRuleCommand,
+  GetIdentityVerificationAttributesCommand,
   SESClient,
-  UpdateReceiptRuleCommand,
-  VerifyDomainIdentityCommand,
 } from "@aws-sdk/client-ses";
-import {
-  CreateEmailIdentityCommand,
-  GetEmailIdentityCommand,
-  SESv2Client,
-} from "@aws-sdk/client-sesv2";
+import { GetEmailIdentityCommand, SESv2Client } from "@aws-sdk/client-sesv2";
 import { ResultAsync } from "neverthrow";
 import type { DomainProvider } from "../services/domains.ts";
 
-const failure = (): { kind: "unavailable"; message: string } => ({
-  kind: "unavailable",
+class ConfirmedFailure extends Error {}
+const failure = (
+  error: unknown,
+): { kind: "confirmed" | "unavailable"; message: string } => ({
+  kind:
+    error instanceof ConfirmedFailure ||
+    (error instanceof Error &&
+      ["NotFoundException", "RuleDoesNotExistException"].includes(error.name))
+      ? "confirmed"
+      : "unavailable",
   message: "SES domain operation failed",
 });
-/** No clients are created and no AWS requests are sent unless explicitly enabled. */
+/** Read-only adoption; no clients or AWS requests unless explicitly enabled. */
 export function createSesDomainProvider(config: {
   enabled: boolean;
   ruleName: string;
+  ruleSetName?: string;
+  approvedDomains?: readonly string[];
   endpoint?: string;
+  credentials?: {
+    accessKeyId: string;
+    secretAccessKey: string;
+    sessionToken?: string;
+  };
 }): DomainProvider | undefined {
   if (!config.enabled) return undefined;
-  if (!config.ruleName.trim())
-    throw new Error("SES receipt rule name required");
+  if (
+    !config.ruleName.trim() ||
+    !config.ruleSetName?.trim() ||
+    !config.approvedDomains?.length
+  )
+    throw new Error("SES receipt rule and approved domains required");
+  const approved = new Set(
+    config.approvedDomains.map((name) => name.toLowerCase()),
+  );
   const options = {
     region: "eu-north-1",
     ...(config.endpoint === undefined ? {} : { endpoint: config.endpoint }),
+    ...(config.credentials === undefined
+      ? {}
+      : { credentials: config.credentials }),
   };
   const ses = new SESClient(options);
   const sesv2 = new SESv2Client(options);
-  let previous = Promise.resolve(true);
+  const allowed = (name: string) => approved.has(name.toLowerCase());
   return {
     async ensure(name) {
-      const result = await ResultAsync.fromPromise(
+      return ResultAsync.fromPromise(
         (async () => {
-          try {
-            await sesv2.send(
-              new CreateEmailIdentityCommand({ EmailIdentity: name }),
-            );
-          } catch (error) {
-            if (
-              !(error instanceof Error) ||
-              error.name !== "AlreadyExistsException"
-            )
-              throw error;
-          }
+          if (!allowed(name)) throw new Error("domain not approved");
           const identity = await sesv2.send(
             new GetEmailIdentityCommand({ EmailIdentity: name }),
           );
-          const token = await ses.send(
-            new VerifyDomainIdentityCommand({ Domain: name }),
-          );
           if (
-            !token.VerificationToken ||
-            !identity.DkimAttributes?.Tokens?.length
+            identity.VerifiedForSendingStatus === false ||
+            identity.DkimAttributes?.Status === "FAILED"
           )
-            throw new Error("SES verification records unavailable");
+            throw new ConfirmedFailure("identity verification or DKIM failed");
+          if (
+            identity.VerifiedForSendingStatus !== true ||
+            identity.DkimAttributes?.Status !== "SUCCESS" ||
+            !identity.DkimAttributes.Tokens?.length
+          )
+            throw new Error("identity verification or DKIM unavailable");
+          const verification = await ses.send(
+            new GetIdentityVerificationAttributesCommand({
+              Identities: [name],
+            }),
+          );
+          const token =
+            verification.VerificationAttributes?.[name]?.VerificationToken;
+          if (!token) throw new Error("verification token unavailable");
           return {
-            verificationToken: token.VerificationToken,
+            verificationToken: token,
             dkimTokens: identity.DkimAttributes.Tokens,
           };
         })(),
         failure,
       );
-      return result;
     },
     async receipt(name, add) {
-      const work = previous.then(async () => {
-        const active = await ses.send(
-          new DescribeActiveReceiptRuleSetCommand({}),
-        );
-        const ruleSet = active.Metadata?.Name;
-        if (!ruleSet) throw new Error("no active SES receipt rule set");
-        const found = await ses.send(
-          new DescribeReceiptRuleCommand({
-            RuleSetName: ruleSet,
-            RuleName: config.ruleName,
-          }),
-        );
-        const rule = found.Rule;
-        if (!rule?.Name || !rule.Enabled || !rule.Recipients?.length)
-          throw new Error(
-            "receipt rule must be enabled and restricted to recipients",
+      return ResultAsync.fromPromise(
+        (async () => {
+          if (!add || !allowed(name))
+            throw new Error("receipt changes are operator managed");
+          const active = await ses.send(
+            new DescribeActiveReceiptRuleSetCommand({}),
           );
-        const recipients = rule.Recipients.filter(
-          (item) => item.toLowerCase() !== name.toLowerCase(),
-        );
-        if (add) recipients.push(name);
-        if (recipients.length === 0)
-          throw new Error("refusing an unrestricted receipt rule");
-        await ses.send(
-          new UpdateReceiptRuleCommand({
-            RuleSetName: ruleSet,
-            Rule: { ...rule, Recipients: recipients },
-          }),
-        );
-        return true;
-      });
-      previous = work.then(
-        () => true,
-        () => false,
-      );
-      const result = await ResultAsync.fromPromise(work, failure);
-      return result.map(() => undefined);
-    },
-    async verified(name) {
-      const result = await ResultAsync.fromPromise(
-        sesv2
-          .send(new GetEmailIdentityCommand({ EmailIdentity: name }))
-          .then((identity) => identity.VerifiedForSendingStatus === true),
+          const ruleSet = active.Metadata?.Name;
+          if (!ruleSet || ruleSet !== config.ruleSetName)
+            throw new Error("configured SES receipt rule set is not active");
+          const found = await ses.send(
+            new DescribeReceiptRuleCommand({
+              RuleSetName: ruleSet,
+              RuleName: config.ruleName,
+            }),
+          );
+          const rule = found.Rule;
+          if (!rule || rule.Enabled === undefined)
+            throw new Error("receipt rule unavailable");
+          if (
+            !rule.Enabled ||
+            !rule.Recipients?.some(
+              (item) => item.toLowerCase() === name.toLowerCase(),
+            )
+          )
+            throw new ConfirmedFailure(
+              "enabled rule with approved recipient required",
+            );
+        })(),
         failure,
       );
-      return result;
+    },
+    async verified(name) {
+      return ResultAsync.fromPromise(
+        (async () => {
+          if (!allowed(name)) throw new Error("domain not approved");
+          const identity = await sesv2.send(
+            new GetEmailIdentityCommand({ EmailIdentity: name }),
+          );
+          return identity.VerifiedForSendingStatus === true;
+        })(),
+        failure,
+      );
     },
   };
 }

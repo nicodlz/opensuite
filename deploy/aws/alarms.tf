@@ -40,7 +40,7 @@ locals {
 resource "aws_cloudwatch_metric_alarm" "inbound" {
   for_each            = local.alarms
   alarm_name          = "${var.name_prefix}-${each.key}"
-  alarm_description   = "Esuno ${each.key}; investigate and recover before retention expires."
+  alarm_description   = "OpenSuite ${each.key}; investigate and recover before retention expires."
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 1
   period              = 300
