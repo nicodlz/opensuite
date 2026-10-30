@@ -96,6 +96,7 @@ services:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./apps/web/dist:/srv:ro
       - ./apps/landing:/landing:ro
+      - ./deploy/vaultwarden/brand:/opt/opensuite/vault-brand:ro
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:
@@ -419,6 +420,7 @@ services:
       VAULT_MAIN_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
       VAULT_HTTPS_PORT: ${HTTPS_PORT:-443}
       ROCKET_PORT: 8080
+      TEMPLATES_FOLDER: /opt/opensuite/vault-templates
       ORG_CREATION_USERS: ${VAULT_ORG_CREATION_USERS:-none}
       SIGNUPS_ALLOWED: ${VAULT_SIGNUPS_ALLOWED:-false}
       INVITATIONS_ALLOWED: ${VAULT_INVITATIONS_ALLOWED:-true}
@@ -451,6 +453,7 @@ services:
         volume:
           nocopy: true
       - ./deploy/vaultwarden/start.sh:/opt/opensuite/start.sh:ro
+      - ./deploy/vaultwarden/templates:/opt/opensuite/vault-templates:ro
       - type: volume
         source: secrets
         target: /run/opensuite/vault-database

@@ -56,6 +56,7 @@ let origin = "";
 let caPath = "";
 let ca = "";
 let direct = "";
+let certificatePin = "";
 let context: BrowserContext | undefined;
 const sessions = ["", ""];
 const homes = ["", ""];
@@ -391,6 +392,7 @@ describe("Bitwarden CLI against Vault", () => {
         );
         socket.on("error", reject);
       });
+      certificatePin = pin;
       const login = await fetch(`http://127.0.0.1:${direct}/admin/`, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -439,6 +441,169 @@ describe("Bitwarden CLI against Vault", () => {
       expect(await bw(user, ["sync"])).toContain("Syncing complete");
     }
   }, 180_000);
+
+  test("Esuno web vault branding and login in both themes", async () => {
+    const example = object(
+      await bw(
+        0,
+        ["create", "item"],
+        encoded({
+          ...object(await bw(0, ["get", "template", "item"])),
+          type: 1,
+          name: "Example account",
+          login: { username: "demo@example.invalid", password: "example-only" },
+        }),
+      ),
+    );
+    const screenshots = process.env["VAULT_BRAND_SCREENSHOTS"];
+    if (screenshots) await mkdir(screenshots, { recursive: true });
+    try {
+      for (const theme of ["light", "dark"] as const) {
+        context = await chromium.launchPersistentContext(
+          join(temp, `brand-${theme}`),
+          {
+            channel: "chromium",
+            headless: true,
+            locale: "en-US",
+            colorScheme: theme,
+            viewport: { width: 1440, height: 900 },
+            args: [
+              `--ignore-certificate-errors-spki-list=${certificatePin}`,
+              "--host-resolver-rules=MAP vault.localhost 127.0.0.1",
+            ],
+            env: {
+              ...process.env,
+              LANG: "en_US.UTF-8",
+              LANGUAGE: "en",
+              TMPDIR: temp,
+            },
+          },
+        );
+        context.setDefaultTimeout(90_000);
+        const external: string[] = [];
+        await context.route("**/*", async (route) => {
+          const url = new URL(route.request().url());
+          if (url.origin !== origin) {
+            external.push(url.origin + url.pathname);
+            await route.abort();
+          } else await route.continue();
+        });
+        const page = await context.newPage();
+        const cssResponse = page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname === "/css/vaultwarden.css",
+        );
+        const response = await page.goto(origin);
+        expect(response?.status()).toBe(200);
+        expect(response?.headers()["content-security-policy"]).toContain(
+          "script-src 'self'",
+        );
+        const css = await (await cssResponse).text();
+        expect(css).toMatch(/--esuno-violet:\s*#5630a8/);
+        expect(css).toContain(".vw-sso-login");
+        expect(css).toContain(".vw-passkey-login");
+        await page.getByLabel("Email address").waitFor();
+        expect(await page.locator("html").getAttribute("class")).toContain(
+          `theme_${theme}`,
+        );
+        expect(
+          await page
+            .locator("html")
+            .evaluate((el) =>
+              getComputedStyle(el)
+                .getPropertyValue("--color-background-alt")
+                .trim(),
+            ),
+        ).toBe(theme === "light" ? "246 244 248" : "10 7 16");
+        const logo = theme === "light" ? "logo.svg" : "logo-white.svg";
+        const logoPath = `/esuno-vault/images/${logo}?v=1`;
+        expect(
+          await page
+            .locator('bit-landing-header bit-svg[aria-label="Bitwarden logo"]')
+            .first()
+            .evaluate((el) => getComputedStyle(el).content),
+        ).toContain(logoPath);
+        const favicon = await page
+          .locator('link[rel="icon"][sizes="32x32"]')
+          .getAttribute("href");
+        expect(favicon).toBe("/esuno-vault/images/favicon-32x32.png?v=1");
+        if (!favicon) throw new Error("Favicon link missing");
+        for (const [url, fileName] of [
+          [logoPath, logo],
+          [favicon, "favicon-32x32.png"],
+        ] as const) {
+          const result = await page.evaluate(async (path) => {
+            const fetched = await fetch(path);
+            return {
+              bytes: Array.from(new Uint8Array(await fetched.arrayBuffer())),
+              cache: fetched.headers.get("cache-control"),
+            };
+          }, url);
+          expect(Buffer.from(result.bytes)).toEqual(
+            await readFile(
+              join("deploy/vaultwarden/brand/esuno-vault/images", fileName),
+            ),
+          );
+          expect(result.cache).toContain("no-cache");
+        }
+        const manifestHref = await page
+          .locator('link[rel="manifest"]')
+          .getAttribute("href");
+        expect(manifestHref).toBe("/esuno-vault/manifest.json?v=1");
+        const manifest = await page.evaluate(
+          async (url) => (await fetch(url)).text(),
+          manifestHref ?? "",
+        );
+        expect(
+          z.object({ name: z.string() }).parse(JSON.parse(manifest)).name,
+        ).toBe("Esuno Vault");
+        if (screenshots)
+          await page.screenshot({
+            path: join(screenshots, `login-${theme}.png`),
+          });
+        await page.getByLabel("Email address").fill(emails[0] ?? "");
+        await page.getByRole("button", { name: "Continue" }).click();
+        await page.locator('input[type="password"]').fill(masterPassword);
+        await page.getByRole("button", { name: "Log in", exact: true }).click();
+        const addLater = page.getByText("Add it later", { exact: true });
+        const exampleItem = page.getByText("Example account", { exact: true });
+        try {
+          await addLater.or(exampleItem).first().waitFor({ timeout: 45_000 });
+          if (await addLater.isVisible()) {
+            await addLater.click();
+            await page.getByRole("link", { name: "Skip to web app" }).click();
+          }
+          await exampleItem.waitFor();
+          const skipTour = page.getByRole("button", {
+            name: "Skip",
+            exact: true,
+          });
+          if (await skipTour.isVisible()) await skipTour.click();
+        } catch (error) {
+          if (screenshots)
+            await page.screenshot({
+              path: join(screenshots, `login-error-${theme}.png`),
+            });
+          throw new Error(
+            `Vault list did not load at ${page.url()}: ${await page.locator("body").innerText()}`,
+            { cause: error },
+          );
+        }
+        if (screenshots)
+          await page.screenshot({
+            path: join(screenshots, `vault-${theme}.png`),
+          });
+        expect(external).toEqual([]);
+        await context.close();
+        context = undefined;
+      }
+    } finally {
+      await context?.close();
+      context = undefined;
+      if (example.id)
+        await bw(0, ["delete", "item", example.id, "--permanent"]);
+    }
+  }, 360_000);
 
   test("login, TOTP, secure note, card, folder and favorite round trip", async () => {
     const folder = object(

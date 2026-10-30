@@ -5,6 +5,10 @@ to each client version and deployment; it is not a security audit. Vault account
 are independent of Esuno accounts. Use your dedicated HTTPS Vault origin (for
 example `https://vault.example.org`) and an invited account.
 
+The Esuno theme applies to the bundled web vault only. Official mobile and
+desktop applications and browser extensions ship their own interface and
+branding; the server cannot theme them.
+
 ## Server selection and evidence
 
 On the login or registration screen, choose the self-hosted server and save the

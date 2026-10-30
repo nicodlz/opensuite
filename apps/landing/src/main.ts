@@ -1,7 +1,10 @@
+/* Stylesheets are side-effect imports processed by Vite. */
+/* oxlint-disable import/no-unassigned-import */
 import "@fontsource-variable/dm-sans/index.css";
 import "@fontsource-variable/space-grotesk/index.css";
 import "@opensuite/design-tokens/theme.css";
 import "./landing.css";
+/* oxlint-enable import/no-unassigned-import */
 
 const root = document.documentElement;
 const calm = window.matchMedia("(prefers-reduced-motion: reduce)");
