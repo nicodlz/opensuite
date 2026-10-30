@@ -913,5 +913,27 @@ describe("alias API", () => {
         .find((response) => response.statusCode === 429)
         ?.json<{ code: string; defined: boolean }>(),
     ).toMatchObject({ code: "TOO_MANY_REQUESTS", defined: true });
+    const limitedMutations = await Promise.all([
+      app.inject({
+        method: "PATCH",
+        url: "/aliases/missing",
+        headers: headers("alice"),
+        payload: { note: "x" },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/aliases/keys",
+        headers: headers("alice"),
+        payload: { name: "test" },
+      }),
+      app.inject({
+        method: "DELETE",
+        url: "/aliases/keys/missing",
+        headers: headers("alice"),
+      }),
+    ]);
+    expect(limitedMutations.map((response) => response.statusCode)).toEqual([
+      429, 429, 429,
+    ]);
   });
 });
