@@ -1,0 +1,9 @@
+{
+  "name": "opensuite-pass-drill-cli",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned disposable recovery-drill client",
+  "dependencies": {
+    "@bitwarden/cli": "2026.7.0"
+  }
+}

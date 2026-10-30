@@ -164,14 +164,15 @@ test("live API probes reach the status page through the preview proxy", async ({
   await expect(page.getByText("No dependencies declared")).toBeVisible();
 });
 
-test("a script that fails to load is retried once instead of leaving a blank page", async ({
+test("a script that fails to load is retried instead of leaving a blank page", async ({
   page,
 }) => {
   await mockHealthy(page);
   let aborted = 0;
-  // A module of the initial graph fails once, as after a network change.
+  // A module of the initial graph fails on two loads in a row, as during a
+  // burst of network changes.
   await page.route("**/src/ui/toast.tsx*", async (route) => {
-    if (aborted === 0) {
+    if (aborted < 2) {
       aborted += 1;
       await route.abort("internetdisconnected");
     } else await route.continue();
@@ -180,5 +181,21 @@ test("a script that fails to load is retried once instead of leaving a blank pag
   await expect(
     page.getByRole("heading", { name: "All checks operational" }),
   ).toBeVisible();
-  expect(aborted).toBe(1);
+  expect(aborted).toBe(2);
+});
+
+test("a script that keeps failing stops after three reloads", async ({
+  page,
+}) => {
+  await mockHealthy(page);
+  let attempts = 0;
+  await page.route("**/src/ui/toast.tsx*", async (route) => {
+    attempts += 1;
+    await route.abort("internetdisconnected");
+  });
+  await page.goto("/");
+  // Reloads wait 0.5 s, 2 s and 4.5 s; allow them all, then confirm no more.
+  await expect.poll(() => attempts, { timeout: 20_000 }).toBe(4);
+  await page.waitForTimeout(6000);
+  expect(attempts).toBe(4);
 });

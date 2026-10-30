@@ -14,8 +14,9 @@ set +a
 # Scratch must be a private, encrypted filesystem, not tmpfs by assumption.
 : "${BACKUP_SCRATCH:?set BACKUP_SCRATCH to a private encrypted filesystem}"
 mkdir -p "$BACKUP_SCRATCH"
-BACKUP_STAGE=$(mktemp -d "$BACKUP_SCRATCH/opensuite-backup.XXXXXXXX")
-export BACKUP_STAGE BACKUP_REPOSITORY BACKUP_PASSWORD_FILE BACKUP_ACCESS_KEY_ID BACKUP_SECRET_ACCESS_KEY
+export BACKUP_REPOSITORY BACKUP_PASSWORD_FILE BACKUP_ACCESS_KEY_ID BACKUP_SECRET_ACCESS_KEY
+BACKUP_STAGE=''
+make_stage() { BACKUP_STAGE=$(mktemp -d "$BACKUP_SCRATCH/opensuite-backup.XXXXXXXX"); export BACKUP_STAGE; }
 # Compose can be pointed at an isolated project/overlay for testing or recovery.
 compose() {
   docker compose --profile "*" ${COMPOSE_PROJECT_NAME:+--project-name "$COMPOSE_PROJECT_NAME"} \
@@ -23,13 +24,25 @@ compose() {
 }
 # Root-run helpers may create scratch files that the Docker-group operator
 # cannot unlink. Remove those through a network-isolated pinned helper.
-clean_stage() {
-  if ! rm -rf "$BACKUP_STAGE" 2>/dev/null; then
-    docker run --rm --network none --mount "type=bind,src=$BACKUP_STAGE,dst=/stage" \
+clean_dir() {
+  dir=$1
+  if ! rm -rf "$dir" 2>/dev/null; then
+    docker run --rm --network none --mount "type=bind,src=$dir,dst=/stage" \
       alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a \
       sh -ec 'find /stage -mindepth 1 -delete' >&2
-    rmdir "$BACKUP_STAGE"
+    rmdir "$dir"
   fi
+}
+clean_stage() { [ -z "$BACKUP_STAGE" ] || clean_dir "$BACKUP_STAGE"; }
+sweep_stale() {
+  for stale in "$BACKUP_SCRATCH"/opensuite-backup.*; do
+    [ -d "$stale" ] && [ ! -L "$stale" ] || continue
+    clean_dir "$stale" || return 1
+    log stale_scratch_removed
+  done
+}
+pass_secret_files() {
+  printf '%s\n' "pass-admin:${PASS_ADMIN_TOKEN_FILE:-/dev/null}" "pass-smtp:${PASS_SMTP_SECRET_FILE:-/dev/null}" "pass-push:${PASS_PUSH_KEY_FILE:-/dev/null}"
 }
 log() { printf '{"component":"backup","event":"%s","time":"%s"}\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }
 # Docker operators may not be able to read uid-restricted restored secrets on
@@ -42,8 +55,8 @@ read_secret() {
 }
 # Exact path component names used by these services. A trailing slash makes the
 # rclone source a directory/prefix rather than a similarly named sibling.
-objects() { # save|restore|size, mail|drive
-  direction=$1 kind=$2
+objects() { # save|preflight|restore|size, mail|drive, force
+  direction=$1 kind=$2 object_force=${3:-0}
   if [ "$kind" = mail ]; then
     if [ "${MAIL_BLOB_STORE:-local}" != s3 ]; then [ "$direction" != size ] || echo 0; return 0; fi
     OBJECT_ENDPOINT=${MAIL_S3_ENDPOINT:?}; OBJECT_REGION=${MAIL_S3_REGION:?}
@@ -70,11 +83,16 @@ objects() { # save|restore|size, mail|drive
     mkdir -p "$BACKUP_STAGE/data/objects/$kind"
     compose run --rm --no-deps -T backup-objects 'exec rclone copy "$1" "$2" --s3-no-check-bucket' sh "$remote" "/stage/data/objects/$kind" >&2
     compose run --rm --no-deps -T backup-objects 'exec rclone check "$1" "$2" --download' sh "$remote" "/stage/data/objects/$kind" >&2
+  elif [ "$direction" = preflight ]; then
+    listing=$(compose run --rm --no-deps -T backup-objects 'exec rclone lsf "$1" --recursive' sh "$remote") || return 1
+    if [ -n "$listing" ]; then
+      [ "$object_force" = 1 ] || { echo "backup: $kind restore prefix is not empty" >&2; return 1; }
+      # Existing objects must be an exact subset of the snapshot, including bytes.
+      compose run --rm --no-deps -T backup-objects 'exec rclone check "$1" "$2" --one-way --download' sh "$remote" "/stage/data/objects/$kind" >&2 || { echo "backup: $kind restore prefix differs from snapshot" >&2; return 1; }
+    fi
+    compose run --rm --no-deps -T backup-objects 'exec rclone copy "$1" "$2" --ignore-existing --dry-run --s3-no-check-bucket' sh "/stage/data/objects/$kind" "$remote" >&2
   else
-    # Never overwrite a live prefix; a recovery bucket must be empty.
-    listing=$(compose run --rm --no-deps -T backup-objects 'exec rclone lsf "$1" --recursive' sh "$remote")
-    [ -z "$listing" ] || { echo "backup: $kind restore prefix is not empty" >&2; return 1; }
-    compose run --rm --no-deps -T backup-objects 'exec rclone copy "$1" "$2" --s3-no-check-bucket' sh "/stage/data/objects/$kind" "$remote" >&2
+    compose run --rm --no-deps -T backup-objects 'exec rclone copy "$1" "$2" --ignore-existing --s3-no-check-bucket' sh "/stage/data/objects/$kind" "$remote" >&2
     compose run --rm --no-deps -T backup-objects 'exec rclone check "$1" "$2" --download' sh "/stage/data/objects/$kind" "$remote" >&2
   fi
 }

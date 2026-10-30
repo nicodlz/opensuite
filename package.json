@@ -20,12 +20,11 @@
     "iac:validate": "node scripts/iac-validate.mjs"
   },
   "devDependencies": {
-    "@axe-core/playwright": "catalog:",
+    "@aws-sdk/client-s3": "catalog:",
     "@bitwarden/cli": "catalog:",
     "@noble/hashes": "catalog:",
     "@opensuite/core": "workspace:*",
     "@opensuite/typescript-config": "workspace:*",
-    "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "knip": "catalog:",
     "neverthrow": "catalog:",
@@ -35,6 +34,8 @@
     "turbo": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
+    "@playwright/test": "catalog:",
+    "@axe-core/playwright": "catalog:",
     "zod": "catalog:"
   }
 }

@@ -16,7 +16,8 @@ import { Icon, type IconName } from "../ui/icons.tsx";
 import { activeLayout, hubHref, isExternal, productHref } from "../origins.ts";
 import { setTheme, useTheme } from "./theme.ts";
 
-export type Product = "mail" | "calendar" | "contacts" | "drive" | "admin";
+export type Product =
+  "mail" | "calendar" | "contacts" | "drive" | "pass" | "admin";
 
 const products: {
   id: Product;
@@ -37,6 +38,7 @@ const products: {
     mark: "/calendar-mark.svg",
   },
   { id: "contacts", label: "Contacts", icon: "contacts" },
+  { id: "pass", label: "Pass", icon: "pass", mark: "/vault-mark.svg" },
   {
     id: "drive",
     label: "Drive",
@@ -80,8 +82,15 @@ function AppLink({
   );
 }
 const hrefOf = (product: Product) =>
-  product === "admin" || product === "contacts"
-    ? hubHref(activeLayout(), product === "admin" ? "/status" : "/contacts")
+  product === "admin" || product === "contacts" || product === "pass"
+    ? hubHref(
+        activeLayout(),
+        product === "admin"
+          ? "/status"
+          : product === "pass"
+            ? "/pass"
+            : "/contacts",
+      )
     : productHref(activeLayout(), product);
 
 function AppearanceItems() {

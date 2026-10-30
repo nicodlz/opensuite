@@ -32,6 +32,13 @@ export const ProductOriginsSchema = z.object({
   mail: z.url().optional(),
   drive: z.url().optional(),
   calendar: z.url().optional(),
+  pass: z
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      return url.protocol === "https:" && url.origin === value;
+    })
+    .optional(),
 });
 export type ProductOrigins = z.infer<typeof ProductOriginsSchema>;
 

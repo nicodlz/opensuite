@@ -51,3 +51,4 @@ services:
       - postgres-data:/postgres
       - caddy-data:/caddy-data
       - caddy-config:/caddy-config
+      - vaultwarden-data:/pass-data
