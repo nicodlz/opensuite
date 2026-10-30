@@ -22,6 +22,28 @@ describe("account-wide authentication limits", () => {
       ).trim(),
     ).toBe("other=b");
   });
+  it("sees authentication cookies whose names carry Unicode whitespace", () => {
+    const nbsp = "\u00a0";
+    expect(hasTrustDevice(`${nbsp}__Host-opensuite.trust_device=value`)).toBe(
+      true,
+    );
+    expect(
+      hasTrustDevice(`__Host-opensuite.trust_device${nbsp}=value${nbsp}`),
+    ).toBe(true);
+    expect(hasPendingFactor(`${nbsp}__Host-opensuite.two_factor=value`)).toBe(
+      true,
+    );
+    expect(
+      hasDuplicateAuthCookie(
+        `${nbsp}__Host-opensuite.session_token=attacker; __Host-opensuite.session_token=victim`,
+      ),
+    ).toBe(true);
+    expect(
+      withoutSessionCookie(
+        `${nbsp}__Host-opensuite.session_token=a; other=b`,
+      ).trim(),
+    ).toBe("other=b");
+  });
   it("limits distributed login attempts, resets with the window, and retains the IP limit", () => {
     let time = 0;
     const limiter = createAuthLimiter(() => time);
@@ -116,9 +138,27 @@ describe("account-wide authentication limits", () => {
       ),
     ).toMatchObject({ first: true });
   });
+  it("limits every password re-check per authenticated user", () => {
+    const limiter = createAuthLimiter(() => 0);
+    for (const path of [
+      "/auth/two-factor/enable",
+      "/auth/two-factor/disable",
+      "/auth/two-factor/get-totp-uri",
+      "/auth/two-factor/generate-backup-codes",
+      "/auth/change-password",
+    ])
+      for (let i = 0; i < 2; i++)
+        expect(limiter.reauthenticate(path, "user-a")).toBeUndefined();
+    expect(
+      limiter.reauthenticate("/auth/security-keys/remove", "user-a"),
+    ).toMatchObject({ first: true });
+    expect(
+      limiter.reauthenticate("/auth/get-session", "user-a"),
+    ).toBeUndefined();
+  });
   it("limits key password checks per authenticated user across both actions", () => {
     const limiter = createAuthLimiter(() => 0);
-    for (let i = 0; i < 5; i++)
+    for (let i = 0; i < 10; i++)
       expect(
         limiter.reauthenticate(
           i % 2

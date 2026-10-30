@@ -7,7 +7,8 @@
 - Add optional FIDO2 security keys as a password-following second factor, with multiple keys and audited recovery.
 
 - Show a locally generated authenticator setup QR code and manual secret, and allow password-confirmed backup-code regeneration.
-- Add an audited operator reset for locked-out TOTP accounts and optional Vault Yubico OTP configuration.
+- Add an audited operator reset for locked-out MFA accounts (TOTP and security keys) and optional Vault Yubico OTP configuration (`VAULT_YUBICO_CLIENT_ID`, `VAULT_YUBICO_SECRET_FILE`). The reset now previews its target and only acts with `--confirm USER_ID`; see [development](docs/development.md).
+- Web MFA does not cover IMAP/SMTP, JMAP/DAV, ManageSieve, alias API keys or Vault; see [risks](docs/risks.md).
 
 - Pass renamed to Vault. The internal Compose network key stays `pass-network`, so upgrading an existing installation keeps the existing network and does not recreate PostgreSQL; Caddy and the API are recreated for their renamed variables (a short HTTP interruption). An unused `pass-database/` directory created by the previous release in the `secrets` volume can be deleted.
 

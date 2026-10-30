@@ -2111,21 +2111,21 @@ describe("identity over HTTP", () => {
     };
     await directSignUp(account);
     const cookie = cookieOf(await post("sign-in/email", account));
-    const statuses = await [0, 1, 2, 3, 4, 5].reduce(
-      async (previous, index) => {
-        const list = await previous;
-        const path =
-          index % 2 ? "security-keys/remove" : "security-keys/register-options";
-        const response = await post(
-          path,
-          { password: "wrong", id: "missing" },
-          cookie,
-        );
-        return [...list, response.status];
-      },
-      Promise.resolve<number[]>([]),
-    );
-    expect(statuses.slice(0, 5).every((status) => status === 400)).toBe(true);
-    expect(statuses[5]).toBe(429);
+    const statuses = await Array.from(
+      { length: 11 },
+      (_, index) => index,
+    ).reduce(async (previous, index) => {
+      const list = await previous;
+      const path =
+        index % 2 ? "security-keys/remove" : "security-keys/register-options";
+      const response = await post(
+        path,
+        { password: "wrong", id: "missing" },
+        cookie,
+      );
+      return [...list, response.status];
+    }, Promise.resolve<number[]>([]));
+    expect(statuses.slice(0, 10).every((status) => status === 400)).toBe(true);
+    expect(statuses[10]).toBe(429);
   });
 });

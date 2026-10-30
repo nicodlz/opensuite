@@ -3,11 +3,19 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { authCookiePrefix } from "./identity.ts";
 import { networkBucket } from "./alias-limits.ts";
-import { parseCookies } from "better-auth/cookies";
 
-/** Parse each pair separately so duplicate names remain observable. */
+/**
+ * Every pair, duplicates included. Names are trimmed with `String.trim`, like
+ * the better-call parser Better Auth endpoints read cookies with; it removes
+ * more than HTTP whitespace (e.g. U+00A0), so a disguised name is still seen.
+ */
 const cookiePairs = (cookie: string | undefined) =>
-  (cookie ?? "").split(";").flatMap((part) => Array.from(parseCookies(part)));
+  (cookie ?? "").split(";").flatMap((part): [string, string][] => {
+    const eq = part.indexOf("=");
+    return eq === -1
+      ? []
+      : [[part.slice(0, eq).trim(), part.slice(eq + 1).trim()]];
+  });
 export const hasPendingFactor = (cookie: string | undefined) =>
   cookiePairs(cookie).some(
     ([name, value]) =>
@@ -22,7 +30,7 @@ export const withoutSessionCookie = (cookie: string) =>
     .split(";")
     .filter(
       (part) =>
-        ![...parseCookies(part)].some(
+        !cookiePairs(part).some(
           ([name]) => name === `${authCookiePrefix}.session_token`,
         ),
     )
@@ -76,10 +84,17 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
         ![
           "/auth/security-keys/register-options",
           "/auth/security-keys/remove",
+          "/auth/two-factor/enable",
+          "/auth/two-factor/disable",
+          "/auth/two-factor/get-totp-uri",
+          "/auth/two-factor/generate-backup-codes",
+          "/auth/change-password",
         ].includes(path)
       )
         return undefined;
-      return reauthBuckets.consume(`key-reauth:${userId}`, 5);
+      // One budget for every password re-check: enough for a user setting up
+      // several factors in a minute, too small to guess from many addresses.
+      return reauthBuckets.consume(`reauth:${userId}`, 10);
     },
     hasDuplicateChallenge: (cookie: string | undefined) =>
       challengeValues(cookie).length > 1,

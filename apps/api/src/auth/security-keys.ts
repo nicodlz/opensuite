@@ -85,7 +85,9 @@ export function securityKeys(
     id: "security-keys",
     rateLimit: [
       {
-        pathMatcher: (path: string) => path.startsWith("/security-keys/"),
+        pathMatcher: (path: string) =>
+          path === "/security-keys/register-options" ||
+          path === "/security-keys/remove",
         window: 10,
         max: 5,
       },
