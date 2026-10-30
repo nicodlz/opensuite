@@ -81,6 +81,7 @@ export function Composer({
   onClose,
   onNotice,
   onSaved,
+  onDraftId,
 }: {
   state: ComposerState;
   from: string | undefined;
@@ -89,8 +90,10 @@ export function Composer({
   onClose: () => void;
   onNotice: (value: string) => void;
   onSaved: () => void;
+  /** Reports the id each save gives the draft (JMAP recreates it). */
+  onDraftId?: (id: string) => void;
 }) {
-  const [fields, setFields] = useState<Fields>(() => ({
+  const [initial] = useState<Fields>(() => ({
     to: joinAddresses(state.content.to),
     cc: joinAddresses(state.content.cc),
     bcc: joinAddresses(state.content.bcc),
@@ -101,6 +104,7 @@ export function Composer({
       name: "Attachment",
     })),
   }));
+  const [fields, setFields] = useState<Fields>(initial);
   const [showCopies, setShowCopies] = useState(
     state.content.cc.length > 0 || state.content.bcc.length > 0,
   );
@@ -110,9 +114,16 @@ export function Composer({
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<"" | "saving" | "saved">("");
   const [error, setError] = useState("");
+  // Compare in the form the composer saves, so opening a draft or a reply
+  // without changing it writes nothing.
   const saved = useRef({
     id: state.draftId,
-    snapshot: JSON.stringify(state.content),
+    snapshot: JSON.stringify(toContent(state.content, initial)),
+  });
+  const working = useRef(false);
+  const draftIdListener = useRef(onDraftId);
+  useEffect(() => {
+    draftIdListener.current = onDraftId;
   });
   const queue = useRef<Promise<void>>(Promise.resolve());
   const bodyRef = useRef<HTMLTextAreaElement>(null);
@@ -138,7 +149,11 @@ export function Composer({
           })
         : await mailClient.createDraft({ accountId, draft: value });
       saved.current = { id: result.id, snapshot };
+      draftIdListener.current?.(result.id);
       setStatus("saved");
+      setError((current) =>
+        current.startsWith("Could not save") ? "" : current,
+      );
       return undefined;
     });
     queue.current = run.catch(() => undefined);
@@ -160,14 +175,21 @@ export function Composer({
   }, [fields, busy, state.content, persist]);
 
   async function close() {
+    if (working.current) return;
+    working.current = true;
     setBusy(true);
     try {
-      if (saved.current.id || !isEmpty(fields)) {
-        await persist(toContent(state.content, fields));
+      const value = toContent(state.content, fields);
+      if (
+        saved.current.id ||
+        (!isEmpty(fields) && JSON.stringify(value) !== saved.current.snapshot)
+      ) {
+        await persist(value);
         onSaved();
       }
       onClose();
     } catch {
+      working.current = false;
       setError("Could not save this draft. Try again.");
       setBusy(false);
     }
@@ -189,6 +211,9 @@ export function Composer({
       setError("Wait for attachments to finish uploading.");
       return;
     }
+    // One send per draft, whatever triggers it (button, Ctrl+Enter, repeat).
+    if (working.current) return;
+    working.current = true;
     setBusy(true);
     try {
       await persist(toContent(state.content, fields));
@@ -199,6 +224,7 @@ export function Composer({
       onSaved();
       onClose();
     } catch {
+      working.current = false;
       setError(
         "Sending could not be confirmed. Check Sent before trying again.",
       );
@@ -206,6 +232,8 @@ export function Composer({
     }
   }
   async function discard() {
+    if (working.current) return;
+    working.current = true;
     setBusy(true);
     try {
       await queue.current;
@@ -218,6 +246,7 @@ export function Composer({
       onSaved();
       onClose();
     } catch {
+      working.current = false;
       setError("Could not discard this draft.");
       setBusy(false);
     }
@@ -260,7 +289,7 @@ export function Composer({
       (event) => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
           event.preventDefault();
-          void latest.current.send();
+          if (!event.repeat) void latest.current.send();
         } else if (event.key === "Escape") {
           event.preventDefault();
           if (latest.current.expanded) setExpanded(false);
@@ -311,10 +340,7 @@ export function Composer({
 
   if (minimized)
     return (
-      <section
-        className="composer minimized"
-        aria-label="Compose message"
-      >
+      <section className="composer minimized" aria-label="Compose message">
         <div className="compose-header">
           <button
             type="button"

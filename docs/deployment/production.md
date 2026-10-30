@@ -9,6 +9,10 @@ wildcard change are a **separate owner-approved cutover**; this procedure does
 not authorize them. Real AWS and B2 integration has not been tested here.
 Do not cut over until the preservation and verification gates below are met.
 
+The intended interface hosts are `mail.esuno.net` and `calendar.esuno.net`.
+The generic examples below still need to be adapted to the actual installation;
+these target names do not imply that DNS, hosting or mail routing is configured.
+
 ## Prerequisites and DNS
 
 1. Prepare an Ubuntu VPS with adequate RAM, encrypted storage and space for
@@ -109,6 +113,39 @@ B2 S3 CORS works only without native B2 CORS rules. Confirm preflight and a brow
 download from the real origin. The public endpoint must be browser-reachable
 and match the signed host. See [B2 CORS](https://www.backblaze.com/docs/cloud-storage-enable-cors-with-the-s3-compatible-api).
 
+### Separate application origins (optional)
+
+Mail, Drive and Calendar can each be served at the root of their own origin,
+for example `https://mail.example.com/`, `https://drive.example.com/` and
+`https://calendar.example.com/`. The mail origin stays the sign-in origin.
+Add to `.env` (commas, no spaces):
+
+```dotenv
+OPENSUITE_SITE_ADDRESS="mail.example.com, drive.example.com, calendar.example.com"
+OPENSUITE_PUBLIC_HOST=mail.example.com
+AUTH_PRODUCT_ORIGINS=drive=https://drive.example.com,calendar=https://calendar.example.com
+DRIVE_TRUSTED_ORIGINS=https://mail.example.com,https://drive.example.com,https://calendar.example.com
+```
+
+Create explicit DNS records for each name; do not rely on a wildcard. Add the
+Drive origin to the Drive bucket CORS rule. Then check:
+
+- `GET https://<each origin>/api/origins` returns the three origins.
+- Opening Drive or Calendar while signed out leads to the mail sign-in page,
+  including the second factor, then back to the requested page.
+- Signing out on any origin signs out on all three.
+- Old URLs such as `https://mail.example.com/drive?…` move to the new origin
+  with their query. Public Drive links under `/drive/api/v1/public/…` keep
+  working on every origin.
+- A `POST` to `/api/…` or `/drive/api/…` with another `Origin` is refused.
+
+Sessions use host-only `__Host-opensuite.*` cookies, never a parent-domain
+cookie, so other hosts under the same parent domain cannot read or replace
+them. A sibling origin receives the session through a single-use token valid
+for one minute, bound to that origin and carried in the URL fragment. After
+upgrading from a release with `__Secure-better-auth.*` cookies, every user
+signs in once again.
+
 ## Bootstrap and mail storage
 
 Keep Caddy stopped and public mail ports closed while the recovery override is
@@ -138,6 +175,15 @@ override is absent from the running Stalwart container before exposing Caddy.
 Start the stack with `docker compose up -d` and inspect `docker compose ps` and
 `docker compose logs stalwart-setup`. Setup failures are recorded and alerted,
 but do not stop the API or HTTPS; repair and rerun the job.
+
+## Optional Pass
+
+Pass uses a separate public hostname and can run independently of the mail and
+application services. Before enabling the `pass` profile, follow
+[Pass operations](../operations/pass.md) for operator-managed DNS, TLS, the
+loopback-only administrator, invitations, SMTP and recovery. The scheduled
+Esuno backup currently does not include the Pass database or data volume;
+arrange and test a separate encrypted backup before storing real vaults.
 
 ## First administrator
 

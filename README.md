@@ -1,6 +1,9 @@
-# OpenSuite
+# Esuno
 
-OpenSuite is a self-hosted mail and file suite, intended as an alternative to hosted mail, calendar and Drive services. It combines a web workspace and application API with the Stalwart mail server, PostgreSQL and S3-compatible storage.
+Esuno is a self-hosted mail and file suite, intended as an alternative to hosted mail, calendar and Drive services. It combines a web workspace and application API with the Stalwart mail server, PostgreSQL and S3-compatible storage.
+
+The intended interface addresses are `mail.esuno.net` and `calendar.esuno.net`;
+their configuration and DNS cutover remain deployment steps.
 
 > **Status: early development.** The mail API, mailbox provisioning, Drive,
 > ingestion and backup tools are implemented. Real SES/B2 behavior and the
@@ -31,6 +34,7 @@ This first release is an early, single-server baseline. The repository contains:
   migration, backup and recovery requirements.
 - **Outbound mail:** server-only Stalwart relay configuration and DKIM DNS records; see [outbound operations](docs/operations/outbound.md) for SES, queue limits and deployment steps.
 - **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
+- **Pass** (optional `pass` Compose profile): Vaultwarden on a dedicated origin with its own PostgreSQL database. See [Pass operations](docs/operations/pass.md) for setup and backup limitations.
 - **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. See [development](docs/development.md#drive).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).

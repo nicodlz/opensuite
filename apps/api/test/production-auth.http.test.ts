@@ -58,6 +58,76 @@ const cleanup = async () => {
     ),
   );
 };
+// The runtime administers Stalwart as management@opensuite.internal, never as
+// the recovery administrator. Create that account exactly as
+// deploy/stalwart/bootstrap.sh does, with a password distinct from recovery.
+const managementPassword = "integration-management-password-0123456789";
+const stalwartAdmin = async (
+  user: string,
+  password: string,
+  calls: unknown[],
+) => {
+  const response = await fetch(`${mailUrl}/jmap/`, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      using: ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"],
+      methodCalls: calls,
+    }),
+  });
+  if (!response.ok)
+    throw new Error(`Stalwart administration ${response.status}`);
+  return JSON.stringify(await response.json());
+};
+const createManagementAccount = async () => {
+  const domain = await stalwartAdmin("admin", "integration-password", [
+    [
+      "x:Domain/set",
+      {
+        create: {
+          domain: {
+            name: "opensuite.internal",
+            dkimManagement: { "@type": "Manual" },
+          },
+        },
+      },
+      "d",
+    ],
+  ]);
+  const id = /"created":\{"domain":\{"id":"([a-zA-Z0-9]+)"/.exec(domain)?.[1];
+  if (id === undefined) throw new Error("management domain not created");
+  const account = await stalwartAdmin("admin", "integration-password", [
+    [
+      "x:Account/set",
+      {
+        create: {
+          account: {
+            "@type": "User",
+            name: "management",
+            domainId: id,
+            roles: { "@type": "Admin" },
+            credentials: {
+              "0": { "@type": "Password", secret: managementPassword },
+            },
+          },
+        },
+      },
+      "a",
+    ],
+  ]);
+  if (!account.includes('"created":{"account":{"id":'))
+    throw new Error("management account not created");
+  const check = await stalwartAdmin(
+    "management@opensuite.internal",
+    managementPassword,
+    [["x:Domain/query", {}, "q"]],
+  );
+  if (!check.includes('"x:Domain/query"'))
+    throw new Error("management account not usable");
+};
 beforeAll(async () => {
   try {
     await Promise.all([
@@ -99,6 +169,7 @@ beforeAll(async () => {
     databaseUrl = `postgresql://postgres:test-password@127.0.0.1:${await port(pg, "5432")}/postgres`;
     mailUrl = `http://127.0.0.1:${await port(mail, "8080")}`;
     await wait(async () => (await fetch(`${mailUrl}/healthz/ready`)).ok);
+    await createManagementAccount();
     await run(
       "pnpm",
       ["--filter", "@opensuite/db", "exec", "prisma", "migrate", "deploy"],
@@ -137,7 +208,7 @@ beforeAll(async () => {
         stalwartOrigin: mailUrl,
         secret: "test-secret-at-least-32-characters-long",
         mailboxKey: "ab".repeat(32),
-        adminPassword: "integration-password",
+        adminPassword: managementPassword,
       },
       fetcher,
     );

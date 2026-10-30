@@ -143,7 +143,7 @@ function AdminShell({
     setToastOpen(true);
   }
   const links = [
-    { to: "/", label: "System status", icon: "status" },
+    { to: "/status", label: "System status", icon: "status" },
     { to: "/setup", label: "Setup wizard", icon: "sparkle" },
     { to: "/domains", label: "Domains", icon: "globe" },
   ] as const;
@@ -164,7 +164,9 @@ function AdminShell({
                   to={link.to}
                   icon={link.icon}
                   label={link.label}
-                  active={path === link.to}
+                  active={
+                    path === link.to || (link.to === "/status" && path === "/")
+                  }
                 />
               ))}
               <SidebarItem
@@ -239,7 +241,7 @@ function StatusPage() {
           <p className="eyebrow">YOUR INSTALLATION</p>
           <h1>System status</h1>
           <p className="page-subtitle">
-            A live view of your OpenSuite API and its dependencies.
+            A live view of your Esuno API and its dependencies.
           </p>
         </div>
         <Button
@@ -401,7 +403,7 @@ function ProductPlaceholder({ name }: { name: string }) {
           installation while it is being built.
         </p>
         <Button asChild variant="secondary">
-          <Link to="/">View system status</Link>
+          <Link to="/status">View system status</Link>
         </Button>
       </section>
     </div>

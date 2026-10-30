@@ -359,15 +359,13 @@ it("reserves a file above 5 GB, enforces quota and issues short-lived part URLs"
   expect(reservation.expiresAt?.getTime()).toBeGreaterThan(
     Date.now() + 23 * 60 * 60 * 1000,
   );
-  const part = z
-    .object({ url: z.url(), expiresIn: z.number() })
-    .parse(
-      await large.command("large-owner", {
-        action: "part",
-        id: begin.id,
-        partNumber: 1,
-      }),
-    );
+  const part = z.object({ url: z.url(), expiresIn: z.number() }).parse(
+    await large.command("large-owner", {
+      action: "part",
+      id: begin.id,
+      partNumber: 1,
+    }),
+  );
   expect(part.expiresIn).toBeLessThanOrEqual(300);
   await expect(
     large.command("other", { action: "part", id: begin.id, partNumber: 1 }),

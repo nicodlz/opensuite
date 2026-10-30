@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+const key = (token: string) => createHash("sha256").update(token).digest("hex");
+
 /**
  * Binds each single-use session token to the one application origin it was
  * issued for. Better Auth enforces expiry and single use of the token itself;
@@ -10,8 +12,6 @@ export const createHandoffRegistry = (
   lifetimeMs = 60_000,
 ) => {
   const entries = new Map<string, { target: string; expires: number }>();
-  const key = (token: string) =>
-    createHash("sha256").update(token).digest("hex");
   const sweep = () => {
     const current = now();
     for (const [name, entry] of entries)

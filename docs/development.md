@@ -137,6 +137,20 @@ LocalStack 4.14.0 is the last release that starts without a LocalStack account.
 To use a newer image, set `LOCALSTACK_IMAGE` and `LOCALSTACK_AUTH_TOKEN` in
 `.env`.
 
+## Optional Pass profile
+
+`docker compose --profile pass up -d pass caddy` starts Vaultwarden, its
+database provisioner and shared PostgreSQL without requiring mail or Drive.
+The local vault origin is `https://pass.localhost`; Caddy's local CA must be
+trusted. Set an Argon2 admin-token file to enable the loopback-only admin
+listener. See [Pass operations](operations/pass.md) for setup, invitations,
+backup limitations and the required separate origin. The standard backup does
+not include Pass.
+
+`pnpm exec vitest run --project pass` runs a disposable Vaultwarden, PostgreSQL
+and Caddy integration project. Docker Compose is required; the suite removes
+its project containers and volumes even on failure.
+
 ## Smoke test
 
 ```sh
