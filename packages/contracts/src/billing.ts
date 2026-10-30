@@ -19,6 +19,8 @@ export const plans = {
     name: "Plus",
     storageBytes: 50 * GB,
     customDomains: 1,
+    // Mailbox addresses on the shared domains, the primary one included.
+    addressLimit: 5,
     // A fixed number of aliases; Pro relies on the anti-abuse cap only.
     aliasLimit: 50,
     prices: {
@@ -30,6 +32,7 @@ export const plans = {
     name: "Pro",
     storageBytes: 500 * GB,
     customDomains: 5,
+    addressLimit: 15,
     aliasLimit: null,
     prices: {
       month: { amount: 999, monthly: 999 },
@@ -42,6 +45,7 @@ export const plans = {
     name: string;
     storageBytes: number;
     customDomains: number;
+    addressLimit: number;
     aliasLimit: number | null;
     prices: Record<BillingInterval, { amount: number; monthly: number }>;
   }
