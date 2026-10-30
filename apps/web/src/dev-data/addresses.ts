@@ -1,9 +1,6 @@
+import { isReservedMailLocalPart } from "@opensuite/core/reserved-mail-local-parts";
 import { ORPCError } from "@orpc/client";
-import {
-  AddressLocalPart,
-  isReservedAddress,
-  type addressesContract,
-} from "@opensuite/contracts";
+import { AddressLocalPart, type addressesContract } from "@opensuite/contracts";
 import type { ContractRouterClient } from "@orpc/contract";
 import { z } from "zod";
 
@@ -45,7 +42,7 @@ export const fakeAddresses: ContractRouterClient<typeof addressesContract> = {
   async create(input) {
     const part = AddressLocalPart.safeParse(input.localPart);
     if (!part.success) throw new ORPCError("BAD_REQUEST");
-    if (isReservedAddress(part.data)) throw new ORPCError("RESERVED");
+    if (isReservedMailLocalPart(part.data)) throw new ORPCError("RESERVED");
     const domain = (await fakeAddresses.domains({})).find(
       (row) => row.id === input.domainId,
     );

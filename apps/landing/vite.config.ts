@@ -4,7 +4,7 @@ import { defineConfig, loadEnv } from "vite";
 // so a build-time value cannot inject markup or alter the checkout path.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
-  const value = env["VITE_ESUNO_APP_ORIGIN"] || "https://mail.cleito.tech";
+  const value = env["VITE_ESUNO_APP_ORIGIN"] || "https://mail.esuno.net";
   const url = new URL(value);
   if (
     !["https:", "http:"].includes(url.protocol) ||

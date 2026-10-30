@@ -62,16 +62,13 @@ payment_action_required. Signature verification uses the raw request body.
 Stripe is queried for current subscription state; duplicate events do not
 repeat the update. Active, trialing and past_due subscriptions grant access;
 past_due is a payment warning. Incomplete, incomplete_expired, unpaid,
-canceled and paused subscriptions do not grant access. Access is rechecked
-against the owned Stripe subscription and customer; a Stripe outage prevents
-new entitlement-dependent writes. No data is removed on cancellation, expiry,
+canceled and paused subscriptions do not grant access. Entitlements use locally stored subscription state, updated by webhooks and a bounded six-hour Stripe reconciliation job. No data is removed on cancellation, expiry,
 or downgrade.
 
 Checkout uses Stripe-hosted pages for payment and authentication. Signed-in
 customers return to `/settings/billing?billing=updated` on success or
 `?billing=canceled` on cancellation; portal flows return to the updated URL.
-For public checkout, set `BILLING_CANCEL_URL` to the public site's HTTPS
-origin or URL; its origin is allowed to call the public Checkout endpoint.
+Public checkout cancellations return to `https://esuno.net` by default; set `BILLING_CANCEL_URL` to override the public site URL.
 Successful public checkout returns to `/welcome?session_id=...`. Session IDs
 are bearer-like claim secrets: API logs contain only method, status and
 duration, and Caddy skips access logs for the welcome and Checkout status

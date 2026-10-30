@@ -7,3 +7,5 @@ export * from "./adapters/aws.ts";
 export * from "./adapters/database.ts";
 export * from "./adapters/jmap.ts";
 export * from "./services/probes.ts";
+
+export { isReservedMailLocalPart } from "./reserved-mail-local-parts.ts";

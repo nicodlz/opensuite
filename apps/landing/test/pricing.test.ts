@@ -21,6 +21,11 @@ function content(source: string, attribute: string): string {
 }
 
 describe("landing catalogue", () => {
+  it("describes the supported ways to move data", () => {
+    expect(html).toContain("mail over IMAP");
+    expect(html).toContain("CalDAV and CardDAV");
+    expect(html).toContain("download Drive files");
+  });
   it("matches every displayed price, annual saving, storage and address figure", () => {
     const pricing = content(html, 'id="pricing"');
     // Guard against new, untested monetary or storage figures in pricing.

@@ -12,7 +12,6 @@ export function matchesPrice(
   interval: BillingInterval,
 ) {
   return (
-    price.active &&
     price.metadata["esuno"] === "1" &&
     price.lookup_key === priceLookupKey(plan, interval) &&
     price.currency === "eur" &&
@@ -41,6 +40,7 @@ export function createPriceResolver(
     if (
       result.data.length !== 1 ||
       result.data[0] === undefined ||
+      !result.data[0].active ||
       !matchesPrice(result.data[0], plan, interval)
     )
       throw new Error("Stripe price mismatch");

@@ -80,8 +80,9 @@ if (internalToken !== undefined && internalToken.length < 32) {
   process.exit(1);
 }
 const token =
-  configuredToken ??
-  (config.ESUNO_DEPLOYMENT_MODE === "cloud" ? internalToken : undefined);
+  config.ESUNO_DEPLOYMENT_MODE === "cloud"
+    ? (configuredToken ?? internalToken)
+    : undefined;
 if (config.ESUNO_DEPLOYMENT_MODE === "cloud" && token === undefined) {
   process.stderr.write("Cloud Drive requires an entitlements token\n");
   process.exit(1);

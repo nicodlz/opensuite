@@ -12,7 +12,9 @@ if (
   ) ||
   args.length > 1
 ) {
-  process.stderr.write("Usage: node src/reconcile.ts [--delete-orphans]\n");
+  process.stderr.write(
+    "Usage: node src/reconcile.ts [--delete-old-staging | --delete-orphans]\n",
+  );
   process.exit(1);
 }
 const env = z
@@ -29,6 +31,8 @@ const env = z
     DRIVE_S3_PATH_STYLE: z.enum(["true", "false"]).default("true"),
   })
   .parse(process.env);
+if (args.length > 0 && env.DRIVE_S3_PREFIX === "")
+  throw new Error("A nonempty DRIVE_S3_PREFIX is required for deletion");
 let databaseUrl = env.DRIVE_DATABASE_URL;
 if (
   databaseUrl === undefined &&

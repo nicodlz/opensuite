@@ -1,6 +1,7 @@
 import {
   DeleteObjectCommand,
   ListObjectsV2Command,
+  ListMultipartUploadsCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
 import type { PrismaClient } from "../db/generated/index.js";
@@ -15,6 +16,12 @@ export type ReconciliationFinding =
       actual: number;
     }
   | { kind: "orphan"; key: string }
+  | {
+      kind: "multipart";
+      key: string;
+      uploadId: string;
+      initiated: string | null;
+    }
   | { kind: "deleted_staging"; key: string };
 
 /** Lists metadata only. Final objects are never deleted by this operation. */
@@ -77,14 +84,13 @@ export async function reconcileObjects(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
           stagingId,
         );
-      if (
-        isStaging &&
-        (await db.entry.findUnique({
-          where: { id: stagingId },
-          select: { id: true },
-        }))
-      )
-        continue;
+      const reservation = isStaging
+        ? await db.entry.findUnique({
+            where: { id: stagingId },
+            select: { state: true },
+          })
+        : null;
+      if (reservation !== null && reservation.state !== "ready") continue;
       report({ kind: "orphan", key });
       if (
         options.deleteStaging &&
@@ -94,13 +100,11 @@ export async function reconcileObjects(
         object.ETag !== undefined
       ) {
         // Recheck immediately before a conditional delete. Never delete a final key.
-        if (
-          await db.entry.findUnique({
-            where: { id: stagingId },
-            select: { id: true },
-          })
-        )
-          continue;
+        const current = await db.entry.findUnique({
+          where: { id: stagingId },
+          select: { state: true },
+        });
+        if (current !== null && current.state !== "ready") continue;
         await client.send(
           new DeleteObjectCommand({
             Bucket: options.bucket,
@@ -115,6 +119,32 @@ export async function reconcileObjects(
       throw new Error("incomplete object listing");
     cursor = page.IsTruncated ? page.NextContinuationToken : undefined;
   } while (cursor !== undefined);
+  let keyMarker: string | undefined;
+  let uploadIdMarker: string | undefined;
+  do {
+    const page = await client.send(
+      new ListMultipartUploadsCommand({
+        Bucket: options.bucket,
+        Prefix: options.prefix,
+        KeyMarker: keyMarker,
+        UploadIdMarker: uploadIdMarker,
+      }),
+    );
+    for (const upload of page.Uploads ?? []) {
+      if (!upload.Key || !upload.UploadId)
+        throw new Error("incomplete multipart listing");
+      report({
+        kind: "multipart",
+        key: upload.Key,
+        uploadId: upload.UploadId,
+        initiated: upload.Initiated?.toISOString() ?? null,
+      });
+    }
+    if (page.IsTruncated && !page.NextKeyMarker)
+      throw new Error("incomplete multipart listing");
+    keyMarker = page.IsTruncated ? page.NextKeyMarker : undefined;
+    uploadIdMarker = page.IsTruncated ? page.NextUploadIdMarker : undefined;
+  } while (keyMarker !== undefined);
   /* oxlint-enable eslint/no-await-in-loop */
   for (const [key, entry] of byKey)
     if (!seen.has(key)) report({ kind: "missing", key, entryId: entry.id });

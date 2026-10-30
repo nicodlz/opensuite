@@ -1,6 +1,8 @@
 import * as React from "react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { ORPCError } from "@orpc/client";
+import { auth } from "../auth/client.ts";
 import { BillingInterval, PlanId, plans } from "@opensuite/contracts";
 import { Button } from "../ui/button.tsx";
 import { TextField } from "../ui/text-field.tsx";
@@ -36,35 +38,73 @@ export function SubscribePage() {
     initialInterval.success ? initialInterval.data : "month",
   );
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(
-    initialPlan.success && initialInterval.success,
+  const [conflict, setConflict] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [autoCheckout] = useState(
+    () => initialPlan.success && initialInterval.success,
   );
+  const availability = useQuery({
+    queryKey: ["billing", "plans"],
+    queryFn: () => billing.plans({}),
+  });
+  const session = useQuery({
+    queryKey: ["auth", "session"],
+    queryFn: () => auth.session(),
+    retry: false,
+  });
   async function checkout(
     selectedPlan: PlanId,
     selectedInterval: BillingInterval,
   ) {
     setBusy(true);
     setError("");
+    setConflict(false);
     try {
       const result = await billing.checkout({
         plan: selectedPlan,
         interval: selectedInterval,
       });
-      window.location.assign(result.url);
+      window.location.replace(result.url);
     } catch (failure) {
       setError(billingError(failure));
+      setConflict(failure instanceof ORPCError && failure.code === "CONFLICT");
       setBusy(false);
     }
   }
   useEffect(() => {
-    if (initialPlan.success && initialInterval.success)
-      void checkout(initialPlan.data, initialInterval.data);
-    // Read the initial URL once; changing the chooser requires an explicit submit.
+    if (!availability.data?.checkout || !autoCheckout || !session.isSuccess)
+      return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("plan");
+    url.searchParams.delete("interval");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+    if (session.data === null) void checkout(plan, interval);
+    // Initial link is consumed only once after checking availability.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availability.data?.checkout, session.isSuccess]);
+  useEffect(() => {
+    const restore = (event: PageTransitionEvent) => {
+      if (event.persisted) setBusy(false);
+    };
+    window.addEventListener("pageshow", restore);
+    return () => window.removeEventListener("pageshow", restore);
   }, []);
   return (
     <Frame title="Choose Esuno Cloud">
-      {busy ? (
+      {availability.isPending ? (
+        <output>Checking availability…</output>
+      ) : availability.isError ? (
+        <p role="alert">Billing is temporarily unavailable.</p>
+      ) : !availability.data.checkout ? (
+        <p>
+          Esuno is self-hosted here.{" "}
+          <a href={docs}>Self-hosting documentation</a>
+        </p>
+      ) : busy ? (
         <output>Taking you to secure checkout…</output>
       ) : (
         <>
@@ -75,6 +115,12 @@ export function SubscribePage() {
           ) : (
             <p>Choose a plan and billing interval to continue.</p>
           )}
+          {conflict && (
+            <p>
+              <a href="/settings/billing">Manage your plan and billing</a>
+            </p>
+          )}
+          {session.data && <p>Checkout will bill {session.data.user.email}.</p>}
           <div className="billing-fields">
             <label>
               Plan
@@ -104,6 +150,7 @@ export function SubscribePage() {
           <p className="billing-price">
             {price(plans[plan].prices[interval].amount, interval)}
           </p>
+          <p>VAT included.</p>
           <Button onClick={() => void checkout(plan, interval)}>
             Continue to checkout
           </Button>
@@ -132,12 +179,17 @@ export function WelcomePage() {
     );
   }, [sessionId, valid]);
   const [checkoutQueryKey] = useState(() => crypto.randomUUID());
+  const [pollExpired, setPollExpired] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setPollExpired(true), 120_000);
+    return () => window.clearTimeout(timer);
+  }, []);
   const status = useQuery({
     queryKey: ["billing", "checkout-status", checkoutQueryKey],
     queryFn: () => billing.checkoutStatus({ sessionId }),
     enabled: valid,
     refetchInterval: (query) =>
-      query.state.data?.state === "pending" ? 3000 : false,
+      query.state.data?.state === "pending" && !pollExpired ? 3000 : false,
   });
   const [name, setName] = useState("");
   const [localPart, setLocalPart] = useState("");
@@ -200,7 +252,15 @@ export function WelcomePage() {
       setPassword("");
       setConfirmation("");
     } catch (failure) {
-      setError(billingError(failure));
+      setError(
+        failure instanceof ORPCError && failure.code === "CONFLICT"
+          ? "This address is unavailable, choose another"
+          : failure instanceof ORPCError && failure.code === "BAD_REQUEST"
+            ? failure.message === "This address is reserved"
+              ? "This address is reserved. Choose another."
+              : "This checkout can no longer be claimed"
+            : billingError(failure),
+      );
     } finally {
       setBusy(false);
     }
@@ -225,6 +285,12 @@ export function WelcomePage() {
             Try again
           </Button>
         </div>
+      ) : pollExpired &&
+        (status.isPending || status.data.state === "pending") ? (
+        <p role="alert">
+          Payment confirmation is taking longer than expected. Please contact
+          support.
+        </p>
       ) : status.isPending || status.data.state === "pending" ? (
         <output>Confirming your payment…</output>
       ) : status.data.state === "expired" ? (
@@ -266,7 +332,7 @@ export function WelcomePage() {
               autoComplete="new-password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              maxLength={256}
+              maxLength={128}
               required
             />
             {password && estimate?.value === password && (

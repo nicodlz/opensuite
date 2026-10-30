@@ -17,6 +17,8 @@ import {
   S3Client,
   PutObjectCommand,
   HeadObjectCommand,
+  CreateMultipartUploadCommand,
+  AbortMultipartUploadCommand,
 } from "@aws-sdk/client-s3";
 import {
   reconcileObjects,
@@ -637,7 +639,7 @@ it("refreshes mail quota after finish and delete without blocking on failure", a
   await service.command("refresh-owner", { action: "finish", id: upload.id });
   await service.command("refresh-owner", { action: "trash", id: upload.id });
   await service.command("refresh-owner", { action: "delete", id: upload.id });
-  expect(calls).toEqual(["refresh-owner", "refresh-owner"]);
+  expect(calls).toEqual(["refresh-owner", "refresh-owner", "refresh-owner"]);
 }, 120_000);
 
 it("reports storage drift and only deletes old, unreferenced staging objects on request", async () => {
@@ -655,6 +657,8 @@ it("reports storage drift and only deletes old, unreferenced staging objects on 
   const liveId = randomUUID();
   const orphanKey = `${prefix}pending/${orphanId}`;
   const liveKey = `${prefix}pending/${liveId}`;
+  const readyStagingKey = `${prefix}pending/${mismatchId}`;
+  const multipartKey = `${prefix}pending/${randomUUID()}`;
   const finalOrphan = `${prefix}objects/${randomUUID()}`;
   const mismatchKey = `${prefix}objects/${mismatchId}`;
   const missingKey = `${prefix}objects/${missingId}`;
@@ -690,10 +694,17 @@ it("reports storage drift and only deletes old, unreferenced staging objects on 
       ],
     });
     await Promise.all(
-      [orphanKey, liveKey, finalOrphan, mismatchKey].map((Key) =>
-        client.send(new PutObjectCommand({ Bucket: bucket, Key, Body: "abc" })),
+      [orphanKey, liveKey, readyStagingKey, finalOrphan, mismatchKey].map(
+        (Key) =>
+          client.send(
+            new PutObjectCommand({ Bucket: bucket, Key, Body: "abc" }),
+          ),
       ),
     );
+    const multipart = await client.send(
+      new CreateMultipartUploadCommand({ Bucket: bucket, Key: multipartKey }),
+    );
+    if (!multipart.UploadId) throw new Error("multipart fixture unavailable");
     const findings: ReconciliationFinding[] = [];
     const reconcile = (deleteStaging: boolean) =>
       reconcileObjects(
@@ -719,10 +730,25 @@ it("reports storage drift and only deletes old, unreferenced staging objects on 
           actual: 3,
         },
         { kind: "orphan", key: orphanKey },
+        { kind: "orphan", key: readyStagingKey },
         { kind: "orphan", key: finalOrphan },
       ]),
     );
     expect(findings).not.toContainEqual({ kind: "orphan", key: liveKey });
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        kind: "multipart",
+        key: multipartKey,
+        uploadId: multipart.UploadId,
+      }),
+    );
+    await client.send(
+      new AbortMultipartUploadCommand({
+        Bucket: bucket,
+        Key: multipartKey,
+        UploadId: multipart.UploadId,
+      }),
+    );
     await client.send(
       new HeadObjectCommand({ Bucket: bucket, Key: orphanKey }),
     );

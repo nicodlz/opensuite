@@ -53,7 +53,8 @@ export const createStorageMeter = (
       measured: drive.status === "fulfilled" && mailbox.status === "fulfilled",
     };
   };
-  const refresh = async (userId: string) => {
+  const lastQuota = new Map<string, { value: number | null; at: number }>();
+  const refreshOne = async (userId: string) => {
     const [entitlement, link] = await Promise.all([
       entitlements.get(userId),
       db.mailboxLink.findUnique({
@@ -70,8 +71,75 @@ export const createStorageMeter = (
         : entitlement.quotaBytes === 0
           ? 1
           : Math.max(1, entitlement.quotaBytes - (await driveBytes(userId)));
+    const previous = lastQuota.get(link.accountId);
+    if (
+      previous &&
+      previous.value === quota &&
+      Date.now() - previous.at < 300_000
+    )
+      return;
     const result = await mail.setDiskQuota(link.accountId, quota);
     if (result.isErr()) throw new Error("mail quota unavailable");
+    if (lastQuota.size >= 1000) lastQuota.clear();
+    lastQuota.set(link.accountId, { value: quota, at: Date.now() });
+  };
+  const jobs = new Map<
+    string,
+    {
+      dirty: boolean;
+      promise: Promise<void>;
+      resolve: () => void;
+      reject: (error: unknown) => void;
+    }
+  >();
+  const queue: string[] = [];
+  let running = 0;
+  const drain = () => {
+    while (running < 4 && queue.length > 0) {
+      const userId = queue.shift();
+      if (userId === undefined) break;
+      const job = jobs.get(userId);
+      if (job === undefined) continue;
+      running++;
+      void (async () => {
+        try {
+          do {
+            job.dirty = false;
+            // Coalesce requests while preserving their final state.
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await refreshOne(userId);
+            // Calls may set dirty while refreshOne awaits I/O.
+            // oxlint-disable-next-line typescript/no-unnecessary-condition
+          } while (job.dirty);
+          job.resolve();
+        } catch (error) {
+          job.reject(error);
+        } finally {
+          jobs.delete(userId);
+          running--;
+          drain();
+        }
+      })();
+    }
+  };
+  const refresh = (userId: string): Promise<void> => {
+    const existing = jobs.get(userId);
+    if (existing) {
+      existing.dirty = true;
+      return existing.promise;
+    }
+    if (jobs.size >= 256)
+      return Promise.reject(new Error("quota refresh queue full"));
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((ok, fail) => {
+      resolve = ok;
+      reject = fail;
+    });
+    jobs.set(userId, { dirty: false, promise, resolve, reject });
+    queue.push(userId);
+    drain();
+    return promise;
   };
   return { mailBytes, driveBytes, measure, refresh };
 };

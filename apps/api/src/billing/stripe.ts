@@ -109,7 +109,7 @@ export function createStripeBilling(
       throw new Error("billing customer mismatch");
     return row.stripeCustomerId;
   };
-  const checkout = async (actor: Actor | null, choice: PlanChoice) => {
+  const checkoutUnlocked = async (actor: Actor | null, choice: PlanChoice) => {
     if (actor !== null) {
       const entitlement = await entitlements.get(actor.id);
       if (entitlement.grant)
@@ -131,15 +131,36 @@ export function createStripeBilling(
         });
     }
     const price = await resolvePrice(choice.plan, choice.interval);
-    const customer =
-      actor === null
-        ? (
-            await client.customers.create(
-              { metadata: { esuno: "1", integration: BILLING_INTEGRATION } },
-              { idempotencyKey: `esuno_customer_anonymous_${randomUUID()}` },
-            )
-          ).id
-        : await customerFor(actor);
+    const customer = actor === null ? undefined : await customerFor(actor);
+    if (customer !== undefined) {
+      const subscriptions = await client.subscriptions
+        .list({ customer, status: "all", limit: 100 })
+        .autoPagingToArray({ limit: 10_000 });
+      if (
+        subscriptions.some(
+          (sub) =>
+            sub.status !== "canceled" && sub.status !== "incomplete_expired",
+        )
+      )
+        throw new ORPCError("CONFLICT", {
+          status: 409,
+          defined: true,
+          message:
+            "An existing subscription must be managed in billing settings",
+        });
+      const sessions = await client.checkout.sessions
+        .list({ customer, status: "open", limit: 100 })
+        .autoPagingToArray({ limit: 10_000 });
+      /* oxlint-disable eslint/no-await-in-loop */
+      for (const open of sessions) {
+        if (
+          open.metadata?.["esuno"] === "1" &&
+          open.metadata["integration"] === BILLING_INTEGRATION
+        )
+          await client.checkout.sessions.expire(open.id);
+      }
+      /* oxlint-enable eslint/no-await-in-loop */
+    }
     const session = await client.checkout.sessions.create(
       {
         mode: "subscription",
@@ -160,22 +181,29 @@ export function createStripeBilling(
             ...(actor === null ? {} : { userId: actor.id }),
           },
         },
-        customer,
+        ...(customer === undefined ? {} : { customer }),
         ...(actor === null ? {} : { client_reference_id: actor.id }),
         success_url:
           actor === null
             ? `${origin}/welcome?session_id={CHECKOUT_SESSION_ID}`
             : updatedUrl,
-        cancel_url: actor === null ? (config.cancelUrl ?? origin) : canceledUrl,
+        cancel_url:
+          actor === null
+            ? (config.cancelUrl ?? "https://esuno.net")
+            : canceledUrl,
         ...(config.automaticTax
           ? {
               automatic_tax: { enabled: true },
               billing_address_collection: "required" as const,
               tax_id_collection: { enabled: true },
-              customer_update: {
-                address: "auto" as const,
-                name: "auto" as const,
-              },
+              ...(customer === undefined
+                ? {}
+                : {
+                    customer_update: {
+                      address: "auto" as const,
+                      name: "auto" as const,
+                    },
+                  }),
             }
           : {}),
       },
@@ -183,6 +211,16 @@ export function createStripeBilling(
     );
     if (session.url === null) throw new Error("checkout URL unavailable");
     return { url: session.url };
+  };
+  const checkout = async (actor: Actor | null, choice: PlanChoice) => {
+    if (actor === null) return checkoutUnlocked(actor, choice);
+    return db.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${actor.id}, 71034))`;
+        return checkoutUnlocked(actor, choice);
+      },
+      { timeout: 45_000 },
+    );
   };
   const portal = async (actor: Actor, choice?: PlanChoice) => {
     const customer = await db.billingCustomer.findUnique({

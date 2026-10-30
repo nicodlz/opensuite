@@ -6,15 +6,6 @@ export const createEntitlements = (
   db: PrismaClient,
   config: BillingConfig,
   aliasCap: number,
-  verify?: (subscription: {
-    id: string;
-    stripeCustomerId: string;
-    userId: string | null;
-    plan: string;
-    interval: string;
-    status: string;
-    priceId: string;
-  }) => Promise<boolean>,
 ) => {
   const get = async (userId: string) => {
     const user = await db.user.findUnique({
@@ -26,11 +17,19 @@ export const createEntitlements = (
       },
     });
     if (user === null) throw new Error("account unavailable");
-    const entitled = user.subscriptions.find(
-      (subscription) =>
-        entitledStatuses.some((status) => status === subscription.status) &&
-        PlanId.safeParse(subscription.plan).success,
-    );
+    const entitled = user.subscriptions
+      .toSorted(
+        (a, b) =>
+          (b.plan === "pro" ? 1 : 0) - (a.plan === "pro" ? 1 : 0) ||
+          (b.stripeCreatedAt ?? b.createdAt).getTime() -
+            (a.stripeCreatedAt ?? a.createdAt).getTime() ||
+          b.id.localeCompare(a.id),
+      )
+      .find(
+        (subscription) =>
+          entitledStatuses.some((status) => status === subscription.status) &&
+          PlanId.safeParse(subscription.plan).success,
+      );
     const subscription = entitled ?? user.subscriptions[0] ?? null;
     if (config.mode === "self-hosted")
       return {
@@ -101,10 +100,7 @@ export const createEntitlements = (
         grant: true,
       };
     }
-    if (
-      entitled === undefined ||
-      (verify !== undefined && !(await verify(entitled)))
-    )
+    if (entitled === undefined)
       return {
         mode: "cloud" as const,
         plan: "none" as const,

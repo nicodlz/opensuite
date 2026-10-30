@@ -84,3 +84,47 @@ it("combines actual Drive and mail usage and sends a one-byte limit when exhaust
     await once(server, "close");
   }
 });
+
+it("coalesces refresh requests and skips unchanged quotas", async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  let reads = 0;
+  let writes = 0;
+  const db = {
+    mailboxLink: {
+      findUnique: () =>
+        Promise.resolve({ accountId: "mail", status: "active" }),
+    },
+  } as unknown as PrismaClient;
+  const mail = {
+    setDiskQuota: () => {
+      writes++;
+      return okAsync(undefined);
+    },
+  } as unknown as StalwartAdmin;
+  const entitlements = {
+    get: async () => {
+      reads++;
+      if (reads === 1) await gate;
+      return { quotaBytes: null };
+    },
+  } as unknown as Entitlements;
+  const storage = createStorageMeter(
+    db,
+    entitlements,
+    mail,
+    "http://127.0.0.1",
+    undefined,
+  );
+  const first = storage.refresh("owner");
+  const second = storage.refresh("owner");
+  const third = storage.refresh("owner");
+  finish();
+  await Promise.all([first, second, third]);
+  expect(reads).toBe(2);
+  expect(writes).toBe(1);
+  await storage.refresh("owner");
+  expect(writes).toBe(1);
+});

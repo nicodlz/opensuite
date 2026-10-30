@@ -6,6 +6,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import {
   configureApplicationRole,
   createAliasStore,
+  createAddressStore,
   createDatabase,
   type PrismaClient,
 } from "@opensuite/db";
@@ -255,6 +256,20 @@ it("uses current Stripe state for duplicate and out-of-order subscription events
   ).toBeNull();
   customerOwned = true;
   await Promise.all([webhook.process(first), webhook.process(first)]);
+  const failingRefresh = createWebhookProcessor(
+    db,
+    stripe,
+    () => Promise.reject(new Error("quota down")),
+    () => {},
+  );
+  await failingRefresh.process(event("evt_refresh_failure", 201));
+  expect(
+    (
+      await db.stripeEvent.findUniqueOrThrow({
+        where: { id: "evt_refresh_failure" },
+      })
+    ).processedAt,
+  ).not.toBeNull();
   expect(refreshes).toBe(1);
   fetchFails = true;
   await expect(
@@ -267,8 +282,22 @@ it("uses current Stripe state for duplicate and out-of-order subscription events
       })
     ).processedAt,
   ).toBeNull();
+  expect(
+    (
+      await db.stripeEvent.findUniqueOrThrow({
+        where: { id: "evt_fixture_retry" },
+      })
+    ).attempts,
+  ).toBe(1);
   fetchFails = false;
   await webhook.process(event("evt_fixture_retry", 201));
+  expect(
+    (
+      await db.stripeEvent.findUniqueOrThrow({
+        where: { id: "evt_fixture_retry" },
+      })
+    ).attempts,
+  ).toBe(2);
   expect(
     (
       await db.stripeEvent.findUniqueOrThrow({
@@ -379,6 +408,29 @@ it("uses current Stripe state for duplicate and out-of-order subscription events
   };
   await webhook.process(event("evt_fixture_interval", 402));
   expect((await entitlements.get(userId)).subscription?.interval).toBe("month");
+  const itemBeforeForeignPrice = current.items.data[0];
+  if (itemBeforeForeignPrice === undefined)
+    throw new Error("missing fixture item");
+  current = {
+    ...current,
+    items: {
+      data: [
+        {
+          ...itemBeforeForeignPrice,
+          price: { ...price, lookup_key: "foreign_month" },
+        },
+      ],
+    },
+  };
+  await webhook.process(event("evt_changed_to_foreign_price", 403));
+  expect(
+    (await db.subscription.findUniqueOrThrow({ where: { id: current.id } }))
+      .status,
+  ).toBe("unowned");
+  current = {
+    ...current,
+    items: { data: [{ ...itemBeforeForeignPrice, price }] },
+  };
   current = { ...current, status: "canceled" };
   await webhook.process({
     ...event("evt_fixture_4", 500),
@@ -491,6 +543,8 @@ it("creates signed-in and public Checkout sessions and directs plan changes thro
   const portalRequests: Record<string, unknown>[] = [];
   let ownedPrice = true;
   let quantity = 1;
+  let liveSubscriptions: { status: string }[] = [];
+  const expiredSessions: string[] = [];
   const prices = {
     esuno_plus_month: {
       id: "price_plus_month",
@@ -531,6 +585,20 @@ it("creates signed-in and public Checkout sessions and directs plan changes thro
     },
     checkout: {
       sessions: {
+        list: () => ({
+          autoPagingToArray: () =>
+            Promise.resolve([
+              {
+                id: "cs_open",
+                metadata: { esuno: "1", integration: "esuno-cloud-v1" },
+              },
+              { id: "cs_foreign", metadata: {} },
+            ]),
+        }),
+        expire: (id: string) => {
+          expiredSessions.push(id);
+          return Promise.resolve({});
+        },
         create: (params: Record<string, unknown>) => {
           requests.push(params);
           return Promise.resolve({
@@ -540,6 +608,9 @@ it("creates signed-in and public Checkout sessions and directs plan changes thro
       },
     },
     subscriptions: {
+      list: () => ({
+        autoPagingToArray: () => Promise.resolve(liveSubscriptions),
+      }),
       retrieve: () =>
         Promise.resolve({
           customer: "cus_checkout",
@@ -598,6 +669,13 @@ it("creates signed-in and public Checkout sessions and directs plan changes thro
   );
   await billing.checkout(null, { plan: "plus", interval: "month" });
   await billing.checkout(actor, { plan: "plus", interval: "month" });
+  expect(requests[0]).not.toHaveProperty("customer");
+  expect(expiredSessions).toEqual(["cs_open"]);
+  liveSubscriptions = [{ status: "active" }];
+  await expect(
+    billing.checkout(actor, { plan: "plus", interval: "month" }),
+  ).rejects.toMatchObject({ status: 409 });
+  liveSubscriptions = [];
   expect(requests[0]).toMatchObject({
     mode: "subscription",
     success_url:
@@ -778,11 +856,7 @@ it("prioritizes active grants and ignores expired or revoked grants", async () =
     internalToken: "x".repeat(32),
     automaticTax: false,
   };
-  let verifications = 0;
-  const entitlements = createEntitlements(db, config, 1000, () => {
-    verifications++;
-    return Promise.resolve(true);
-  });
+  const entitlements = createEntitlements(db, config, 1000);
   const grants = createGrantStore(db);
   await grants.grant({
     email,
@@ -797,7 +871,6 @@ it("prioritizes active grants and ignores expired or revoked grants", async () =
     subscription: null,
     grant: true,
   });
-  expect(verifications).toBe(0);
   await grants.grant({
     email,
     plan: "unlimited",
@@ -829,7 +902,6 @@ it("prioritizes active grants and ignores expired or revoked grants", async () =
     addressLimit: 5,
     grant: false,
   });
-  expect(verifications).toBe(1);
   await grants.grant({
     email,
     plan: "plus",
@@ -841,7 +913,6 @@ it("prioritizes active grants and ignores expired or revoked grants", async () =
     plan: "plus",
     grant: false,
   });
-  expect(verifications).toBe(2);
   expect(
     await createEntitlements(db, { mode: "self-hosted" }, 1000).get(userId),
   ).toMatchObject({ plan: "free", quotaBytes: null, addressLimit: null });
@@ -920,4 +991,244 @@ it("manages grants only through the operator CLI and audits each action", async 
       "billing.grant.list",
     ]),
   );
+}, 30_000);
+
+it("resumes a claim after signup succeeds but its response is lost", async () => {
+  const suffix = randomUUID();
+  const sessionId = `cs_test_${suffix.replaceAll("-", "")}`;
+  const customer = `cus_${suffix}`;
+  const subscription = `sub_${suffix}`;
+  const session = {
+    id: sessionId,
+    mode: "subscription",
+    status: "complete",
+    payment_status: "paid",
+    client_reference_id: null,
+    created: Math.floor(Date.now() / 1000),
+    customer,
+    subscription,
+    metadata: {
+      integration: "esuno-cloud-v1",
+      esuno: "1",
+      plan: "plus",
+      interval: "month",
+    },
+  };
+  const stripe = {
+    checkout: { sessions: { retrieve: () => Promise.resolve(session) } },
+    customers: { update: () => Promise.resolve({}) },
+  } as unknown as Stripe;
+  await db.subscription.create({
+    data: {
+      id: subscription,
+      stripeCustomerId: customer,
+      plan: "plus",
+      interval: "month",
+      status: "active",
+      priceId: "price",
+      storageQuotaBytes: 50_000_000_000n,
+      stripeObservedAt: new Date(),
+    },
+  });
+  await db.checkoutClaim.create({
+    data: {
+      sessionId,
+      stripeCustomerId: customer,
+      subscriptionId: subscription,
+      expiresAt: new Date(Date.now() + 60_000),
+    },
+  });
+  let calls = 0;
+  const claims = createClaimService(
+    db,
+    stripe,
+    "claim.test",
+    async ({ email, name }) => {
+      calls++;
+      await db.user.create({ data: { id: suffix, email, name } });
+      throw new Error("lost signup response");
+    },
+  );
+  const input = {
+    sessionId,
+    localPart: `user_${suffix.replaceAll("-", "").slice(0, 12)}`,
+    name: "User",
+    password: "long-enough-password",
+  };
+  await db.user.create({
+    data: {
+      id: `wildcard-${suffix}`,
+      name: "Other",
+      email: `${input.localPart.replace("_", "x")}@claim.test`,
+    },
+  });
+  await expect(claims.claim(input)).rejects.toMatchObject({ status: 409 });
+  expect(await claims.claim(input)).toEqual({
+    email: `${input.localPart}@claim.test`,
+  });
+  expect(calls).toBe(1);
+  expect(
+    (await db.checkoutClaim.findUniqueOrThrow({ where: { sessionId } }))
+      .claimedByUserId,
+  ).toBe(suffix);
+  expect(
+    (await db.subscription.findUniqueOrThrow({ where: { id: subscription } }))
+      .userId,
+  ).toBe(suffix);
 });
+
+it("chooses duplicate entitled subscriptions by plan then Stripe creation time", async () => {
+  const userId = `duplicate-${randomUUID()}`;
+  await db.user.create({
+    data: { id: userId, name: "Duplicate", email: `${userId}@example.test` },
+  });
+  const config: BillingConfig = {
+    mode: "cloud",
+    stripeSecretKey: "sk_test_fixture",
+    webhookSecret: "whsec_fixture",
+    internalToken: "x".repeat(32),
+    automaticTax: false,
+  };
+  for (const [suffix, plan, created] of [
+    ["plus", "plus", 300],
+    ["new-pro", "pro", 200],
+    ["old-pro", "pro", 100],
+  ] as const) {
+    await db.subscription.create({
+      data: {
+        id: `${userId}-${suffix}`,
+        userId,
+        stripeCustomerId: `cus-${suffix}`,
+        plan,
+        interval: "month",
+        status: "active",
+        priceId: "price",
+        storageQuotaBytes: BigInt(
+          plan === "pro" ? 500_000_000_000 : 50_000_000_000,
+        ),
+        stripeCreatedAt: new Date(created * 1000),
+        stripeObservedAt: new Date(),
+      },
+    });
+  }
+  const result = await createEntitlements(db, config, 1000).get(userId);
+  expect(result.plan).toBe("pro");
+  expect(result.subscription?.id).toBe(`${userId}-new-pro`);
+});
+
+it("serializes a paid claim and an extra address for the same mailbox", async () => {
+  const suffix = randomUUID();
+  const owner = `owner-${suffix}`;
+  const domain = `domain-${suffix}.test`;
+  const customer = `cus_race_${suffix}`;
+  const subscription = `sub_race_${suffix}`;
+  const sessionId = `cs_test_${suffix.replaceAll("-", "")}`;
+  await db.user.create({
+    data: {
+      id: owner,
+      name: "Owner",
+      email: `${owner}@example.test`,
+      role: "admin",
+    },
+  });
+  await db.mailboxLink.create({
+    data: {
+      userId: owner,
+      accountId: `account-${owner}`,
+      address: `${owner}@example.test`,
+      credentialId: "test",
+      secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+    },
+  });
+  const domainRow = await db.domain.create({
+    data: {
+      name: domain,
+      userId: owner,
+      status: "verified",
+      stalwartId: "domain",
+    },
+  });
+  await db.subscription.create({
+    data: {
+      id: subscription,
+      stripeCustomerId: customer,
+      plan: "plus",
+      interval: "month",
+      status: "active",
+      priceId: "price",
+      storageQuotaBytes: 50_000_000_000n,
+      stripeObservedAt: new Date(),
+    },
+  });
+  await db.checkoutClaim.create({
+    data: {
+      sessionId,
+      stripeCustomerId: customer,
+      subscriptionId: subscription,
+      expiresAt: new Date(Date.now() + 60_000),
+    },
+  });
+  const session = {
+    id: sessionId,
+    mode: "subscription",
+    status: "complete",
+    payment_status: "paid",
+    client_reference_id: null,
+    created: Math.floor(Date.now() / 1000),
+    customer,
+    subscription,
+    metadata: {
+      integration: "esuno-cloud-v1",
+      esuno: "1",
+      plan: "plus",
+      interval: "month",
+    },
+  };
+  const stripe = {
+    checkout: { sessions: { retrieve: () => Promise.resolve(session) } },
+    customers: { update: () => Promise.resolve({}) },
+  } as unknown as Stripe;
+  const addresses = createAddressStore(db, []);
+  let entered!: () => void;
+  let release!: () => void;
+  const locked = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const claims = createClaimService(
+    db,
+    stripe,
+    domain,
+    async ({ email, name }) => {
+      const result = await addresses.withPrimaryReservation(email, async () => {
+        entered();
+        await gate;
+        await db.user.create({
+          data: { id: `claimed-${suffix}`, name, email },
+        });
+        return `claimed-${suffix}`;
+      });
+      if (result === null) throw new Error("address unavailable");
+      return result;
+    },
+  );
+  const claim = claims.claim({
+    sessionId,
+    name: "Claimant",
+    localPart: "claimant",
+    password: "long-enough-password",
+  });
+  await locked;
+  const address = addresses.reserve(owner, domainRow.id, "claimant", null);
+  release();
+  expect(await claim).toEqual({ email: `claimant@${domain}` });
+  const result = await address;
+  expect(result.isErr() && result.error.kind).toBe("conflict");
+  expect(
+    await db.address.count({
+      where: { domainId: domainRow.id, localPart: "claimant" },
+    }),
+  ).toBe(0);
+}, 60_000);

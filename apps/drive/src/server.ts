@@ -153,7 +153,7 @@ export const buildServer = (
     if (error instanceof ORPCError)
       return reply
         .code(error.status)
-        .send({ code: "DRIVE_ERROR", message: error.message });
+        .send({ code: String(error.code), message: error.message });
     if (error instanceof z.ZodError)
       return reply.code(400).send({ code: "BAD_REQUEST" });
     const errorName = error instanceof Error ? error.name : "UnknownError";

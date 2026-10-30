@@ -2,14 +2,14 @@ import { ORPCError } from "@orpc/client";
 import type { BillingInterval, BillingOverview } from "@opensuite/contracts";
 
 function money(cents: number) {
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "EUR",
   }).format(cents / 100);
 }
 export function price(amount: number, interval: BillingInterval) {
   return interval === "year"
-    ? `${money(amount / 12)}/month, billed ${money(amount)} yearly`
+    ? `${money(amount / 12)}/month, billed ${money(amount)} per year`
     : `${money(amount)}/month`;
 }
 export function bytes(value: number) {
@@ -21,7 +21,7 @@ export function bytes(value: number) {
     amount /= 1000;
     index++;
   }
-  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(amount)} ${units[index]}`;
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(amount)} ${units[index]}`;
 }
 export function usageState(storage: BillingOverview["storage"]) {
   if (

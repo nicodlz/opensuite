@@ -1,4 +1,5 @@
-import { AddressLocalPart, isReservedAddress } from "@opensuite/contracts";
+import { AddressLocalPart } from "@opensuite/contracts";
+import { isReservedMailLocalPart } from "../reserved-mail-local-parts.ts";
 import type { AddressStore } from "@opensuite/db";
 import type { Actor } from "./accounts.ts";
 import type { AliasMail } from "./aliases.ts";
@@ -143,7 +144,7 @@ export function createAddressService(
     ) => {
       const parsed = AddressLocalPart.safeParse(input.localPart);
       if (!parsed.success) return failed("invalid");
-      if (isReservedAddress(parsed.data)) {
+      if (isReservedMailLocalPart(parsed.data)) {
         await store.audit(actor.id, "address.create.failure");
         return failed("reserved");
       }

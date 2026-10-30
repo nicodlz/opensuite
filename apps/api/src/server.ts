@@ -93,7 +93,6 @@ export interface ServerDependencies {
     secret: string;
     processor: ReturnType<typeof createWebhookProcessor>;
   };
-  readonly publicCheckoutOrigin?: string;
 }
 
 const tokenDigest = (value: string) =>
@@ -143,24 +142,6 @@ export const buildServer = async (
   app.addHook("onRequest", async (request, reply) => {
     const identity = dependencies.identity;
     const rawPath = request.url.split("?")[0] ?? "";
-    const publicCheckout =
-      dependencies.publicCheckoutOrigin !== undefined &&
-      request.headers.origin === dependencies.publicCheckoutOrigin &&
-      rawPath === "/billing/checkout";
-    if (publicCheckout) {
-      reply
-        .header(
-          "access-control-allow-origin",
-          dependencies.publicCheckoutOrigin ?? "",
-        )
-        .header("vary", "origin");
-      if (request.method === "OPTIONS")
-        return reply
-          .header("access-control-allow-methods", "POST")
-          .header("access-control-allow-headers", "content-type")
-          .code(204)
-          .send();
-    }
     if (
       identity !== undefined &&
       (rawPath.startsWith("/auth/") || rawPath.startsWith("/api/auth/"))
@@ -215,7 +196,6 @@ export const buildServer = async (
       identity !== undefined &&
       request.method !== "GET" &&
       request.method !== "HEAD" &&
-      !(publicCheckout && request.method === "POST") &&
       !(
         request.method === "POST" &&
         rawPath === "/billing/webhook" &&
@@ -466,10 +446,11 @@ export const buildServer = async (
       .object({ userId: z.string().min(1).max(200) })
       .parse(request.params);
     try {
-      const [entitlement, mailBytes] = await Promise.all([
-        dependencies.entitlements.get(userId),
-        dependencies.storageMeter.mailBytes(userId),
-      ]);
+      const entitlement = await dependencies.entitlements.get(userId);
+      const mailBytes =
+        entitlement.quotaBytes === null
+          ? 0
+          : await dependencies.storageMeter.mailBytes(userId);
       reply.header("cache-control", "no-store");
       return {
         quotaBytes: entitlement.quotaBytes,
@@ -935,7 +916,14 @@ export const buildServer = async (
         claims: dependencies.claims,
         publicCheckoutLimit: () =>
           checkoutLimits.consume(`checkout:${request.ip}`, 10, 60_000) ===
-          undefined,
+            undefined &&
+          checkoutLimits.consume("checkout:global", 100, 60_000) === undefined,
+        claimLimit: (kind) =>
+          checkoutLimits.consume(
+            `${kind}:${request.ip}`,
+            kind === "status" ? 60 : 10,
+            60_000,
+          ) === undefined,
         push: dependencies.push,
         pushCleanup: dependencies.pushCleanup ?? dependencies.push?.store,
         pushSubscribeLimit: (userId) =>
