@@ -7,6 +7,7 @@ import { createMailService } from "@opensuite/core/services/mail";
 import {
   configureApplicationRole,
   createDatabase,
+  createDomainStore,
   createMailboxStore,
 } from "@opensuite/db";
 import { JmapClient } from "@opensuite/jmap";
@@ -508,13 +509,34 @@ it("provisions and authenticates accounts on every configured or managed domain 
       (await post("/api/auth/sign-up/email", managed, adminCookie)).status,
     ).toBe(400);
     const adminId = await userId("admin@example.test");
-    await db.value.domain.create({
+    const row = await db.value.domain.create({
       data: { userId: adminId, name: "managed.test" },
     });
     expect(
       (await post("/api/auth/sign-up/email", managed, adminCookie)).status,
     ).toBe(200);
     expect((await post("/api/auth/sign-in/email", managed)).status).toBe(200);
+    // Its accounts keep the domain from removal.
+    const removal = await createDomainStore(db.value).beginRemoval(row.id);
+    expect(removal.isOk() && removal.value).toBe(false);
+    // An address another user already holds is never provisioned again.
+    await db.value.address.create({
+      data: { userId: adminId, domainId: row.id, localPart: "taken" },
+    });
+    expect(
+      (
+        await post(
+          "/api/auth/sign-up/email",
+          account("taken@managed.test"),
+          adminCookie,
+        )
+      ).ok,
+    ).toBe(false);
+    expect(
+      await db.value.mailboxLink.count({
+        where: { address: "taken@managed.test" },
+      }),
+    ).toBe(0);
     await db.value.domain.update({
       where: { name: "managed.test" },
       data: { removalPending: true },
@@ -542,6 +564,19 @@ it("provisions and authenticates accounts on every configured or managed domain 
     await expect(
       bootstrap("nobody@third.test", "long-test-password-789", "Nobody"),
     ).rejects.toThrow("email domain is not configured");
+    // Provisioning checks the domain itself, not only signup: an account
+    // that bypassed signup is never given a mailbox.
+    await db.value.user.create({
+      data: { id: "outsider", name: "Outsider", email: "outsider@third.test" },
+    });
+    expect(await reconcile()).toBeGreaterThanOrEqual(1);
+    expect(
+      await db.value.mailboxLink.count({ where: { userId: "outsider" } }),
+    ).toBe(0);
+    await db.value.mailboxProvision.deleteMany({
+      where: { userId: "outsider" },
+    });
+    await db.value.user.delete({ where: { id: "outsider" } });
     expect(
       await db.value.user.count({
         where: { email: { endsWith: "@third.test" } },

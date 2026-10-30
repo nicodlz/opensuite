@@ -286,6 +286,42 @@ site, enable MFA, and create any additional accounts through the authenticated
 admin signup API. Check provisioning and reconciliation logs; signup does not
 verify mailbox ownership. See [authentication](../development.md#authentication-and-mailbox-provisioning).
 
+## Additional account domain
+
+Accounts can use other domains than `MAIL_DOMAIN`, for example to give
+`user@example.net` a mailbox on the same installation. Each address must
+belong to only one account.
+
+1. Add the domain, in lowercase, to `MAIL_DOMAINS` in `.env` (comma separated)
+   and recreate the API so it reads the new value: `docker compose up -d api`.
+   A plain restart keeps the old environment, and the bootstrap command,
+   which runs in the API container, refuses the domain until then. Domains
+   managed in the console are accepted without this step.
+2. Create the account. With an administrator session, call
+   `POST /api/auth/sign-up/email` with `name`, `email` and `password` and the
+   configured Origin, as described in the
+   [admin guide](../admin/index.md#users); the bootstrap command also works
+   but promotes the account to administrator. Provisioning creates the domain
+   in Stalwart; mail between local accounts of both domains is then delivered
+   locally.
+3. Receive mail: verify the domain in SES, extend the receipt rule to it and,
+   after owner approval, publish its MX, as in
+   [SES inbound and outbound](#ses-inbound-and-outbound). Check that the
+   worker routes the address: a release that routes primary addresses and
+   delivers to linked mailboxes needs nothing else; otherwise add a static
+   route and destination for the account.
+4. Send mail: SES accepts only verified identities, so verify the domain and
+   publish its DKIM, SPF and DMARC records as in
+   [outbound DKIM and DNS](../operations/outbound.md#dkim-and-dns).
+   Until then SES rejects its messages and the sender receives a bounce.
+
+Before deploying a release with this support, list the domain records
+(`SELECT name, status, "removalPending" FROM "Domain";`): every managed
+domain whose removal has not started becomes available for accounts. Before
+rolling back, make sure no account in another domain is still pending
+provisioning, or disable it, as older releases refuse it on every
+reconciliation.
+
 ## Mail TLS
 
 After Caddy has obtained a publicly trusted certificate for the same hostname,

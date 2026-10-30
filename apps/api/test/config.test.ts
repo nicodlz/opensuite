@@ -109,7 +109,7 @@ it("requires valid mail configuration and derives readiness from the internal or
     const domains = await loadAuthConfig({
       ...env,
       STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
-      MAIL_DOMAINS: " second.test, example.test ,",
+      MAIL_DOMAINS: " Second.TEST, example.test ,",
     });
     expect(domains.isOk() && domains.value.mailDomains).toEqual([
       "example.test",

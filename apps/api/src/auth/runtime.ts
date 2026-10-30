@@ -95,6 +95,15 @@ export const createAuthRuntime = (
         !(await isMailDomain(domain))
       )
         return err(failure());
+      // The address must not already be another user's address or alias.
+      const taken = await db.address.count({
+        where: {
+          localPart: { equals: local, mode: "insensitive" },
+          domain: { name: domain },
+          userId: { not: userId },
+        },
+      });
+      if (taken > 0) return err(failure());
       const domainResult = await admin.createDomain(domain);
       if (domainResult.isErr()) return err(failure());
       const name = `os-${createHash("sha256").update(userId).digest("hex").slice(0, 32)}`;

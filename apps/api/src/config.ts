@@ -119,7 +119,7 @@ const AuthEnvironment = z.object({
     .transform((value) =>
       value
         .split(",")
-        .map((item) => item.trim())
+        .map((item) => item.trim().toLowerCase())
         .filter((item) => item !== ""),
     )
     .pipe(z.array(mailDomain)),

@@ -50,6 +50,8 @@ const synthetic: ManagedDomain[] = [
     ],
   },
 ];
+/** Domains of the synthetic installation, including ones added locally. */
+export const syntheticDomainNames = () => synthetic.map((item) => item.name);
 export const domainsClient = import.meta.env.DEV
   ? {
       list(_input: object) {

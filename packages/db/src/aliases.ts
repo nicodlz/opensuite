@@ -115,6 +115,17 @@ export const createAliasStore = (db: PrismaClient) => {
           const domain = await validDomain(tx, domainId);
           if (!domain) return err({ kind: "invalid" });
           if (
+            await tx.mailboxLink.count({
+              where: {
+                address: {
+                  equals: `${localPart}@${domain.name}`,
+                  mode: "insensitive",
+                },
+              },
+            })
+          )
+            return err({ kind: "conflict" });
+          if (
             (await tx.emailAlias.count({
               where: { userId, deletedAt: null },
             })) >= cap ||

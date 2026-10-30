@@ -509,6 +509,54 @@ describe("PostgreSQL schema and adapters", () => {
 });
 
 describe("alias reservations", () => {
+  it("keeps a mailbox's primary address from other users and its domain from removal", async () => {
+    const suffix = randomUUID();
+    const owner = `primary-owner-${suffix}`;
+    const other = `primary-other-${suffix}`;
+    const name = `${suffix}.example.test`;
+    await db.user.createMany({
+      data: [
+        { id: owner, email: `owner@${name}`, name: owner },
+        { id: other, email: `other@${name}`, name: other },
+      ],
+    });
+    const domain = await db.domain.create({
+      data: { name, userId: owner, status: "verified", stalwartId: "d" },
+    });
+    await db.mailboxLink.createMany({
+      data: [owner, other].map((userId, index) => ({
+        userId,
+        accountId: `${suffix}-${String(index)}`,
+        address: `${index === 0 ? "owner" : "other"}@${name}`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      })),
+    });
+    const { createAliasStore, createDomainStore } =
+      await import("../src/index.ts");
+    const domains = createDomainStore(db);
+    const removal = await domains.beginRemoval(domain.id);
+    expect(removal.isOk() && removal.value).toBe(false);
+    expect(
+      (
+        await domains.addAddress(owner, domain.id, other, "OWNER", false)
+      ).isErr(),
+    ).toBe(true);
+    const alias = await createAliasStore(db).reserve(
+      other,
+      { domainId: domain.id },
+      "owner",
+      10,
+    );
+    expect(alias.isErr() && alias.error).toEqual({ kind: "conflict" });
+    expect(await db.address.count({ where: { domainId: domain.id } })).toBe(0);
+    expect(
+      (
+        await domains.addAddress(owner, domain.id, owner, "owner", false)
+      ).isOk(),
+    ).toBe(true);
+  });
+
   it("reserves deleted addresses permanently and routes only active aliases", async () => {
     const suffix = randomUUID();
     const owner = `alias-owner-${suffix}`;

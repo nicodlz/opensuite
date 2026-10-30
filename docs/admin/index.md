@@ -11,7 +11,7 @@ With an administrator session, open **Setup wizard** at `/setup`. The wizard off
 1. **System check** shows API, database, Stalwart, Drive, Drive object storage, relay configuration and backup marker status. A marker does not verify a restore; check mail blob storage separately.
 2. **Mail domain** adds a domain, displays DNS records for manual publication and rechecks them. Register the administrator address for inbound routing when offered.
 3. **Outbound relay** shows stored relay and DKIM status and can submit a test message. Configure the relay with the operator procedure and independently confirm delivery.
-4. **Create users** provides a form for email, display name and initial password. The address must use a managed domain that is already added: `MAIL_DOMAIN` or any other domain added under Domains.
+4. **Create users** provides a form for email, display name and initial password. The address must use a managed domain that is already added: `MAIL_DOMAIN` or any other domain added under Domains, even before its DNS is verified. A domain listed only in `MAIL_DOMAINS` has no domain record, so the wizard answers with a conflict; use the sign-up API below or the bootstrap command for it. An address that is already another user's address or alias is refused, and a domain cannot be removed while a mailbox uses it.
 5. **Finish** summarizes the checks and links to Mail, Drive and operating guides. Unknown and pending checks need investigation; completing the wizard does not prove production readiness.
 
 The wizard requires an existing administrator session. See the [user guide](../user/index.md#signing-in-and-mfa) for sign-in and MFA. Vite development uses synthetic setup data.
