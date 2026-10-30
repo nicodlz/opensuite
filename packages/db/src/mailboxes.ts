@@ -59,7 +59,10 @@ export const createMailboxStore = (client: PrismaClient, key: unknown) => {
       return ResultAsync.fromPromise(
         client.mailboxLink.findFirst({
           where: {
-            ...parsed.data,
+            userId: parsed.data.userId,
+            ...(parsed.data.accountId === "default"
+              ? {}
+              : { accountId: parsed.data.accountId }),
             status: "active",
             user: { disabled: false },
           },

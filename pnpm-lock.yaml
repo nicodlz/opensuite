@@ -361,6 +361,9 @@ importers:
       '@opensuite/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@opensuite/jmap':
+        specifier: workspace:*
+        version: link:../../packages/jmap
       '@orpc/openapi':
         specifier: 'catalog:'
         version: 1.16.1(fastify@5.12.7)(ws@8.22.0)

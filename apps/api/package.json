@@ -13,6 +13,7 @@
     "@opensuite/contracts": "workspace:*",
     "@opensuite/core": "workspace:*",
     "@opensuite/db": "workspace:*",
+    "@opensuite/jmap": "workspace:*",
     "@orpc/openapi": "catalog:",
     "@orpc/server": "catalog:",
     "@orpc/zod": "catalog:",
