@@ -400,7 +400,11 @@ chosen mailbox domain), any wildcard change and rule-set activation. At the
 agreed window, apply only the approved changes, confirm propagation and monitor
 both old and new routes through the TTL and queue drain. Unknown recipients are
 held _after_ SES acceptance (see the hold window in
-[ingestion](../architecture/ingestion.md)), so the routes should be complete.
+[ingestion](../architecture/ingestion.md)), so the routes should be complete. Before enabling reception,
+confirm on the real buckets that the SES buffer has an agreed lifecycle for
+noncurrent versions (do not assume the Terraform module's 30 days; a bucket
+without a lifecycle configuration keeps deleted messages indefinitely) and that
+archive retention exceeds `INGEST_HOLD_DAYS`.
 
 ## Rollback
 
