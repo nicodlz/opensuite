@@ -33,6 +33,7 @@ export interface ServerDependencies {
   readonly accounts?: AccountService;
   readonly mail?: MailService;
   readonly domains?: DomainService;
+  readonly setupStatus?: ApiContext["setupStatus"];
 }
 
 export const buildServer = async (
@@ -325,6 +326,8 @@ export const buildServer = async (
     const { matched } = await handler.handle(request, reply, {
       context: {
         actor,
+        setupStatus: dependencies.setupStatus,
+        setupIdentity: dependencies.identity,
         audit: dependencies.identity?.audit,
         mail: dependencies.mail,
         downloads,

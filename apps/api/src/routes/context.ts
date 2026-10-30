@@ -1,3 +1,4 @@
+import type { SetupStatus } from "@opensuite/contracts";
 import type { DomainService } from "./domains.ts";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
 import type { MailService } from "@opensuite/core/services/mail";
@@ -6,6 +7,15 @@ import type { FastifyBaseLogger } from "fastify";
 
 /** Per-request context handed to every procedure by the server. */
 export interface ApiContext {
+  readonly setupStatus: (() => Promise<SetupStatus>) | undefined;
+  readonly setupIdentity:
+    | {
+        readonly handler: (request: Request) => Promise<Response>;
+        readonly publicOrigin: string;
+        readonly mailDomain?: string;
+        readonly userIdForEmail?: (email: string) => Promise<string | null>;
+      }
+    | undefined;
   readonly mail: MailService | undefined;
   readonly downloads: {
     issue(

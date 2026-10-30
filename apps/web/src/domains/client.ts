@@ -55,6 +55,22 @@ export const domainsClient = import.meta.env.DEV
       list(_input: object) {
         return Promise.resolve(structuredClone(synthetic));
       },
+      addAddress(input: {
+        domainId: string;
+        userId: string;
+        localPart: string;
+        isAlias: boolean;
+      }) {
+        const domain = synthetic.find((item) => item.id === input.domainId);
+        if (!domain) throw new Error("Domain missing");
+        domain.addresses.push({
+          id: crypto.randomUUID(),
+          userId: input.userId,
+          localPart: input.localPart,
+          isAlias: input.isAlias,
+        });
+        return Promise.resolve(structuredClone(domain));
+      },
       recheck(input: { domainId: string }) {
         const domain = synthetic.find((item) => item.id === input.domainId);
         if (!domain) throw new Error("Domain missing");

@@ -360,6 +360,50 @@ export class StalwartAdmin {
     return this.#reload();
   }
 
+  /** Inspect the configured SES route without returning credentials. */
+  async sesRelayConfigured(): Promise<AdminResult<boolean>> {
+    const route = await this.#list("MtaRoute", NamedSchema);
+    if (route.isErr()) return err(route.error);
+    const tls = await this.#list("MtaTlsStrategy", NamedSchema);
+    if (tls.isErr()) return err(tls.error);
+    const strategy = await this.#transport.call(
+      this.#api,
+      "x:MtaOutboundStrategy/get",
+      { ids: ["singleton"] },
+      using,
+      GetSchema(z.object({ id: z.string() }).catchall(z.unknown())),
+    );
+    if (strategy.isErr()) return err(strategy.error);
+    const current = strategy.value.list[0];
+    if (current === undefined || strategy.value.notFound.length > 0)
+      return err({
+        kind: "invalidResponse",
+        message: "Missing outbound strategy",
+      });
+    const target = route.value.find((item) => item.name === "osrelay");
+    const tlsTarget = tls.value.find((item) => item.name === "osrelay");
+    return ok(
+      target?.["@type"] === "Relay" &&
+        target["host"] === "email-smtp.eu-north-1.amazonaws.com" &&
+        target["port"] === 2587 &&
+        target["protocol"] === "smtp" &&
+        target["implicitTls"] === false &&
+        target["allowInvalidCerts"] === false &&
+        typeof target["authUsername"] === "string" &&
+        target["authUsername"].length > 0 &&
+        z
+          .object({ "@type": z.literal("File"), filePath: z.string().min(1) })
+          .safeParse(target["authSecret"]).success &&
+        tlsTarget?.["startTls"] === "require" &&
+        tlsTarget["allowInvalidCerts"] === false &&
+        isDeepStrictEqual(current["route"], {
+          match: { "0": branch("is_local_domain(rcpt_domain)", "'local'") },
+          else: "'osrelay'",
+        }) &&
+        isDeepStrictEqual(current["tls"], { match: {}, else: "'osrelay'" }),
+    );
+  }
+
   /** Restore Stalwart's default routing, scheduling and TLS expressions. */
   async resetOutbound(): Promise<AdminResult<void>> {
     const result = await this.#update("MtaOutboundStrategy", "singleton", {

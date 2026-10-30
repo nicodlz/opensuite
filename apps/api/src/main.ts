@@ -16,6 +16,7 @@ import {
 import { createAuthRuntime } from "./auth/runtime.ts";
 import { startDomainJob } from "./routes/domain-job.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
+import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
 
 const config = loadConfig(process.env);
@@ -86,6 +87,26 @@ const app = await buildServer({
   config: { ...config.value, trustProxy: authConfig.value.trustedProxyIp },
   readiness,
   monotonicMs,
+  setupStatus: createSetupStatus({
+    readiness,
+    mailDomain: authConfig.value.mailDomain,
+    ...(process.env["DOMAINS_SES_ENABLED"] === "true" &&
+    process.env["DOMAINS_STALWART_ORIGIN"] &&
+    process.env["DOMAINS_STALWART_USER"] &&
+    process.env["DOMAINS_STALWART_PASSWORD_FILE"]
+      ? {
+          relayManagement: {
+            origin: process.env["DOMAINS_STALWART_ORIGIN"],
+            username: process.env["DOMAINS_STALWART_USER"],
+            passwordFile: process.env["DOMAINS_STALWART_PASSWORD_FILE"],
+          },
+        }
+      : {}),
+    ...(process.env["SETUP_BACKUP_MARKER"] === undefined
+      ? {}
+      : { backupMarker: process.env["SETUP_BACKUP_MARKER"] }),
+    backupMaxAgeSeconds: 93600,
+  }),
   identity: auth.identity,
   accounts: auth.accounts,
   ...(domains === undefined ? {} : { domains }),

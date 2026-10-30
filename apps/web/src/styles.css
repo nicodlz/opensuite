@@ -2109,3 +2109,68 @@ h1 {
 .domain-record code {
   overflow-wrap: anywhere;
 }
+
+.setup-steps ol {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1.5rem;
+}
+.setup-steps button {
+  width: 100%;
+  height: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  color: var(--foreground);
+  padding: 0.8rem;
+  cursor: pointer;
+}
+.setup-steps button[aria-current="step"] {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.setup-steps small {
+  display: block;
+  margin-top: 0.3rem;
+}
+.setup-panel h2 {
+  margin-bottom: 1rem;
+}
+.setup-panel p {
+  line-height: 1.6;
+  margin: 0.8rem 0;
+}
+.setup-panel .field {
+  margin-top: 1rem;
+}
+.setup-checks {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+}
+.setup-checks li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.setup-navigation,
+.setup-links {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1.5rem;
+}
+.setup-navigation {
+  justify-content: space-between;
+}
+@media (max-width: 760px) {
+  .setup-steps ol {
+    grid-template-columns: 1fr 1fr;
+  }
+}

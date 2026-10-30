@@ -1,5 +1,6 @@
 import { contract } from "@opensuite/contracts";
 import { implement, ORPCError } from "@orpc/server";
+import { setupRouter } from "./setup.ts";
 import { domainsRouter } from "./domains.ts";
 import { requireAdmin, requireSession } from "./session.ts";
 import type { ApiContext } from "./context.ts";
@@ -30,6 +31,7 @@ export const accountRouter = account.router({
 });
 export const adminRouter = admin.router({
   domains: domainsRouter,
+  setup: setupRouter,
   accounts: {
     list: admin.accounts.list.use(requireAdmin).handler(async ({ context }) => {
       if (context.accounts === undefined)
