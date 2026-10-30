@@ -193,6 +193,18 @@ services:
     env_file:
       - path: ${INGEST_ENV_FILE:-./deploy/ingest.env}
         required: false
+    # Delivers to every active mailbox linked in the database; the key
+    # decrypts their stored credentials.
+    environment:
+      MAILBOX_KEY_FILE: /run/opensuite/mailbox-key/password
+      INGEST_MAILBOX_ORIGIN: http://stalwart:8080
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/mailbox-key
+        read_only: true
+        volume:
+          subpath: mailbox-key
     healthcheck:
       test:
         [
