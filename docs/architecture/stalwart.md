@@ -8,6 +8,24 @@ The following were **verified on a local container, 2026-10-29**, with the pinne
 
 Default listeners were observed on ports 25, 465, 993, 995, 4190, 443 and 8080; 587 and 143 were not created by default. No TLS certificate was present by default. Discovery at `/.well-known/jmap` returned 307 to `/jmap/session`; an anonymous session returned 200 with no accounts. `/.well-known/caldav` redirected to `/dav/cal`, and `/.well-known/carddav` to `/dav/card`. `Http.clientIpSource` can trust `X-Forwarded-For`; loopback values were rejected. Restrict the trusted proxy chain and validate the actual Compose proxy and certificate configuration before exposure.
 
+## Management and mail TLS in Compose
+
+The recovery administrator is present only during the explicit bootstrap or
+recovery override. Normal setup and provisioning use a separate Admin account
+whose credential allows the private Compose management subnet. Caddy removes
+untrusted forwarded-address values and blocks clients from that subnet, while
+the mail server trusts one forwarded hop. Direct access to the internal mail
+listener is trusted; a compromised container on any network attached to
+Stalwart can spoof the forwarded header. Caddy cannot inspect JMAP JSON with its
+stock modules, so it does not block the management capability by body content.
+See [bootstrap and operations](../development.md#mail-bootstrap-and-upgrades).
+
+Caddy TLS and Stalwart TLS are separate. Mail ports bind to loopback until the
+operator exports Caddy's chain and key, configures Stalwart's file-backed
+certificate, verifies handshakes and explicitly changes the bind address.
+Renewal export and verification are operator responsibilities. Port 25 is not
+published in the standard stack; the documented fallback bypasses SES.
+
 ## JMAP
 
 - **Session:** [Stalwart's JMAP overview](https://stalw.art/docs/http/jmap/) documents discovery via `/.well-known/jmap`, the session resource and its `apiUrl`, `uploadUrl`, `downloadUrl`, account and capability information. Use advertised URLs and capabilities, not hard-coded account IDs. [Capabilities](https://stalw.art/docs/http/jmap/capabilities/) are permission-dependent. Method: official documentation.

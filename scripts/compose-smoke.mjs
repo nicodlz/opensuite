@@ -2,7 +2,7 @@
 // Starts a throwaway copy of the Compose stack, checks it end to end through
 // the reverse proxy, writes a JUnit report and always destroys the stack.
 //
-//   CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
+//   OPENSUITE_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 import { execFile } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import https from "node:https";
@@ -21,7 +21,7 @@ if (values.report === undefined) {
 }
 const reportPath = values.report;
 
-const runId = (process.env["CLEITO_RUN_ID"] ?? `local-${String(Date.now())}`)
+const runId = (process.env["OPENSUITE_RUN_ID"] ?? `local-${String(Date.now())}`)
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-");
 const project = `opensuite-smoke-${runId}`;
@@ -44,6 +44,23 @@ const compose = async (...args) => {
   const { stdout } = await run("docker", [...composeArgs, ...args], {
     maxBuffer: 16 * 1024 * 1024,
   });
+  return stdout;
+};
+
+/** @param {...string} args */
+const bootstrap = async (...args) => {
+  const { stdout } = await run(
+    "docker",
+    [
+      ...composeArgs,
+      "--file",
+      "deploy/stalwart/compose.bootstrap.yaml",
+      "--profile",
+      "bootstrap",
+      ...args,
+    ],
+    { maxBuffer: 16 * 1024 * 1024 },
+  );
   return stdout;
 };
 
@@ -223,6 +240,17 @@ try {
   await test("stack starts and every service reports healthy", async () => {
     // `--wait` treats finished one-shot jobs as failures, so wait for the
     // long-running services first, then run the settings job to completion.
+    await bootstrap("up", "-d", "--wait", "--wait-timeout", "300", "stalwart");
+    await bootstrap("run", "--rm", "--no-deps", "stalwart-bootstrap");
+    await compose(
+      "up",
+      "-d",
+      "--force-recreate",
+      "--wait",
+      "--wait-timeout",
+      "300",
+      "stalwart",
+    );
     const longRunning = [
       "caddy",
       "api",
@@ -277,10 +305,10 @@ try {
       "-T",
       "stalwart",
       "cat",
-      "/run/opensuite/stalwart-admin/password",
+      "/run/opensuite/stalwart-management/password",
     )
   ).trim();
-  const adminAuth = `Basic ${Buffer.from(`admin:${adminPassword}`).toString("base64")}`;
+  const adminAuth = `Basic ${Buffer.from(`management@opensuite.internal:${adminPassword}`).toString("base64")}`;
 
   await test("API liveness through the proxy over verified TLS", async () => {
     const res = await request(httpsPort, ca, "/api/health");
@@ -297,7 +325,7 @@ try {
     );
   });
 
-  await test("JMAP discovery leads to an authenticated session", async () => {
+  await test("JMAP discovery excludes the internal management account", async () => {
     const discovery = await request(httpsPort, ca, "/.well-known/jmap");
     assert(
       redirects.has(discovery.status),
@@ -320,17 +348,10 @@ try {
     const session = await request(httpsPort, ca, location.pathname, {
       authorization: adminAuth,
     });
-    assert(session.status === 200, `session status ${String(session.status)}`);
-    const body = parseJson(session.body);
     assert(
-      field(field(body, "capabilities"), "urn:ietf:params:jmap:core") !==
-        undefined,
-      "JMAP core capability missing",
+      session.status === 403,
+      `management session status ${String(session.status)}`,
     );
-    const username = field(body, "username");
-    assert(username === "admin", `session user ${String(username)}`);
-    const apiUrl = String(field(body, "apiUrl"));
-    assert(apiUrl.startsWith("https://localhost/"), `apiUrl ${apiUrl}`);
     const wrong = await request(httpsPort, ca, location.pathname, {
       authorization: `Basic ${Buffer.from("admin:wrong").toString("base64")}`,
     });
@@ -411,12 +432,8 @@ try {
       authorization: adminAuth,
     });
     assert(
-      session.status === 200,
-      `JMAP session status ${String(session.status)}`,
-    );
-    assert(
-      field(parseJson(session.body), "username") === "admin",
-      "authenticated session missing",
+      session.status === 403,
+      `management session status ${String(session.status)}`,
     );
     const banner = await smtpBanner(await hostPort("stalwart", "25"));
     assert(banner.startsWith("220 "), `banner ${banner.trim()}`);
