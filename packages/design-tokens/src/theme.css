@@ -38,7 +38,7 @@
   --radius-control: 6px;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+  :root[data-theme="system"] {
     color-scheme: dark;
     --background: var(--night);
     --surface: var(--night-soft);

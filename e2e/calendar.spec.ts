@@ -74,6 +74,10 @@ test("the event editor saves and reloads a reminder", async ({ page }) => {
 
 for (const theme of ["light", "dark"] as const) {
   test(`${theme} week, month and popovers are accessible`, async ({ page }) => {
+    await page.addInitScript(() => {
+      if (!localStorage.getItem("opensuite-theme"))
+        localStorage.setItem("opensuite-theme", "system");
+    });
     await page.emulateMedia({ colorScheme: theme });
     await open(page);
     await expect(chip(page, "Design review")).toBeVisible();

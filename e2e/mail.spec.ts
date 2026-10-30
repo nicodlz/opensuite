@@ -19,6 +19,10 @@ for (const theme of themes) {
     await page.route("https://images.example.test/**", (route) =>
       route.abort(),
     );
+    await page.addInitScript(() => {
+      if (!localStorage.getItem("opensuite-theme"))
+        localStorage.setItem("opensuite-theme", "system");
+    });
     await page.emulateMedia({ colorScheme: theme });
     await page.goto("/mail");
     await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
@@ -41,6 +45,28 @@ for (const theme of themes) {
     await axe(page);
   });
 }
+test("mail folders keep Inbox first regardless of server order", async ({
+  page,
+}) => {
+  await page.goto("/mail");
+  const folders = page.getByRole("navigation", { name: "Mail folders" });
+  await expect(folders.locator(".shell-nav-label")).toHaveText([
+    "Inbox",
+    "Drafts",
+    "Sent",
+    "Archive",
+    "Junk Mail",
+    "Trash",
+    "Work",
+  ]);
+  await expect(folders.getByRole("button", { name: /Inbox/ })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await folders.getByRole("button", { name: "Junk Mail" }).click();
+  await expect(page.getByRole("heading", { name: "Junk Mail" })).toBeVisible();
+  await expect(folders.getByText("Labels")).toBeVisible();
+});
 test("keyboard navigation, compose, send, reply and search", async ({
   page,
 }) => {
