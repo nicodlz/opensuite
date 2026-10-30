@@ -398,7 +398,13 @@ export async function recoverObjects(
   await inTurn(keys.value, async (key) => {
     const body = await storage.readArchive(key);
     // A setup test carries no mail, archived or not.
-    if (body.isOk() && isSetupNotice(body.value, scope)) return;
+    // An intact setup test carries no mail; a replaced entry is not skipped.
+    if (
+      body.isOk() &&
+      namedAfter(key, body.value) &&
+      isSetupNotice(body.value, scope)
+    )
+      return;
     const parsed =
       body.isOk() && namedAfter(key, body.value)
         ? parseNotification(body.value)

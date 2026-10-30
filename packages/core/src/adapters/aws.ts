@@ -320,11 +320,15 @@ export function awsRecovery(
     archiveState(key) {
       return ResultAsync.fromPromise(
         (async () => {
-          if (!(await exists(archive, archiveBucket, prefix + key)))
-            return "absent" as const;
-          const stored = new TextDecoder().decode(
-            await read(archive, archiveBucket, prefix + key),
-          );
+          // One read: a missing entry answers 404.
+          let bytes: Uint8Array;
+          try {
+            bytes = await read(archive, archiveBucket, prefix + key);
+          } catch (cause) {
+            if (statusOf(cause) === 404) return "absent" as const;
+            throw cause;
+          }
+          const stored = new TextDecoder().decode(bytes);
           return namedAfter(key, stored)
             ? ("present" as const)
             : ("changed" as const);

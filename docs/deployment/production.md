@@ -766,12 +766,15 @@ ingestion and subscription DLQs before their 14 days run out.
    every stored version of that key, reporting `changed` (and exiting with
    an error) if any holds other content. Another writer creating the entry
    between that check and the write would see its version superseded but
-   kept by B2, and the run reports it; one writing after the run is caught
-   later, as entries are named after the SHA-256 of their content: replay
-   and `recover objects` refuse an entry whose content no longer matches
-   its name (`archive_mismatch`), and recovery reports an existing entry in
-   that state as `changed` instead of skipping it. The earlier versions B2
-   keeps allow restoring an entry by hand.
+   kept by B2, and the run reports it. A writer acting after the run's
+   version check goes unnoticed by that run and is caught later, as
+   entries are named after the SHA-256 of their content: replay and
+   `recover objects` refuse an entry whose content no longer matches its
+   name (`archive_mismatch`), and recovery reports an existing entry in
+   that state as `changed` instead of skipping it. A rerun does not clear
+   a `changed`: the current version is then this run's, so examine the
+   earlier versions B2 keeps (and the run's report and audit entry) before
+   anything else; they allow restoring an entry by hand.
 
 4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
    `--apply`. Investigate every `unrecoverable` message (its original is

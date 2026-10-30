@@ -625,6 +625,39 @@ describe("archive integrity", () => {
     expect(stages).toEqual(["archive_mismatch"]);
     expect(memory.imports).toHaveLength(0);
   });
+
+  it("does not let a replacement shaped like SES's setup test hide", async () => {
+    const memory = synthetic();
+    const stages: unknown[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event, fields) {
+          if (event === "ingest_failure") stages.push(fields["stage"]);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    const original = JSON.stringify(notification(["alice@example.test"]));
+    const n = notification(
+      ["alice@example.test"],
+      "PASS",
+      "AMAZON_SES_SETUP_NOTIFICATION",
+    );
+    const { dmarcVerdict: _dmarc, ...receipt } = n.receipt;
+    memory.archives.set(
+      `notifications/${archiveKey(original)}`,
+      JSON.stringify({ ...n, receipt }),
+    );
+    expect((await service.reconcile(86_400 * 3650)).isErr()).toBe(true);
+    expect(stages).toEqual(["archive_mismatch"]);
+  });
 });
 
 describe("SES setup tests", () => {

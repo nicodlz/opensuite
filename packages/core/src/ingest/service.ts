@@ -446,12 +446,14 @@ export class IngestService {
         });
         return;
       }
-      if (isSetupNotice(body.value, this.deps)) return;
       if (!namedAfter(key, body.value)) {
         failures++;
         this.deps.events.emit("ingest_failure", { stage: "archive_mismatch" });
         return;
       }
+      // An intact setup test carries no mail; checked after integrity, so a
+      // replaced entry cannot hide behind that shape.
+      if (isSetupNotice(body.value, this.deps)) return;
       const n = parseNotification(body.value);
       if (n.isErr()) {
         failures++;
