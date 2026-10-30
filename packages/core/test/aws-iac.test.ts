@@ -70,7 +70,7 @@ const originalBucketStatements = [
 const originalTopicStatements = [
   `statement {
     sid = "AccountAdministration"
-    actions = ["SNS:*"]
+    actions = ["SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission", "SNS:RemovePermission", "SNS:DeleteTopic", "SNS:Subscribe", "SNS:ListSubscriptionsByTopic", "SNS:Publish"]
     resources = [aws_sns_topic.inbound.arn]
     principals { type = "AWS" identifiers = ["arn:\${data.aws_partition.current.partition}:iam::\${data.aws_caller_identity.current.account_id}:root"] }
   }`,
@@ -142,7 +142,7 @@ describe("AWS infrastructure ownership and complete policies", () => {
     );
   });
 
-  it("preserves each original topic policy statement and adds a scoped rule", () => {
+  it("preserves the reconciled topic policy statements and adds a scoped rule", () => {
     const source = readModule("messaging.tf");
     const policy = statements(
       block(source, 'data "aws_iam_policy_document" "topic"'),
@@ -169,5 +169,135 @@ describe("AWS infrastructure ownership and complete policies", () => {
     expect(
       block(source, 'resource "aws_sns_topic_policy" "inbound"'),
     ).toContain("policy = data.aws_iam_policy_document.topic.json");
+  });
+
+  it("limits lifecycle expiration to noncurrent versions in the Esuno prefix", () => {
+    const lifecycle = block(
+      readModule("storage.tf"),
+      'resource "aws_s3_bucket_lifecycle_configuration" "buffer"',
+    );
+    expect(normalize(lifecycle)).toBe(
+      normalize(`resource "aws_s3_bucket_lifecycle_configuration" "buffer" {
+        bucket = aws_s3_bucket.buffer.id
+        rule {
+          id = "esuno-recover-deleted-messages"
+          status = "Enabled"
+          filter { prefix = var.esuno_message_prefix }
+          noncurrent_version_expiration { noncurrent_days = 30 }
+        }
+      }`),
+    );
+  });
+
+  it("limits worker deletion and SMTP sending to the configured Esuno scope", () => {
+    const source = readModule("iam.tf");
+    const ingestion = block(
+      source,
+      'resource "aws_iam_user_policy" "ingestion"',
+    );
+    expect(ingestion).not.toContain("s3:DeleteObject");
+    const deletion = block(
+      source,
+      'resource "aws_iam_user_policy" "ingest_esuno_delete"',
+    );
+    expect(normalize(deletion)).toBe(
+      normalize(`resource "aws_iam_user_policy" "ingest_esuno_delete" {
+        name = "\${var.name_prefix}-esuno-delete"
+        user = aws_iam_user.ingestion.name
+        policy = jsonencode({
+          Version = "2012-10-17"
+          Statement = [{
+            Effect = "Allow"
+            Action = "s3:DeleteObject"
+            Resource = "\${aws_s3_bucket.buffer.arn}/\${var.esuno_message_prefix}*"
+          }]
+        })
+      }`),
+    );
+    const sending = block(source, 'resource "aws_iam_user_policy" "sending"');
+    expect(normalize(sending)).toBe(
+      normalize(`resource "aws_iam_user_policy" "sending" {
+        name = var.sending_policy_name
+        user = var.sending_iam_user_name
+        policy = jsonencode({
+          Version = "2012-10-17"
+          Statement = [{
+            Sid = "SendFromEsunoOnly"
+            Effect = "Allow"
+            Action = "ses:SendRawEmail"
+            Resource = [for domain in sort(tolist(var.esuno_sending_domains)) : "arn:\${data.aws_partition.current.partition}:ses:\${var.region}:\${data.aws_caller_identity.current.account_id}:identity/\${domain}"]
+            Condition = {
+              StringLike = { "ses:FromAddress" = [for domain in sort(tolist(var.esuno_sending_domains)) : "*@\${domain}"] }
+            }
+          }]
+        })
+      }`),
+    );
+  });
+
+  it("enforces AES-GCM encryption for state and plans", () => {
+    const encryption = block(readModule("encryption.tf"), "encryption");
+    expect(normalize(block(encryption, 'key_provider "pbkdf2" "local"'))).toBe(
+      normalize('key_provider "pbkdf2" "local" { passphrase = var.state_key }'),
+    );
+    expect(normalize(block(encryption, 'method "aes_gcm" "local"'))).toBe(
+      normalize(
+        'method "aes_gcm" "local" { keys = key_provider.pbkdf2.local }',
+      ),
+    );
+    for (const name of ["state", "plan"]) {
+      expect(normalize(block(encryption, `\n    ${name}`))).toBe(
+        normalize(`${name} { method = method.aes_gcm.local enforced = true }`),
+      );
+    }
+  });
+
+  it("denies insecure queue access without blocking AWS service principals", () => {
+    const queue = block(
+      readModule("messaging.tf"),
+      'data "aws_iam_policy_document" "queue"',
+    );
+    expect(statements(queue).get("DenyInsecureTransport")).toBe(
+      normalize(`statement {
+        sid = "DenyInsecureTransport"
+        effect = "Deny"
+        actions = ["sqs:*"]
+        resources = [each.value]
+        principals { type = "*" identifiers = ["*"] }
+        condition { test = "Bool" variable = "aws:SecureTransport" values = ["false"] }
+        condition { test = "Bool" variable = "aws:PrincipalIsAWSService" values = ["false"] }
+      }`),
+    );
+    expect(queue).toContain("ingestion        = aws_sqs_queue.ingestion.arn");
+    expect(queue).toContain(
+      "subscription_dlq = aws_sqs_queue.subscription_dlq.arn",
+    );
+  });
+
+  it("moves adopted addresses and forgets former owners without destruction", () => {
+    const source = readModule("state-transitions.tf");
+    const moved = [...source.matchAll(/^moved\s*\{/gm)].map((match) =>
+      normalize(block(source, "moved", match.index)),
+    );
+    expect(moved).toEqual([
+      normalize(`moved {
+        from = aws_s3_bucket_lifecycle_configuration.esuno_buffer
+        to = aws_s3_bucket_lifecycle_configuration.buffer
+      }`),
+      normalize(`moved {
+        from = aws_iam_user_policy.esuno_smtp
+        to = aws_iam_user_policy.sending
+      }`),
+    ]);
+    const removed = [...source.matchAll(/^removed\s*\{/gm)].map((match) =>
+      normalize(block(source, "removed", match.index)),
+    );
+    // In pinned OpenTofu 1.9, removed blocks forget objects without lifecycle syntax.
+    expect(removed).toEqual([
+      normalize("removed { from = aws_ses_domain_identity.domain }"),
+      normalize("removed { from = aws_ses_domain_dkim.domain }"),
+      normalize("removed { from = aws_ses_domain_mail_from.domain }"),
+      normalize("removed { from = aws_iam_user.sending }"),
+    ]);
   });
 });

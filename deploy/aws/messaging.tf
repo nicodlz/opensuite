@@ -5,7 +5,7 @@ resource "aws_sns_topic" "inbound" {
 data "aws_iam_policy_document" "topic" {
   statement {
     sid       = "AccountAdministration"
-    actions   = ["SNS:*"]
+    actions   = ["SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission", "SNS:RemovePermission", "SNS:DeleteTopic", "SNS:Subscribe", "SNS:ListSubscriptionsByTopic", "SNS:Publish"]
     resources = [aws_sns_topic.inbound.arn]
     principals {
       type        = "AWS"

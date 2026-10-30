@@ -148,19 +148,44 @@ account and region. These are account and state operations, not offline checks:
    subscriptions, Firehose, IAM users/roles and inline policies, and alarms as
    applicable. Import the original active-rule-set resource only if that set is
    already active and `activate_rule_set` is true. Do not import SES identities,
-   DKIM or MAIL FROM into this module. If older state already tracks those, back
-   up state and coordinate removal of their addresses from state without deleting
-   the AWS objects (including `aws_ses_domain_identity.domain`,
-   `aws_ses_domain_dkim.domain`, and `aws_ses_domain_mail_from.domain` instances).
-   Likewise, if it tracks `aws_iam_user.sending`, hand that user to its external
-   owner without deleting it. Reconcile the old sending inline policy's address,
-   name and user with the existing policy before importing or moving state; do
-   not leave a second broad policy attached unnoticed.
+   DKIM or MAIL FROM into this module. The old adopted state addresses
+   `aws_s3_bucket_lifecycle_configuration.esuno_buffer` and
+   `aws_iam_user_policy.esuno_smtp` move to
+   `aws_s3_bucket_lifecycle_configuration.buffer` and
+   `aws_iam_user_policy.sending` respectively via `moved` blocks. Do not import
+   objects already in that state; if both the old and new addresses are present,
+   stop and reconcile ownership rather than creating duplicates. A pending move
+   appears in the plan even when it proposes no remote changes. To obtain a
+   strictly empty adoption plan without applying, an operator may perform the
+   corresponding `tofu state mv` as a separately approved state-only transition
+   after backing up state and verifying both addresses. For an object not yet in
+   state, import to the new address. For example, supply the existing
+   `SENDING_USER` and `SENDING_POLICY` and use:
+
+   ```sh
+   tofu import -var-file="$VARS" aws_iam_user_policy.sending "$SENDING_USER:$SENDING_POLICY"
+   ```
+
+   Reconcile the policy name, user, and any other inline or attached policies;
+   do not leave a second broad policy attached unnoticed. If older state tracks
+   `aws_ses_domain_identity.domain`, `aws_ses_domain_dkim.domain`,
+   `aws_ses_domain_mail_from.domain` or `aws_iam_user.sending`, the module's
+   `removed` blocks protect those objects from destruction. OpenTofu 1.9.1
+   forgets them without destroying them; its `removed` syntax does not support
+   the nested lifecycle block introduced in 1.10. The plan will show pending
+   state removals, so it will not yet be empty. To meet the empty-plan adoption
+   requirement, back up and verify the state, coordinate the handoff, and have
+   the operator perform a separately approved state-only removal of those
+   addresses (for example, `tofu state rm` for each tracked resource) before
+   re-planning. Never delete the remote objects. The `removed` blocks also
+   protect against destruction if tracked instances remain in another state.
 
 4. Run a real `tofu plan` with the intended variables and encrypted state. It
    **must be empty** after adoption: resolve every proposed creation, deletion,
    replacement, policy, lifecycle, queue name, recipient, IAM or activation
-   change with the operator and repeat the plan. In particular, ignored
+   change with the operator and repeat the plan. Inspect the move annotations
+   and confirm no replacements, deletions, or unintended policy changes; a
+   state move is not itself proof that the remote attributes match. In particular, ignored
    recipients will not show drift, so inspect them directly in AWS. Queue
    `max_message_size` drift is also intentionally ignored; inspect it separately.
    The queue defaults now derive as `<prefix>-inbound` and
