@@ -1,10 +1,16 @@
 #!/bin/sh
 set -eu
+# The public vault must not share the application origin or an implicit port.
+[ "$PASS_HTTPS_PORT" = 443 ] || { echo 'Pass requires HTTPS_PORT=443.' >&2; exit 1; }
+site=$(printf '%s' "$PASS_MAIN_SITE_ADDRESS" | tr '[:upper:]' '[:lower:]')
+site=${site#https://}; site=${site#http://}; site=${site%%/*}; site=${site%%:*}
+pass_host=$(printf '%s' "$PASS_PUBLIC_HOST" | tr '[:upper:]' '[:lower:]')
+[ -n "$pass_host" ] && [ "$pass_host" != "$site" ] || { echo 'Pass requires a separate public hostname.' >&2; exit 1; }
 # Saved admin settings override environment values. Fail closed on Unicode
 # escapes, which could otherwise disguise the setting's name or value.
 if [ -f /data/config.json ] && [ "$PASS_ALLOW_SAVED_SIGNUPS" != true ]; then
-  if ! perl -0777 -ne 'exit((/\\u[0-9a-fA-F]{4}/ || /"signups_allowed"\s*:\s*true\b/) ? 1 : 0)' /data/config.json; then
-    echo 'Pass saved configuration may enable signups; review it or explicitly allow saved signups.' >&2
+  if ! perl -0777 -ne 'exit((/\\u[0-9a-fA-F]{4}/ || /"(?:signups_allowed|disable_admin_token)"\s*:\s*true\b/ || /"signups_domains_whitelist"\s*:\s*"[^"]/ || /"admin_token"\s*:\s*(?!null\b)/) ? 1 : 0)' /data/config.json; then
+    echo 'Pass saved configuration contains a restricted setting; review it or explicitly allow saved settings.' >&2
     exit 1
   fi
 fi

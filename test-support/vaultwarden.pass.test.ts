@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,11 +9,16 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { z } from "zod";
 
 const run = promisify(execFile);
-const id = randomBytes(5).toString("hex");
-const project = `opensuite-pass-${id}`;
-const octet = (randomBytes(1).readUInt8() % 200) + 20;
+const suffix = (process.env["OPENSUITE_RUN_ID"] ?? "local")
+  .toLowerCase()
+  .replace(/[^a-z0-9-]/g, "-")
+  .slice(0, 30);
+const project = `opensuite-pass-${suffix}-${String(process.pid)}`;
+const octet = (process.pid % 200) + 20;
 const env = {
   ...process.env,
+  COMPOSE_PROFILES: "",
+  HTTPS_PORT: "443",
   DRIVE_S3_ENDPOINT: "http://fixture.invalid",
   DRIVE_S3_PUBLIC_ENDPOINT: "http://fixture.invalid",
   DRIVE_S3_BUCKET: "fixture",
@@ -23,11 +28,67 @@ const env = {
   PASS_PUBLIC_HOST: "pass.localhost",
   PASS_ADMIN_TOKEN_FILE: "/dev/null",
   PASS_ALLOW_SAVED_SIGNUPS: "false",
+  PASS_CADDY_IP: `10.239.${String(octet)}.2`,
+  PASS_LOGIN_RATELIMIT_SECONDS: "3600",
+  PASS_LOGIN_RATELIMIT_MAX_BURST: "2",
   PASS_TEST_API_SUBNET: `10.240.${String(octet)}.0/24`,
   PASS_TEST_API_IP: `10.240.${String(octet)}.2`,
   PASS_TEST_SUBNET: `10.239.${String(octet)}.0/24`,
   PASS_TEST_DYNAMIC_RANGE: `10.239.${String(octet)}.128/25`,
   PASS_TEST_PROXY_IP: `10.239.${String(octet)}.2`,
+};
+const ipNumber = (ip: string) =>
+  ip.split(".").reduce((value, part) => value * 256 + Number(part), 0);
+// Select unused /24s from Docker's current IPAM allocations. Each run uses
+// separate networks for the API proxy and the Pass proxy.
+const chooseSubnets = async () => {
+  const ids = (await run("docker", ["network", "ls", "-q"])).stdout
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const allocated = z
+    .array(
+      z.object({
+        IPAM: z.object({
+          Config: z
+            .array(z.object({ Subnet: z.string().optional() }))
+            .nullable(),
+        }),
+      }),
+    )
+    .parse(
+      JSON.parse((await run("docker", ["network", "inspect", ...ids])).stdout),
+    );
+  const ranges = allocated.flatMap((network) =>
+    (network.IPAM.Config ?? []).flatMap(({ Subnet }) => {
+      if (!Subnet || Subnet.includes(":")) return [];
+      const [ip, bits] = Subnet.split("/");
+      if (!ip || !bits) return [];
+      const size = 2 ** (32 - Number(bits));
+      const start = Math.floor(ipNumber(ip) / size) * size;
+      return [{ start, end: start + size - 1 }];
+    }),
+  );
+  for (let offset = 0; offset < 200; offset += 1) {
+    const candidate = ((octet + offset - 20) % 200) + 20;
+    const bases = [239, 240].map((second) =>
+      ipNumber(`10.${String(second)}.${String(candidate)}.0`),
+    );
+    if (
+      bases.every((base) =>
+        ranges.every(({ start, end }) => base > end || base + 255 < start),
+      )
+    ) {
+      env.PASS_TEST_SUBNET = `10.239.${String(candidate)}.0/24`;
+      env.PASS_TEST_DYNAMIC_RANGE = `10.239.${String(candidate)}.128/25`;
+      env.PASS_TEST_PROXY_IP = `10.239.${String(candidate)}.2`;
+      env.PASS_CADDY_IP = env.PASS_TEST_PROXY_IP;
+      env.PASS_TEST_API_SUBNET = `10.240.${String(candidate)}.0/24`;
+      env.PASS_TEST_API_IP = `10.240.${String(candidate)}.2`;
+      return;
+    }
+  }
+  throw new Error("No free disposable proxy subnets");
 };
 const args = [
   "compose",
@@ -69,7 +130,7 @@ const sql = (database: string, statement: string) =>
     "-c",
     statement,
   );
-const port = async (service: string, internal = "80") => {
+const port = async (service: string, internal = "8080") => {
   const result = /:(\d+)\s*$/.exec(
     await compose("port", service, internal),
   )?.[1];
@@ -138,70 +199,127 @@ const cleanup = async () => {
   }
 };
 
+const prepareSecrets = async () => {
+  fixtureDirectory = await mkdtemp(join(tmpdir(), "opensuite-pass-"));
+  const adminFile = join(fixtureDirectory, "admin-phc");
+  const salt = randomBytes(16).toString("base64").replace(/=+$/, "");
+  const hash = randomBytes(32).toString("base64").replace(/=+$/, "");
+  await writeFile(adminFile, `$argon2id$v=19$m=19456,t=2,p=1$${salt}$${hash}`, {
+    mode: 0o600,
+  });
+  await run("chmod", ["755", fixtureDirectory]);
+  await run("chmod", ["644", adminFile]);
+  env.PASS_ADMIN_TOKEN_FILE = adminFile;
+};
+const provisionExistingDatabase = async () => {
+  // Initialize the volume without Pass, as on an existing installation.
+  await compose("up", "-d", "--wait", "--wait-timeout", "180", "postgres");
+  await sql(
+    "postgres",
+    "CREATE ROLE opensuite_app LOGIN; CREATE ROLE opensuite_drive LOGIN",
+  );
+  beforeProvision = await sql(
+    "postgres",
+    "SELECT count(*) FROM pg_database WHERE datname='opensuite_pass'",
+  );
+  await sql("postgres", "CREATE DATABASE opensuite_pass");
+  try {
+    await compose("run", "--rm", "--no-deps", "pass-provision");
+    throw new Error("Foreign-owned database was accepted");
+  } catch (error) {
+    conflictMessage = error instanceof Error ? error.message : "";
+  }
+  await sql("postgres", "DROP DATABASE opensuite_pass");
+  await sql(
+    "postgres",
+    "DO $$ BEGIN EXECUTE format('CREATE ROLE opensuite_pass LOGIN PASSWORD %L', md5(random()::text)); END $$; CREATE TABLE pass_old_verifier AS SELECT rolpassword FROM pg_authid WHERE rolname='opensuite_pass'",
+  );
+  await compose("run", "--rm", "--no-deps", "pass-provision");
+  passwordRotated = await sql(
+    "postgres",
+    "SELECT rolpassword <> (SELECT rolpassword FROM pass_old_verifier) FROM pg_authid WHERE rolname='opensuite_pass'",
+  );
+  afterFirstProvision = await sql(
+    "postgres",
+    "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='opensuite_pass'",
+  );
+  await compose("run", "--rm", "--no-deps", "pass-provision");
+  afterSecondProvision = await sql(
+    "postgres",
+    "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='opensuite_pass'",
+  );
+};
+const startServices = async () => {
+  await compose("up", "-d", "--wait", "--wait-timeout", "180", "pass", "caddy");
+  proxy = await port("caddy", "443");
+  ca = await compose(
+    "exec",
+    "-T",
+    "caddy",
+    "cat",
+    "/data/caddy/pki/authorities/local/root.crt",
+  );
+  direct = await port("pass");
+};
+
+const writeConfig = (config: string) =>
+  new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      "docker",
+      [
+        ...args,
+        "run",
+        "--rm",
+        "-T",
+        "--no-deps",
+        "--entrypoint",
+        "/bin/sh",
+        "pass",
+        "-c",
+        "cat > /data/config.json",
+      ],
+      { env, stdio: ["pipe", "ignore", "ignore"] },
+    );
+    child.on("error", reject);
+    child.on("exit", (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error("Could not write fixture config")),
+    );
+    child.stdin.end(config);
+  });
+
+const spoofedHeaders = (index: number) => ({
+  "content-type": "application/x-www-form-urlencoded",
+  "x-real-ip": `198.51.100.${String(index)}`,
+  "x-forwarded-for": `203.0.113.${String(index)}`,
+});
+
+const connectAsPass = (database: string) =>
+  compose(
+    "run",
+    "--rm",
+    "-T",
+    "--no-deps",
+    "--entrypoint",
+    "/bin/sh",
+    "pass-provision",
+    "-c",
+    'export PGPASSWORD="$(cat /run/opensuite/pass-database/password)"; exec psql -h postgres -U opensuite_pass -d "$1" -c "SELECT 1"',
+    "sh",
+    database,
+  );
+
+const runWith = (name: string, value: string) =>
+  compose("run", "--rm", "-T", "--no-deps", "-e", `${name}=${value}`, "pass");
+
 describe("Pass Compose integration", () => {
   beforeAll(async () => {
     try {
-      fixtureDirectory = await mkdtemp(join(tmpdir(), "opensuite-pass-"));
-      const adminFile = join(fixtureDirectory, "admin-phc");
-      const salt = randomBytes(16).toString("base64").replace(/=+$/, "");
-      const hash = randomBytes(32).toString("base64").replace(/=+$/, "");
-      await writeFile(
-        adminFile,
-        `$argon2id$v=19$m=19456,t=2,p=1$${salt}$${hash}`,
-        { mode: 0o600 },
-      );
-      env.PASS_ADMIN_TOKEN_FILE = adminFile;
-      // Initialize the volume without Pass, as on an existing installation.
-      await compose("up", "-d", "--wait", "--wait-timeout", "180", "postgres");
-      await sql("postgres", "CREATE ROLE opensuite_app LOGIN");
-      beforeProvision = await sql(
-        "postgres",
-        "SELECT count(*) FROM pg_database WHERE datname='opensuite_pass'",
-      );
-      await sql("postgres", "CREATE DATABASE opensuite_pass");
-      try {
-        await compose("run", "--rm", "--no-deps", "pass-provision");
-        throw new Error("Foreign-owned database was accepted");
-      } catch (error) {
-        conflictMessage = error instanceof Error ? error.message : "";
-      }
-      await sql("postgres", "DROP DATABASE opensuite_pass");
-      await sql(
-        "postgres",
-        "DO $$ BEGIN EXECUTE format('CREATE ROLE opensuite_pass LOGIN PASSWORD %L', md5(random()::text)); END $$; CREATE TABLE pass_old_verifier AS SELECT rolpassword FROM pg_authid WHERE rolname='opensuite_pass'",
-      );
-      await compose("run", "--rm", "--no-deps", "pass-provision");
-      passwordRotated = await sql(
-        "postgres",
-        "SELECT rolpassword <> (SELECT rolpassword FROM pass_old_verifier) FROM pg_authid WHERE rolname='opensuite_pass'",
-      );
-      afterFirstProvision = await sql(
-        "postgres",
-        "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='opensuite_pass'",
-      );
-      await compose("run", "--rm", "--no-deps", "pass-provision");
-      afterSecondProvision = await sql(
-        "postgres",
-        "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='opensuite_pass'",
-      );
-      await compose(
-        "up",
-        "-d",
-        "--wait",
-        "--wait-timeout",
-        "180",
-        "pass",
-        "caddy",
-      );
-      proxy = await port("caddy", "443");
-      ca = await compose(
-        "exec",
-        "-T",
-        "caddy",
-        "cat",
-        "/data/caddy/pki/authorities/local/root.crt",
-      );
-      direct = await port("pass");
+      await chooseSubnets();
+      await prepareSecrets();
+      await provisionExistingDatabase();
+      await startServices();
     } catch (error) {
       await cleanup();
       throw error;
@@ -222,6 +340,34 @@ describe("Pass Compose integration", () => {
     expect(health.status).toBe(200);
   });
 
+  test("rejects a shared site origin and a nonstandard HTTPS port", async () => {
+    await expect(runWith("PASS_PUBLIC_HOST", "localhost")).rejects.toThrow(
+      "separate public hostname",
+    );
+    await expect(runWith("PASS_HTTPS_PORT", "8443")).rejects.toThrow(
+      "requires HTTPS_PORT=443",
+    );
+  }, 120_000);
+
+  test("runs as a non-root user with a read-only root filesystem", async () => {
+    expect((await compose("exec", "-T", "pass", "id", "-u")).trim()).toBe(
+      "1000",
+    );
+    await expect(
+      compose("exec", "-T", "pass", "touch", "/root-fs-probe"),
+    ).rejects.toThrow("Command failed");
+    const container = (await compose("ps", "-q", "pass")).trim();
+    const options = (
+      await run("docker", [
+        "inspect",
+        "--format",
+        "{{.HostConfig.ReadonlyRootfs}}",
+        container,
+      ])
+    ).stdout.trim();
+    expect(options).toBe("true");
+  });
+
   test("migrates tables under the dedicated database role", async () => {
     const owners = await sql(
       "opensuite_pass",
@@ -233,7 +379,20 @@ describe("Pass Compose integration", () => {
       "SELECT has_database_privilege('opensuite_pass','opensuite_pass','CONNECT'), has_database_privilege('opensuite_app','opensuite_pass','CONNECT')",
     );
     expect(rights.trim()).toBe("t|f");
-  });
+    const isolation = await sql(
+      "postgres",
+      "SELECT has_database_privilege('opensuite_pass','opensuite','CONNECT'), has_database_privilege('opensuite_pass','opensuite_drive','CONNECT'), has_database_privilege('opensuite_app','opensuite','CONNECT'), has_database_privilege('opensuite_drive','opensuite_drive','CONNECT')",
+    );
+    expect(isolation.trim()).toBe("f|f|t|t");
+    await Promise.all(
+      ["opensuite", "opensuite_drive"].map(async (database) => {
+        await expect(connectAsPass(database)).rejects.toThrow(
+          "permission denied",
+        );
+      }),
+    );
+    expect(await connectAsPass("opensuite_pass")).toContain("1");
+  }, 120_000);
 
   test("serves the client configuration through Caddy", async () => {
     const response = await request("/api/config");
@@ -319,6 +478,17 @@ describe("Pass Compose integration", () => {
     const key = (
       await compose("exec", "-T", "pass", "sha256sum", "/data/rsa_key.pem")
     ).trim();
+    await compose("stop", "pass");
+    await compose(
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      "--wait",
+      "--wait-timeout",
+      "180",
+      "postgres",
+    );
     await compose(
       "up",
       "-d",
@@ -329,6 +499,7 @@ describe("Pass Compose integration", () => {
       "180",
       "pass",
     );
+    direct = await port("pass");
     expect(
       (
         await compose("exec", "-T", "pass", "sha256sum", "/data/rsa_key.pem")
@@ -340,6 +511,58 @@ describe("Pass Compose integration", () => {
       ).trim(),
     ).toBe("disposable-marker");
     expect((await request("/api/config")).status).toBe(200);
+  }, 240_000);
+
+  test("ignores spoofed client IP headers on public and loopback listeners", async () => {
+    const body = new URLSearchParams({
+      grant_type: "password",
+      client_id: "web",
+      password: "disposable",
+      scope: "api offline_access",
+      username: "nobody@example.invalid",
+      device_identifier: "00000000-0000-4000-8000-000000000001",
+      device_name: "fixture",
+      device_type: "14",
+    }).toString();
+    const directAttempt = async (index: number) =>
+      (
+        await fetch(`http://127.0.0.1:${direct}/identity/connect/token`, {
+          method: "POST",
+          headers: spoofedHeaders(index),
+          body,
+        })
+      ).status;
+    const directStatuses = [
+      await directAttempt(1),
+      await directAttempt(2),
+      await directAttempt(3),
+    ];
+    expect(directStatuses).toEqual([400, 400, 429]);
+    await compose(
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      "--wait",
+      "--wait-timeout",
+      "180",
+      "pass",
+    );
+    direct = await port("pass");
+    const proxyAttempt = async (index: number) =>
+      (
+        await request("/identity/connect/token", {
+          method: "POST",
+          headers: spoofedHeaders(index),
+          body,
+        })
+      ).status;
+    const proxyStatuses = [
+      await proxyAttempt(1),
+      await proxyAttempt(2),
+      await proxyAttempt(3),
+    ];
+    expect(proxyStatuses).toEqual([400, 400, 429]);
   }, 240_000);
 
   test("isolates the Pass listener on its own network", async () => {
@@ -357,8 +580,49 @@ describe("Pass Compose integration", () => {
   });
 
   test("guards saved signup settings on startup", async () => {
-    const writeConfig = (config: string) =>
-      compose(
+    try {
+      await compose("stop", "pass");
+      await [
+        '{"disable_admin_token":true}',
+        '{"signups_domains_whitelist":"example.invalid"}',
+        '{"admin_token":"fixture"}',
+      ].reduce(async (previous, config) => {
+        await previous;
+        await writeConfig(config);
+        await expect(
+          compose("run", "--rm", "-T", "--no-deps", "pass"),
+        ).rejects.toThrow("restricted setting");
+      }, Promise.resolve());
+      await writeConfig('{"signups_allowed":true}');
+      await expect(
+        compose(
+          "up",
+          "-d",
+          "--no-deps",
+          "--force-recreate",
+          "--wait",
+          "--wait-timeout",
+          "20",
+          "pass",
+        ),
+      ).rejects.toThrow("Command failed");
+      expect(await compose("logs", "--no-color", "pass")).toContain(
+        "saved configuration contains a restricted setting",
+      );
+      env.PASS_ALLOW_SAVED_SIGNUPS = "true";
+      await compose(
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        "--wait",
+        "--wait-timeout",
+        "180",
+        "pass",
+      );
+      expect((await request("/api/config")).status).toBe(200);
+      await compose("stop", "pass");
+      await compose(
         "run",
         "--rm",
         "--no-deps",
@@ -366,49 +630,22 @@ describe("Pass Compose integration", () => {
         "/bin/sh",
         "pass",
         "-c",
-        `printf '%s' '${config}' > /data/config.json`,
+        "rm /data/config.json",
       );
-    await compose("stop", "pass");
-    await writeConfig('{"signups_allowed":true}');
-    await expect(
-      compose(
-        "up",
-        "-d",
+    } finally {
+      env.PASS_ALLOW_SAVED_SIGNUPS = "false";
+      await compose(
+        "run",
+        "--rm",
+        "-T",
         "--no-deps",
-        "--force-recreate",
-        "--wait",
-        "--wait-timeout",
-        "20",
+        "--entrypoint",
+        "/bin/sh",
         "pass",
-      ),
-    ).rejects.toThrow("Command failed");
-    expect(await compose("logs", "--no-color", "pass")).toContain(
-      "saved configuration may enable signups",
-    );
-    env.PASS_ALLOW_SAVED_SIGNUPS = "true";
-    await compose(
-      "up",
-      "-d",
-      "--no-deps",
-      "--force-recreate",
-      "--wait",
-      "--wait-timeout",
-      "180",
-      "pass",
-    );
-    expect((await request("/api/config")).status).toBe(200);
-    await compose("stop", "pass");
-    await compose(
-      "run",
-      "--rm",
-      "--no-deps",
-      "--entrypoint",
-      "/bin/sh",
-      "pass",
-      "-c",
-      "rm /data/config.json",
-    );
-    env.PASS_ALLOW_SAVED_SIGNUPS = "false";
+        "-c",
+        "rm -f /data/config.json",
+      );
+    }
     await compose(
       "up",
       "-d",

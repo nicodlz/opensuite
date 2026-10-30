@@ -16,22 +16,17 @@ if ! psql -X -q -h postgres -U "$POSTGRES_USER" -d postgres -c 'SELECT 1' >/dev/
   echo 'Pass database provisioning failed: superuser authentication or connection failed.' >&2
   exit 3
 fi
-owner=$(psql -X -A -t -q -v ON_ERROR_STOP=1 -h postgres -U "$POSTGRES_USER" -d postgres -c "SELECT EXISTS (SELECT FROM pg_database WHERE datname = 'opensuite_pass' AND pg_get_userbyid(datdba) <> 'opensuite_pass')" 2>/dev/null) || {
-  echo 'Pass database provisioning failed: could not inspect database ownership.' >&2
-  exit 1
-}
-if [ "$owner" = t ]; then
-  echo 'Pass database provisioning failed: database is owned by another role.' >&2
-  exit 4
-fi
-if ! psql -X -q -v ON_ERROR_STOP=1 -h postgres -U "$POSTGRES_USER" -d postgres >/dev/null 2>&1 <<'SQL'
+# A single session holds the lock through ownership checks and provisioning.
+if ! output=$(psql -X -q -v ON_ERROR_STOP=1 -h postgres -U "$POSTGRES_USER" -d postgres 2>/dev/null <<'SQL'
 \getenv pass_password PASS_DB_PASSWORD
+\getenv app_database POSTGRES_DB
+\getenv drive_database POSTGRES_DRIVE_DB
 SELECT pg_advisory_lock(104857603);
-DO $$ BEGIN
-  IF EXISTS (SELECT FROM pg_database WHERE datname = 'opensuite_pass' AND pg_get_userbyid(datdba) <> 'opensuite_pass') THEN
-    RAISE EXCEPTION 'Pass database is owned by another role';
-  END IF;
-END $$;
+SELECT EXISTS (SELECT FROM pg_database WHERE datname = 'opensuite_pass' AND pg_get_userbyid(datdba) <> 'opensuite_pass') AS wrong_owner \gset
+\if :wrong_owner
+\echo PASS_DATABASE_OWNER_CONFLICT
+\quit
+\endif
 SELECT 'CREATE ROLE opensuite_pass LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'opensuite_pass') \gexec
 SELECT format('ALTER ROLE opensuite_pass LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD %L', :'pass_password') \gexec
@@ -39,10 +34,30 @@ SELECT 'CREATE DATABASE opensuite_pass OWNER opensuite_pass'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'opensuite_pass') \gexec
 REVOKE ALL ON DATABASE opensuite_pass FROM PUBLIC;
 GRANT CONNECT ON DATABASE opensuite_pass TO opensuite_pass;
+-- Preserve other login roles' implicit access before revoking PUBLIC; the
+-- application roles only receive their own database below. Create
+-- inactive application roles when needed; their migration jobs enable them.
+SELECT 'CREATE ROLE opensuite_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'opensuite_app') \gexec
+SELECT 'CREATE ROLE opensuite_drive NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'opensuite_drive') \gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO %I', d.datname, r.rolname)
+FROM pg_database d CROSS JOIN pg_roles r
+WHERE d.datallowconn AND d.datname <> 'opensuite_pass' AND r.rolcanlogin
+  AND r.rolname NOT IN ('opensuite_pass', 'opensuite_app', 'opensuite_drive')
+  AND has_database_privilege('public', d.oid, 'CONNECT') \gexec
+SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC, opensuite_pass', datname)
+FROM pg_database WHERE datallowconn AND datname <> 'opensuite_pass' \gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO opensuite_app', :'app_database') \gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO opensuite_drive', datname) FROM pg_database WHERE datname = :'drive_database' \gexec
 \connect opensuite_pass
 ALTER SCHEMA public OWNER TO opensuite_pass;
 SQL
-then
-  echo 'Pass database provisioning failed; check database ownership and configuration.' >&2
+); then
+  echo 'Pass database provisioning failed; check configuration.' >&2
   exit 1
+fi
+if printf '%s\n' "$output" | grep -q '^PASS_DATABASE_OWNER_CONFLICT$'; then
+  echo 'Pass database provisioning failed: database is owned by another role.' >&2
+  exit 4
 fi

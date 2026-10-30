@@ -53,12 +53,19 @@ services:
         chmod 0775 /setup-status
         generate drive-database 999
         generate pass-database 999
+        chown 999:1000 /secrets/pass-database /secrets/pass-database/password
+        chmod 0550 /secrets/pass-database
+        chmod 0440 /secrets/pass-database/password
+        mkdir -p /pass-data
+        chown -R 1000:1000 /pass-data
+        chmod 0700 /pass-data
         chown 999:1000 /secrets/app-database /secrets/app-database/password
         chmod 0550 /secrets/app-database
         chmod 0440 /secrets/app-database/password
     volumes:
       - secrets:/secrets
       - setup-status:/setup-status
+      - vaultwarden-data:/pass-data
     network_mode: none
 
   caddy:
@@ -68,7 +75,7 @@ services:
       api-proxy:
         ipv4_address: 172.28.254.2
       pass-network:
-        ipv4_address: 172.28.253.2
+        ipv4_address: ${PASS_CADDY_IP:-172.28.253.2}
     image: caddy:2.11.7@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8
     entrypoint: ["/bin/sh", "-ec"]
     command:
@@ -379,16 +386,25 @@ services:
 
   pass:
     profiles: [pass]
-    restart: unless-stopped
-    logging: *logging
-    image: vaultwarden/server:1.37.4@sha256:efb3cde962015fcc036b2ea625242248611943b27212ebf4392841fb30fad055
+    <<: *restart
+    image: ${PASS_IMAGE:-vaultwarden/server:1.37.4@sha256:efb3cde962015fcc036b2ea625242248611943b27212ebf4392841fb30fad055}
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,mode=1777"]
     entrypoint: ["/bin/sh", "/opt/opensuite/start.sh"]
     environment:
       DOMAIN: https://${PASS_PUBLIC_HOST:-pass.localhost}
+      PASS_PUBLIC_HOST: ${PASS_PUBLIC_HOST:-pass.localhost}
+      PASS_MAIN_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
+      PASS_HTTPS_PORT: ${HTTPS_PORT:-443}
+      ROCKET_PORT: 8080
+      ORG_CREATION_USERS: ${PASS_ORG_CREATION_USERS:-none}
       SIGNUPS_ALLOWED: ${PASS_SIGNUPS_ALLOWED:-false}
       INVITATIONS_ALLOWED: ${PASS_INVITATIONS_ALLOWED:-true}
       IP_HEADER: X-Real-IP
-      IP_HEADER_TRUSTED_PROXIES: ${PASS_TRUSTED_PROXY:-172.28.253.2}
+      IP_HEADER_TRUSTED_PROXIES: ${PASS_CADDY_IP:-172.28.253.2}
       LOGIN_RATELIMIT_SECONDS: ${PASS_LOGIN_RATELIMIT_SECONDS:-60}
       LOGIN_RATELIMIT_MAX_BURST: ${PASS_LOGIN_RATELIMIT_MAX_BURST:-10}
       ADMIN_RATELIMIT_SECONDS: ${PASS_ADMIN_RATELIMIT_SECONDS:-300}
@@ -398,7 +414,7 @@ services:
       PASS_ALLOW_SAVED_SIGNUPS: ${PASS_ALLOW_SAVED_SIGNUPS:-false}
       PASS_SMTP_HOST: ${PASS_SMTP_HOST:-}
       PASS_SMTP_FROM: ${PASS_SMTP_FROM:-}
-      PASS_SMTP_PORT: ${PASS_SMTP_PORT:-587}
+      PASS_SMTP_PORT: ${PASS_SMTP_PORT:-2587}
       PASS_SMTP_SECURITY: ${PASS_SMTP_SECURITY:-starttls}
       PASS_SMTP_USERNAME: ${PASS_SMTP_USERNAME:-}
       PASS_PUSH_ENABLED: ${PASS_PUSH_ENABLED:-false}
@@ -406,7 +422,7 @@ services:
       PASS_PUSH_RELAY_URI: ${PASS_PUSH_RELAY_URI:-https://push.bitwarden.com}
       PASS_PUSH_IDENTITY_URI: ${PASS_PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
     ports:
-      - "127.0.0.1:${PASS_ADMIN_PORT:-8081}:80"
+      - "127.0.0.1:${PASS_ADMIN_PORT:-8081}:8080"
     volumes:
       - vaultwarden-data:/data
       - ./deploy/vaultwarden/start.sh:/opt/opensuite/start.sh:ro
@@ -631,8 +647,8 @@ networks:
   pass-network:
     ipam:
       config:
-        - subnet: 172.28.253.0/24
-          ip_range: 172.28.253.128/25
+        - subnet: ${PASS_NETWORK_SUBNET:-172.28.253.0/24}
+          ip_range: ${PASS_NETWORK_IP_RANGE:-172.28.253.128/25}
   api-proxy:
     internal: true
     ipam:
