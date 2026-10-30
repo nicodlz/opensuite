@@ -9,6 +9,7 @@ export const validMailboxLocalPart = (part: string) =>
 export function createAddressStore(
   db: PrismaClient,
   configured: readonly string[],
+  subscriberDomains?: readonly string[],
 ) {
   const locked = createLocked(db);
   const usable = {
@@ -86,7 +87,11 @@ export function createAddressStore(
           let failures = 0;
           // Bound management requests and preserve per-domain failure isolation.
           /* oxlint-disable eslint/no-await-in-loop */
-          for (const name of configured) {
+          for (const name of configured.filter(
+            (domain) =>
+              subscriberDomains === undefined ||
+              subscriberDomains.includes(domain),
+          )) {
             try {
               const existing = await db.domain.findUnique({ where: { name } });
               if (existing?.removalPending || existing?.stalwartId) continue;
@@ -169,13 +174,24 @@ export function createAddressStore(
         })(),
         unavailable,
       ),
-    domains: () =>
+    domains: (userId: string) =>
       ResultAsync.fromPromise(
-        db.domain.findMany({
-          where: usable,
-          select: { id: true, name: true },
-          orderBy: { name: "asc" },
-        }),
+        (async () => {
+          const user = await db.user.findUniqueOrThrow({
+            where: { id: userId },
+            select: { role: true },
+          });
+          return db.domain.findMany({
+            where: {
+              ...usable,
+              ...(subscriberDomains !== undefined && user.role !== "admin"
+                ? { name: { in: [...subscriberDomains] } }
+                : {}),
+            },
+            select: { id: true, name: true },
+            orderBy: { name: "asc" },
+          });
+        })(),
         unavailable,
       ),
     list: (userId: string) =>
@@ -219,12 +235,23 @@ export function createAddressStore(
               disabled: false,
               mailbox: { status: "active" },
             },
-            select: { email: true, mailbox: { select: { accountId: true } } },
+            select: {
+              email: true,
+              role: true,
+              mailbox: { select: { accountId: true } },
+            },
           });
           const domain = await tx.domain.findFirst({
             where: { id: domainId, ...usable },
           });
-          if (!user || !domain || !user.mailbox)
+          if (
+            !user ||
+            !domain ||
+            !user.mailbox ||
+            (subscriberDomains !== undefined &&
+              user.role !== "admin" &&
+              !subscriberDomains.includes(domain.name))
+          )
             return err({ kind: "invalid" });
           const full = `${localPart}@${domain.name}`;
           const primary = await tx.$queryRaw<

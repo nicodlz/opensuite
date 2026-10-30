@@ -33,3 +33,13 @@ A submitted message enters Stalwart's queue; SES acceptance is not final deliver
 ## Suspend a mailbox
 
 An administrator can call `POST /api/admin/accounts/{userId}/disable` with an authenticated session and the configured Origin. Obtain the user ID from the account list; this is not an email address. An administrator cannot disable their own account or the last enabled administrator. Disabling removes application sessions and marks the user disabled; Stalwart mailbox suspension is attempted and retried by reconciliation on failure. Suspension disables authentication, receiving and sending permissions; this disable flow does not delete app passwords. Check the API logs and Stalwart state to confirm completion, especially before assuming direct protocol access is blocked. The API does not expose a re-enable operation in this checkout. Plan recovery with the operator and do not delete mailbox data as a substitute for suspension.
+
+### Subscriber domain choices
+
+`SUBSCRIBER_DOMAINS` limits non-admin users' new addresses, hide-my-email
+aliases, and alias defaults to the listed account domains. Cloud deployments
+require this list and require `BILLING_ACCOUNT_DOMAIN` (or its `MAIL_DOMAIN`
+default) to be included. Each listed domain must already be an account domain.
+Self-hosted deployments may leave it empty. Administrators keep their normal
+choices, and existing addresses and aliases remain usable. See
+[Cloud billing operations](../operations/billing.md#subscriber-domains).

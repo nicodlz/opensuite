@@ -55,6 +55,11 @@ test("add and remove an address", async ({ page }) => {
   await expect(page.getByText("1 of 5 used")).toBeVisible();
   await expect(page.getByText("Primary", { exact: true })).toBeVisible();
   await page.getByLabel("Address name").fill("hello");
+  await expect(page.getByLabel("Domain").locator("option")).toHaveText([
+    "Select a domain",
+    "esuno.net",
+    "esn.pm",
+  ]);
   await page.getByLabel("Domain").selectOption("d2");
   await page.getByRole("button", { name: "Add address" }).click();
   await expect(page.getByText("hello@esn.pm")).toBeVisible();

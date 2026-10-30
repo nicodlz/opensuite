@@ -39,6 +39,7 @@ export function createClaimService(
     userId: string;
   }) => Promise<string>,
   refresh?: (userId: string) => Promise<void>,
+  subscriberDomains?: readonly string[],
 ) {
   const examine = async (sessionId: string) => {
     const session = await stripe.checkout.sessions.retrieve(sessionId);
@@ -117,6 +118,11 @@ export function createClaimService(
     try {
       reservedUserId = await db.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domain}, 9876))`;
+        if (
+          subscriberDomains !== undefined &&
+          !subscriberDomains.includes(domain)
+        )
+          throw bad();
         const domainRow = await tx.domain.findUnique({
           where: { name: domain },
           select: { id: true },

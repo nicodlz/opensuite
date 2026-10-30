@@ -38,7 +38,7 @@ export const addressesRouter = addresses.router({
     .handler(({ context }) => value(service(context).list(context.actor))),
   domains: addresses.domains
     .use(requireSession)
-    .handler(({ context }) => value(service(context).domains())),
+    .handler(({ context }) => value(service(context).domains(context.actor))),
   create: addresses.create.use(requireSession).handler(({ context, input }) => {
     if (!context.addressMutationLimit(context.actor.id))
       throw new ORPCError("TOO_MANY_REQUESTS", { defined: true });

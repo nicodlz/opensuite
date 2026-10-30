@@ -436,7 +436,7 @@ describe("PostgreSQL schema and adapters", () => {
         : Promise.resolve("remote"),
     );
     expect(provisioned.isOk() && provisioned.value).toBe(1);
-    const domains = await store.domains();
+    const domains = await store.domains(id);
     expect(
       domains.isOk() && domains.value.some((domain) => domain.name === good),
     ).toBe(true);

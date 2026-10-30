@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createECDH } from "node:crypto";
 import { ok } from "neverthrow";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -285,3 +287,110 @@ it("reads the Cloud account domain and rejects an invalid one", async () => {
     ).isErr(),
   ).toBe(true);
 });
+
+it("validates subscriber domains and the Cloud billing domain before startup", async () => {
+  const { loadSubscriberDomains } = await import("../src/config.ts");
+  const accountDomains = new Set(["technical.example", "esuno.net", "esn.pm"]);
+  const isAccount = (name: string) => Promise.resolve(accountDomains.has(name));
+  const validate = (
+    value: string | undefined,
+    mode: "cloud" | "self-hosted",
+    domain = "esuno.net",
+  ) =>
+    loadSubscriberDomains(
+      { SUBSCRIBER_DOMAINS: value },
+      mode,
+      domain,
+      isAccount,
+    );
+  expect((await validate(undefined, "cloud")).isErr()).toBe(true);
+  expect((await validate("  ", "cloud")).isErr()).toBe(true);
+  expect(
+    (await validate(undefined, "self-hosted")).match(
+      (value) => value,
+      () => {
+        throw new Error("configuration result");
+      },
+    ),
+  ).toBeUndefined();
+  expect(
+    (await validate("esuno.net, esn.pm", "cloud")).match(
+      (value) => value,
+      () => {
+        throw new Error("configuration result");
+      },
+    ),
+  ).toEqual(["esuno.net", "esn.pm"]);
+  expect((await validate("esuno.net,foreign.example", "cloud")).isErr()).toBe(
+    true,
+  );
+  expect((await validate("Esuno.net", "cloud")).isErr()).toBe(true);
+  expect((await validate("esuno.net,", "cloud")).isErr()).toBe(true);
+  expect(
+    (await validate("esuno.net,esn.pm", "cloud", "technical.example")).isErr(),
+  ).toBe(true);
+});
+
+it("refuses Cloud startup with a missing list or a billing domain outside it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "subscriber-startup-"));
+  try {
+    const secret = join(directory, "secret");
+    const key = join(directory, "key");
+    const stripe = join(directory, "stripe");
+    const webhook = join(directory, "webhook");
+    await Promise.all([
+      writeFile(secret, "a".repeat(40)),
+      writeFile(key, "ab".repeat(32)),
+      writeFile(stripe, "sk_test_abcdefghijklmnop"),
+      writeFile(webhook, "whsec_abcdefghijklmnop"),
+    ]);
+    const env = {
+      ...process.env,
+      ESUNO_DEPLOYMENT_MODE: "cloud",
+      POSTGRES_HOST: "127.0.0.1",
+      POSTGRES_DB: "fixture",
+      APP_DATABASE_PASSWORD_FILE: secret,
+      AUTH_SECRET_FILE: secret,
+      MAILBOX_KEY_FILE: key,
+      STALWART_MANAGEMENT_PASSWORD_FILE: secret,
+      STRIPE_SECRET_KEY_FILE: stripe,
+      STRIPE_WEBHOOK_SECRET_FILE: webhook,
+      BILLING_INTERNAL_TOKEN_FILE: secret,
+      TRUSTED_PROXY_IP: "127.0.0.1",
+      AUTH_PUBLIC_ORIGIN: "https://suite.example.test",
+      STALWART_INTERNAL_ORIGIN: "http://127.0.0.1:8080",
+      MAIL_DOMAIN: "technical.example",
+      MAIL_DOMAINS: "esuno.net,esn.pm",
+      BILLING_ACCOUNT_DOMAIN: "technical.example",
+      BILLING_INTERNAL_TOKEN_OVERRIDE_FILE: "",
+      VAPID_PUBLIC_KEY_FILE: "",
+      VAPID_PRIVATE_KEY_FILE: "",
+    };
+    const run = (list: string) =>
+      new Promise<{ code: number | null; stderr: string }>(
+        (resolve, reject) => {
+          const child = spawn(
+            process.execPath,
+            [fileURLToPath(new URL("../src/main.ts", import.meta.url))],
+            { env: { ...env, SUBSCRIBER_DOMAINS: list } },
+          );
+          let stderr = "";
+          child.stderr.on("data", (chunk: Buffer) => {
+            stderr += chunk.toString();
+          });
+          child.on("error", reject);
+          child.on("close", (code) => resolve({ code, stderr }));
+        },
+      );
+    const missing = await run("");
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("cloud mode requires SUBSCRIBER_DOMAINS");
+    const mismatch = await run("esuno.net,esn.pm");
+    expect(mismatch.code).toBe(1);
+    expect(mismatch.stderr).toContain(
+      "BILLING_ACCOUNT_DOMAIN must be in SUBSCRIBER_DOMAINS",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30000);

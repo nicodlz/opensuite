@@ -13,14 +13,17 @@ import {
 import { createKeys } from "./aliases-keys.ts";
 export type { AliasStoreFailure } from "./aliases-shared.ts";
 
-export const createAliasStore = (db: PrismaClient) => {
+export const createAliasStore = (
+  db: PrismaClient,
+  subscriberDomains?: readonly string[],
+) => {
   const locked = createLocked(db);
   return {
-    ...createLeaseAndList(db),
-    ...createReserve(locked),
+    ...createLeaseAndList(db, subscriberDomains),
+    ...createReserve(locked, subscriberDomains),
     ...createSnapshot(db),
     ...createMutations(db, locked),
-    ...createDefaults(db, locked),
+    ...createDefaults(db, locked, subscriberDomains),
     ...createKeys(db, locked),
     ...createSubmission(db),
   };

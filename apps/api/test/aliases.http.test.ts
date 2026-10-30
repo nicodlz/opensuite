@@ -21,6 +21,7 @@ import {
 import {
   createDatabase,
   createAliasStore,
+  createAddressStore,
   createPushStore,
   createDomainStore,
   type PrismaClient,
@@ -29,6 +30,7 @@ import type { FastifyInstance } from "fastify";
 import { err, ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.ts";
+import { createAddressService } from "@opensuite/core/services/addresses";
 import { createAliasSendGuard } from "../src/adapters/alias-mail.ts";
 
 const run = promisify(execFile);
@@ -1427,3 +1429,364 @@ describe("push API", () => {
     expect(tests.some((response) => response.statusCode === 429)).toBe(true);
   });
 });
+
+/* oxlint-disable eslint/no-await-in-loop */
+it("restricts subscriber choices and creation while preserving existing mail and admin access", async () => {
+  const adminId = "policy-admin";
+  const subscriberId = "policy-subscriber";
+  const allowed = ["esuno.net", "esn.pm"];
+  const technical = "technical.example";
+  const foreign = "other.example";
+  await db.user.createMany({
+    data: [
+      {
+        id: adminId,
+        email: `admin@${technical}`,
+        name: "Admin",
+        role: "admin",
+      },
+      { id: subscriberId, email: `existing@${technical}`, name: "Subscriber" },
+    ],
+  });
+  await db.mailboxLink.createMany({
+    data: [adminId, subscriberId].map((userId) => ({
+      userId,
+      accountId: `${userId}-mail`,
+      address:
+        userId === adminId ? `admin@${technical}` : `existing@${technical}`,
+      credentialId: "fixture",
+      secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+    })),
+  });
+  const ids = new Map<string, string>();
+  for (const name of [technical, foreign, ...allowed]) {
+    const row = await db.domain.create({
+      data: {
+        name,
+        userId: adminId,
+        status: "verified",
+        stalwartId: `remote-${name}`,
+      },
+    });
+    ids.set(name, row.id);
+  }
+  const technicalId = ids.get(technical);
+  const foreignId = ids.get(foreign);
+  if (!technicalId || !foreignId) throw new Error("fixture domains");
+  const mail = { set: () => Promise.resolve(ok(undefined)) };
+  const unrestricted = createAliasService(createAliasStore(db), mail, 100);
+  const oldAlias = await unrestricted.create(subscriberId, {
+    domainId: technicalId,
+    requestId: "old-policy-request",
+  });
+  expect(oldAlias.isOk()).toBe(true);
+  if (oldAlias.isErr()) throw new Error("fixture alias");
+  await db.user.update({
+    where: { id: subscriberId },
+    data: { defaultAliasDomainId: technicalId },
+  });
+  const oldAddressStore = createAddressStore(db, [technical, ...allowed]);
+  const oldAddress = (
+    await oldAddressStore.reserve(
+      subscriberId,
+      technicalId,
+      "existing-extra",
+      100,
+    )
+  ).match(
+    (value) => value,
+    () => {
+      throw new Error("fixture result");
+    },
+  );
+  await db.address.update({
+    where: { id: oldAddress.id },
+    data: { ready: true, active: true },
+  });
+  const addressStore = createAddressStore(db, [technical, ...allowed], allowed);
+  const policyAliases = createAliasService(
+    createAliasStore(db, allowed),
+    mail,
+    100,
+  );
+  const policyAddresses = createAddressService(
+    addressStore,
+    mail,
+    () => Promise.resolve(100),
+    () => Promise.resolve(ok(undefined)),
+    [technical, ...allowed],
+  );
+  const actor = (id: string) => ({
+    id,
+    email: id === adminId ? `admin@${technical}` : `existing@${technical}`,
+    role: id === adminId ? ("admin" as const) : ("user" as const),
+  });
+  const policyApp = await buildServer({
+    config: { logLevel: "silent" },
+    monotonicMs: clock,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: clock,
+    }),
+    aliases: policyAliases,
+    addresses: policyAddresses,
+    identity: {
+      publicOrigin: origin,
+      handler: () => Promise.resolve(new Response()),
+      actor: (h) => {
+        const id = /test-user=(policy-admin|policy-subscriber)/.exec(
+          h.get("cookie") ?? "",
+        )?.[1];
+        return Promise.resolve(id ? actor(id) : null);
+      },
+    },
+  });
+  try {
+    const names = async (path: string, userId: string) =>
+      (
+        await policyApp.inject({
+          method: "GET",
+          url: path,
+          headers: headers(userId),
+        })
+      )
+        .json<{ name: string }[]>()
+        .map((row) => row.name);
+    expect(await names("/addresses/domains", subscriberId)).toEqual([
+      "esn.pm",
+      "esuno.net",
+    ]);
+    expect(await names("/aliases/domains", subscriberId)).toEqual([
+      "esn.pm",
+      "esuno.net",
+    ]);
+    expect(await names("/addresses/domains", adminId)).toContain(technical);
+    expect(await names("/aliases/domains", adminId)).toContain(technical);
+    for (const blockedDomainId of [technicalId, foreignId]) {
+      expect(
+        (
+          await policyAddresses.create(actor(subscriberId), {
+            localPart: "blocked",
+            domainId: blockedDomainId,
+          })
+        ).isErr(),
+      ).toBe(true);
+      expect(
+        (
+          await policyAliases.create(subscriberId, {
+            domainId: blockedDomainId,
+          })
+        ).isErr(),
+      ).toBe(true);
+      expect(
+        (
+          await policyApp.inject({
+            method: "POST",
+            url: "/addresses",
+            headers: headers(subscriberId),
+            payload: { localPart: "blocked", domainId: blockedDomainId },
+          })
+        ).statusCode,
+      ).toBe(400);
+      expect(
+        (
+          await policyApp.inject({
+            method: "POST",
+            url: "/aliases",
+            headers: headers(subscriberId),
+            payload: {
+              domainId: blockedDomainId,
+              requestId: `blocked-${blockedDomainId}`,
+            },
+          })
+        ).statusCode,
+      ).toBe(400);
+      expect(
+        (
+          await policyApp.inject({
+            method: "PUT",
+            url: "/aliases/default-domain",
+            headers: headers(subscriberId),
+            payload: { domainId: blockedDomainId },
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    expect(
+      (
+        await policyApp.inject({
+          method: "PATCH",
+          url: `/aliases/${oldAlias.value.id}`,
+          headers: headers(subscriberId),
+          payload: { domainId: technicalId },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (await policyAliases.getDefault(subscriberId)).match(
+        (value) => value,
+        () => {
+          throw new Error("fixture result");
+        },
+      ),
+    ).toEqual({ domainId: null });
+    const key = (
+      await policyAliases.createKey(subscriberId, "Generator")
+    ).match(
+      (value) => value,
+      () => {
+        throw new Error("fixture result");
+      },
+    );
+    const compat = await policyApp.inject({
+      method: "POST",
+      url: "/alias/random/new",
+      headers: { authentication: key.secret },
+      payload: {},
+    });
+    expect(compat.statusCode).toBe(201);
+    expect(
+      allowed.some((domain) =>
+        compat.json<{ alias: string }>().alias.endsWith(`@${domain}`),
+      ),
+    ).toBe(true);
+    expect(
+      (
+        await policyAliases.create(subscriberId, {
+          domainId: technicalId,
+          requestId: "old-policy-request",
+        })
+      ).isErr(),
+    ).toBe(true);
+    await db.domain.updateMany({
+      where: { name: { in: allowed } },
+      data: { status: "failing" },
+    });
+    const unavailable = await policyApp.inject({
+      method: "POST",
+      url: "/alias/random/new",
+      headers: { authentication: key.secret },
+      payload: {},
+    });
+    expect(unavailable.statusCode).toBe(400);
+    await db.domain.updateMany({
+      where: { name: { in: allowed } },
+      data: { status: "verified" },
+    });
+    const allowedId = ids.get("esuno.net");
+    if (!allowedId) throw new Error("fixture domain");
+    expect(
+      (await policyAliases.setDefault(subscriberId, allowedId)).isOk(),
+    ).toBe(true);
+    expect(
+      (
+        await policyAliases.create(subscriberId, { domainId: allowedId })
+      ).isOk(),
+    ).toBe(true);
+    expect(
+      (
+        await policyAddresses.create(actor(subscriberId), {
+          localPart: "allowed",
+          domainId: allowedId,
+        })
+      ).isOk(),
+    ).toBe(true);
+    expect(
+      (
+        await policyAddresses.create(actor(adminId), {
+          localPart: "admin-extra",
+          domainId: technicalId,
+        })
+      ).isOk(),
+    ).toBe(true);
+    expect(
+      (await policyAliases.create(adminId, { domainId: technicalId })).isOk(),
+    ).toBe(true);
+    expect((await policyAliases.setDefault(adminId, technicalId)).isOk()).toBe(
+      true,
+    );
+    expect(
+      (await addressStore.resolveLogin(`existing-extra@${technical}`))?.id,
+    ).toBe(subscriberId);
+    expect(
+      (
+        await addressStore.canSendAs(
+          subscriberId,
+          `existing-extra@${technical}`,
+        )
+      ).match(
+        (value) => value,
+        () => {
+          throw new Error("fixture result");
+        },
+      )?.id,
+    ).toBe(oldAddress.id);
+    const provisioned: string[] = [];
+    const configuredStore = createAddressStore(
+      db,
+      ["excluded.example", "included.example"],
+      ["included.example"],
+    );
+    expect(
+      (
+        await configuredStore.ensureConfigured((name) => {
+          provisioned.push(name);
+          return Promise.resolve(`remote-${name}`);
+        })
+      ).isOk(),
+    ).toBe(true);
+    expect(provisioned).toEqual(["included.example"]);
+    expect(
+      await db.domain.findUnique({ where: { name: "excluded.example" } }),
+    ).toBeNull();
+    expect(
+      (await policyAliases.list(subscriberId))
+        .match(
+          (value) => value,
+          () => {
+            throw new Error("fixture result");
+          },
+        )
+        .some((row) => row.id === oldAlias.value.id),
+    ).toBe(true);
+    expect(
+      (
+        await policyAliases.canSendAs(subscriberId, oldAlias.value.address)
+      ).match(
+        (value) => value,
+        () => {
+          throw new Error("fixture result");
+        },
+      ),
+    ).toBe(oldAlias.value.id);
+    const routes = (
+      await createDomainStore(db).routes([
+        `existing@${technical}`,
+        oldAlias.value.address,
+      ])
+    ).match(
+      (value) => value,
+      () => {
+        throw new Error("fixture result");
+      },
+    );
+    expect(routes).toEqual(
+      expect.arrayContaining([
+        {
+          address: `existing@${technical}`,
+          destination: `${subscriberId}-mail`,
+        },
+        {
+          address: oldAlias.value.address,
+          destination: `${subscriberId}-mail`,
+        },
+      ]),
+    );
+  } finally {
+    await policyApp.close();
+  }
+});
+
+/* oxlint-enable eslint/no-await-in-loop */

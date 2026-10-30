@@ -23,6 +23,7 @@ interface RuntimeConfig {
   readonly publicOrigin: string;
   readonly productOrigins?: Readonly<Record<string, string>>;
   readonly mailDomain: string;
+  readonly claimDomain?: string;
   /** Every configured account domain, `mailDomain` included. */
   readonly mailDomains?: readonly string[];
   readonly stalwartOrigin: string;
@@ -198,7 +199,10 @@ export const createAuthRuntime = (
       name: string;
       userId: string;
     }) => {
-      if (input.email.toLowerCase().split("@")[1] !== config.mailDomain)
+      if (
+        input.email.toLowerCase().split("@")[1] !==
+        (config.claimDomain ?? config.mailDomain)
+      )
         throw new Error("address unavailable");
       try {
         if (

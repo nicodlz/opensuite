@@ -31,6 +31,7 @@ import {
   loadConfig,
   loadMailPushConfig,
   loadBillingConfig,
+  loadSubscriberDomains,
 } from "./config.ts";
 import { startMailNotifier } from "./adapters/mail-notifier.ts";
 import { createAuthRuntime } from "./auth/runtime.ts";
@@ -123,7 +124,26 @@ const readiness = createReadinessService({
   monotonicMs,
 });
 
-const auth = createAuthRuntime(database.value, authConfig.value);
+const accountDomain =
+  billing.value.mode === "cloud"
+    ? (billing.value.accountDomain ?? authConfig.value.mailDomain)
+    : authConfig.value.mailDomain;
+const auth = createAuthRuntime(database.value, {
+  ...authConfig.value,
+  claimDomain: accountDomain,
+});
+const subscriberDomains = await loadSubscriberDomains(
+  process.env,
+  billing.value.mode,
+  accountDomain,
+  auth.identity.isMailDomain,
+);
+if (subscriberDomains.isErr()) {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "invalid subscriber domain configuration", issues: subscriberDomains.error.issues })}\n`,
+  );
+  process.exit(1);
+}
 const internalToken =
   billing.value.mode === "cloud"
     ? billing.value.internalToken
@@ -169,10 +189,6 @@ const stripeBilling =
         entitlements,
       )
     : undefined;
-const accountDomain =
-  billing.value.mode === "cloud"
-    ? (billing.value.accountDomain ?? authConfig.value.mailDomain)
-    : authConfig.value.mailDomain;
 // A purchase must never create an address on a domain accounts cannot use.
 if (
   billing.value.mode === "cloud" &&
@@ -192,6 +208,7 @@ const claims =
         accountDomain,
         auth.claimSignUp,
         storageMeter.refresh,
+        subscriberDomains.value,
       );
 const webhookProcessor =
   stripeBilling === undefined
@@ -214,7 +231,7 @@ if (store.isErr()) {
   process.exit(1);
 }
 const mailboxStore = store.value;
-const aliasStore = createAliasStore(database.value);
+const aliasStore = createAliasStore(database.value, subscriberDomains.value);
 const aliasMail = createAliasMail(
   {
     origin: authConfig.value.stalwartOrigin,
@@ -239,6 +256,7 @@ const aliases = createAliasService(
 const addressStore = createAddressStore(
   database.value,
   authConfig.value.mailDomains,
+  subscriberDomains.value,
 );
 const addressState = await addressStore.markChanged();
 if (addressState.isErr()) throw new Error("address state unavailable");

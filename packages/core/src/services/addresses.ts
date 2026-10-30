@@ -116,8 +116,8 @@ export function createAddressService(
     return ok(undefined);
   };
   return {
-    domains: async () => {
-      const result = await store.domains();
+    domains: async (actor: Actor) => {
+      const result = await store.domains(actor.id);
       return result;
     },
     ensureDomains,

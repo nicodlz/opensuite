@@ -75,7 +75,7 @@ duration, and Caddy skips access logs for the welcome and Checkout status
 paths. Do not enable downstream logging of those URLs.
 
 A paid public session can be claimed once within 30 days of its creation, on
-`BILLING_ACCOUNT_DOMAIN` (default `MAIL_DOMAIN`; the API refuses to start in Cloud mode if it is not an account domain), after its webhook has been processed. The user signs in normally
+`BILLING_ACCOUNT_DOMAIN` (default `MAIL_DOMAIN`; Cloud startup requires it to be an account domain and in `SUBSCRIBER_DOMAINS`), after its webhook has been processed. The user signs in normally
 and MFA remains unchanged. If provisioning or network interruption leaves a
 paid session unclaimed, the operator must verify the payment and purchaser
 through a separate channel, then arrange a refund or a controlled manual
@@ -148,3 +148,25 @@ WHERE id = 'evt_REPLACE_WITH_VERIFIED_ID' AND "processedAt" IS NULL;
 ```
 
 Record the event ID and reason in the incident log; reconciliation remains responsible for repairing subscription state.
+
+### Subscriber domains
+
+Cloud requires `SUBSCRIBER_DOMAINS`, a comma-separated list of lowercase
+account domains. Each must be `MAIL_DOMAIN`, in `MAIL_DOMAINS`, or an
+existing managed domain. The API refuses to start if the list is empty, a
+listed domain is not an account domain, or the billing account domain is
+missing from the list. For example, when the primary technical mailbox uses
+`MAIL_DOMAIN=technical.example`, configure:
+
+```dotenv
+MAIL_DOMAIN=technical.example
+MAIL_DOMAINS=esuno.net,esn.pm
+SUBSCRIBER_DOMAINS=esuno.net,esn.pm
+BILLING_ACCOUNT_DOMAIN=esuno.net
+```
+
+Provision and verify the subscriber domains for mail delivery. Non-admins
+can choose only listed domains for new addresses, aliases, and alias defaults;
+existing mailboxes and aliases continue to work. Administrators retain their
+existing domain choices. Self-hosted deployments may leave the list empty to
+keep the existing unrestricted behavior.

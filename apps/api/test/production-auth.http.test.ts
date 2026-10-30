@@ -241,6 +241,7 @@ beforeAll(async () => {
       {
         publicOrigin: origin,
         mailDomain: "example.test",
+        claimDomain: "second.test",
         mailDomains: ["example.test", "second.test"],
         stalwartOrigin: mailUrl,
         secret: "test-secret-at-least-32-characters-long",
@@ -273,10 +274,11 @@ beforeAll(async () => {
       monotonicMs,
       identity: {
         ...runtime.identity,
-        resolveAddress: createAddressStore(db.value, [
-          "example.test",
-          "second.test",
-        ]).resolveLogin,
+        resolveAddress: createAddressStore(
+          db.value,
+          ["example.test", "second.test"],
+          ["second.test"],
+        ).resolveLogin,
       },
       accounts: runtime.accounts,
       mail: mailService,
@@ -445,8 +447,55 @@ it("provisions, repairs, authenticates and suspends real local mailboxes", async
     if (credential.isErr()) throw new Error("credential unavailable");
     const client = new JmapClient(mailUrl, {
       authorization: `Basic ${Buffer.from(`${user.email}:${credential.value.secret}`).toString("base64")}`,
+      rewriteSessionUrlsToOrigin: mailUrl,
     });
-    expect((await client.discover()).isOk()).toBe(true);
+    const discovered = await client.discover();
+    if (discovered.isErr()) throw new Error("mail session unavailable");
+    const session = discovered.value;
+    const boxesResult = await client.mailboxes(session, link.accountId);
+    if (boxesResult.isErr()) throw new Error("mailboxes unavailable");
+    const drafts = boxesResult.value.list.find((box) => box.role === "drafts");
+    const inbox = boxesResult.value.list.find((box) => box.role === "inbox");
+    if (!drafts || !inbox) throw new Error("mailboxes unavailable");
+    const blob = await client.upload(
+      session,
+      link.accountId,
+      Buffer.from(
+        `From: ${user.email}\r\nTo: ${user.email}\r\nSubject: policy-existing-delivery\r\n\r\nHello\r\n`,
+      ),
+    );
+    if (blob.isErr()) throw new Error("upload unavailable");
+    const message = await client.importEmail(session, link.accountId, {
+      blobId: blob.value.blobId,
+      mailboxIds: { [drafts.id]: true },
+      keywords: { $draft: true },
+    });
+    const identities = await client.identities(session, link.accountId);
+    if (message.isErr() || identities.isErr())
+      throw new Error("submission unavailable");
+    const identity = identities.value.list.find(
+      (entry) => entry.email === user.email,
+    );
+    if (!identity) throw new Error("identity unavailable");
+    expect(
+      (
+        await client.submit(
+          session,
+          link.accountId,
+          message.value.id,
+          identity.id,
+        )
+      ).isOk(),
+    ).toBe(true);
+    await wait(async () => {
+      const found = await client.queryEmails(session, link.accountId, {
+        filter: {
+          subject: "policy-existing-delivery",
+          inMailbox: inbox.id,
+        },
+      });
+      return found.isOk() && found.value.ids.length > 0;
+    });
     failSuspend = true;
     expect(
       (await post(`/admin/accounts/${id}/disable`, {}, adminCookie)).status,
@@ -704,13 +753,20 @@ it("provisions a public claim through the normal sign-up path", async () => {
   const input = {
     name: "Claimed user",
     userId: "claim-fixture-user",
-    email: "claim-fixture@example.test",
+    email: "claim-fixture@second.test",
     password: "long-claim-password-123",
   };
-  const id = await claimSignUp(input);
+  await expect(
+    claimSignUp({ ...input, email: "claim-fixture@example.test" }),
+  ).rejects.toThrow("address unavailable");
   const client = createDatabase(databaseUrl);
   if (client.isErr()) throw new Error("database unavailable");
   try {
+    await client.value.domain.update({
+      where: { name: "second.test" },
+      data: { removalPending: false },
+    });
+    const id = await claimSignUp(input);
     const link = await client.value.mailboxLink.findUniqueOrThrow({
       where: { userId: id },
     });

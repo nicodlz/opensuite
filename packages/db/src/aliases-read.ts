@@ -3,7 +3,10 @@ import type { PrismaClient } from "./generated/index.js";
 import { unavailable } from "./aliases-shared.ts";
 import { withUserLease } from "./alias-locks.ts";
 
-export const createLeaseAndList = (db: PrismaClient) => ({
+export const createLeaseAndList = (
+  db: PrismaClient,
+  subscriberDomains?: readonly string[],
+) => ({
   withUserLease: <T>(userId: string, work: (token: string) => Promise<T>) =>
     withUserLease(db, userId, work),
   findRequest: (userId: string, requestId: string) =>
@@ -13,17 +16,26 @@ export const createLeaseAndList = (db: PrismaClient) => ({
       }),
       unavailable,
     ),
-  domains: () =>
+  domains: (userId: string) =>
     ResultAsync.fromPromise(
-      db.domain.findMany({
-        where: {
-          status: "verified",
-          removalPending: false,
-          stalwartId: { not: null },
-        },
-        select: { id: true, name: true },
-        orderBy: { name: "asc" },
-      }),
+      (async () => {
+        const user = await db.user.findUniqueOrThrow({
+          where: { id: userId },
+          select: { role: true },
+        });
+        return db.domain.findMany({
+          where: {
+            ...(subscriberDomains !== undefined && user.role !== "admin"
+              ? { name: { in: [...subscriberDomains] } }
+              : {}),
+            status: "verified",
+            removalPending: false,
+            stalwartId: { not: null },
+          },
+          select: { id: true, name: true },
+          orderBy: { name: "asc" },
+        });
+      })(),
       unavailable,
     ),
   list: (userId: string, search?: string) =>

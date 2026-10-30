@@ -41,7 +41,9 @@ const value = async <T>(
 export const aliasesRouter = aliases.router({
   domains: aliases.domains
     .use(requireSession)
-    .handler(({ context }) => value(service(context).domains())),
+    .handler(({ context }) =>
+      value(service(context).domains(context.actor.id)),
+    ),
   list: aliases.list
     .use(requireSession)
     .handler(({ context, input }) =>

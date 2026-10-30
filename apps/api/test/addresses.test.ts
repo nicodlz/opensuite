@@ -79,7 +79,11 @@ it("lists available domains without calling the provisioning callback", async ()
     },
     [],
   );
-  const domains = await addresses.domains();
+  const domains = await addresses.domains({
+    id: "user",
+    email: "user@example.test",
+    role: "user",
+  });
   expect(domains.isOk() && domains.value).toEqual([
     { id: "good", name: "good.test" },
   ]);

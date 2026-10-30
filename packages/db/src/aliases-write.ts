@@ -10,7 +10,10 @@ import {
 } from "./aliases-shared.ts";
 import { ALIAS_DOMAIN_LOCK_SEED } from "./alias-locks.ts";
 
-export const createReserve = (locked: Locked) => ({
+export const createReserve = (
+  locked: Locked,
+  subscriberDomains?: readonly string[],
+) => ({
   reserve: (
     userId: string,
     input: {
@@ -24,6 +27,24 @@ export const createReserve = (locked: Locked) => ({
   ) =>
     wrap(
       locked(userId, async (tx) => {
+        // An explicit domain must be eligible even on an idempotent retry.
+        if (subscriberDomains !== undefined && input.domainId !== undefined) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${input.domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+          const user = await tx.user.findUnique({
+            where: { id: userId },
+            select: { role: true },
+          });
+          const domain = await tx.domain.findUnique({
+            where: { id: input.domainId },
+            select: { name: true },
+          });
+          if (
+            !user ||
+            !domain ||
+            (user.role !== "admin" && !subscriberDomains.includes(domain.name))
+          )
+            return err({ kind: "invalid" });
+        }
         if (input.requestId) {
           const prior = await tx.emailAlias.findUnique({
             where: {
@@ -41,14 +62,42 @@ export const createReserve = (locked: Locked) => ({
           },
           select: {
             defaultAliasDomainId: true,
+            role: true,
             mailbox: { select: { accountId: true } },
           },
         });
-        const domainId = input.domainId ?? user?.defaultAliasDomainId;
-        if (!user || !domainId) return err({ kind: "invalid" });
+        if (!user) return err({ kind: "invalid" });
+        const restricted =
+          subscriberDomains !== undefined && user.role !== "admin";
+        let domainId = input.domainId ?? user.defaultAliasDomainId;
+        // A stale default is ignored. The compatible API has no domain selector,
+        // so choose the first available subscriber domain in that case.
+        if (input.domainId === undefined && domainId && restricted) {
+          const existing = await tx.domain.findUnique({
+            where: { id: domainId },
+            select: { name: true },
+          });
+          if (!existing || !subscriberDomains.includes(existing.name)) {
+            domainId =
+              (
+                await tx.domain.findFirst({
+                  where: {
+                    name: { in: [...subscriberDomains] },
+                    status: "verified",
+                    removalPending: false,
+                    stalwartId: { not: null },
+                  },
+                  orderBy: { name: "asc" },
+                  select: { id: true },
+                })
+              )?.id ?? null;
+          }
+        }
+        if (!domainId) return err({ kind: "invalid" });
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
         const domain = await validDomain(tx, domainId);
-        if (!domain) return err({ kind: "invalid" });
+        if (!domain || (restricted && !subscriberDomains.includes(domain.name)))
+          return err({ kind: "invalid" });
         // Another account's primary address, provisioned or not.
         if (
           await tx.user.count({
@@ -158,12 +207,27 @@ export const createMutations = (db: PrismaClient, locked: Locked) => ({
     ),
 });
 
-export const createDefaults = (db: PrismaClient, locked: Locked) => ({
+export const createDefaults = (
+  db: PrismaClient,
+  locked: Locked,
+  subscriberDomains?: readonly string[],
+) => ({
   setDefault: (userId: string, domainId: string) =>
     wrap(
       locked(userId, async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
-        if (!(await validDomain(tx, domainId))) return err({ kind: "invalid" });
+        const user = await tx.user.findUniqueOrThrow({
+          where: { id: userId },
+          select: { role: true },
+        });
+        const domain = await validDomain(tx, domainId);
+        if (
+          !domain ||
+          (subscriberDomains !== undefined &&
+            user.role !== "admin" &&
+            !subscriberDomains.includes(domain.name))
+        )
+          return err({ kind: "invalid" });
         await tx.user.update({
           where: { id: userId },
           data: { defaultAliasDomainId: domainId },
@@ -176,9 +240,21 @@ export const createDefaults = (db: PrismaClient, locked: Locked) => ({
       db.user
         .findUniqueOrThrow({
           where: { id: userId },
-          select: { defaultAliasDomainId: true },
+          select: {
+            defaultAliasDomainId: true,
+            role: true,
+            defaultAliasDomain: { select: { name: true } },
+          },
         })
-        .then((user) => ({ domainId: user.defaultAliasDomainId })),
+        .then((user) => ({
+          domainId:
+            subscriberDomains !== undefined &&
+            user.role !== "admin" &&
+            user.defaultAliasDomain !== null &&
+            !subscriberDomains.includes(user.defaultAliasDomain.name)
+              ? null
+              : user.defaultAliasDomainId,
+        })),
       unavailable,
     ),
 });

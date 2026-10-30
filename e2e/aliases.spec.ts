@@ -258,3 +258,30 @@ for (const theme of ["light", "dark"] as const)
       .click();
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   });
+
+test("subscriber alias domain selectors show only offered domains", async ({
+  page,
+}) => {
+  await mockAliases(page);
+  await page.route("**/api/aliases/domains", (route) =>
+    route.fulfill({
+      json: [
+        { id: "d1", name: "esuno.net" },
+        { id: "d2", name: "esn.pm" },
+      ],
+    }),
+  );
+  await page.goto("/vault/aliases");
+  await expect(
+    page.getByLabel("Default domain").locator("option"),
+  ).toContainText(["esuno.net", "esn.pm"]);
+  await expect(page.getByLabel("Default domain").locator("option")).toHaveCount(
+    3,
+  );
+  await page.getByRole("button", { name: "Create alias", exact: true }).click();
+  const choices = page
+    .getByRole("dialog", { name: "Create alias" })
+    .getByRole("combobox", { name: "Domain" })
+    .locator("option");
+  await expect(choices).toHaveText(["esuno.net", "esn.pm"]);
+});

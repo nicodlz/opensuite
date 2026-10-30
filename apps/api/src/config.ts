@@ -109,6 +109,45 @@ const mailDomain = z
   .regex(
     /^(?=.{1,253}$)[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?)+$/,
   );
+/** Validate the subscriber policy against the same account-domain lookup used by auth. */
+export async function loadSubscriberDomains(
+  env: Readonly<Record<string, string | undefined>>,
+  mode: "cloud" | "self-hosted",
+  accountDomain: string,
+  isAccountDomain: (name: string) => Promise<boolean>,
+): Promise<Result<readonly string[] | undefined, ConfigError>> {
+  const raw = env["SUBSCRIBER_DOMAINS"]?.trim();
+  if (!raw)
+    return mode === "cloud"
+      ? err({
+          kind: "invalid_environment",
+          issues: ["cloud mode requires SUBSCRIBER_DOMAINS"],
+        })
+      : ok(undefined);
+  const parsed = z
+    .array(mailDomain)
+    .min(1)
+    .safeParse(raw.split(",").map((name) => name.trim()));
+  if (!parsed.success)
+    return err({
+      kind: "invalid_environment",
+      issues: ["invalid SUBSCRIBER_DOMAINS"],
+    });
+  const domains = [...new Set(parsed.data)];
+  if (mode === "cloud" && !domains.includes(accountDomain))
+    return err({
+      kind: "invalid_environment",
+      issues: ["BILLING_ACCOUNT_DOMAIN must be in SUBSCRIBER_DOMAINS"],
+    });
+  if (!(await Promise.all(domains.map(isAccountDomain))).every(Boolean))
+    return err({
+      kind: "invalid_environment",
+      issues: [
+        "SUBSCRIBER_DOMAINS contains a domain that is not an account domain",
+      ],
+    });
+  return ok(domains);
+}
 const AuthEnvironment = z.object({
   TRUSTED_PROXY_IP: z.ipv4(),
   AUTH_PUBLIC_ORIGIN: z.url().refine((value) => {

@@ -34,7 +34,7 @@ export function createAliasService(
   return {
     findRequest: async (userId: string, requestId: string) =>
       (await store.findRequest(userId, requestId)).map((row) => row !== null),
-    domains: async () => store.domains(),
+    domains: async (userId: string) => store.domains(userId),
     list: async (userId: string, search?: string) =>
       (await store.list(userId, search)).map((rows) => rows.map(view)),
     ...createAliasOperations(store, cap, sync, limitForUser),
