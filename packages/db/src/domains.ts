@@ -1,4 +1,5 @@
 import { ResultAsync } from "neverthrow";
+import { ALIAS_DOMAIN_LOCK_SEED, withUserLease } from "./alias-locks.ts";
 import { z } from "zod";
 import type { PrismaClient } from "./generated/index.js";
 
@@ -41,6 +42,44 @@ const convert = (row: {
   checkedAt: row.checkedAt?.toISOString() ?? null,
 });
 export const createDomainStore = (db: PrismaClient) => ({
+  withUserLease<T>(userId: string, work: () => Promise<T>) {
+    return withUserLease(db, userId, work);
+  },
+  beginRemoval(domainId: string) {
+    return ResultAsync.fromPromise(
+      db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+        const [addresses, defaults] = await Promise.all([
+          tx.address.count({ where: { domainId } }),
+          tx.user.count({ where: { defaultAliasDomainId: domainId } }),
+        ]);
+        if (addresses || defaults) return false;
+        await tx.domain.update({
+          where: { id: domainId },
+          data: { removalPending: true },
+        });
+        return true;
+      }),
+      failure,
+    );
+  },
+  cancelRemoval(domainId: string) {
+    return ResultAsync.fromPromise(
+      db.domain
+        .updateMany({
+          where: { id: domainId },
+          data: { removalPending: false },
+        })
+        .then(() => undefined),
+      failure,
+    );
+  },
+  isManagedAddress(addressId: string) {
+    return ResultAsync.fromPromise(
+      db.emailAlias.count({ where: { addressId } }).then((count) => count > 0),
+      failure,
+    );
+  },
   verificationTargets() {
     return ResultAsync.fromPromise(
       db.domain.findMany({
@@ -114,7 +153,22 @@ export const createDomainStore = (db: PrismaClient) => ({
   ) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${id}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+        const previous = await tx.domain.findUniqueOrThrow({
+          where: { id },
+          select: { status: true },
+        });
         const row = await tx.domain.update({ where: { id }, data, include });
+        if (previous.status !== data.status) {
+          await tx.emailAlias.updateMany({
+            where: { domainId: id, deletedAt: null, enabled: true },
+            data: {
+              ready: false,
+              detachedByDomain: false,
+              revision: { increment: 1 },
+            },
+          });
+        }
         await tx.auditEvent.create({
           data: {
             userId: actor,
@@ -160,6 +214,11 @@ export const createDomainStore = (db: PrismaClient) => ({
   ) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+        const domain = await tx.domain.findUniqueOrThrow({
+          where: { id: domainId },
+        });
+        if (domain.removalPending) throw new Error("domain removal pending");
         await tx.address.create({
           data: { domainId, userId, localPart, isAlias },
         });
@@ -209,6 +268,19 @@ export const createDomainStore = (db: PrismaClient) => ({
         .findMany({
           where: {
             user: { disabled: false, mailbox: { status: "active" } },
+            OR: [
+              { emailAlias: null },
+              {
+                emailAlias: {
+                  is: {
+                    enabled: true,
+                    ready: true,
+                    deletedAt: null,
+                    domain: { status: "verified" },
+                  },
+                },
+              },
+            ],
           },
           select: {
             localPart: true,

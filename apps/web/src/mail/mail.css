@@ -1142,3 +1142,19 @@
     transition: none;
   }
 }
+
+.message-alias {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.compose-from select {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  padding: 8px 0;
+}

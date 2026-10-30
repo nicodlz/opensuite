@@ -1,3 +1,4 @@
+import type { AliasService } from "@opensuite/core/services/aliases";
 import type { SetupStatus } from "@opensuite/contracts";
 import type { DomainService } from "./domains.ts";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
@@ -31,6 +32,9 @@ export interface ApiContext {
   };
   readonly actor: Actor | null;
   readonly domains: DomainService | undefined;
+  readonly aliases: AliasService | undefined;
+  readonly aliasCreationLimit: (userId: string) => boolean;
+  readonly aliasMutationLimit: (userId: string) => boolean;
   readonly audit:
     | ((event: { userId: string | null; action: string }) => Promise<void>)
     | undefined;

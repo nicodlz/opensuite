@@ -12,12 +12,19 @@ services:
         volume:
           subpath: stalwart-management
   caddy:
+    # This protocol fixture does not build or serve the web application.
+    entrypoint: ["caddy"]
+    command:
+      ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
     environment:
       OPENSUITE_SITE_ADDRESS: ":80"
     ports: !override
       - "127.0.0.1::80"
   localstack:
     ports: !override []
+    # This suite uses the AWS CLI against MinIO, not LocalStack's S3/SQS fixtures.
+    volumes: !override
+      - localstack-data:/var/lib/localstack
   minio:
     image: minio/minio:RELEASE.2025-07-23T15-54-02Z@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0
     command: ["server", "/data"]

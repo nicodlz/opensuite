@@ -604,3 +604,90 @@ it("expires and bounds uploaded metadata and returns the new draft when removal 
     },
   ]);
 }, 30_000);
+
+it("rate limits alias submissions and invokes the audit gate before sending", async () => {
+  let allow = false;
+  let checks = 0;
+  let lookups = 0;
+  let submissions = 0;
+  const fake: typeof fetch = (input, init) => {
+    if (init?.method !== "POST") return fetchFake(input, init);
+    const body = z
+      .object({
+        methodCalls: z.array(z.tuple([z.string(), z.unknown(), z.string()])),
+      })
+      .parse(JSON.parse(typeof init.body === "string" ? init.body : ""));
+    const method = body.methodCalls[0]?.[0];
+    let data: object;
+    if (method === "Mailbox/get")
+      data = {
+        accountId: "jmap-account",
+        state: "s",
+        list: [
+          { ...mailbox, id: "d", role: "drafts" },
+          { ...mailbox, id: "s", role: "sent" },
+        ],
+        notFound: [],
+      };
+    else if (method === "Email/get")
+      data = {
+        accountId: "jmap-account",
+        state: "s",
+        list: [
+          {
+            ...emails[0],
+            id: "draft",
+            mailboxIds: { d: true },
+            keywords: { $draft: true },
+            from: [{ email: "alias@example.test", name: null }],
+          },
+        ],
+        notFound: [],
+      };
+    else if (method === "Identity/get")
+      data = {
+        accountId: "jmap-account",
+        state: "s",
+        list: [{ id: "identity", name: "Alias", email: "alias@example.test" }],
+        notFound: [],
+      };
+    else if (method === "EmailSubmission/set") {
+      submissions++;
+      data = { accountId: "jmap-account", created: { item: { id: "sent" } } };
+    } else throw new Error("unexpected call");
+    return Promise.resolve(
+      Response.json({
+        methodResponses: [[method, data, "0"]],
+        sessionState: "s",
+      }),
+    );
+  };
+  const mail = createMailService({
+    origin,
+    store: {
+      getForOwner: () =>
+        Promise.resolve(
+          ok({ accountId: "owned", address: actor.email, secret: "fixture" }),
+        ),
+    },
+    client: () =>
+      new JmapClient(origin, { authorization: "fixture", fetch: fake }),
+    canSendAs: () => {
+      lookups++;
+      return Promise.resolve("alias-id");
+    },
+    beforeAliasSend: (userId, aliasId) => {
+      expect([userId, aliasId]).toEqual(["alice", "alias-id"]);
+      checks++;
+      return Promise.resolve(allow);
+    },
+  });
+  const denied = await mail.send(actor, "default", "draft");
+  expect(denied.isErr() && denied.error.kind).toBe("rate_limited");
+  expect(submissions).toBe(0);
+  allow = true;
+  expect((await mail.send(actor, "default", "draft")).isOk()).toBe(true);
+  expect(checks).toBe(2);
+  expect(lookups).toBe(2);
+  expect(submissions).toBe(1);
+});

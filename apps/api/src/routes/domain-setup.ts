@@ -1,3 +1,4 @@
+import { timedFetch } from "../adapters/timed-fetch.ts";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
@@ -33,10 +34,16 @@ export async function configureDomains(
     await readFile(config.DOMAINS_STALWART_PASSWORD_FILE, "utf8")
   ).trim();
   if (!password) throw new Error("empty Stalwart administrator password");
-  const admin = new StalwartAdmin(config.DOMAINS_STALWART_ORIGIN, {
-    username: config.DOMAINS_STALWART_USER,
-    password,
-  });
+  const admin = new StalwartAdmin(
+    config.DOMAINS_STALWART_ORIGIN,
+    {
+      username: config.DOMAINS_STALWART_USER,
+      password,
+    },
+    {
+      fetch: timedFetch(),
+    },
+  );
   const mail: DomainMail = {
     async createDomain(name) {
       return (await admin.createDomain(name)).mapErr(failure);

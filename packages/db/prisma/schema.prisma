@@ -30,6 +30,12 @@ model User {
   twoFactor        TwoFactor?
   mailbox          MailboxLink?
   mailboxProvision MailboxProvision?
+  aliasSyncToken String?
+  aliasSyncUntil DateTime?
+  emailAliases     EmailAlias[]
+  aliasApiKeys     AliasApiKey[]
+  defaultAliasDomainId String?
+  defaultAliasDomain Domain? @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
 }
 
 model MailboxProvision {
@@ -115,10 +121,13 @@ model Domain {
   name      String    @unique
   stalwartId String?
   status String @default("pending")
+  removalPending Boolean @default(false)
   records Json @default("[]")
   checkedAt DateTime?
   createdAt DateTime  @default(now())
   addresses Address[]
+  defaultForUsers User[] @relation("DefaultAliasDomain")
+  emailAliases EmailAlias[]
 
   @@unique([id, userId])
   @@index([userId])
@@ -133,8 +142,50 @@ model Address {
   localPart String
   isAlias   Boolean  @default(false)
   createdAt DateTime @default(now())
+  emailAlias EmailAlias?
 
   @@unique([domainId, localPart])
+  @@index([userId])
+}
+
+model EmailAlias {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  domainId String
+  domain Domain @relation(fields: [domainId], references: [id], onDelete: Restrict)
+  addressId String @unique
+  addressRecord Address @relation(fields: [addressId], references: [id], onDelete: Restrict)
+  address String @unique
+  localPart String
+  website String?
+  note String?
+  enabled Boolean @default(true)
+  ready Boolean @default(false)
+  detachedByDomain Boolean @default(false)
+  suspended Boolean @default(false)
+  lastAccountId String?
+  revision Int @default(0)
+  requestId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  @@unique([userId, requestId])
+  @@index([userId])
+}
+
+model AliasApiKey {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  name String
+  prefix String @unique
+  secretHash String
+  createdAt DateTime @default(now())
+  lastUsedAt DateTime?
+  revokedAt DateTime?
+
   @@index([userId])
 }
 

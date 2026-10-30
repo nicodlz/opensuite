@@ -9,6 +9,14 @@ import {
   type Session,
 } from "../src/index.ts";
 import { StalwartAdmin } from "../src/admin.ts";
+import { createAliasMail } from "../../../apps/api/src/adapters/alias-mail.ts";
+import { ok } from "neverthrow";
+import {
+  createAliasStore,
+  createDatabase,
+  type PrismaClient,
+} from "../../db/src/index.ts";
+import { createAliasService } from "../../core/src/services/aliases.ts";
 import type { Result } from "neverthrow";
 
 const run = promisify(execFile);
@@ -49,6 +57,8 @@ let domainId: string;
 let inbox: string;
 let drafts: string;
 let sent: string;
+let aliasDb: PrismaClient | undefined;
+const pgContainer = `${project}-db`;
 
 const rewrite = (url: string) =>
   `${base}${new URL(url).pathname}${new URL(url).search}`;
@@ -127,12 +137,61 @@ describe("Stalwart JMAP integration", () => {
       inbox = findMailbox(boxes, "inbox");
       drafts = findMailbox(boxes, "drafts");
       sent = findMailbox(boxes, "sent");
+      await run("docker", [
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        pgContainer,
+        "-e",
+        "POSTGRES_PASSWORD=test-password",
+        "-e",
+        "POSTGRES_INITDB_ARGS=--no-sync",
+        "-p",
+        "127.0.0.1::5432",
+        "postgres:18.6",
+      ]);
+      const waitPg = async (attempt: number): Promise<void> => {
+        try {
+          await run("docker", [
+            "exec",
+            pgContainer,
+            "pg_isready",
+            "-U",
+            "postgres",
+          ]);
+        } catch {
+          if (!attempt) throw new Error("PostgreSQL unavailable");
+          await pause(500);
+          await waitPg(attempt - 1);
+        }
+      };
+      await waitPg(120);
+      const pgPort = /:(\d+)\s*$/.exec(
+        (await run("docker", ["port", pgContainer, "5432"])).stdout,
+      )?.[1];
+      if (!pgPort) throw new Error("PostgreSQL port missing");
+      const databaseUrl = `postgresql://postgres:test-password@127.0.0.1:${pgPort}/postgres`;
+      await run(
+        "pnpm",
+        ["--filter", "@opensuite/db", "exec", "prisma", "migrate", "deploy"],
+        {
+          env: { ...process.env, DATABASE_URL: databaseUrl },
+          maxBuffer: 4_000_000,
+        },
+      );
+      const database = createDatabase(databaseUrl);
+      if (database.isErr()) throw new Error("PostgreSQL configuration failed");
+      aliasDb = database.value;
     } catch (error) {
+      await run("docker", ["rm", "-f", pgContainer]).catch(() => undefined);
       await compose("down", "--volumes", "--remove-orphans");
       throw error;
     }
   }, 120_000);
   afterAll(async () => {
+    await aliasDb?.$disconnect();
+    await run("docker", ["rm", "-f", pgContainer]).catch(() => undefined);
     await compose("down", "--volumes", "--remove-orphans");
   }, 60_000);
 
@@ -181,6 +240,11 @@ describe("Stalwart JMAP integration", () => {
     expect(
       Object.values(account.aliases).filter((item) => item.name === "a.alias"),
     ).toHaveLength(1);
+    expect(
+      value(await alice.identities(aliceSession, aliceId)).list.map(
+        (item) => item.email,
+      ),
+    ).toContain("a.alias@example.test");
     const weak = await admin.createAccount("weak", domainId, "123");
     expect(weak.isErr() ? weak.error : undefined).toMatchObject({
       kind: "set",
@@ -196,7 +260,203 @@ describe("Stalwart JMAP integration", () => {
       domainId,
     );
     expect(conflict.isErr()).toBe(true);
+    value(await admin.removeAlias(first.id, "a.alias", domainId));
+    expect(
+      value(await alice.identities(aliceSession, aliceId)).list.map(
+        (item) => item.email,
+      ),
+    ).not.toContain("a.alias@example.test");
   });
+
+  it("delivers to an alias, stops after removal, restores delivery and sends replies as the alias", async () => {
+    const account = value(
+      await admin.createAccount("alice", domainId, password),
+    );
+    const address = "private-reply@example.test";
+    if (!aliasDb) throw new Error("Missing alias database");
+    const adapter = createAliasMail(
+      { origin: base, username: "admin", password: "integration-password" },
+      {
+        getForOwner: () =>
+          Promise.resolve(
+            ok({
+              accountId: account.id,
+              address: "alice@example.test",
+              secret: password,
+            }),
+          ),
+      },
+    );
+    const send = async (
+      client: JmapClient,
+      session: Session,
+      accountId: string,
+      from: string,
+      to: string,
+      subject: string,
+    ) => {
+      const box = findMailbox(
+        value(await client.mailboxes(session, accountId)).list,
+        "drafts",
+      );
+      const raw = Buffer.from(
+        `From: ${from}\r\nTo: ${to}\r\nSubject: ${subject}\r\nMessage-ID: <${subject}@example.test>\r\n\r\nHello\r\n`,
+      );
+      const blob = value(await client.upload(session, accountId, raw));
+      const email = value(
+        await client.importEmail(session, accountId, {
+          blobId: blob.blobId,
+          mailboxIds: { [box]: true },
+          keywords: { $draft: true },
+        }),
+      );
+      const identity = value(
+        await client.identities(session, accountId),
+      ).list.find((item) => item.email === from);
+      if (!identity) throw new Error("missing identity");
+      value(await client.submit(session, accountId, email.id, identity.id));
+    };
+    const delivered = async (
+      client: JmapClient,
+      session: Session,
+      id: string,
+      subject: string,
+    ) => {
+      const poll = async (remaining: number): Promise<boolean> => {
+        if (
+          value(await client.queryEmails(session, id, { filter: { subject } }))
+            .ids.length > 0
+        )
+          return true;
+        if (remaining === 0) return false;
+        await pause(250);
+        return poll(remaining - 1);
+      };
+      return poll(40);
+    };
+    expect(
+      (
+        await adapter.set(
+          account.id,
+          "private-reply",
+          domainId,
+          address,
+          "alice",
+          true,
+        )
+      ).isOk(),
+    ).toBe(true);
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      address,
+      "alias-first",
+    );
+    expect(await delivered(alice, aliceSession, aliceId, "alias-first")).toBe(
+      true,
+    );
+    await send(
+      alice,
+      aliceSession,
+      aliceId,
+      address,
+      "bob@example.test",
+      "alias-reply",
+    );
+    expect(await delivered(bob, bobSession, bobId, "alias-reply")).toBe(true);
+    const replyIds = value(
+      await bob.queryEmails(bobSession, bobId, {
+        filter: { subject: "alias-reply" },
+      }),
+    ).ids;
+    const reply = value(await bob.emails(bobSession, bobId, replyIds)).list[0];
+    expect(reply?.from?.[0]?.email).toBe(address);
+    const userId = "stalwart-alias-owner";
+    await aliasDb.user.create({
+      data: { id: userId, email: "alias-owner@example.test", name: "Fixture" },
+    });
+    await aliasDb.mailboxLink.create({
+      data: {
+        userId,
+        accountId: account.id,
+        address: "alice@example.test",
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const domain = await aliasDb.domain.create({
+      data: {
+        userId,
+        name: "example.test",
+        status: "verified",
+        stalwartId: domainId,
+      },
+    });
+    const reservation = await aliasDb.address.create({
+      data: {
+        userId,
+        domainId: domain.id,
+        localPart: "private-reply",
+        isAlias: true,
+      },
+    });
+    const row = await aliasDb.emailAlias.create({
+      data: {
+        userId,
+        domainId: domain.id,
+        addressId: reservation.id,
+        address,
+        localPart: "private-reply",
+        ready: true,
+      },
+    });
+    const aliases = createAliasService(createAliasStore(aliasDb), adapter, 10);
+    expect((await aliases.transition(userId, row.id, "disable")).isOk()).toBe(
+      true,
+    );
+    expect(
+      value(await alice.identities(aliceSession, aliceId)).list.some(
+        (item) => item.email === address,
+      ),
+    ).toBe(false);
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      address,
+      "alias-disabled",
+    );
+    expect(
+      await delivered(alice, aliceSession, aliceId, "alias-disabled"),
+    ).toBe(false);
+    expect(
+      (
+        await adapter.set(
+          account.id,
+          "private-reply",
+          domainId,
+          address,
+          "alice",
+          true,
+        )
+      ).isOk(),
+    ).toBe(true);
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      address,
+      "alias-restored",
+    );
+    expect(
+      await delivered(alice, aliceSession, aliceId, "alias-restored"),
+    ).toBe(true);
+    value(await admin.removeAlias(account.id, "private-reply", domainId));
+  }, 60_000);
 
   it("imports identical MIME twice, retains bytes, keywords, date and an attachment, then moves it", async () => {
     const raw = [

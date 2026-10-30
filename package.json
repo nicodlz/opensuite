@@ -21,10 +21,12 @@
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "catalog:",
+    "@axe-core/playwright": "catalog:",
     "@bitwarden/cli": "catalog:",
     "@noble/hashes": "catalog:",
     "@opensuite/core": "workspace:*",
     "@opensuite/typescript-config": "workspace:*",
+    "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "knip": "catalog:",
     "neverthrow": "catalog:",
@@ -34,8 +36,6 @@
     "turbo": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
-    "@playwright/test": "catalog:",
-    "@axe-core/playwright": "catalog:",
     "zod": "catalog:"
   }
 }

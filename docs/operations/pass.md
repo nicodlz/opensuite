@@ -177,17 +177,6 @@ volume and secrets into an isolated environment, then set `PASS_IMAGE` to the pr
 image pin. Do not point an older image at a migrated database without upstream
 confirmation. Test recovery before reconnecting users.
 
-For client setup, version-specific evidence and manual checks, see the
-[Pass client compatibility guide](../user/pass-clients.md). Run
-`pnpm exec vitest run --project pass` against a local Docker Compose daemon
-when changing the Pass stack or pinned CLI. Install the Playwright Chromium
-build with `pnpm exec playwright install chromium` first. These tests use
-disposable projects, accounts, ports and volumes; they do not establish
-production recovery or audit the deployment. The CLI trusts the disposable
-Caddy CA via `NODE_EXTRA_CA_CERTS`; registration pins the test certificate in
-Chromium after checking its CA chain and hostname. The suite checks the known
-raw API denial responses described in the compatibility guide.
-
 ## Esuno shell status
 
 To enable the Pass launcher in Esuno, include the exact HTTPS vault origin in
@@ -207,3 +196,14 @@ from the API container, so an unreachable status may also indicate a DNS, TLS or
 network problem. Results (including failures) are cached for 30 seconds and
 requests time out after two seconds. A missing origin is a normal disabled
 state. Anonymous callers receive only enabled and reachable; the version and check time are available to authenticated sessions. The status does not verify login or client compatibility.
+
+For client setup, version-specific evidence and manual checks, see the
+[Pass client compatibility guide](../user/pass-clients.md). Run
+`pnpm exec vitest run --project pass` against a local Docker Compose daemon
+when changing the Pass stack or pinned CLI. Install the Playwright Chromium
+build with `pnpm exec playwright install chromium` first. These tests use
+disposable projects, accounts, ports and volumes; they do not establish
+production recovery or audit the deployment. The CLI trusts the disposable
+Caddy CA via `NODE_EXTRA_CA_CERTS`; registration pins the test certificate in
+Chromium after checking its CA chain and hostname. The suite checks the known
+raw API denial responses described in the compatibility guide.

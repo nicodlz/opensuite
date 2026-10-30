@@ -186,8 +186,14 @@ export function createDomainService(
       const row = await store.get(id);
       if (row.isErr()) return err(unavailable());
       if (row.value.addresses.length > 0) return err(invalid());
+      const reserved = await store.beginRemoval(id);
+      if (reserved.isErr()) return err(unavailable());
+      if (!reserved.value) return err(invalid());
       const result = await provider.receipt(row.value.name, false);
-      if (result.isErr()) return err(unavailable());
+      if (result.isErr()) {
+        await store.cancelRemoval(id);
+        return err(unavailable());
+      }
       const removed = await store.remove(actor.id, id);
       return removed.isErr() ? err(unavailable()) : ok(undefined);
     },
@@ -201,42 +207,65 @@ export function createDomainService(
       },
     ): Promise<Result<ManagedDomain, Failure>> {
       if (actor.role !== "admin") return err(denied());
-      if (
-        (
-          await store.audit(
-            actor.id,
-            "admin.domain.address.add.attempt",
-            input.domainId,
-          )
-        ).isErr()
-      )
-        return err(unavailable());
-      const part = LocalPart.safeParse(input.localPart);
-      if (!part.success) return err(invalid());
-      const row = await store.get(input.domainId);
-      if (row.isErr() || row.value.stalwartId === null)
-        return err(unavailable());
-      const mailbox = await store.mailbox(input.userId);
-      if (mailbox.isErr()) return err(unavailable());
-      if (input.isAlias) {
-        const alias = await mail.createAlias(
-          mailbox.value.accountId,
-          part.data,
-          row.value.stalwartId,
+      const lease = await store.withUserLease(input.userId, async () => {
+        if (
+          (
+            await store.audit(
+              actor.id,
+              "admin.domain.address.add.attempt",
+              input.domainId,
+            )
+          ).isErr()
+        )
+          return err(unavailable());
+        const part = LocalPart.safeParse(input.localPart);
+        if (!part.success) return err(invalid());
+        const row = await store.get(input.domainId);
+        if (row.isErr() || row.value.stalwartId === null)
+          return err(unavailable());
+        const existing = row.value.addresses.find(
+          (address) => address.localPart.toLowerCase() === part.data,
         );
-        if (alias.isErr()) return err(unavailable());
-      } else if (
-        mailbox.value.address.toLowerCase() !== `${part.data}@${row.value.name}`
-      )
-        return err(invalid());
-      const result = await store.addAddress(
-        actor.id,
-        input.domainId,
-        input.userId,
-        part.data,
-        input.isAlias,
-      );
-      return result.isErr() ? err(unavailable()) : ok(result.value);
+        if (existing !== undefined) {
+          const managed = await store.isManagedAddress(existing.id);
+          if (managed.isErr()) return err(unavailable());
+          if (
+            managed.value ||
+            existing.userId !== input.userId ||
+            existing.isAlias !== input.isAlias
+          )
+            return err(invalid());
+        }
+        const mailbox = await store.mailbox(input.userId);
+        if (mailbox.isErr()) return err(unavailable());
+        if (
+          !input.isAlias &&
+          mailbox.value.address.toLowerCase() !==
+            `${part.data}@${row.value.name}`
+        )
+          return err(invalid());
+        const result =
+          existing === undefined
+            ? await store.addAddress(
+                actor.id,
+                input.domainId,
+                input.userId,
+                part.data,
+                input.isAlias,
+              )
+            : ok(row.value);
+        if (result.isErr()) return err(unavailable());
+        if (input.isAlias) {
+          const alias = await mail.createAlias(
+            mailbox.value.accountId,
+            part.data,
+            row.value.stalwartId,
+          );
+          if (alias.isErr()) return err(unavailable());
+        }
+        return ok(result.value);
+      });
+      return lease.isErr() ? err(unavailable()) : lease.value;
     },
     async removeAddress(
       actor: Actor,
@@ -259,18 +288,40 @@ export function createDomainService(
         return err(unavailable());
       const address = row.value.addresses.find((item) => item.id === addressId);
       if (address === undefined) return err(invalid());
-      if (address.isAlias) {
-        const mailbox = await store.mailbox(address.userId);
-        if (mailbox.isErr()) return err(unavailable());
-        const result = await mail.removeAlias(
-          mailbox.value.accountId,
-          address.localPart,
-          row.value.stalwartId,
+      const managed = await store.isManagedAddress(addressId);
+      if (managed.isErr()) return err(unavailable());
+      if (managed.value) return err(invalid());
+      const lease = await store.withUserLease(address.userId, async () => {
+        const current = await store.get(domainId);
+        if (
+          current.isErr() ||
+          current.value.stalwartId === null ||
+          !current.value.addresses.some(
+            (item) => item.id === addressId && item.userId === address.userId,
+          )
+        )
+          return err(invalid());
+        const stillManaged = await store.isManagedAddress(addressId);
+        if (stillManaged.isErr()) return err(unavailable());
+        if (stillManaged.value) return err(invalid());
+        if (address.isAlias) {
+          const mailbox = await store.mailbox(address.userId);
+          if (mailbox.isErr()) return err(unavailable());
+          const result = await mail.removeAlias(
+            mailbox.value.accountId,
+            address.localPart,
+            current.value.stalwartId,
+          );
+          if (result.isErr()) return err(unavailable());
+        }
+        const removed = await store.removeAddress(
+          actor.id,
+          domainId,
+          addressId,
         );
-        if (result.isErr()) return err(unavailable());
-      }
-      const removed = await store.removeAddress(actor.id, domainId, addressId);
-      return removed.isErr() ? err(unavailable()) : ok(removed.value);
+        return removed.isErr() ? err(unavailable()) : ok(removed.value);
+      });
+      return lease.isErr() ? err(unavailable()) : lease.value;
     },
   };
 }

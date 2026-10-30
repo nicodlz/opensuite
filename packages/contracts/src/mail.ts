@@ -66,6 +66,7 @@ export const ThreadSummarySchema = z.object({
   labels: z.array(IdSchema),
 });
 export const DraftContentSchema = z.object({
+  from: z.email().optional(),
   to: z.array(AddressSchema),
   cc: z.array(AddressSchema),
   bcc: z.array(AddressSchema),
@@ -95,6 +96,7 @@ const errors = {
   FORBIDDEN: { status: 403, message: "Access denied" },
   VALIDATION: { status: 400, message: "Invalid mail data" },
   CONFLICT: { status: 409, message: "Mail item changed" },
+  TOO_MANY_REQUESTS: { status: 429, message: "Too many requests" },
   UPSTREAM_UNAVAILABLE: { status: 503, message: "Mail service unavailable" },
 };
 const procedure = oc.errors(errors);

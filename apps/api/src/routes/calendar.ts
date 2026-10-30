@@ -26,6 +26,7 @@ const result = async <T>(
     validation: "VALIDATION",
     conflict: "CONFLICT",
     unavailable: "UPSTREAM_UNAVAILABLE",
+    rate_limited: "TOO_MANY_REQUESTS",
   } satisfies Record<CalendarFailure["kind"], string>;
   const statuses = {
     forbidden: 403,
@@ -33,6 +34,7 @@ const result = async <T>(
     validation: 400,
     conflict: 409,
     unavailable: 503,
+    rate_limited: 429,
   } satisfies Record<CalendarFailure["kind"], number>;
   throw new ORPCError(codes[value.error.kind], {
     status: statuses[value.error.kind],
