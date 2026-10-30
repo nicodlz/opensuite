@@ -21,6 +21,8 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "catalog:",
+    "@aws-sdk/client-s3": "catalog:",
+    "@bitwarden/cli": "catalog:",
     "@opensuite/core": "workspace:*",
     "@opensuite/typescript-config": "workspace:*",
     "@playwright/test": "catalog:",

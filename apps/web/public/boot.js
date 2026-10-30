@@ -1,29 +1,63 @@
-// Reload once when an application script or stylesheet fails to load (for
-// example after a network change), instead of leaving a blank page. At most
-// one automatic reload every ten seconds, so a lasting failure cannot loop.
+// Recover from application code that fails to load (for example during a
+// network change) instead of leaving a blank page.
+// - Until the page has loaded, a failed same-origin script or stylesheet
+//   reloads it.
+// - Afterwards only a failed lazy page chunk (Vite's preload error) does, so
+//   typing in a form is never interrupted by an unrelated resource.
+// At most three reloads within any sliding minute, so a lasting failure
+// cannot loop.
 (function () {
   const key = "esuno-asset-reload";
+  let scheduled = false;
+  let loaded = false;
+  window.addEventListener("load", function () {
+    loaded = true;
+  });
+  function recent(now) {
+    return (sessionStorage.getItem(key) || "")
+      .split(",")
+      .map(Number)
+      .filter(
+        (time) => Number.isFinite(time) && time <= now && now - time < 60000,
+      );
+  }
   function reload() {
-    const last = Number(sessionStorage.getItem(key) || 0);
-    if (Date.now() - last < 10000) return;
-    sessionStorage.setItem(key, String(Date.now()));
-    window.location.reload();
+    if (scheduled) return true;
+    const now = Date.now();
+    const times = recent(now);
+    if (times.length >= 3) return false;
+    times.push(now);
+    sessionStorage.setItem(key, times.join(","));
+    scheduled = true;
+    setTimeout(
+      function () {
+        window.location.reload();
+      },
+      500 * times.length * times.length,
+    );
+    return true;
+  }
+  function ownCode(target) {
+    if (target instanceof HTMLScriptElement)
+      return (
+        target.src !== "" && new URL(target.src).origin === location.origin
+      );
+    if (target instanceof HTMLLinkElement)
+      return (
+        (target.relList.contains("stylesheet") ||
+          target.relList.contains("modulepreload")) &&
+        new URL(target.href).origin === location.origin
+      );
+    return false;
   }
   window.addEventListener(
     "error",
     function (event) {
-      const target = event.target;
-      if (
-        target &&
-        (target.tagName === "SCRIPT" || target.tagName === "LINK") &&
-        target !== document.currentScript
-      )
-        reload();
+      if (!loaded && ownCode(event.target)) reload();
     },
     true,
   );
   window.addEventListener("vite:preloadError", function (event) {
-    event.preventDefault();
-    reload();
+    if (reload()) event.preventDefault();
   });
 })();

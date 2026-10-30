@@ -252,3 +252,40 @@ it("keeps sign-in available after anonymous IP buckets fill", async () => {
   );
   expect(sameSubnet.filter((item) => item.statusCode === 429)).toHaveLength(1);
 }, 120_000);
+it("labels a refusal by Better Auth's own rate limit as rate limited", async () => {
+  const actions: string[] = [];
+  app = await buildServer({
+    config: { logLevel: "silent" },
+    monotonicMs,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs,
+    }),
+    identity: {
+      publicOrigin: "https://suite.example.test",
+      handler: () =>
+        Promise.resolve(
+          new Response('{"message":"Too many requests"}', {
+            status: 429,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      actor: () => Promise.resolve(null),
+      userIdForEmail: () => Promise.resolve("user-1"),
+      audit: (event) => {
+        actions.push(event.action);
+        return Promise.resolve();
+      },
+    },
+  });
+  const response = await app.inject({
+    method: "POST",
+    url: "/auth/sign-in/email",
+    headers: { origin: "https://suite.example.test" },
+    payload: { email: "user@example.test", password: "right-password" },
+  });
+  expect(response.statusCode).toBe(429);
+  expect(actions).toEqual(["sign_in.rate_limited"]);
+});

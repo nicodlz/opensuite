@@ -72,6 +72,11 @@ const CalendarPage = lazy(() =>
     default: module.CalendarPage,
   })),
 );
+const PassPage = lazy(() =>
+  import("./pass/pass-page.tsx").then((module) => ({
+    default: module.PassPage,
+  })),
+);
 const SetupPage = lazy(() =>
   import("./setup/setup-page.tsx").then((module) => ({
     default: module.SetupPage,
@@ -486,6 +491,39 @@ const driveRoute = createRoute({
     </Protected>
   ),
 });
+const passRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/pass",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <PassPage page="home" />
+      </Lazy>
+    </Protected>
+  ),
+});
+const passGeneratorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/pass/generator",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <PassPage page="generator" />
+      </Lazy>
+    </Protected>
+  ),
+});
+const passClientsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/pass/clients",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <PassPage page="clients" />
+      </Lazy>
+    </Protected>
+  ),
+});
 const domainsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/domains",
@@ -525,6 +563,9 @@ const router = createRouter({
     calendarRoute,
     contactsRoute,
     driveRoute,
+    passRoute,
+    passGeneratorRoute,
+    passClientsRoute,
     domainsRoute,
     setupRoute,
   ]),

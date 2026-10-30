@@ -48,7 +48,11 @@ export function Protected({ children }: { children: ReactNode }) {
     }
   }, [session.isSuccess, session.data, navigate]);
   if (session.isPending)
-    return <main className="auth-loading">Checking your session…</main>;
+    return (
+      <main className="auth-loading">
+        <output>Checking your session…</output>
+      </main>
+    );
   if (session.isError)
     return (
       <main className="auth-loading" role="alert">
@@ -120,6 +124,14 @@ export function LoginPage() {
       setBusy(false);
     }
   }
+  // Other origins never show the form: typing there would race the move.
+  const here = activeLayout();
+  if (here.split && here.host !== "mail")
+    return (
+      <main className="auth-loading">
+        <output>Redirecting to sign-in…</output>
+      </main>
+    );
   return (
     <main className="auth-page">
       <div className="auth-card">

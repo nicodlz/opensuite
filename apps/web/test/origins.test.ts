@@ -22,6 +22,9 @@ describe("origin layout", () => {
     expect(redirectFor(layout, "/drive", "?q=1")).toBeNull();
     expect(rewriteFor(layout)).toBeUndefined();
     expect(resolveLayout({}, "http://localhost:5173").split).toBe(false);
+    expect(
+      resolveLayout({ mail, pass: "https://pass.example.test" }, mail).split,
+    ).toBe(false);
   });
   it("serves each application at the root of its own origin", () => {
     const layout = resolveLayout(origins, calendar);
@@ -55,6 +58,9 @@ describe("origin layout", () => {
     expect(redirectFor(hub, "/drive-notes", "")).toBeNull();
     const sibling = resolveLayout(origins, drive);
     expect(redirectFor(sibling, "/login", "")).toBe(`${mail}/login`);
+    expect(redirectFor(sibling, "/pass/generator", "?x=1")).toBe(
+      `${mail}/pass/generator?x=1`,
+    );
     expect(redirectFor(sibling, "/setup", "?step=2")).toBe(
       `${mail}/setup?step=2`,
     );
@@ -87,6 +93,12 @@ describe("origin map loading", () => {
     expect(await loadOrigins(offline)).toEqual({});
     expect(await loadOrigins(answer({ error: true }, 503))).toEqual({});
     expect(await loadOrigins(answer({ drive: "not a url" }))).toEqual({});
+    expect(await loadOrigins(answer({ pass: "javascript:alert(1)" }))).toEqual(
+      {},
+    );
+    expect(
+      await loadOrigins(answer({ pass: "https://pass.example.test/path" })),
+    ).toEqual({});
   });
   it("keeps the app on this origin without a map", () => {
     const layout = resolveLayout({}, drive);
