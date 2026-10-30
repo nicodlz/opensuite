@@ -10,6 +10,7 @@ import {
   belongs,
   covered,
   isSetupNotice,
+  isSetupObject,
   mergeVariants,
   namedAfter,
 } from "./recovery.ts";
@@ -445,6 +446,7 @@ export class IngestService {
         });
         return;
       }
+      if (isSetupNotice(body.value, this.deps)) return;
       if (!namedAfter(key, body.value)) {
         failures++;
         this.deps.events.emit("ingest_failure", { stage: "archive_mismatch" });
@@ -548,7 +550,8 @@ export class IngestService {
     );
     if (keys.isOk())
       for (const key of keys.value)
-        if (!referenced.has(key))
+        // SES's setup test object never has a notification to reference it.
+        if (!referenced.has(key) && !isSetupObject(key, this.deps))
           this.deps.events.emit("ingest_buffer_without_notification", { key });
     return failures > 0
       ? err({

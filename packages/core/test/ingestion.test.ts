@@ -628,6 +628,65 @@ describe("archive integrity", () => {
 });
 
 describe("SES setup tests", () => {
+  it("deletes a setup test from the queue and does not report its object", async () => {
+    const memory = synthetic();
+    const seen: string[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event) {
+          seen.push(event);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "messages/",
+      objectPrefixes: ["messages/", "messages/esuno/"],
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    const n = notification(
+      ["alice@example.test"],
+      "PASS",
+      "AMAZON_SES_SETUP_NOTIFICATION",
+    );
+    const { dmarcVerdict: _dmarc, ...receipt } = n.receipt;
+    const setup = JSON.stringify({
+      ...n,
+      receipt: {
+        ...receipt,
+        action: {
+          ...receipt.action,
+          objectKey: "messages/esuno/AMAZON_SES_SETUP_NOTIFICATION",
+        },
+      },
+    });
+    const deleted: string[] = [];
+    const queue = {
+      receive: () => Promise.resolve(ok([])),
+      delete: (handle: string) => {
+        deleted.push(handle);
+        return Promise.resolve(ok(undefined));
+      },
+      defer: () => Promise.resolve(ok(undefined)),
+    };
+    expect(
+      (
+        await service.handle(queue, { body: setup, receipt: "r", attempts: 1 })
+      ).isOk(),
+    ).toBe(true);
+    expect(deleted).toEqual(["r"]);
+    // SES's test object in the buffer is not an orphan to report.
+    memory.buffers.set(
+      "messages/esuno/AMAZON_SES_SETUP_NOTIFICATION",
+      new Uint8Array([1]),
+    );
+    await service.reconcile(86_400 * 3650);
+    expect(seen).not.toContain("ingest_buffer_without_notification");
+  });
+
   it("acknowledges SES's setup test without archiving or delivering it", async () => {
     const memory = synthetic();
     const seen: string[] = [];

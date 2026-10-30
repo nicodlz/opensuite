@@ -46,7 +46,9 @@ const body = (
 // SES's setup test as observed in production: a Received notification
 // whose message ID is the marker, its object under the rule's prefix, and
 // without a DMARC verdict.
-const setupNotice = (options: { object?: string; bucket?: string } = {}) => {
+const setupNotice = (
+  options: { object?: string; bucket?: string; topic?: string } = {},
+) => {
   const n = notification(
     ["alice@example.test"],
     "PASS",
@@ -60,6 +62,7 @@ const setupNotice = (options: { object?: string; bucket?: string } = {}) => {
       action: {
         ...receipt.action,
         bucketName: options.bucket ?? "inbound",
+        topicArn: options.topic ?? receipt.action.topicArn,
         objectKey: options.object ?? "AMAZON_SES_SETUP_NOTIFICATION",
       },
     },
@@ -262,9 +265,11 @@ describe("recovery from the Firehose archive", () => {
           setupNotice(),
           // Under a nested rule prefix that is configured.
           setupNotice({ object: "esuno/AMAZON_SES_SETUP_NOTIFICATION" }),
-          // The marker under an unknown prefix or bucket is not trusted.
+          // Under a prefix that is not listed: a missing prefix, foreign.
           setupNotice({ object: "other/AMAZON_SES_SETUP_NOTIFICATION" }),
+          // Another bucket or topic: not this installation's, invalid.
           setupNotice({ bucket: "elsewhere" }),
+          setupNotice({ topic: "arn:aws:sns:eu-north-1:123456789012:other" }),
           // Real mail missing a verdict stays an error to examine.
           JSON.stringify(broken),
         ),
@@ -277,8 +282,9 @@ describe("recovery from the Firehose archive", () => {
       { prefix: "metadata/", apply: false },
     );
     expect(report.isOk() && report.value).toMatchObject({
-      records: 5,
+      records: 6,
       setup: 2,
+      foreign: 1,
       invalid: 3,
       notifications: 0,
     });

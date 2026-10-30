@@ -58,25 +58,36 @@ const SetupShape = z.object({
  * delivered nor counted as an invalid notification. Anything else with the
  * marker remains invalid.
  */
-export function isSetupNotice(text: string, scope: RecoveryScope): boolean {
+export const isSetupNotice = (text: string, scope: RecoveryScope) =>
+  setupNotice(text, scope) === "setup";
+/**
+ * `setup` for this installation's setup test, `foreign` for one naming this
+ * bucket and topic under a prefix that is not accepted (a prefix missing
+ * from the configuration, like a refused notification), otherwise `null`.
+ */
+export function setupNotice(
+  text: string,
+  scope: RecoveryScope,
+): "setup" | "foreign" | null {
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
-    return false;
+    return null;
   }
   const parsed = SetupShape.safeParse(value);
-  if (!parsed.success) return false;
+  if (!parsed.success) return null;
   const action = parsed.data.receipt.action;
-  return (
-    action.bucketName === scope.bucket &&
-    action.topicArn === scope.topic &&
-    (scope.objectPrefixes?.length
-      ? scope.objectPrefixes
-      : [scope.bufferPrefix]
-    ).some((prefix) => action.objectKey === prefix + SETUP_MARKER)
-  );
+  if (action.bucketName !== scope.bucket || action.topicArn !== scope.topic)
+    return null;
+  return isSetupObject(action.objectKey, scope) ? "setup" : "foreign";
 }
+/** The test object SES writes under an accepted prefix when a rule is set up. */
+export const isSetupObject = (key: string, scope: RecoveryScope) =>
+  (scope.objectPrefixes?.length
+    ? scope.objectPrefixes
+    : [scope.bufferPrefix]
+  ).some((prefix) => key === prefix + SETUP_MARKER);
 /**
  * Whether a notification is this installation's, and names its own message:
  * SES stores each message under its rule's object key prefix followed by the
@@ -266,8 +277,13 @@ export async function recoverFirehose(
     for (const line of text.split("\n")) {
       if (line === "") continue;
       report.records++;
-      if (isSetupNotice(line, scope)) {
+      const marker = setupNotice(line, scope);
+      if (marker === "setup") {
         report.setup++;
+        continue;
+      }
+      if (marker === "foreign") {
+        report.foreign++;
         continue;
       }
       const parsed = parseNotification(line);
@@ -369,6 +385,8 @@ export async function recoverObjects(
   let foreign = 0;
   await inTurn(keys.value, async (key) => {
     const body = await storage.readArchive(key);
+    // A setup test carries no mail, archived or not.
+    if (body.isOk() && isSetupNotice(body.value, scope)) return;
     const parsed =
       body.isOk() && namedAfter(key, body.value)
         ? parseNotification(body.value)

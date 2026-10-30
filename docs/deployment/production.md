@@ -549,7 +549,7 @@ Set `INBOUND_OBJECT_PREFIXES` in `deploy/ingest.env` before the new image
 runs (the replay timer uses it too), recreate the worker with
 `docker compose --profile ingest up -d ingest`, run `deploy/ingest/replay.sh`
 once and check it exits 0 without `archive_foreign` failures, then send a
-test message. Rolling back to an earlier release ignores the variable.
+test message. Rolling back to an earlier release ignores the variable. Earlier releases refused SES's setup test for a rule (message ID `AMAZON_SES_SETUP_NOTIFICATION`) until it reached the dead-letter queue; after upgrading, redrive such messages: the worker acknowledges them.
 
 Mailboxes created in the admin console, with their addresses, aliases and
 domain addresses, need no entry: Compose gives the worker the mailbox key
