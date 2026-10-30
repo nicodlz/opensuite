@@ -61,7 +61,7 @@ it("requires valid mail configuration and derives readiness from the internal or
       MAIL_DOMAIN: "example.test",
       AUTH_SECRET_FILE: authFile,
       MAILBOX_KEY_FILE: keyFile,
-      STALWART_ADMIN_PASSWORD_FILE: adminFile,
+      STALWART_MANAGEMENT_PASSWORD_FILE: adminFile,
     };
     expect((await loadAuthConfig(env)).isErr()).toBe(true);
     expect(
