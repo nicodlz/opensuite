@@ -12,6 +12,11 @@ describe("recovery exit status", () => {
     expect(recoveryIncomplete(clean)).toBe(false);
     expect(recoveryIncomplete({ ...clean, failed: 1 })).toBe(true);
     expect(recoveryIncomplete({ ...clean, unreadable: 2 })).toBe(true);
+    // A record that is not a valid notification may be unrecovered mail.
+    expect(recoveryIncomplete({ ...clean, invalid: 1 })).toBe(true);
+    expect(recoveryIncomplete({ ...clean, setup: 3 })).toBe(false);
+    // Refused notifications usually mean a prefix is missing.
+    expect(recoveryIncomplete({ ...clean, foreign: 1 })).toBe(true);
     expect(
       recoveryIncomplete({ ...clean, unrecoverable: [{ messageId: "m" }] }),
     ).toBe(true);

@@ -46,7 +46,7 @@ export class IngestService {
     const n = parsed.value;
     const { storage, ledger, delivery, events } = this.deps;
     if (!belongs(n, this.deps))
-      return err({ message: "Unexpected bucket or topic" });
+      return err({ message: "Unexpected bucket, topic or object key" });
     if (!reconcile) {
       const archive = await storage.archive(archiveKey(body), body);
       if (archive.isErr()) return archive;

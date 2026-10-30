@@ -23,6 +23,7 @@ import { z } from "zod";
 import { createHealthServer } from "./health.ts";
 import { runWorker } from "./worker.ts";
 import { operatorCommand, recoveryIncomplete } from "./operator.ts";
+import { parseObjectPrefixes } from "./prefixes.ts";
 
 const route = z.object({ address: z.email(), destination: z.string().min(1) });
 const destination = z.object({
@@ -41,6 +42,9 @@ const configSchema = z
     INBOUND_QUEUE_URL: z.url(),
     INBOUND_TOPIC_ARN: z.string().min(1),
     INBOUND_BUFFER_PREFIX: z.string().default(""),
+    // Receipt rules' object key prefixes, current and past, comma separated;
+    // the buffer prefix alone when empty.
+    INBOUND_OBJECT_PREFIXES: z.string().default(""),
     ARCHIVE_BUCKET: z.string().min(1),
     ARCHIVE_PREFIX: z.string().min(1).default("notifications/"),
     AWS_REGION: z.string().default("eu-north-1"),
@@ -117,6 +121,17 @@ const configSchema = z
     )
       ctx.addIssue({ code: "custom", message: "Route has no destination" });
     if (
+      !parseObjectPrefixes(
+        value.INBOUND_OBJECT_PREFIXES,
+        value.INBOUND_BUFFER_PREFIX,
+      ).success
+    )
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "Object prefixes must be distinct, end with a slash and lie within the buffer prefix",
+      });
+    if (
       value.INBOUND_BUCKET === value.ARCHIVE_BUCKET &&
       value.ARCHIVE_ENDPOINT_URL === value.AWS_ENDPOINT_URL &&
       (value.INBOUND_BUFFER_PREFIX === "" ||
@@ -178,6 +193,13 @@ async function linkedMailboxes() {
     credential: async (accountId: string) =>
       store.value.getForAccount(accountId),
   };
+}
+function objectPrefixes() {
+  const parsed = parseObjectPrefixes(
+    c.INBOUND_OBJECT_PREFIXES,
+    c.INBOUND_BUFFER_PREFIX,
+  );
+  return parsed.success ? parsed.data : undefined;
 }
 const s3 = new S3Client({
   requestHandler: {
@@ -242,6 +264,7 @@ const service = new IngestService({
   },
   bucket: c.INBOUND_BUCKET,
   bufferPrefix: c.INBOUND_BUFFER_PREFIX,
+  objectPrefixes: objectPrefixes(),
   topic: c.INBOUND_TOPIC_ARN,
   maxAttempts: c.INGEST_MAX_ATTEMPTS,
   holdDays: c.INGEST_HOLD_DAYS,
@@ -317,6 +340,7 @@ try {
             bucket: c.INBOUND_BUCKET,
             topic: c.INBOUND_TOPIC_ARN,
             bufferPrefix: c.INBOUND_BUFFER_PREFIX,
+            objectPrefixes: objectPrefixes(),
           },
         },
       },

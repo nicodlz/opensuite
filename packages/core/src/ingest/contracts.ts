@@ -131,6 +131,8 @@ export interface IngestDependencies {
   events: Events;
   bucket: string;
   bufferPrefix: string;
+  /** Receipt rules' object key prefixes; see `RecoveryScope`. */
+  objectPrefixes?: string[] | undefined;
   topic: string;
   maxAttempts: number;
   /**

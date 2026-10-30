@@ -493,6 +493,10 @@ AWS_ACCESS_KEY_ID=<ingestion-access-key-id>
 AWS_SECRET_ACCESS_KEY=<ingestion-secret-key>
 INBOUND_BUCKET=<aws-buffer-bucket>
 INBOUND_BUFFER_PREFIX=messages/
+# Object key prefix of every receipt rule whose notifications are in the
+# archives, current and past (see below); list messages/ too if any archived
+# notification uses it.
+INBOUND_OBJECT_PREFIXES=messages/,messages/esuno/
 INBOUND_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/<account>/<queue>
 INBOUND_TOPIC_ARN=arn:aws:sns:eu-north-1:<account>:<topic>
 ARCHIVE_ENDPOINT_URL=https://s3.<b2-region>.backblazeb2.com
@@ -505,10 +509,47 @@ INGEST_ROUTES='[{"address":"user@example.com","destination":"ACCOUNT_ID"}]'
 INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","authorization":"Basic <encoded-credential>","quarantineMailbox":"JUNK_ID","rewriteSessionUrls":true}]'
 ```
 
-`INBOUND_BUFFER_PREFIX` must equal the receipt rule's object key prefix
-(`messages/` in the AWS module): the worker refuses a notification whose
-object key is not that prefix followed by its message ID. Before upgrading
-to a release with this check, confirm it on one archived real notification.
+The worker refuses a notification whose object key is not exactly an
+accepted prefix followed by its message ID (logged as an unexpected bucket,
+topic or object key). Accepted prefixes are `INBOUND_OBJECT_PREFIXES` (comma
+separated, each ending with a slash and within `INBOUND_BUFFER_PREFIX`, which
+scopes buffer listing), or `INBOUND_BUFFER_PREFIX` alone. List the prefix of
+every receipt rule whose notifications may still be replayed (the AWS
+module's `message_prefix` and `esuno_message_prefix` outputs): a missing one
+rejects new mail, which then waits in the queue and its DLQ, and one missing
+for archived notifications makes every replay fail. Replay checks every
+archived notification, imported or not, and the Firehose archive never
+expires, so keep a former rule's prefix listed as long as the B2 archive or
+the Firehose files a recovery may read hold notifications under it, in
+practice for good. The worker needs delete rights under such a prefix only
+while one of its messages is not yet imported (the AWS module grants them on
+the Esuno prefix only).
+
+Before upgrading to a release with this check, count the archived
+notifications by prefix. On a host with the AWS CLI and `jq`, load
+`deploy/ingest.env` into the shell, then use the archive credentials (not
+the AWS ones) in a private directory that you delete afterwards, as the
+files contain addresses:
+
+```sh
+set -a; . deploy/ingest.env; set +a
+umask 077; dir=$(mktemp -d)
+AWS_ACCESS_KEY_ID="$ARCHIVE_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$ARCHIVE_SECRET_ACCESS_KEY" \
+AWS_REGION="$ARCHIVE_REGION" \
+  aws s3 sync "s3://$ARCHIVE_BUCKET/$ARCHIVE_PREFIX" "$dir" --endpoint-url "$ARCHIVE_ENDPOINT_URL"
+find "$dir" -name '*.json' -exec jq -r '.receipt.action.objectKey' {} + \
+  | sed 's#[^/]*$##' | sort | uniq -c
+rm -rf "$dir"
+```
+
+Every prefix it prints must be listed.
+
+Set `INBOUND_OBJECT_PREFIXES` in `deploy/ingest.env` before the new image
+runs (the replay timer uses it too), recreate the worker with
+`docker compose --profile ingest up -d ingest`, run `deploy/ingest/replay.sh`
+once and check it exits 0 without `archive_foreign` failures, then send a
+test message. Rolling back to an earlier release ignores the variable.
 
 Mailboxes created in the admin console, with their addresses, aliases and
 domain addresses, need no entry: Compose gives the worker the mailbox key
@@ -634,7 +675,9 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 Use this after an SQS message expired or was lost, after losing the host, or
 after restoring the database from a backup older than recent mail. It relies
 on the Firehose notification archive (`metadata/`, never expired) and the
-versioned buffer (`messages/`, noncurrent versions kept 30 days) in AWS, and
+versioned buffer (noncurrent versions under `messages/esuno/` kept 30 days
+by the AWS module; other prefixes follow the bucket's actual lifecycle) in
+AWS, and
 on the replay archive in B2, none of which live on the host. Expect one
 request at a time: about 1.5 hours per 100,000 archive entries.
 
@@ -686,9 +729,12 @@ ingestion and subscription DLQs before their 14 days run out.
    or backup time minus 24 hours (Firehose retries delivery for up to a
    day); `SINCE` and `UNTIL` (ISO 8601) select notifications by their
    receipt time. Read the report: notifications found, already archived,
-   missing, unreadable, invalid, foreign and outside the window, and
+   missing, unreadable, invalid, SES setup notices (no mail, ignored),
+   foreign and outside the window, and
    divergent message IDs (`mergeable: false` ones are skipped by replay and
-   need an operator). Run it again with `--apply` as last argument.
+   need an operator). The topic is this installation's, so `foreign`
+   records usually mean `INBOUND_OBJECT_PREFIXES` lacks a rule's prefix: fix
+   it before applying (both commands exit with an error while any remain). Run it again with `--apply` as last argument.
 
 4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
    `--apply`. Investigate every `unrecoverable` message (its original is
@@ -708,13 +754,18 @@ ingestion and subscription DLQs before their 14 days run out.
    `unset` the credentials and revoke the principal.
 
 Both commands can be repeated safely; they exit with an error while any
-read, write or restore failed, an original is unrecoverable or notifications
+read, write or restore failed, a record is not a valid mail notification
+(it may be mail that was not recovered: examine it), an original is
+unrecoverable or notifications
 of one message disagree beyond their envelope (an error that persists, once
 each such message is investigated, as long as the archive keeps them), and applied
 runs, complete or not, are recorded in the audit log. Before relying on
 them, test on the real buckets with the recovery principal: a conditional
 write on an existing key must answer 412, one on a key whose current version
-is a delete marker must succeed, two concurrent ones must leave one 409, all
+is a delete marker must succeed, of two concurrent ones on an absent key
+exactly one must succeed and the other answer 412 (a 409, which S3 may return
+when a write races a deletion, is reported as a failure to retry, not
+expected from two writes alone), all
 existing versions must remain, and the restored object must be encrypted;
 B2 must answer 412 to `If-None-Match` too (a B2 that ignores it rewrites
 identical bytes, harmless as entries are named after their content). Check
