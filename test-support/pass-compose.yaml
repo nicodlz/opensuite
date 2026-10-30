@@ -1,0 +1,31 @@
+# Disposable Pass-only integration fixture; no real external resources.
+services:
+  caddy:
+    entrypoint:
+      [
+        "caddy",
+        "run",
+        "--config",
+        "/etc/caddy/Caddyfile",
+        "--adapter",
+        "caddyfile",
+      ]
+    environment:
+      OPENSUITE_SITE_ADDRESS: localhost
+      PASS_SITE_ADDRESS: pass.localhost
+    networks:
+      api-proxy:
+        ipv4_address: ${PASS_TEST_PROXY_IP}
+    ports: !override
+      - "127.0.0.1::443"
+  pass:
+    environment:
+      DOMAIN: https://pass.localhost
+      IP_HEADER_TRUSTED_PROXIES: ${PASS_TEST_PROXY_IP}
+    ports: !override
+      - "127.0.0.1::80"
+networks:
+  api-proxy:
+    ipam:
+      config: !override
+        - subnet: ${PASS_TEST_SUBNET}
