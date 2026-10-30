@@ -12,6 +12,10 @@ To set up MFA, open **Account → Account security**, enter your current passwor
 
 The underlying authentication API is: `POST /api/auth/sign-in/email`, `POST /api/auth/two-factor/enable`, `POST /api/auth/two-factor/verify-totp`, `POST /api/auth/two-factor/verify-backup-code`, `POST /api/auth/two-factor/disable` and `POST /api/auth/sign-out`. State-changing requests require one of the configured application origins and a session or challenge cookie as appropriate.
 
+## Notifications
+
+Use the account menu in Mail, Calendar or Drive to opt in and send a test. See [Notifications](../notifications.md) for privacy settings and the iOS Home Screen requirement. New-mail and calendar-reminder triggers are not yet available.
+
 ## Mail
 
 Open **Mail**. Choose a folder and select a conversation to read it. The reading pane provides reply, reply all, forward, archive, trash, move, unread, star and label actions where applicable. Message HTML is sanitized and sandboxed; remote images require an explicit choice for each message. Select an attachment to download it.

@@ -1,3 +1,5 @@
+import { MailNotificationOffer, NotificationPrompt } from "../push/prompt.tsx";
+import { PushSettings } from "../push/settings.tsx";
 import * as React from "react";
 import { themeChoices } from "@opensuite/design-tokens";
 import { Link } from "@tanstack/react-router";
@@ -7,6 +9,7 @@ import { Button } from "../ui/button.tsx";
 import {
   DropdownContent,
   DropdownItemIndicator,
+  DropdownItem,
   DropdownMenu,
   DropdownRadioGroup,
   DropdownRadioItem,
@@ -168,6 +171,11 @@ export function AppShell({
   children: ReactNode;
 }) {
   const [navOpen, setNavOpen] = useState(false);
+  const [pushOpen, setPushOpen] = useState(false);
+  const pushProduct =
+    product === "mail" || product === "calendar" || product === "drive"
+      ? product
+      : null;
   const sidebarRef = useRef<HTMLElement>(null);
   useEffect(() => {
     // Navigating from the mobile drawer closes it.
@@ -196,6 +204,13 @@ export function AppShell({
     "Administration";
   return (
     <div className={`shell ${navOpen ? "nav-open" : ""}`}>
+      {signedIn && pushProduct && (
+        <PushSettings
+          product={pushProduct}
+          open={pushOpen}
+          onOpenChange={setPushOpen}
+        />
+      )}
       <a href={`#${mainId}`} className="skip-link">
         Skip to content
       </a>
@@ -293,6 +308,10 @@ export function AppShell({
         onClick={() => setNavOpen(false)}
       />
       <div className="shell-body">
+        {signedIn && pushProduct && (
+          <NotificationPrompt key={pushProduct} product={pushProduct} />
+        )}
+        {signedIn && product === "mail" && <MailNotificationOffer />}
         <header className="shell-topbar">
           <button
             type="button"
@@ -308,6 +327,14 @@ export function AppShell({
             {actions}
             {signedIn ? (
               <AccountMenu>
+                {pushProduct && (
+                  <DropdownItem
+                    className="menu-item"
+                    onSelect={() => setPushOpen(true)}
+                  >
+                    Notification settings
+                  </DropdownItem>
+                )}
                 <AppearanceItems />
               </AccountMenu>
             ) : (

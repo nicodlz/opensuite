@@ -17,6 +17,18 @@ export const RecurrenceSchema = z.enum([
   "monthly",
   "yearly",
 ]);
+// "custom" represents alarms that the simple picker must preserve unchanged.
+export const ReminderSchema = z.enum([
+  "none",
+  "at-time",
+  "5m",
+  "10m",
+  "15m",
+  "30m",
+  "1h",
+  "1d",
+  "custom",
+]);
 export const EventContentSchema = z.object({
   calendarId: IdSchema,
   title: z.string().max(500),
@@ -27,6 +39,7 @@ export const EventContentSchema = z.object({
   allDay: z.boolean(),
   timeZone: z.string().min(1),
   recurrence: RecurrenceSchema,
+  reminder: ReminderSchema.optional(),
 });
 // `id` identifies one occurrence; `seriesId` the stored event. Updates and
 // deletes of a recurring occurrence apply to the whole series.
@@ -90,3 +103,4 @@ export type Calendar = z.infer<typeof CalendarSchema>;
 export type CalendarEvent = z.infer<typeof EventSchema>;
 export type EventContent = z.infer<typeof EventContentSchema>;
 export type Recurrence = z.infer<typeof RecurrenceSchema>;
+export type Reminder = z.infer<typeof ReminderSchema>;

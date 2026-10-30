@@ -1,3 +1,4 @@
+import { clearPushOnSignOut } from "../push/client.ts";
 import * as React from "react";
 import {
   useEffect,
@@ -222,6 +223,8 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
   const session = useQuery(sessionQuery);
   async function signOut() {
     try {
+      // Best effort: the server also clears this session's push records on sign-out.
+      await clearPushOnSignOut().catch(() => undefined);
       await auth.signOut();
     } catch (failure) {
       if (failure instanceof AuthError && failure.status === 401) {

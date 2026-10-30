@@ -34,6 +34,13 @@ model User {
   aliasSyncUntil DateTime?
   emailAliases     EmailAlias[]
   aliasApiKeys     AliasApiKey[]
+  pushSubscriptions PushSubscription[]
+  pushTags PushTag[]
+  mailPushState MailPushState?
+  calendarReminders CalendarReminder[]
+  calendarReminderSync CalendarReminderSync?
+  pushShowDetails Boolean @default(false)
+  calendarTimeZone String @default("UTC")
   defaultAliasDomainId String?
   defaultAliasDomain Domain? @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
 }
@@ -269,4 +276,78 @@ model InboundResolutionAudit {
   createdAt      DateTime @default(now())
 
   @@index([recipientKey])
+}
+
+model PushSubscription {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product String
+  endpoint String @unique
+  p256dh String
+  auth String
+  userAgent String
+  createdAt DateTime @default(now())
+  lastSuccessAt DateTime?
+  failureCount Int @default(0)
+  nextAttemptAt DateTime?
+  vapidFingerprint String?
+  sessionId String?
+  @@index([userId, product])
+  @@index([userId, sessionId])
+}
+
+model PushTag {
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product String
+  tag String
+  expiresAt DateTime
+  @@id([userId, product, tag])
+  @@index([expiresAt])
+}
+
+model MailPushState {
+  userId String @id
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generation String
+  accountId String
+  state String?
+  leaseToken String?
+  leaseUntil DateTime?
+}
+
+model CalendarReminderSync {
+  userId String @id
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  owner String?
+  leaseUntil DateTime?
+  lastSyncedAt DateTime?
+}
+
+model CalendarReminder {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendarId String
+  eventId String
+  uid String
+  occurrenceId String
+  recurrenceKey String
+  alarmId String
+  occurrenceStart DateTime
+  triggerAt DateTime
+  title String
+  location String
+  timeZone String
+  allDay Boolean
+  state String @default("pending")
+  claimOwner String?
+  claimUntil DateTime?
+  nextAttemptAt DateTime?
+  updatedAt DateTime @default(now()) @updatedAt
+  @@unique([userId, uid, recurrenceKey, alarmId, occurrenceStart], map: "calendar_reminder_identity_key")
+  @@index([state, triggerAt])
+  @@index([state, updatedAt])
+  @@index([userId, state])
 }

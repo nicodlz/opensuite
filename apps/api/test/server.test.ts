@@ -1,3 +1,5 @@
+import { createDatabase } from "@opensuite/db";
+import { configurePush } from "../src/push-runtime.ts";
 import { createReadinessService, type DependencyProbe } from "@opensuite/core";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -180,4 +182,43 @@ it("forbids caching of the origin map", async () => {
   expect(response.statusCode).toBe(200);
   expect(response.headers["cache-control"]).toBe("no-store");
   expect(response.json()).toEqual({});
+});
+
+it("starts authentication and health with push unavailable when VAPID files are missing", async () => {
+  const dbResult = createDatabase("postgresql://localhost/test");
+  if (dbResult.isErr()) throw new Error("invalid test database URL");
+  const warn = vi.fn<() => void>();
+  const push = await configurePush(
+    {},
+    dbResult.value,
+    "https://suite.example.test",
+    warn,
+    () => {},
+  );
+  expect(push).toBeUndefined();
+  expect(warn).toHaveBeenCalledOnce();
+  app = await buildServer({
+    config: { logLevel: "silent" },
+    monotonicMs: now,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: now,
+    }),
+    identity: {
+      publicOrigin: "https://suite.example.test",
+      handler: () => Promise.resolve(new Response()),
+      actor: () =>
+        Promise.resolve({
+          id: "alice",
+          email: "alice@example.test",
+          role: "user",
+        }),
+    },
+  });
+  expect((await app.inject("/health")).statusCode).toBe(200);
+  expect((await app.inject("/account/me")).statusCode).toBe(200);
+  expect((await app.inject("/push/public-key")).statusCode).toBe(503);
+  await dbResult.value.$disconnect();
 });

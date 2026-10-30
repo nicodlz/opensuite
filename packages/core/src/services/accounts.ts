@@ -4,6 +4,8 @@ export interface Actor {
   readonly id: string;
   readonly email: string;
   readonly role: "admin" | "user";
+  /** Internal session identifier; never an authentication token. */
+  readonly sessionId?: string;
 }
 export interface AccountFailure {
   readonly kind: "forbidden" | "unavailable";

@@ -10,6 +10,8 @@ import {
   createDomainStore,
   createAliasStore,
   createMailboxStore,
+  createPushStore,
+  createMailPushStore,
 } from "@opensuite/db";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import { createMailService } from "@opensuite/core/services/mail";
@@ -19,12 +21,17 @@ import {
   loadApplicationDatabaseUrl,
   loadAuthConfig,
   loadConfig,
+  loadMailPushConfig,
 } from "./config.ts";
+import { startMailNotifier } from "./adapters/mail-notifier.ts";
 import { createAuthRuntime } from "./auth/runtime.ts";
 import { startDomainJob } from "./routes/domain-job.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
+import { startCalendarReminderJob } from "./calendar-reminder-job.ts";
+import { configurePush } from "./push-runtime.ts";
+import type { PushProduct } from "@opensuite/contracts";
 
 const config = loadConfig(process.env);
 if (config.isErr()) {
@@ -57,6 +64,25 @@ if (authConfig.isErr()) {
   );
   process.exit(1);
 }
+let logPushFailure = (event: {
+  product: PushProduct;
+  status: number | null;
+}) => {
+  process.stderr.write(
+    `${JSON.stringify({ level: "warn", msg: "push delivery failed", ...event })}\n`,
+  );
+};
+const push = await configurePush(
+  process.env,
+  database.value,
+  authConfig.value.publicOrigin,
+  () =>
+    process.stderr.write(
+      `${JSON.stringify({ level: "warn", msg: "VAPID secrets unavailable or invalid; push disabled" })}\n`,
+    ),
+  (event) => logPushFailure(event),
+);
+const pushCleanup = createPushStore(database.value);
 const readiness = createReadinessService({
   probes: [
     createDatabaseProbe(database.value),
@@ -148,7 +174,30 @@ const app = await buildServer({
   mail,
   calendar,
   aliases,
+  ...(push === undefined ? {} : { push }),
+  pushCleanup,
 });
+logPushFailure = (event) => app.log.warn(event, "push delivery failed");
+const mailPushConfig = loadMailPushConfig(process.env);
+if (mailPushConfig.isErr())
+  app.log.error(
+    { issues: mailPushConfig.error.issues },
+    "mail notifications disabled: invalid configuration",
+  );
+const stopMailNotifier =
+  push === undefined || mailPushConfig.isErr()
+    ? undefined
+    : startMailNotifier({
+        store: createMailPushStore(database.value, push.publicKey),
+        mailboxes: {
+          getForOwner: async (userId, accountId) =>
+            mailboxStore.getForOwner(userId, accountId),
+        },
+        origin: authConfig.value.stalwartOrigin,
+        dispatcher: push.dispatcher,
+        options: mailPushConfig.value,
+        log: () => app.log.warn("mail notification worker failed"),
+      });
 const stopDomainJob =
   domains === undefined
     ? undefined
@@ -158,6 +207,20 @@ const stopDomainJob =
         process.env["DOMAINS_CHECK_INTERVAL_SECONDS"],
         () => app.log.warn("domain verification failed"),
       );
+const stopCalendarReminders =
+  push === undefined
+    ? undefined
+    : startCalendarReminderJob({
+        db: database.value,
+        store: {
+          getForOwner: async (userId, accountId) =>
+            mailboxStore.getForOwner(userId, accountId),
+        },
+        origin: authConfig.value.stalwartOrigin,
+        dispatcher: push.dispatcher,
+        publicKey: push.publicKey,
+        onError: () => app.log.warn("calendar reminder job failed"),
+      });
 let running: Promise<void> | undefined;
 const work = async () => {
   try {
@@ -185,6 +248,8 @@ const timer = setInterval(() => {
 app.addHook("onClose", async () => {
   clearInterval(timer);
   await stopDomainJob?.();
+  await stopMailNotifier?.();
+  await stopCalendarReminders?.();
   await running;
   await database.value.$disconnect();
 });

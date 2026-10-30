@@ -7,12 +7,12 @@
         "test-support/**/*.mjs",
         "scripts/*.mjs"
       ],
-      "ignoreDependencies": ["@bitwarden/cli"]
+      "ignoreDependencies": ["@bitwarden/cli", "@types/mailparser"]
     },
     "apps/*": {},
     "packages/*": {},
     "apps/web": {
-      "entry": ["src/styles.css"]
+      "entry": ["src/styles.css", "public/push-sw-v1.js"]
     },
     "apps/api": {
       "entry": ["src/bootstrap.ts"]

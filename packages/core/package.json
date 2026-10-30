@@ -21,11 +21,13 @@
     "@opensuite/db": "workspace:*",
     "@opensuite/jmap": "workspace:*",
     "neverthrow": "catalog:",
-    "zod": "catalog:"
+    "zod": "catalog:",
+    "web-push": "catalog:"
   },
   "devDependencies": {
     "@opensuite/typescript-config": "workspace:*",
     "@types/node": "catalog:",
+    "@types/web-push": "catalog:",
     "typescript": "catalog:"
   }
 }

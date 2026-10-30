@@ -76,8 +76,16 @@ export function MailPage() {
   const [showFilters, setShowFilters] = useState(false);
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [cursor, setCursor] = useState<string | undefined>();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [reading, setReading] = useState(false);
+  const [selected, setSelected] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get("thread"),
+  );
+  const [reading, setReading] = useState(() =>
+    Boolean(new URLSearchParams(window.location.search).get("thread")),
+  );
+  const [notificationTarget] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return { thread: params.get("thread"), message: params.get("message") };
+  });
   // Ticked rows belong to one view; a new folder, search, filter, sort or
   // page starts with nothing selected.
   const [selection, setSelection] = useState<{
@@ -973,6 +981,11 @@ export function MailPage() {
               <ReadingPane
                 key={selected}
                 messages={detail.data.messages}
+                focusMessageId={
+                  selected === notificationTarget.thread
+                    ? notificationTarget.message
+                    : null
+                }
                 aliasesByMessage={matchedByMessage}
                 folder={current}
                 mailboxes={boxes}

@@ -1,3 +1,5 @@
+import type { NotificationDispatcher } from "@opensuite/core/services/notifications";
+import type { createPushStore } from "@opensuite/db";
 import type { AliasService } from "@opensuite/core/services/aliases";
 import type { SetupStatus } from "@opensuite/contracts";
 import type { DomainService } from "./domains.ts";
@@ -9,6 +11,16 @@ import type { FastifyBaseLogger } from "fastify";
 
 /** Per-request context handed to every procedure by the server. */
 export interface ApiContext {
+  readonly push:
+    | {
+        publicKey: string;
+        store: ReturnType<typeof createPushStore>;
+        dispatcher: NotificationDispatcher;
+      }
+    | undefined;
+  readonly pushCleanup: ReturnType<typeof createPushStore> | undefined;
+  readonly pushSubscribeLimit: (userId: string) => boolean;
+  readonly pushTestLimit: (userId: string) => boolean;
   readonly setupStatus: (() => Promise<SetupStatus>) | undefined;
   readonly setupIdentity:
     | {

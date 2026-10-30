@@ -76,7 +76,12 @@ for (const theme of ["light", "dark"]) {
     await expect(
       page.getByRole("menuitemradio", { name: "Light theme" }),
     ).toBeFocused();
-    if (theme === "light") await page.keyboard.press("ArrowDown");
+    if (theme === "light") {
+      await page.keyboard.press("ArrowDown");
+      await expect(
+        page.getByRole("menuitemradio", { name: "Dark theme" }),
+      ).toBeFocused();
+    }
     await page.keyboard.press("Enter");
     await expect(page.locator("html")).toHaveAttribute(
       "data-theme",

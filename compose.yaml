@@ -19,7 +19,7 @@ services:
   # mounts only its own sub-directory, read-only. Nothing reaches Git or .env.
   secrets:
     logging: *logging
-    image: alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+    image: node:24.22.2-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446
     command:
       - sh
       - -euc
@@ -38,6 +38,14 @@ services:
         generate stalwart-management 2000
         generate app-database 999
         generate auth 1000
+        mkdir -p /secrets/vapid
+        if [ ! -s /secrets/vapid/public ] || [ ! -s /secrets/vapid/private ]; then
+          umask 077
+          node -e 'const {createECDH}=require("node:crypto"), fs=require("node:fs"), key=createECDH("prime256v1"); key.generateKeys(); fs.writeFileSync("/secrets/vapid/private",key.getPrivateKey().toString("base64url")); fs.writeFileSync("/secrets/vapid/public",key.getPublicKey().toString("base64url"));'
+        fi
+        chown -R 1000:1000 /secrets/vapid
+        chmod 0500 /secrets/vapid
+        chmod 0400 /secrets/vapid/public /secrets/vapid/private
         mkdir -p /secrets/mailbox-key
         if [ ! -s /secrets/mailbox-key/password ]; then
           od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > /secrets/mailbox-key/password
@@ -144,6 +152,8 @@ services:
       MAIL_DOMAINS: ${MAIL_DOMAINS:-}
       STALWART_INTERNAL_ORIGIN: http://stalwart-management:8080
       STALWART_MANAGEMENT_CLIENT_IP: ${MAIL_MANAGEMENT_API_IP:-172.30.248.10}
+      VAPID_PUBLIC_KEY_FILE: /run/opensuite/vapid/public
+      VAPID_PRIVATE_KEY_FILE: /run/opensuite/vapid/private
       AUTH_SECRET_FILE: /run/opensuite/auth/password
       MAILBOX_KEY_FILE: /run/opensuite/mailbox-key/password
       STALWART_MANAGEMENT_PASSWORD_FILE: /run/opensuite/stalwart-management/password
@@ -163,6 +173,12 @@ services:
         source: ${DOMAINS_SES_CREDENTIALS_FILE:-/dev/null}
         target: /run/opensuite/domain-ses-credentials
         read_only: true
+      - type: volume
+        source: secrets
+        target: /run/opensuite/vapid
+        read_only: true
+        volume:
+          subpath: vapid
       - type: volume
         source: secrets
         target: /run/opensuite/app-database

@@ -136,6 +136,8 @@ const RecurrenceRuleSchema = z.looseObject({
 });
 const CalendarEventSchema = z.object({
   id: z.string(),
+  uid: z.string().optional(),
+  alerts: z.record(z.string(), z.unknown()).nullable().optional(),
   calendarIds: z.record(z.string(), z.boolean()).catch({}),
   title: z.string().catch(""),
   description: z.string().catch(""),
@@ -266,6 +268,9 @@ export class JmapClient {
       return ok({
         ...result.value,
         apiUrl: rewrite(result.value.apiUrl),
+        ...(result.value.eventSourceUrl === undefined
+          ? {}
+          : { eventSourceUrl: rewrite(result.value.eventSourceUrl) }),
         uploadUrl: rewrite(result.value.uploadUrl),
         downloadUrl: rewrite(result.value.downloadUrl),
       });
@@ -293,6 +298,67 @@ export class JmapClient {
       },
       usingMail,
       GetSchema(MailboxSchema),
+    );
+  }
+  emailState(session: Session, accountId: string) {
+    return this.#transport.call(
+      session.apiUrl,
+      "Email/get",
+      { accountId, ids: [], properties: ["id"] },
+      usingMail,
+      GetSchema(z.object({ id: z.string() })),
+    );
+  }
+  emailChanges(session: Session, accountId: string, sinceState: string) {
+    return this.#transport.call(
+      session.apiUrl,
+      "Email/changes",
+      { accountId, sinceState, maxChanges: 500 },
+      usingMail,
+      z.object({
+        accountId: z.string(),
+        oldState: z.string(),
+        newState: z.string(),
+        hasMoreChanges: z.boolean(),
+        created: z.array(z.string()),
+        updated: z.array(z.string()),
+        destroyed: z.array(z.string()),
+      }),
+    );
+  }
+  notificationEmails(
+    session: Session,
+    accountId: string,
+    ids: readonly string[],
+  ) {
+    return this.#transport.call(
+      session.apiUrl,
+      "Email/get",
+      {
+        accountId,
+        ids,
+        properties: [
+          "id",
+          "threadId",
+          "mailboxIds",
+          "keywords",
+          "receivedAt",
+          "subject",
+          "from",
+        ],
+      },
+      usingMail,
+      GetSchema(
+        z.object({
+          id: z.string(),
+          threadId: z.string(),
+          mailboxIds: z.record(z.string(), z.boolean()),
+          keywords: z.record(z.string(), z.boolean()),
+          receivedAt: z.string(),
+          subject: z.string().nullable(),
+          from: z.array(AddressSchema).nullable(),
+        }),
+      ),
     );
   }
   queryEmails(
@@ -745,7 +811,7 @@ export class JmapClient {
   ): Promise<
     JmapResult<{
       query: z.infer<typeof QuerySchema>;
-      events: { list: CalendarEvent[]; notFound: string[] };
+      events: { state: string; list: CalendarEvent[]; notFound: string[] };
     }>
   > {
     const result = await this.#transport.json(

@@ -1,3 +1,4 @@
+import { createFixedWindow } from "./auth/fixed-window.ts";
 import type { DomainService } from "./routes/domains.ts";
 import { randomBytes } from "node:crypto";
 import { createAliasLimiter } from "./auth/alias-limits.ts";
@@ -63,6 +64,8 @@ export interface ServerDependencies {
   readonly calendar?: CalendarService;
   readonly domains?: DomainService;
   readonly aliases?: AliasService;
+  readonly push?: NonNullable<ApiContext["push"]>;
+  readonly pushCleanup?: NonNullable<ApiContext["pushCleanup"]>;
   readonly setupStatus?: ApiContext["setupStatus"];
 }
 
@@ -87,6 +90,7 @@ export const buildServer = async (
   });
   const startedAt = dependencies.monotonicMs();
   const aliasLimits = createAliasLimiter();
+  const pushLimits = createFixedWindow();
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("x-request-id", request.id);
     done();
@@ -441,6 +445,17 @@ export const buildServer = async (
             });
         }
         const actor = (await identity.actor?.(headers)) ?? null;
+        // Direct authentication sign-outs must also stop delivery to every
+        // subscription bound to this session, including sibling origins.
+        if (
+          path === "/auth/sign-out" &&
+          request.method === "POST" &&
+          actor?.sessionId
+        ) {
+          await (
+            dependencies.pushCleanup ?? dependencies.push?.store
+          )?.unsubscribeSession(actor.id, actor.sessionId);
+        }
         if (path === "/auth/sign-up/email" && actor?.role !== "admin") {
           await identity.audit?.({
             userId: actor?.id ?? null,
@@ -570,7 +585,11 @@ export const buildServer = async (
   const handleApi = async (request: FastifyRequest, reply: FastifyReply) => {
     // The origin map decides cross-origin navigation; never let a browser
     // or intermediary keep an old copy.
-    if (request.url.split("?")[0] === "/origins")
+    if (
+      ["/origins", "/push/public-key", "/push/privacy"].includes(
+        request.url.split("?")[0] ?? "",
+      )
+    )
       reply.header("cache-control", "no-store");
     const headers = new Headers();
     for (const [name, value] of Object.entries(request.headers)) {
@@ -586,6 +605,12 @@ export const buildServer = async (
     const { matched } = await handler.handle(request, reply, {
       context: {
         actor,
+        push: dependencies.push,
+        pushCleanup: dependencies.pushCleanup ?? dependencies.push?.store,
+        pushSubscribeLimit: (userId) =>
+          pushLimits.consume(`subscribe:${userId}`, 10, 60_000) === undefined,
+        pushTestLimit: (userId) =>
+          pushLimits.consume(`test:${userId}`, 5, 60_000) === undefined,
         setupStatus: dependencies.setupStatus,
         setupIdentity: dependencies.identity,
         audit: dependencies.identity?.audit,

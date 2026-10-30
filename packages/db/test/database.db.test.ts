@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -9,6 +11,8 @@ import { z } from "zod";
 import {
   createDatabase,
   createDatabaseProbe,
+  createPushStore,
+  createMailPushStore,
   createMailboxStore,
   createProviderStore,
   createSecretBox,
@@ -25,6 +29,8 @@ const runId =
     .replace(/[^a-z0-9-]/g, "-")
     .slice(0, 30) || "local";
 const project = `opensuite-db-${runId}-${randomUUID().slice(0, 8)}`;
+const migrationImage = `${project}-migrate:local`;
+const overrideFile = join(tmpdir(), `${project}-compose.yaml`);
 const composeArgs = [
   "compose",
   "--project-name",
@@ -35,6 +41,8 @@ const composeArgs = [
   "compose.yaml",
   "--file",
   "compose.test.yaml",
+  "--file",
+  overrideFile,
 ];
 const compose = async (...args: string[]) =>
   (
@@ -43,8 +51,18 @@ const compose = async (...args: string[]) =>
       maxBuffer: 16 * 1024 * 1024,
     })
   ).stdout;
+let cleaned = false;
 const cleanup = async () => {
-  await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+  if (cleaned) return;
+  cleaned = true;
+  try {
+    await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+  } finally {
+    await rm(overrideFile, { force: true });
+    await run("docker", ["image", "rm", migrationImage], {
+      timeout: 15_000,
+    }).catch(() => undefined);
+  }
 };
 const key = randomBytes(32).toString("hex");
 let db: PrismaClient;
@@ -52,6 +70,10 @@ let databaseUrl = "";
 let disconnect = () => Promise.resolve();
 
 beforeAll(async () => {
+  await writeFile(
+    overrideFile,
+    `services:\n  migrate:\n    image: ${migrationImage}\n`,
+  );
   try {
     await compose(
       "up",
@@ -96,9 +118,118 @@ afterAll(async () => {
   } finally {
     await cleanup();
   }
-}, 60_000);
+}, 180_000);
 
 describe("PostgreSQL schema and adapters", () => {
+  it("isolates push subscriptions and deduplicates tags atomically", async () => {
+    const alice = `push-a-${randomUUID()}`;
+    const bob = `push-b-${randomUUID()}`;
+    await db.user.createMany({
+      data: [alice, bob].map((id) => ({
+        id,
+        email: `${id}@example.test`,
+        name: id,
+      })),
+    });
+    const store = createPushStore(db);
+    const entry = {
+      product: "mail" as const,
+      endpoint: `https://fcm.googleapis.com/${randomUUID()}`,
+      p256dh: "fake",
+      auth: "fake",
+      userAgent: "test",
+    };
+    expect(await store.subscribe(alice, entry)).toBe(true);
+    const concurrent = {
+      ...entry,
+      endpoint: `https://fcm.googleapis.com/${randomUUID()}`,
+    };
+    expect(
+      await Promise.all(
+        Array.from({ length: 3 }, () => store.subscribe(alice, concurrent)),
+      ),
+    ).toEqual([true, true, true]);
+    expect(await store.subscribe(bob, entry)).toBe(false);
+    expect(await store.status(bob, "mail", entry.endpoint)).toBe(false);
+    await store.unsubscribe(bob, "mail", entry.endpoint);
+    expect(await store.status(alice, "mail", entry.endpoint)).toBe(true);
+    expect(await store.privacy(alice)).toBe(false);
+    await store.setPrivacy(alice, true);
+    expect(await store.privacy(bob)).toBe(false);
+    const now = new Date();
+    const claims = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        store.claim(alice, "mail", "tag", now, new Date(now.getTime() + 1000)),
+      ),
+    );
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    await store.release(alice, "mail", "tag", new Date(now.getTime() + 1000));
+    expect(
+      await store.claim(
+        alice,
+        "mail",
+        "tag",
+        now,
+        new Date(now.getTime() + 1000),
+      ),
+    ).toBe(true);
+    expect(
+      await store.claim(
+        bob,
+        "mail",
+        "tag",
+        now,
+        new Date(now.getTime() + 1000),
+      ),
+    ).toBe(true);
+  });
+
+  it("caps subscriptions under concurrency and invalidates old VAPID keys", async () => {
+    const user = `push-cap-${randomUUID()}`;
+    await db.user.create({
+      data: { id: user, email: `${user}@example.test`, name: user },
+    });
+    const oldStore = createPushStore(db, "old-test-public-key");
+    const entry = {
+      product: "mail" as const,
+      endpoint: "https://fcm.googleapis.com/",
+      p256dh: "fake",
+      auth: "fake",
+      userAgent: "test",
+    };
+    const results = await Promise.all(
+      Array.from({ length: 24 }, (_, index) =>
+        oldStore.subscribe(
+          user,
+          { ...entry, endpoint: `${entry.endpoint}${index}` },
+          "session-one",
+        ),
+      ),
+    );
+    expect(results.filter(Boolean)).toHaveLength(20);
+    const storedEndpoint = `${entry.endpoint}${results.findIndex(Boolean)}`;
+    expect(
+      await oldStore.subscribe(
+        user,
+        { ...entry, endpoint: storedEndpoint },
+        "session-one",
+      ),
+    ).toBe(true);
+    const rotated = createPushStore(db, "new-test-public-key");
+    expect(await rotated.status(user, "mail", storedEndpoint)).toBe(false);
+    expect(await rotated.eligible(user, "mail", new Date())).toHaveLength(0);
+    expect(
+      await rotated.subscribe(
+        user,
+        { ...entry, endpoint: `${entry.endpoint}new` },
+        "session-two",
+      ),
+    ).toBe(true);
+    await rotated.unsubscribeSession(user, "session-one");
+    expect(await rotated.status(user, "mail", `${entry.endpoint}new`)).toBe(
+      true,
+    );
+  });
   it("has no Prisma schema drift after migrations", async () => {
     const result = await run(
       "pnpm",
@@ -155,6 +286,85 @@ describe("PostgreSQL schema and adapters", () => {
         },
       }),
     ).rejects.toThrow("Unique constraint");
+  });
+  it("persists and fences mail push state, and resets it on last unsubscribe", async () => {
+    const userId = `push-state-${randomUUID()}`;
+    const accountId = `account-${randomUUID()}`;
+    await db.user.create({
+      data: { id: userId, email: `${userId}@example.test`, name: "Push" },
+    });
+    await db.mailboxLink.create({
+      data: {
+        userId,
+        accountId,
+        address: `${userId}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const push = createPushStore(db);
+    const input = {
+      product: "mail" as const,
+      endpoint: `https://push.example/${randomUUID()}`,
+      p256dh: "key",
+      auth: "auth",
+      userAgent: "test",
+    };
+    await push.subscribe(userId, input);
+    const otherDevice = {
+      ...input,
+      endpoint: `https://push.example/${randomUUID()}`,
+    };
+    await push.subscribe(userId, otherDevice);
+    expect(
+      await createMailPushStore(db, "another-vapid-key").claim(
+        userId,
+        accountId,
+      ),
+    ).toBeNull();
+    const first = await createMailPushStore(db).claim(userId, accountId);
+    if (!first) throw new Error("claim failed");
+    expect(
+      await createMailPushStore(db).save(
+        userId,
+        first.generation,
+        first.token,
+        "cursor-1",
+      ),
+    ).toBe(true);
+    expect(await createMailPushStore(db).claim(userId, accountId)).toBeNull();
+    await createMailPushStore(db).release(
+      userId,
+      first.generation,
+      first.token,
+    );
+    const [claimA, claimB] = await Promise.all([
+      createMailPushStore(db).claim(userId, accountId),
+      createMailPushStore(db).claim(userId, accountId),
+    ]);
+    expect([claimA, claimB].filter(Boolean)).toHaveLength(1);
+    const second = claimA ?? claimB;
+    expect(second?.state).toBe("cursor-1");
+    await push.unsubscribe(userId, "mail", input.endpoint);
+    expect(
+      (await db.mailPushState.findUniqueOrThrow({ where: { userId } })).state,
+    ).toBe("cursor-1");
+    await push.unsubscribe(userId, "mail", otherDevice.endpoint);
+    await push.subscribe(userId, input);
+    expect(
+      await createMailPushStore(db).save(
+        userId,
+        first.generation,
+        first.token,
+        "stale",
+      ),
+    ).toBe(false);
+    const third = await createMailPushStore(db).claim(userId, accountId);
+    expect(third?.state).toBeNull();
+    expect(third?.generation).not.toBe(first.generation);
+    await push.subscribe(userId, input, "session-a");
+    await push.unsubscribeSession(userId, "session-a");
+    expect(await db.mailPushState.findUnique({ where: { userId } })).toBeNull();
   });
   it("encrypts a mailbox credential and restricts lookup to its owner", async () => {
     const storeResult = createMailboxStore(db, key);
@@ -306,7 +516,7 @@ describe("PostgreSQL schema and adapters", () => {
     await expect(
       compose("run", "--rm", "--no-deps", "migrate"),
     ).resolves.toContain("No pending migrations");
-  }, 60_000);
+  }, 180_000);
 
   it("enforces identity, address, provider and ingestion uniqueness", async () => {
     await db.user.createMany({
