@@ -79,8 +79,15 @@ it("requires valid mail configuration and derives readiness from the internal or
     const config = await loadAuthConfig({
       ...env,
       STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
+      AUTH_PRODUCT_ORIGINS:
+        "drive=https://drive.example.test,pass=https://pass.example.test",
     });
     expect(config.isOk() && config.value).toMatchObject({
+      passOrigin: "https://pass.example.test",
+      productOrigins: {
+        mail: "https://suite.example.test",
+        drive: "https://drive.example.test",
+      },
       stalwartOrigin: "http://mail.internal:8080",
       mailReadyUrl: "http://mail.internal:8080/healthz/ready",
       mailboxKey: "ab".repeat(32),
@@ -115,6 +122,8 @@ describe("application origins", () => {
     expect(parseProductOrigins(hub, undefined)).toEqual({ mail: hub });
   });
   it.each([
+    "pass=http://pass.example.test",
+    "pass=https://mail.example.test",
     "drive=http://drive.example.test",
     "drive=https://drive.example.test/",
     "drive=https://*.example.test",

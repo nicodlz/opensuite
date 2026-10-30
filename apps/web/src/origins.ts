@@ -11,7 +11,14 @@ const productPaths: Record<AppProduct, string> = {
 };
 const products: AppProduct[] = ["mail", "drive", "calendar"];
 /** Paths that only exist on the sign-in (mail) origin. */
-const hubPaths = ["/login", "/status", "/setup", "/domains", "/contacts"];
+const hubPaths = [
+  "/login",
+  "/status",
+  "/setup",
+  "/domains",
+  "/contacts",
+  "/pass",
+];
 
 export type OriginLayout = {
   /** True when applications are served from separate origins. */

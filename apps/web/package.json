@@ -24,6 +24,9 @@
     "@orpc/server": "catalog:"
   },
   "dependencies": {
+    "@zxcvbn-ts/core": "catalog:",
+    "@zxcvbn-ts/language-common": "catalog:",
+    "@zxcvbn-ts/language-en": "catalog:",
     "@orpc/client": "catalog:",
     "@radix-ui/react-dialog": "catalog:",
     "@radix-ui/react-dropdown-menu": "catalog:",

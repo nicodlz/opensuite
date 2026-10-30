@@ -110,6 +110,9 @@ const app = await buildServer({
       : { backupMarker: process.env["SETUP_BACKUP_MARKER"] }),
     backupMaxAgeSeconds: 93600,
   }),
+  ...(authConfig.value.passOrigin === undefined
+    ? {}
+    : { passOrigin: authConfig.value.passOrigin }),
   identity: auth.identity,
   accounts: auth.accounts,
   ...(domains === undefined ? {} : { domains }),
