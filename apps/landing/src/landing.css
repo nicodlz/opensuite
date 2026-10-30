@@ -172,6 +172,33 @@ img {
   font-size: 15px;
 }
 
+.link {
+  color: var(--green);
+  text-decoration: underline;
+  text-decoration-color: rgba(184, 239, 120, 0.4);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.2s;
+}
+.link:hover {
+  text-decoration-color: currentColor;
+}
+.link--arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 30px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.link--arrow svg {
+  width: 18px;
+  height: 18px;
+  transition: translate 0.25s var(--ease);
+}
+.link--arrow:hover svg {
+  translate: 3px 0;
+}
+
 /* Navigation */
 
 .nav {
@@ -210,12 +237,31 @@ img {
 .nav__links a:hover {
   color: var(--ivory);
 }
+.nav__source {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: -8px;
+  color: var(--soft);
+  font-size: 15px;
+  transition: color 0.2s;
+}
+.nav__source:hover {
+  color: var(--ivory);
+}
+.nav__source svg {
+  width: 18px;
+  height: 18px;
+}
 @media (max-width: 860px) {
   .nav__links {
     display: none;
   }
-  .nav .button {
+  .nav__source {
     margin-left: auto;
+  }
+  .nav__source span {
+    display: none;
   }
 }
 
@@ -297,32 +343,7 @@ img {
   margin: 0 auto;
   text-align: center;
 }
-.eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 16px 7px 12px;
-  border-radius: 999px;
-  background: rgba(246, 244, 248, 0.05);
-  box-shadow: inset 0 0 0 1px var(--card-line);
-  color: var(--soft);
-  font-size: 14px;
-}
-.eyebrow__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 4px rgba(184, 239, 120, 0.18);
-  animation: pulse 2.6s ease-in-out infinite;
-}
-@keyframes pulse {
-  50% {
-    box-shadow: 0 0 0 7px rgba(184, 239, 120, 0);
-  }
-}
 .hero__title {
-  margin-top: 26px;
   font-size: clamp(46px, 8.2vw, 104px);
   font-weight: 600;
   letter-spacing: -0.06em;
@@ -1452,6 +1473,19 @@ img {
 .footer .brand {
   margin-right: auto;
 }
+.footer__source {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: color 0.2s;
+}
+.footer__source:hover {
+  color: var(--ivory);
+}
+.footer__source svg {
+  width: 16px;
+  height: 16px;
+}
 .footer .brand__mark {
   width: 24px;
   height: 23px;
@@ -1521,10 +1555,7 @@ img {
   animation-delay: 0.16s;
 }
 .rise--4 {
-  animation-delay: 0.24s;
-}
-.rise--5 {
-  animation-delay: 0.36s;
+  animation-delay: 0.28s;
   animation-duration: 1.4s;
 }
 @keyframes rise {

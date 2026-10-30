@@ -50,6 +50,12 @@
           stroke-linejoin="round"
         />
       </symbol>
+      <symbol id="github" viewBox="0 0 16 16">
+        <path
+          fill="currentColor"
+          d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+        />
+      </symbol>
       <symbol id="arrow" viewBox="0 0 20 20">
         <path
           d="M4 10h11m-4.5-4.5L15 10l-4.5 4.5"
@@ -79,6 +85,14 @@
           <a href="#self-host">Self-host</a>
           <a href="#scale">Scale</a>
         </nav>
+        <a
+          class="nav__source"
+          href="https://github.com/nicodlz/opensuite"
+          aria-label="Esuno source code on GitHub"
+        >
+          <svg aria-hidden="true"><use href="#github" /></svg>
+          <span>GitHub</span>
+        </a>
         <a class="button button--small" href="#self-host">Run Esuno</a>
       </div>
     </header>
@@ -93,29 +107,31 @@
         </div>
 
         <div class="hero__copy">
-          <p class="eyebrow rise rise--1">
-            <span class="eyebrow__dot" aria-hidden="true"></span>
-            Free software · Self-hosted · Yours
-          </p>
-          <h1 class="hero__title rise rise--2">
+          <h1 class="hero__title rise rise--1">
             Your private suite,
             <em>on your own server.</em>
           </h1>
-          <p class="hero__lede rise rise--3">
+          <p class="hero__lede rise rise--2">
             Esuno brings mail, calendar, files and passwords together in one
             calm workspace. You run it, you own it, and you can take every
             message with you.
           </p>
-          <div class="hero__actions rise rise--4">
+          <div class="hero__actions rise rise--3">
             <a class="button" href="#self-host">
               Run it yourself
               <svg aria-hidden="true"><use href="#arrow" /></svg>
             </a>
-            <a class="button button--ghost" href="#suite">Explore the suite</a>
+            <a
+              class="button button--ghost"
+              href="https://github.com/nicodlz/opensuite"
+            >
+              <svg aria-hidden="true"><use href="#github" /></svg>
+              View the source
+            </a>
           </div>
         </div>
 
-        <div class="stage rise rise--5" data-stage>
+        <div class="stage rise rise--4" data-stage>
           <div class="window" data-tilt>
             <div class="window__bar" aria-hidden="true">
               <span></span><span></span><span></span>
@@ -377,7 +393,10 @@
             <span class="principles__n">06</span>
             <h3>Free software</h3>
             <p>
-              Licensed AGPL-3.0-or-later. Read it, change it, run it, share it.
+              Licensed AGPL-3.0-or-later.
+              <a class="link" href="https://github.com/nicodlz/opensuite"
+                >Read the source</a
+              >, change it, run it, share it.
             </p>
           </li>
         </ul>
@@ -446,6 +465,13 @@
                 account for sending and receiving
               </li>
             </ul>
+            <a
+              class="link link--arrow"
+              href="https://github.com/nicodlz/opensuite/blob/main/docs/deployment/production.md"
+            >
+              Read the production runbook
+              <svg aria-hidden="true"><use href="#arrow" /></svg>
+            </a>
           </header>
           <figure class="terminal" data-reveal>
             <div class="terminal__bar" aria-hidden="true">
@@ -538,6 +564,10 @@
         <span class="brand__word">esuno</span>
       </a>
       <p>Free software under AGPL-3.0-or-later.</p>
+      <a class="footer__source" href="https://github.com/nicodlz/opensuite">
+        <svg aria-hidden="true"><use href="#github" /></svg>
+        Source on GitHub
+      </a>
       <p>© 2026 Esuno</p>
     </footer>
   </body>
