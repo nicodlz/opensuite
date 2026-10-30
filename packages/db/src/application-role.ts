@@ -22,6 +22,7 @@ export const configureApplicationRole = async (
     await tx.$executeRaw`REVOKE CREATE ON SCHEMA public FROM PUBLIC, opensuite_app`;
     await tx.$executeRaw`REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM opensuite_app`;
     await tx.$executeRaw`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opensuite_app`;
+    await tx.$executeRaw`REVOKE INSERT, UPDATE, DELETE ON TABLE "BillingGrant" FROM PUBLIC, opensuite_app`;
     await tx.$executeRaw`REVOKE ALL PRIVILEGES ON TABLE "AuditEvent", "_prisma_migrations" FROM opensuite_app`;
     await tx.$executeRaw`REVOKE ALL PRIVILEGES ON TABLE "AuditEvent" FROM PUBLIC`;
     await tx.$executeRaw`GRANT SELECT, INSERT ON TABLE "AuditEvent" TO opensuite_app`;

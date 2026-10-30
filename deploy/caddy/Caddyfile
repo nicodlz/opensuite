@@ -13,12 +13,22 @@
 	}
 
 	route {
+		# Checkout session IDs appear in the welcome query or status path.
+		# Skip access logs for these routes even if an operator enables them.
+		@billing_sensitive path /welcome /api/billing/checkout/*
+		log_skip @billing_sensitive
+		@billing_session_query query session_id=*
+		log_skip @billing_session_query
 		# Never forward a client address from the management network as a trusted
 		# internal management identity. Caddy replaces untrusted X-Forwarded-For.
 		@management_source remote_ip {$MAIL_MANAGEMENT_SUBNET:172.30.248.0/24}
 		handle @management_source {
 			respond 403
 		}
+
+		# Internal service endpoints are never proxied to the public Internet.
+		@internal path /api/internal /api/internal/* /drive/api/internal /drive/api/internal/*
+		respond @internal 404
 
 		# Drive is independently routed and is not a startup dependency.
 		handle_path /drive/api/* {
@@ -148,7 +158,7 @@
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
-		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+		Content-Security-Policy "default-src 'none'; script-src 'self'; connect-src https://{$OPENSUITE_PUBLIC_HOST:localhost}; style-src 'self'; img-src 'self'; font-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 		X-Frame-Options DENY
 		-Server
 	}

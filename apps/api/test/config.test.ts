@@ -231,3 +231,19 @@ it("bounds mail notification settings and permits polling-only operation", async
     }).isErr(),
   ).toBe(true);
 });
+
+it("defaults to self-hosted billing and rejects incomplete Cloud configuration", async () => {
+  const { loadBillingConfig } = await import("../src/config.ts");
+  const selfHosted = await loadBillingConfig({
+    BILLING_CANCEL_URL: "",
+    STRIPE_SECRET_KEY_FILE: "",
+  });
+  expect(selfHosted.isOk() && selfHosted.value).toEqual({
+    mode: "self-hosted",
+  });
+  const cloud = await loadBillingConfig({ ESUNO_DEPLOYMENT_MODE: "cloud" });
+  expect(cloud.isErr()).toBe(true);
+  expect(
+    (await loadBillingConfig({ ESUNO_DEPLOYMENT_MODE: "invalid" })).isErr(),
+  ).toBe(true);
+});

@@ -3,6 +3,7 @@ import { OpenAPIHandler } from "@orpc/openapi/fastify";
 import { ORPCError } from "@orpc/server";
 import Fastify, { LogController } from "fastify";
 import { Readable } from "node:stream";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { Storage } from "./adapters/storage.ts";
 import type { SessionVerifier } from "./domain/session.ts";
@@ -10,12 +11,14 @@ import type { DriveService } from "./services/drive.ts";
 import { router, type Context } from "./routes/index.ts";
 
 const Token = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+const digest = (value: string) => createHash("sha256").update(value).digest();
 export const buildServer = (
   drive: DriveService,
   storage: Storage,
   sessions: SessionVerifier,
   readiness?: ReadinessService,
   trustedOrigins?: readonly string[],
+  internalToken?: string,
 ) => {
   const app = Fastify({
     logger: true,
@@ -61,6 +64,21 @@ export const buildServer = (
     return result.value;
   };
   app.get("/health", () => ({ status: "ok" }));
+  app.get("/internal/usage/:userId", async (request, reply) => {
+    const supplied = request.headers.authorization ?? "";
+    const expected =
+      internalToken === undefined ? "" : `Bearer ${internalToken}`;
+    if (
+      internalToken === undefined ||
+      !timingSafeEqual(digest(supplied), digest(expected))
+    )
+      return reply.code(401).send({ code: "UNAUTHORIZED" });
+    const params = z
+      .object({ userId: z.string().min(1).max(200) })
+      .parse(request.params);
+    reply.header("cache-control", "no-store");
+    return { driveBytes: await drive.usage(params.userId) };
+  });
   app.get("/ready", async (_request, reply) => {
     if (readiness === undefined)
       return reply.code(503).send({ status: "not_ready" });

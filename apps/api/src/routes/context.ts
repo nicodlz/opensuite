@@ -8,9 +8,18 @@ import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { FastifyBaseLogger } from "fastify";
+import type { StorageMeter } from "../billing/storage.ts";
+import type { Entitlements } from "../billing/entitlements.ts";
+import type { StripeBilling } from "../billing/stripe.ts";
+import type { ClaimService } from "../billing/claims.ts";
 
 /** Per-request context handed to every procedure by the server. */
 export interface ApiContext {
+  readonly entitlements: Entitlements | undefined;
+  readonly storageMeter: StorageMeter | undefined;
+  readonly billing: StripeBilling | undefined;
+  readonly claims: ClaimService | undefined;
+  readonly publicCheckoutLimit: () => boolean;
   readonly push:
     | {
         publicKey: string;

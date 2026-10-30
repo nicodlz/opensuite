@@ -2,6 +2,9 @@ import { err, ok } from "neverthrow";
 import { z } from "zod";
 
 const Env = z.object({
+  ESUNO_DEPLOYMENT_MODE: z
+    .enum(["self-hosted", "cloud"])
+    .default("self-hosted"),
   DRIVE_HOST: z.string().default("0.0.0.0"),
   DRIVE_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
   DRIVE_DATABASE_URL: z
@@ -41,10 +44,21 @@ const Env = z.object({
     .int()
     .positive()
     .max(Number.MAX_SAFE_INTEGER)
-    .default(10_000_000_000),
+    .optional(),
+  DRIVE_ENTITLEMENTS_TOKEN_FILE: z.string().min(1).optional(),
+  DRIVE_INTERNAL_TOKEN_FILE: z.string().min(1).optional(),
+  DRIVE_ENTITLEMENTS_API: z.url().optional(),
 });
 export const loadConfig = (environment: NodeJS.ProcessEnv) => {
-  const parsed = Env.safeParse(environment);
+  const parsed = Env.safeParse({
+    ...environment,
+    DRIVE_QUOTA_BYTES: environment["DRIVE_QUOTA_BYTES"] || undefined,
+    DRIVE_ENTITLEMENTS_TOKEN_FILE:
+      environment["DRIVE_ENTITLEMENTS_TOKEN_FILE"] || undefined,
+    DRIVE_INTERNAL_TOKEN_FILE:
+      environment["DRIVE_INTERNAL_TOKEN_FILE"] || undefined,
+    DRIVE_ENTITLEMENTS_API: environment["DRIVE_ENTITLEMENTS_API"] || undefined,
+  });
   return parsed.success
     ? ok(parsed.data)
     : err({

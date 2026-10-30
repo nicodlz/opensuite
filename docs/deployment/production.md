@@ -1,5 +1,9 @@
 # Production installation on one Ubuntu VPS
 
+The default is self-hosted. Managed Cloud requires the separate
+[billing operations guide](../operations/billing.md), including Stripe Tax
+registrations, before accepting payments.
+
 This is the ordered procedure for one Ubuntu host, Docker Compose, a public
 HTTPS/mail hostname, Backblaze B2 for Stalwart blobs and Drive, and SES in
 `eu-north-1` for inbound and outbound. Replace `mail.example.com`,
