@@ -58,6 +58,21 @@ pnpm build` as in the deployment guide. Set `COMPOSE_PROFILES=vault` in `.env`
    read-only secret subdirectory; the entrypoint constructs `DATABASE_URL` in
    the process environment from that file, not from `.env` or command arguments.
 
+   The Vault volume mount disables Docker's initial image-data copy, which
+   otherwise can overwrite the ownership of a new empty volume after secret
+   generation. The `secrets` job recursively sets existing Vault data ownership
+   to `1000:1000` and the volume directory mode to `0700` before a normal
+   Compose startup. This also repairs a volume previously left as `root:root`.
+   Restore reapplies these permissions after extracting Vault data.
+
+   On an existing installation whose volume was already repaired by hand, the
+   data and generated keys are retained; the next normal upgrade with
+   `docker compose --profile vault up -d` reruns `secrets` and recreates the
+   Vault container because its mount configuration changed. Expect a brief
+   Vault interruption. Other running services do not need recreation for this
+   volume change. `docker compose start` on an already-created container does
+   not apply Compose configuration changes; use `up` for the upgrade.
+
 4. The public proxy returns 404 for `/admin` and its descendants. On the server
    open `http://127.0.0.1:8081/admin/`, or use a tunnel from a trusted machine:
 

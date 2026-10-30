@@ -149,6 +149,8 @@ objects restore mail "$force"
 objects restore drive "$force"
 compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/volumes.tar -C /' >&2
 if [ "$vault_restore" = 1 ]; then
+  # Archives can contain stale ownership or directory mode; repair both
+  # before any Vault container is started, including on forced restores.
   compose run --rm --no-deps -T backup-volumes 'tar -xpf /stage/data/vault-volume.tar -C / && chown -R 1000:1000 /vault-data && chmod 0700 /vault-data && [ -s /vault-data/rsa_key.pem ] && [ -s /secrets/vault-database/password ]' >&2
 fi
 # Start only postgres; no application can migrate or write during the restore.
