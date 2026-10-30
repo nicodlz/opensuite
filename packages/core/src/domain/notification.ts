@@ -116,10 +116,11 @@ export type QuarantineReason =
  * For authentication, AWS documents GRAY as an absence of proof, not a
  * failure: SPF none, softfail or neutral; DKIM unsigned or signed for
  * another domain than From; DMARC for a domain without a policy or with
- * p=none. Real Gmail mail arrives with all three GRAY, which contradicts
- * AWS's DMARC definition (at least SPF or DKIM passed), so GRAY proves
- * nothing either way: on its own it does not quarantine, so ordinary mail
- * reaches the inbox, and it is never treated as authentication. A failure
+ * p=none. Real mail from a Google Workspace domain without SPF, DMARC or
+ * its own DKIM key arrives with all three GRAY: its signature is valid but
+ * made for Google's domain, not aligned with From. GRAY therefore proves
+ * nothing about the sender: on its own it does not quarantine, so ordinary
+ * mail reaches the inbox, and it is never treated as authentication. A failure
  * quarantines: DMARC FAIL whatever the domain's requested policy; SPF or
  * DKIM FAIL unless DMARC passed, as forwarding and mailing lists break them
  * while the aligned identifier holds. DMARC that could not be checked
