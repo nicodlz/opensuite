@@ -67,7 +67,8 @@ pass_case_backup() {
 }
 pass_case_refusal() {
   mv .env "$work/target-env"
-  if ./deploy/backup/restore.sh; then echo 'restore unexpectedly accepted a nonempty target' >&2; exit 1; fi
+  if ./deploy/backup/restore.sh 2>"$work/refusal-stderr"; then echo 'restore unexpectedly accepted a nonempty target' >&2; exit 1; fi
+  grep -Fq 'target volumes are not empty' "$work/refusal-stderr"
   mv "$work/target-env" .env
   case_done 'nonempty target refused'
 }
@@ -92,11 +93,18 @@ pass_case_verify() {
 pass_case_force_preflight() {
   compose stop caddy pass postgres
   if ./deploy/backup/restore.sh --force; then echo 'unconfirmed force unexpectedly accepted' >&2; exit 1; fi
+  if COMPOSE_PROJECT_NAME=opensuite ./deploy/backup/restore.sh --force --confirm-project opensuite 2>"$work/default-guard"; then echo 'default project unexpectedly accepted' >&2; exit 1; fi
+  grep -Fq -- '--i-understand-this-is-production is required' "$work/default-guard"
+  cp .env "$work/target-env"
+  printf '\nCOMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT_NAME" >> .env
+  if ./deploy/backup/restore.sh --force --confirm-project "$COMPOSE_PROJECT_NAME" 2>"$work/current-guard"; then echo 'configured project unexpectedly accepted' >&2; exit 1; fi
+  grep -Fq -- '--i-understand-this-is-production is required' "$work/current-guard"
   compose run --rm --no-deps -T backup-volumes 'printf sentinel > /pass-data/preflight-sentinel'
   printf 'conflicting-fixture' | rclone_local rcat store:drive-fixture/drive/objects/file-fixture
-  if ./deploy/backup/restore.sh --force --confirm-project "$COMPOSE_PROJECT_NAME"; then echo 'conflicting object unexpectedly accepted' >&2; exit 1; fi
+  if ./deploy/backup/restore.sh --force --confirm-project "$COMPOSE_PROJECT_NAME" --i-understand-this-is-production; then echo 'conflicting object unexpectedly accepted' >&2; exit 1; fi
   compose run --rm --no-deps -T backup-volumes '[ "$(cat /pass-data/preflight-sentinel)" = sentinel ]'
   [ -s .env ]
+  mv "$work/target-env" .env
   case_done 'force preflight protects local state'
 }
 pass_case_partial_restore() {

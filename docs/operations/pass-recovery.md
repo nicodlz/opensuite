@@ -81,6 +81,13 @@ provider-specific retention and lock behavior before relying on it.
    project name. A failed restore can leave partial state; discard the target or
    carefully retry with `--force`. Never use this against a live system.
 
+   If the confirmed project matches `opensuite`, the repository Compose name,
+   or the name recorded in the current or saved `.env`, the command requires
+   `--i-understand-this-is-production` immediately after the project name. Use
+   it only after explicitly fencing the production project and accepting its
+   replacement. The same acknowledgement is required if the repository's
+   Compose name cannot be determined.
+
 3. Check the saved image version, `.env`, file permissions and effective
    `config.json`, and ensure the intended hostname/TLS and SMTP settings are
    correct. Start Pass with `docker compose --profile pass up -d pass caddy`.

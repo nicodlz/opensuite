@@ -11,14 +11,34 @@ sweep_stale
 make_stage
 log restore_start
 force=0
+production_override=0
 target_project=${COMPOSE_PROJECT_NAME:-}
+env_project() (
+  unset COMPOSE_PROJECT_NAME
+  set -a
+  . "$1" >/dev/null
+  printf '%s' "${COMPOSE_PROJECT_NAME:-}"
+)
+protect_project() { # repository name or a trusted env file's project name
+  [ -z "$1" ] || [ "$target_project" != "$1" ] || [ "$production_override" = 1 ] || {
+    echo 'restore: target matches a production project name; --i-understand-this-is-production is required' >&2; return 1;
+  }
+}
 if [ "${1:-}" = --force ]; then
   force=1; shift
   [ "${1:-}" = --confirm-project ] && [ -n "${2:-}" ] && [ -n "${COMPOSE_PROJECT_NAME:-}" ] && [ "$2" = "$COMPOSE_PROJECT_NAME" ] || { echo 'restore: --force requires COMPOSE_PROJECT_NAME and --confirm-project with the same isolated project name' >&2; exit 1; }
   shift 2
+  if [ "${1:-}" = --i-understand-this-is-production ]; then production_override=1; shift; log production_force_acknowledged; fi
+  protect_project opensuite
+  compose_name=$(awk '/^name:[[:space:]]*/ {sub(/^name:[[:space:]]*/, ""); sub(/[[:space:]]+#.*/, ""); gsub(/^[\047"]|[\047"]$/, ""); print; exit}' "$ROOT/compose.yaml")
+  case "$compose_name" in *[!a-z0-9_-]*|'')
+    [ "$production_override" = 1 ] || { echo 'restore: repository project name cannot be determined; production acknowledgement is required' >&2; exit 1; };;
+    *) protect_project "$compose_name";;
+  esac
+  if [ -f .env ]; then current_project=$(env_project ./.env); protect_project "$current_project"; fi
   log force_confirmed
 fi
-[ "$#" -le 1 ] || { echo 'usage: restore.sh [--force --confirm-project PROJECT] [snapshot-id]' >&2; exit 1; }
+[ "$#" -le 1 ] || { echo 'usage: restore.sh [--force --confirm-project PROJECT [--i-understand-this-is-production]] [snapshot-id]' >&2; exit 1; }
 if [ "$force" = 0 ]; then
   [ ! -e .env ] || { echo 'restore: remove .env and use a new, empty project, or use --force' >&2; exit 1; }
 fi
@@ -40,6 +60,10 @@ compose run --rm --no-deps -T backup-restic 'exec restic restore "$1:/stage/data
 # to read the private stage; archive-internal ownership remains in volumes.tar.
 compose run --rm --no-deps -T backup-volumes 'chown -R "$1:$2" /stage/data' sh "$(id -u)" "$(id -g)" >&2
 [ -s "$BACKUP_STAGE/data/config/env" ] && [ -s "$BACKUP_STAGE/data/volumes.tar" ] || { echo 'restore: snapshot is missing required files' >&2; exit 1; }
+if [ "$force" = 1 ]; then
+  saved_project=$(env_project "$BACKUP_STAGE/data/config/env")
+  protect_project "$saved_project"
+fi
 pass_restore=0
 if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
   pass_restore=1
@@ -47,6 +71,7 @@ if [ -f "$BACKUP_STAGE/data/config/pass-enabled" ]; then
 fi
 # Read the saved configuration in memory for preflight; do not replace .env or
 # any local state before both object destinations have been checked.
+unset DRIVE_S3_ENDPOINT DRIVE_S3_PUBLIC_ENDPOINT DRIVE_S3_BUCKET DRIVE_S3_REGION DRIVE_S3_ACCESS_KEY DRIVE_S3_SECRET_FILE
 set -a
 . "$BACKUP_STAGE/data/config/env"
 set +a

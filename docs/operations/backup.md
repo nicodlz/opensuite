@@ -139,6 +139,12 @@ policies must not interfere with restic's repository operations.
    retry from empty storage. The restored backup configuration is available in
    the encrypted snapshot; retain the independently supplied recovery copy
    until its paths and credentials have been checked.
+   If the confirmed project is `opensuite`, the repository Compose name, or
+   the project name recorded in the current or saved `.env`, the script also
+   requires `--i-understand-this-is-production` after `--confirm-project
+PROJECT`. Use this only after explicitly fencing and accepting replacement
+   of that production project. An unresolved repository name also requires the
+   acknowledgement.
 3. Inspect `.env`, permissions, restored image pins and external secrets;
    ensure the exact Git revision matches `config/git-revision` in the snapshot.
    Confirm the provider credentials and endpoints are correct. Run
