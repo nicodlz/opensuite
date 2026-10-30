@@ -415,3 +415,110 @@ describe("JMAP delivery to linked mailboxes", () => {
     }
   });
 });
+
+describe("JMAP reconciliation across inbox and quarantine", () => {
+  const bytes = Buffer.from("Message-ID: <moved@example.test>\r\n\r\nbody");
+  const date = "2026-01-02T03:04:05.000Z";
+  const fake =
+    (where: string): typeof fetch =>
+    (url, init) =>
+      Promise.resolve().then(() => {
+        const target =
+          typeof url === "string"
+            ? url
+            : url instanceof URL
+              ? url.href
+              : url.url;
+        if (target.endsWith("/.well-known/jmap")) return response(session);
+        if (target.includes("/download/")) return new Response(bytes);
+        if (typeof init?.body !== "string")
+          throw new Error("Missing request body");
+        const call = calls.parse(JSON.parse(init.body)).methodCalls[0];
+        if (call === undefined) throw new Error("Missing call");
+        const value =
+          call[0] === "Mailbox/get"
+            ? {
+                accountId: "account",
+                state: "s",
+                list: [
+                  { id: "inbox", name: "Inbox", role: "inbox", parentId: null },
+                  { id: "junk", name: "Junk", role: "junk", parentId: null },
+                  { id: "other", name: "Other", role: null, parentId: null },
+                ],
+                notFound: [],
+              }
+            : call[0] === "Email/query"
+              ? {
+                  accountId: "account",
+                  queryState: "q",
+                  canCalculateChanges: false,
+                  position: 0,
+                  ids: ["email"],
+                }
+              : {
+                  accountId: "account",
+                  state: "s",
+                  notFound: [],
+                  list: [
+                    {
+                      id: "email",
+                      blobId: "blob",
+                      threadId: "thread",
+                      mailboxIds: { [where]: true },
+                      keywords: { "opensuite-k": true },
+                      receivedAt: date,
+                      subject: null,
+                      from: null,
+                      to: null,
+                      messageId: ["moved@example.test"],
+                      attachments: [],
+                    },
+                  ],
+                };
+        return response({
+          methodResponses: [[call[0], value, "0"]],
+          sessionState: "s",
+        });
+      });
+  const delivery = jmapDelivery([
+    {
+      id: "account",
+      origin: "http://internal.test",
+      authorization: "Basic static",
+      rewriteSessionUrls: true,
+    },
+  ]);
+
+  it.each([
+    ["inbox", true],
+    ["junk", false],
+    ["inbox", false],
+  ] as const)(
+    "finds a copy in %s when looking for a quarantined (%s) import",
+    async (where, quarantine) => {
+      vi.stubGlobal("fetch", fake(where));
+      try {
+        const found = await delivery.reconcile(
+          "account",
+          bytes,
+          quarantine,
+          date,
+          "k",
+        );
+        expect(found.isOk() && found.value).toEqual(["email"]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("does not take a copy elsewhere for the import and never imports again", async () => {
+    vi.stubGlobal("fetch", fake("other"));
+    try {
+      const found = await delivery.reconcile("account", bytes, true, date, "k");
+      expect(found.isErr() && found.error).toMatchObject({ ambiguous: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

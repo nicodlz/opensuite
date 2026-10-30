@@ -89,13 +89,13 @@ export function jmapDelivery(
     const boxes = await client.mailboxes(session.value, account);
     if (boxes.isErr())
       return err({ message: `JMAP mailboxes: ${JSON.stringify(boxes.error)}` });
-    const mailbox = boxes.value.list.find((box) =>
-      quarantine
-        ? config.quarantineMailbox === undefined
-          ? box.role === "junk"
-          : box.id === config.quarantineMailbox
-        : box.role === "inbox",
+    const quarantineBox = boxes.value.list.find((box) =>
+      config.quarantineMailbox === undefined
+        ? box.role === "junk"
+        : box.id === config.quarantineMailbox,
     );
+    const inbox = boxes.value.list.find((box) => box.role === "inbox");
+    const mailbox = quarantine ? quarantineBox : inbox;
     if (mailbox === undefined)
       return err({
         message: quarantine
@@ -107,6 +107,11 @@ export function jmapDelivery(
       session: session.value,
       account,
       mailbox: mailbox.id,
+      // Where an earlier import of this recipient may be: the verdict policy
+      // or the mailbox owner may have moved it between inbox and quarantine.
+      accepted: [inbox?.id, quarantineBox?.id].filter(
+        (id): id is string => id !== undefined,
+      ),
       origin: new URL(config.origin).origin,
     });
   };
@@ -188,7 +193,7 @@ export function jmapDelivery(
     ) {
       const connection = await connect(destination, quarantine);
       if (connection.isErr()) return connection;
-      const { client, session, account, mailbox } = connection.value;
+      const { client, session, account, accepted } = connection.value;
       const matches: string[] = [];
       const expectedId = messageId(bytes);
       if (legacy && expectedId === undefined)
@@ -227,7 +232,7 @@ export function jmapDelivery(
               if (result.isErr()) return result;
               if (
                 (!legacy &&
-                  (email.mailboxIds[mailbox] !== true ||
+                  (!accepted.some((id) => email.mailboxIds[id] === true) ||
                     email.keywords[keyword(key)] !== true ||
                     Date.parse(email.receivedAt) !==
                       Date.parse(receivedDate(receivedAt)))) ||
