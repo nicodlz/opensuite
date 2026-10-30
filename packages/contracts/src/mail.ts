@@ -66,6 +66,7 @@ export const ThreadSummarySchema = z.object({
   labels: z.array(IdSchema),
 });
 export const DraftContentSchema = z.object({
+  from: z.email().optional(),
   to: z.array(AddressSchema),
   cc: z.array(AddressSchema),
   bcc: z.array(AddressSchema),

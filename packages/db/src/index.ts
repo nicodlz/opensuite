@@ -10,3 +10,5 @@ export { createAccountStore } from "./accounts.ts";
 export type { PrismaClient } from "./generated/index.js";
 
 export { createDomainStore } from "./domains.ts";
+
+export type { Prisma } from "./generated/index.js";

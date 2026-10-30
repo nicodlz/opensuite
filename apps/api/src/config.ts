@@ -14,6 +14,7 @@ const EnvSchema = z.object({
     .min(50)
     .max(30_000)
     .default(2000),
+  ALIAS_PER_USER_CAP: z.coerce.number().int().min(1).max(100000).default(1000),
 });
 
 export interface ApiConfig {
@@ -21,6 +22,7 @@ export interface ApiConfig {
   readonly port: number;
   readonly logLevel: z.infer<typeof EnvSchema>["LOG_LEVEL"];
   readonly readinessTimeoutMs: number;
+  readonly aliasPerUserCap: number;
 }
 
 export interface ConfigError {
@@ -46,6 +48,7 @@ export const loadConfig = (
     port: parsed.data.API_PORT,
     logLevel: parsed.data.LOG_LEVEL,
     readinessTimeoutMs: parsed.data.READINESS_TIMEOUT_MS,
+    aliasPerUserCap: parsed.data.ALIAS_PER_USER_CAP,
   });
 };
 

@@ -1,3 +1,5 @@
+import { createAliasService } from "@opensuite/core/services/aliases";
+import { createAliasMail } from "./routes/alias-mail.ts";
 import { createReadinessService, httpProbe } from "@opensuite/core";
 import {
   createDatabase,
@@ -76,7 +78,38 @@ const mail = createMailService({
       mailboxStore.getForOwner(userId, accountId),
   },
   origin: authConfig.value.stalwartOrigin,
+  canSendAs: async (userId, address) =>
+    Boolean(
+      await database.value.emailAlias.findFirst({
+        where: {
+          userId,
+          address,
+          enabled: true,
+          ready: true,
+          deletedAt: null,
+          domain: { enabled: true, status: "verified" },
+        },
+        select: { id: true },
+      }),
+    ),
 });
+const aliases = createAliasService(
+  database.value,
+  createAliasMail(
+    {
+      origin: authConfig.value.stalwartOrigin,
+      password: authConfig.value.adminPassword,
+      ...(authConfig.value.managementClientIp === undefined
+        ? {}
+        : { managementClientIp: authConfig.value.managementClientIp }),
+    },
+    {
+      getForOwner: async (userId, accountId) =>
+        mailboxStore.getForOwner(userId, accountId),
+    },
+  ),
+  config.value.aliasPerUserCap,
+);
 const calendar = createCalendarService({
   store: {
     getForOwner: async (userId, accountId) =>
@@ -115,6 +148,7 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   calendar,
+  aliases,
 });
 const stopDomainJob =
   domains === undefined
@@ -128,6 +162,9 @@ const stopDomainJob =
 let running: Promise<void> | undefined;
 const work = async () => {
   try {
+    const aliasResult = await aliases.reconcile();
+    if (aliasResult.isErr() || aliasResult.value > 0)
+      app.log.warn("alias reconciliation incomplete");
     const failures = await auth.reconcile();
     if (failures > 0)
       app.log.warn({ failures }, "mailbox reconciliation incomplete");

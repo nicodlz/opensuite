@@ -41,6 +41,24 @@ const convert = (row: {
   checkedAt: row.checkedAt?.toISOString() ?? null,
 });
 export const createDomainStore = (db: PrismaClient) => ({
+  withAddressLock<T>(_domainId: string, work: () => Promise<T>) {
+    return ResultAsync.fromPromise(
+      db.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(9876)`;
+          return work();
+        },
+        { timeout: 120_000, maxWait: 30_000 },
+      ),
+      failure,
+    );
+  },
+  isManagedAddress(addressId: string) {
+    return ResultAsync.fromPromise(
+      db.emailAlias.count({ where: { addressId } }).then((count) => count > 0),
+      failure,
+    );
+  },
   verificationTargets() {
     return ResultAsync.fromPromise(
       db.domain.findMany({
@@ -114,7 +132,18 @@ export const createDomainStore = (db: PrismaClient) => ({
   ) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(9876)`;
+        const previous = await tx.domain.findUniqueOrThrow({
+          where: { id },
+          select: { status: true },
+        });
         const row = await tx.domain.update({ where: { id }, data, include });
+        if (previous.status !== data.status) {
+          await tx.emailAlias.updateMany({
+            where: { domainId: id, deletedAt: null, enabled: true },
+            data: { ready: false },
+          });
+        }
         await tx.auditEvent.create({
           data: {
             userId: actor,
@@ -209,6 +238,19 @@ export const createDomainStore = (db: PrismaClient) => ({
         .findMany({
           where: {
             user: { disabled: false, mailbox: { status: "active" } },
+            OR: [
+              { emailAlias: null },
+              {
+                emailAlias: {
+                  is: {
+                    enabled: true,
+                    ready: true,
+                    deletedAt: null,
+                    domain: { enabled: true, status: "verified" },
+                  },
+                },
+              },
+            ],
           },
           select: {
             localPart: true,

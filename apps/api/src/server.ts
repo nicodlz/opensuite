@@ -1,5 +1,7 @@
 import type { DomainService } from "./routes/domains.ts";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import type { AliasService } from "@opensuite/core/services/aliases";
+import { AliasWebsite } from "@opensuite/contracts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
@@ -54,6 +56,7 @@ export interface ServerDependencies {
   readonly mail?: MailService;
   readonly calendar?: CalendarService;
   readonly domains?: DomainService;
+  readonly aliases?: AliasService;
   readonly setupStatus?: ApiContext["setupStatus"];
 }
 
@@ -62,11 +65,32 @@ export const buildServer = async (
 ): Promise<FastifyInstance> => {
   const app = Fastify({
     bodyLimit: 1_000_000,
-    logger: { level: dependencies.config.logLevel },
+    logger: {
+      level: dependencies.config.logLevel,
+      redact: [
+        "req.headers.authentication",
+        "req.headers.authorization",
+        "req.headers.cookie",
+        "request.headers.authentication",
+        "request.headers.authorization",
+        "request.headers.cookie",
+      ],
+    },
     logController: new LogController({ disableRequestLogging: true }),
     trustProxy: dependencies.config.trustProxy ?? false,
   });
   const startedAt = dependencies.monotonicMs();
+  const limits = new Map<string, { count: number; expires: number }>();
+  const consume = (key: string, max: number) => {
+    const now = Date.now();
+    for (const [name, bucket] of limits)
+      if (bucket.expires <= now) limits.delete(name);
+    if (!limits.has(key) && limits.size >= 10_000) return false;
+    const bucket = limits.get(key) ?? { count: 0, expires: now + 60_000 };
+    bucket.count++;
+    limits.set(key, bucket);
+    return bucket.count <= max;
+  };
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("x-request-id", request.id);
     done();
@@ -86,6 +110,20 @@ export const buildServer = async (
   app.addHook("onRequest", async (request, reply) => {
     const identity = dependencies.identity;
     const rawPath = request.url.split("?")[0] ?? "";
+    if (rawPath === "/alias/random/new") {
+      reply.header("Access-Control-Allow-Origin", "*");
+      reply.header("Cache-Control", "no-store");
+      if (request.method === "OPTIONS")
+        return reply
+          .header("Access-Control-Allow-Methods", "POST, OPTIONS")
+          .header(
+            "Access-Control-Allow-Headers",
+            "Authentication, Content-Type",
+          )
+          .code(204)
+          .send();
+      return undefined;
+    }
     if (
       identity !== undefined &&
       (rawPath.startsWith("/auth/") || rawPath.startsWith("/api/auth/"))
@@ -286,12 +324,75 @@ export const buildServer = async (
 
   app.get("/openapi.json", () => openapi);
 
+  app.post(
+    "/alias/random/new",
+    {
+      errorHandler(error, _request, reply) {
+        const status = error.statusCode ?? 500;
+        void reply.code(status >= 400 && status < 500 ? status : 503).send({
+          error:
+            status >= 400 && status < 500
+              ? "Invalid request"
+              : "Service unavailable",
+        });
+      },
+    },
+    async (request, reply) => {
+      if (!consume(`ip:${request.ip}`, 60))
+        return reply.code(429).send({ error: "Too many requests" });
+      const secret = request.headers["authentication"];
+      if (
+        typeof secret !== "string" ||
+        secret.length > 128 ||
+        dependencies.aliases === undefined
+      )
+        return reply.code(401).send({ error: "Invalid API key" });
+      const keyBucket = createHash("sha256").update(secret).digest("hex");
+      if (!consume(`key:${keyBucket}`, 20))
+        return reply.code(429).send({ error: "Too many requests" });
+      const actor = await dependencies.aliases.authenticate(secret);
+      if (actor.isErr())
+        return reply.code(401).send({ error: "Invalid API key" });
+      const parsed = z
+        .object({ hostname: AliasWebsite.optional() })
+        .strict()
+        .safeParse(request.query);
+      const body = z
+        .object({ note: z.string().max(500).optional() })
+        .strict()
+        .safeParse(request.body);
+      if (!parsed.success || !body.success)
+        return reply.code(400).send({ error: "Invalid request" });
+      if (!consume(`user:${actor.value.userId}`, 20))
+        return reply.code(429).send({ error: "Too many requests" });
+      const result = await dependencies.aliases.create(actor.value.userId, {
+        ...(parsed.data.hostname === undefined
+          ? {}
+          : { website: parsed.data.hostname }),
+        ...(body.data.note === undefined ? {} : { note: body.data.note }),
+      });
+      if (result.isErr())
+        return reply
+          .code(
+            result.error.kind === "limit"
+              ? 429
+              : result.error.kind === "invalid"
+                ? 400
+                : 503,
+          )
+          .send({ error: "Could not create alias" });
+      return reply.code(201).send({ alias: result.value.address });
+    },
+  );
+
   if (dependencies.identity !== undefined) {
     const identity = dependencies.identity;
     const limiter = createAuthLimiter();
     const handoffs = createHandoffRegistry();
-    const siblings = Object.values(identity.productOrigins ?? {}).filter(
-      (origin) => origin !== identity.publicOrigin,
+    const siblings = new Set(
+      Object.values(identity.productOrigins ?? {}).filter(
+        (origin) => origin !== identity.publicOrigin,
+      ),
     );
     // The sign-in origin issues a token for one listed sibling application.
     // The token returns in a URL fragment and is redeemed by that origin only.
@@ -302,14 +403,15 @@ export const buildServer = async (
           .code(403)
           .send({ code: "FORBIDDEN", message: "Invalid origin" });
       const input = z.object({ target: z.string() }).safeParse(request.body);
-      if (!input.success || !siblings.includes(input.data.target))
+      if (!input.success || !siblings.has(input.data.target))
         return reply
           .code(400)
           .send({ code: "BAD_REQUEST", message: "Unknown application" });
       const headers = new Headers();
       const cookie = request.headers.cookie;
       if (cookie !== undefined) headers.set("cookie", cookie);
-      if ((await identity.actor?.(headers)) == null)
+      const handoffActor = await identity.actor?.(headers);
+      if (handoffActor === null || handoffActor === undefined)
         return reply
           .code(401)
           .send({ code: "UNAUTHORIZED", message: "Unauthorized" });
@@ -535,6 +637,8 @@ export const buildServer = async (
         downloads,
         accounts: dependencies.accounts,
         domains: dependencies.domains,
+        aliases: dependencies.aliases,
+        aliasCreationLimit: (userId) => consume(`user:${userId}`, 20),
         log: request.log,
         readiness: dependencies.readiness,
         uptimeSeconds: () =>

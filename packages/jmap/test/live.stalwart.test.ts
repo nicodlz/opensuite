@@ -181,6 +181,11 @@ describe("Stalwart JMAP integration", () => {
     expect(
       Object.values(account.aliases).filter((item) => item.name === "a.alias"),
     ).toHaveLength(1);
+    expect(
+      value(await alice.identities(aliceSession, aliceId)).list.map(
+        (item) => item.email,
+      ),
+    ).toContain("a.alias@example.test");
     const weak = await admin.createAccount("weak", domainId, "123");
     expect(weak.isErr() ? weak.error : undefined).toMatchObject({
       kind: "set",
@@ -196,7 +201,125 @@ describe("Stalwart JMAP integration", () => {
       domainId,
     );
     expect(conflict.isErr()).toBe(true);
+    value(await admin.removeAlias(first.id, "a.alias", domainId));
+    expect(
+      value(await alice.identities(aliceSession, aliceId)).list.map(
+        (item) => item.email,
+      ),
+    ).not.toContain("a.alias@example.test");
   });
+
+  it("delivers to an alias, stops after removal, restores delivery and sends replies as the alias", async () => {
+    const account = value(
+      await admin.createAccount("alice", domainId, password),
+    );
+    const address = "private-reply@example.test";
+    const send = async (
+      client: JmapClient,
+      session: Session,
+      accountId: string,
+      from: string,
+      to: string,
+      subject: string,
+    ) => {
+      const box = findMailbox(
+        value(await client.mailboxes(session, accountId)).list,
+        "drafts",
+      );
+      const raw = Buffer.from(
+        `From: ${from}\r\nTo: ${to}\r\nSubject: ${subject}\r\nMessage-ID: <${subject}@example.test>\r\n\r\nHello\r\n`,
+      );
+      const blob = value(await client.upload(session, accountId, raw));
+      const email = value(
+        await client.importEmail(session, accountId, {
+          blobId: blob.blobId,
+          mailboxIds: { [box]: true },
+          keywords: { $draft: true },
+        }),
+      );
+      const identity = value(
+        await client.identities(session, accountId),
+      ).list.find((item) => item.email === from);
+      if (!identity) throw new Error("missing identity");
+      value(await client.submit(session, accountId, email.id, identity.id));
+    };
+    const delivered = async (
+      client: JmapClient,
+      session: Session,
+      id: string,
+      subject: string,
+    ) => {
+      const poll = async (remaining: number): Promise<boolean> => {
+        if (
+          value(await client.queryEmails(session, id, { filter: { subject } }))
+            .ids.length > 0
+        )
+          return true;
+        if (remaining === 0) return false;
+        await pause(250);
+        return poll(remaining - 1);
+      };
+      return poll(40);
+    };
+    value(await admin.createAlias(account.id, "private-reply", domainId));
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      address,
+      "alias-first",
+    );
+    expect(await delivered(alice, aliceSession, aliceId, "alias-first")).toBe(
+      true,
+    );
+    await send(
+      alice,
+      aliceSession,
+      aliceId,
+      address,
+      "bob@example.test",
+      "alias-reply",
+    );
+    expect(await delivered(bob, bobSession, bobId, "alias-reply")).toBe(true);
+    const replyIds = value(
+      await bob.queryEmails(bobSession, bobId, {
+        filter: { subject: "alias-reply" },
+      }),
+    ).ids;
+    const reply = value(await bob.emails(bobSession, bobId, replyIds)).list[0];
+    expect(reply?.from?.[0]?.email).toBe(address);
+    value(await admin.removeAlias(account.id, "private-reply", domainId));
+    expect(
+      value(await alice.identities(aliceSession, aliceId)).list.some(
+        (item) => item.email === address,
+      ),
+    ).toBe(false);
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      address,
+      "alias-disabled",
+    );
+    expect(
+      await delivered(alice, aliceSession, aliceId, "alias-disabled"),
+    ).toBe(false);
+    value(await admin.createAlias(account.id, "private-reply", domainId));
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      address,
+      "alias-restored",
+    );
+    expect(
+      await delivered(alice, aliceSession, aliceId, "alias-restored"),
+    ).toBe(true);
+    value(await admin.removeAlias(account.id, "private-reply", domainId));
+  }, 60_000);
 
   it("imports identical MIME twice, retains bytes, keywords, date and an attachment, then moves it", async () => {
     const raw = [

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -86,7 +86,7 @@ beforeAll(async () => {
     await cleanup();
     throw error;
   }
-}, 240_000);
+}, 600_000);
 
 afterAll(async () => {
   try {
@@ -177,7 +177,16 @@ describe("PostgreSQL schema and adapters", () => {
       .parse(
         await db.$queryRaw`SELECT migration_name, checksum, finished_at FROM "_prisma_migrations"`,
       );
-    expect(rows).toHaveLength(6);
+    const migrations = await readdir(
+      new URL("../prisma/migrations", import.meta.url),
+      { withFileTypes: true },
+    );
+    expect(rows.map((row) => row.migration_name).toSorted()).toEqual(
+      migrations
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .toSorted(),
+    );
     const migration = rows.find(
       (row) => row.migration_name === "20261029000000_initial",
     );
@@ -470,5 +479,79 @@ describe("PostgreSQL schema and adapters", () => {
     } finally {
       await unavailable.value.$disconnect();
     }
+  });
+});
+
+describe("alias reservations", () => {
+  it("reserves deleted addresses permanently and routes only active aliases", async () => {
+    const suffix = randomUUID();
+    const owner = `alias-owner-${suffix}`;
+    const other = `alias-other-${suffix}`;
+    await db.user.createMany({
+      data: [
+        { id: owner, email: `${owner}@example.test`, name: owner },
+        { id: other, email: `${other}@example.test`, name: other },
+      ],
+    });
+    const domain = await db.domain.create({
+      data: {
+        name: `${suffix}.example.test`,
+        userId: owner,
+        status: "verified",
+      },
+    });
+    await db.mailboxLink.create({
+      data: {
+        userId: owner,
+        accountId: suffix,
+        address: `${owner}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const address = await db.address.create({
+      data: {
+        userId: owner,
+        domainId: domain.id,
+        localPart: "private",
+        isAlias: true,
+      },
+    });
+    const full = `private@${domain.name}`;
+    const alias = await db.emailAlias.create({
+      data: {
+        userId: owner,
+        domainId: domain.id,
+        addressId: address.id,
+        address: full,
+        localPart: "private",
+        ready: true,
+      },
+    });
+    const { createDomainStore } = await import("../src/index.ts");
+    const store = createDomainStore(db);
+    const active = await store.routes([full]);
+    expect(active.isOk() && active.value).toEqual([
+      { address: full, destination: suffix },
+    ]);
+    await db.emailAlias.update({
+      where: { id: alias.id },
+      data: { enabled: false, deletedAt: new Date() },
+    });
+    const inactive = await store.routes([full]);
+    expect(inactive.isOk() && inactive.value).toEqual([]);
+    await expect(
+      db.address.delete({ where: { id: address.id } }),
+    ).rejects.toThrow("EmailAlias_addressId_fkey");
+    await expect(
+      db.address.create({
+        data: {
+          userId: other,
+          domainId: domain.id,
+          localPart: "PRIVATE",
+          isAlias: true,
+        },
+      }),
+    ).rejects.toThrow("Unique constraint");
   });
 });

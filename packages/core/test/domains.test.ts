@@ -1,4 +1,4 @@
-import { err, ok, okAsync } from "neverthrow";
+import { err, ok, okAsync, ResultAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { DnsRecord, ManagedDomain } from "@opensuite/contracts";
 import type { createDomainStore } from "@opensuite/db";
@@ -30,6 +30,13 @@ function fixture() {
   };
   const audits: string[] = [];
   const store: ReturnType<typeof createDomainStore> = {
+    withAddressLock: (_domain, work) => {
+      return ResultAsync.fromPromise(work(), () => ({
+        kind: "unavailable" as const,
+        message: "failed",
+      }));
+    },
+    isManagedAddress: () => success(false),
     verificationTargets: () => success([]),
     audit: (_actor, action) => {
       audits.push(action);
