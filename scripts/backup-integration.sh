@@ -8,16 +8,29 @@ name="osbackup$$"
 old="$name-old"
 new="$name-new"
 minio="$name-minio"
+octet=$(( ($$ % 190) + 20 ))
+test_subnet="10.238.$octet.0/24"
+test_ip="10.238.$octet.10"
+fixture_port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()})')
 rclone='rclone/rclone:1.71.2@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51'
+pass_drill=${PASS_BACKUP_DRILL:-0}
+. "$root/scripts/pass-drill.sh"
+admin_hash='$argon2id$v=19$m=65536,t=3,p=4$ZGlzcG9zYWJsZS1zYWx0IQ$RsDLAAOjuY6ic36ncF+H4SzvxmYg8tdhdel1GSA9GTo'
+case_done() { [ "$pass_drill" = 0 ] || printf '%s\n' "$1" >> "$PASS_DRILL_CASES"; }
 cleanup() {
   rc=$?
   trap - EXIT HUP INT TERM
   for project in "$old" "$new"; do
     if [ "$rc" -ne 0 ]; then docker compose --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" logs --no-color postgres stalwart >&2 || :; fi
-    docker compose --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" down --volumes --remove-orphans --timeout 5 >/dev/null 2>&1 || :
-    docker volume rm "${project}_secrets" "${project}_stalwart-data" "${project}_postgres-data" >/dev/null 2>&1 || :
+    docker compose --profile '*' --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" down --volumes --remove-orphans --timeout 5 >/dev/null 2>&1 || :
+    docker volume rm "${project}_secrets" "${project}_stalwart-data" "${project}_postgres-data" "${project}_vaultwarden-data" "${project}_caddy-data" "${project}_caddy-config" "${project}_setup-status" >/dev/null 2>&1 || :
+    if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ] || [ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" ]; then
+      echo "cleanup: disposable project $project still has containers or volumes" >&2
+      rc=1
+    fi
   done
-  docker rm -f "$minio" >/dev/null 2>&1 || :
+  docker rm -fv "$minio" >/dev/null 2>&1 || :
+  if [ -n "$(docker ps -aq --filter "name=^/$minio$")" ]; then echo 'cleanup: disposable object store remains' >&2; rc=1; fi
   rm -rf "$work"
   exit "$rc"
 }
@@ -27,7 +40,7 @@ mkdir -p "$work/source/deploy" "$work/target/deploy" "$work/scratch" "$work/secr
 chmod 755 "$work" "$work/secrets"
 for folder in source target; do
   cp "$root/compose.yaml" "$work/$folder/compose.yaml"
-  cp -R "$root/deploy/backup" "$root/deploy/stalwart" "$root/deploy/postgres" "$root/deploy/caddy" "$work/$folder/deploy/"
+  cp -R "$root/deploy/backup" "$root/deploy/stalwart" "$root/deploy/postgres" "$root/deploy/caddy" "$root/deploy/vaultwarden" "$work/$folder/deploy/"
   chmod -R a+rX "$work/$folder/deploy"
 done
 git -C "$work/source" init -q
@@ -63,7 +76,8 @@ BACKUP_SECRET_ACCESS_KEY='fixture-secret'
 BACKUP_PASSWORD_FILE='$work/secrets/restic'
 BACKUP_SCRATCH='$work/scratch'
 CONFIG
-cat > "$work/overlay.yaml" <<'YAML'
+# Expand the disposable paths, ports, and subnet into this fixture overlay.
+cat > "$work/overlay.yaml" <<YAML
 services:
   postgres:
     command: ["postgres", "-c", "fsync=off"]
@@ -85,13 +99,52 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
   backup-objects:
     extra_hosts: ["host.docker.internal:host-gateway"]
+  pass:
+    environment:
+      SIGNUPS_ALLOWED: "true"
+      DOMAIN: https://127.0.0.1:$fixture_port
+    ports: !override ["127.0.0.1::8080"]
+  caddy:
+    entrypoint: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    volumes: !override
+      - $work/caddy-test:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports: !override ["127.0.0.1:$fixture_port:443"]
+    networks:
+      api-proxy:
+        ipv4_address: 10.240.$octet.2
+      pass-network:
+        ipv4_address: 10.241.$octet.2
+networks:
+  api-proxy:
+    ipam:
+      config: !override
+        - subnet: 10.240.$octet.0/24
+  pass-network:
+    ipam:
+      config: !override
+        - subnet: 10.241.$octet.0/24
+          ip_range: 10.241.$octet.128/25
 YAML
+cat > "$work/caddy-test" <<'CADDY'
+{
+  default_sni 127.0.0.1
+}
+https://127.0.0.1 {
+  tls internal
+  reverse_proxy pass-vault:8080
+}
+CADDY
 cat > "$work/source/.env" <<CONFIG
 POSTGRES_USER=opensuite
 POSTGRES_DB=opensuite
 POSTGRES_DRIVE_DB=opensuite_drive
-MAIL_MANAGEMENT_SUBNET=10.237.253.0/24
-MAIL_MANAGEMENT_API_IP=10.237.253.10
+PASS_NETWORK_SUBNET=10.241.$octet.0/24
+PASS_NETWORK_IP_RANGE=10.241.$octet.128/25
+PASS_CADDY_IP=10.241.$octet.2
+MAIL_MANAGEMENT_SUBNET=$test_subnet
+MAIL_MANAGEMENT_API_IP=$test_ip
 MAIL_BLOB_STORE=s3
 MAIL_S3_ENDPOINT=http://host.docker.internal:$port
 MAIL_S3_REGION=us-east-1
@@ -112,14 +165,21 @@ DRIVE_S3_ACCESS_KEY=fixture-access
 DRIVE_S3_SECRET_FILE=$work/secrets/drive
 OBSERVE_BACKUP_DIR=$work/source/deploy/backup-status
 CONFIG
+if [ "$pass_drill" = 1 ]; then
+  printf '%s\n' "$admin_hash" > "$work/secrets/pass-admin"
+  cat >> "$work/source/.env" <<CONFIG
+PASS_ADMIN_TOKEN_FILE=$work/secrets/pass-admin
+PASS_SIGNUPS_ALLOWED=true
+CONFIG
+fi
 export BACKUP_CONFIG="$work/backup.conf" BACKUP_COMPOSE_OVERRIDE="$work/overlay.yaml" COMPOSE_PROJECT_NAME="$old" BACKUP_STAGE="$work/scratch"
 set -a
 . "$BACKUP_CONFIG"
 set +a
 cd "$work/source"
 compose() { docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/backup/compose.backup.yaml -f "$work/overlay.yaml" "$@"; }
-docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml up -d --wait --wait-timeout 180 stalwart
-docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml --profile bootstrap run --rm stalwart-bootstrap
+docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/backup/compose.backup.yaml -f deploy/stalwart/compose.bootstrap.yaml -f "$work/overlay.yaml" up -d --wait --wait-timeout 180 stalwart
+docker compose --project-name "$COMPOSE_PROJECT_NAME" -f compose.yaml -f deploy/backup/compose.backup.yaml -f deploy/stalwart/compose.bootstrap.yaml -f "$work/overlay.yaml" --profile bootstrap run --rm stalwart-bootstrap
 compose up -d --force-recreate --wait --wait-timeout 180 postgres stalwart
 compose up --no-deps --force-recreate --exit-code-from stalwart-setup stalwart-setup
 docker run --rm --network none -v "${old}_setup-status:/status:ro" \
@@ -135,7 +195,7 @@ printf 'drive-content-fixture' | rclone_local rcat store:drive-fixture/drive/obj
 mailport=$(compose port stalwart 8080 | sed 's/.*://')
 password=$(compose run --rm --no-deps -T backup-management 'cat /run/opensuite/stalwart-management/password')
 base="http://127.0.0.1:$mailport"
-request() { curl -fsS -u "management@opensuite.internal:$password" -H 'X-Forwarded-For: 10.237.253.10' "$@"; }
+request() { curl -fsS -u "management@opensuite.internal:$password" -H "X-Forwarded-For: $test_ip" "$@"; }
 account=$(request "$base/jmap/session" | jq -er '.primaryAccounts["urn:ietf:params:jmap:mail"]')
 jmap() { request -H 'Content-Type: application/json' -d "$1" "$base/jmap/"; }
 inbox=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Mailbox/get\",{\"accountId\":\"$account\"},\"a\"]]}" | jq -er '.methodResponses[0][1].list[] | select(.role == "inbox") | .id')
@@ -143,25 +203,36 @@ printf 'From: sender@example.invalid\r\nTo: recipient@example.invalid\r\nSubject
 blob=$(request -H 'Content-Type: message/rfc822' --data-binary "@$work/message" "$base/jmap/upload/$account/" | jq -er .blobId)
 response=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Email/import\",{\"accountId\":\"$account\",\"emails\":{\"fixture\":{\"blobId\":\"$blob\",\"mailboxIds\":{\"$inbox\":true}}}},\"a\"]]}")
 email=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].created.fixture.id')
+[ "$pass_drill" = 0 ] || pass_case_create
 ./deploy/backup/init.sh
+if [ "$pass_drill" = 1 ]; then pass_case_failure; pass_case_missing_key; fi
 # A scratch area too small for the objects is refused before any service stops.
-before=$(compose ps --services --filter status=running | sort)
+services=$(compose ps --services --filter status=running)
+before=$(printf '%s\n' "$services" | sort)
 if BACKUP_SCRATCH_RESERVE_BYTES=999999999999999999 ./deploy/backup/backup.sh 2>"$work/too-small"; then
   echo 'backup ran without enough scratch space' >&2; exit 1
 fi
 grep -q 'scratch too small' "$work/too-small"
-[ "$(compose ps --services --filter status=running | sort)" = "$before" ]
+services=$(compose ps --services --filter status=running)
+[ "$(printf '%s\n' "$services" | sort)" = "$before" ]
 [ ! -e "$work/source/deploy/backup-status/last-success" ]
 ./deploy/backup/backup.sh
 [ -s "$work/source/deploy/backup-status/last-success" ]
+[ "$(stat -c %a "$work/source/deploy/backup-status/last-success")" = 644 ]
+[ "$pass_drill" = 0 ] || pass_case_backup
 # Delete live application state and object copies while retaining the backup bucket.
-compose down --volumes --remove-orphans --timeout 10
+compose --profile '*' down --volumes --remove-orphans --timeout 10
 rclone_local purge store:mail-fixture/mail
 rclone_local purge store:drive-fixture/drive
 rm "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$work/secrets/tls-cert" "$work/secrets/tls-key"
+if [ "$pass_drill" = 1 ]; then rm "$work/secrets/pass-admin"; rm -rf "$work/cli-create"; fi
 export COMPOSE_PROJECT_NAME="$new"
 cd "$work/target"
 ./deploy/backup/restore.sh
+if [ "$pass_drill" = 1 ]; then
+  pass_case_refusal; pass_case_restore; pass_case_verify
+  pass_case_force_preflight; pass_case_partial_restore; pass_case_retry
+fi
 [ "$(cat deploy/ingest.env)" = INGEST_FIXTURE=present ]
 [ "$(cat deploy/observe.env)" = OBSERVE_FIXTURE=present ]
 for fixture in relay tls-cert tls-key; do

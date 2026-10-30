@@ -2,14 +2,14 @@
 
 This is a **downtime** backup. At 01:00 UTC the systemd timer invokes the
 Compose helper services. The controller stops running Caddy, API, Drive,
-ingest, observe and Stalwart containers; takes `pg_dump` custom-format snapshots of both databases,
+ingest, observe, Stalwart and (when enabled) Pass containers; takes `pg_dump` custom-format snapshots of the application and Drive databases and the dedicated Pass database,
 `pg_dumpall --globals-only`, the complete stopped Stalwart RocksDB directory
 (including WAL), the Compose secrets and Caddy volumes, configuration and both S3 object
-prefixes; checks the object copies byte-for-byte; and starts the previously
+prefixes and the stopped Pass volume; checks the object copies byte-for-byte; and starts the previously
 running services again. The staged set is then encrypted and uploaded by
 restic 0.19.1. A snapshot is published only if every capture succeeded; pruning
 runs only after a successful snapshot. PostgreSQL dumps are individually
-consistent; the stopped application writers make them a coordinated set.
+consistent; the stopped application writers make them a coordinated set. Pass stays stopped across its dump and volume capture, including attachments and Sends, so database references and files belong to the same quiescent state. External Pass writers must also be stopped. The volume archive excludes any SQLite database files; PostgreSQL data is captured only with `pg_dump`.
 
 [Stalwart's backup procedure](https://stalw.art/docs/management/maintenance/backup/)
 explicitly permits stopping the server and copying the complete RocksDB
@@ -32,8 +32,9 @@ is not covered by this backup design. Alert on `scratch_too_small` and on the
 age of the last successful backup, and keep total Drive and mail usage below
 the scratch capacity until a streaming or object-level backup replaces the
 scratch copy. The
-scratch files are removed on normal exit or handled termination; inspect and
-securely clean stale directories after a crash or power loss.
+scratch files are removed on normal exit or handled termination. After acquiring
+the shared lock, backup, init and restore remove stale scratch directories from
+a prior crash before creating their own stage.
 
 **Scope and prerequisites:** This captures current object bytes, not old
 versions, bucket policies, incomplete S3 multipart uploads, or arbitrary S3
@@ -63,12 +64,12 @@ separate recovery requirements, not supplied by this backup.
 2. Copy `deploy/backup/backup.conf.example` to `/etc/opensuite/backup.conf`,
    mode 0600, and fill in its shell assignments. Choose an encrypted,
    access-restricted `BACKUP_SCRATCH` filesystem. Put a strong randomly
-   generated restic password in the named file, mode 0600. Protect and test an
+   generated restic password in the named file, mode 0600. Never keep the restic password or B2 key only in this Pass instance. Escrow the plaintext admin token separately. Protect and test an
    **independent offline copy** of the password, backup key, repository URL,
    Git revision and this procedure: none can be recovered from the repository
    without the password. The backup contains `.env`, configured mail and Drive object secrets, relay
    and TLS files, ingest and observe env files when present, generated Compose
-   secrets and backup configuration, all encrypted by restic before
+   secrets, Pass admin, SMTP and push secret files when configured, and backup configuration, all encrypted by restic before
    uploading. Docker administrators can read these values; restrict host and
    Docker access. Environment and configuration files must be trusted POSIX
    shell assignments, not arbitrary shell code.
@@ -81,13 +82,26 @@ separate recovery requirements, not supplied by this backup.
    stderr. Alert on failed systemd units, failure/overlap/restart_failed events,
    missing success events and the age of the most recent successful snapshot.
    A successful capture followed by a pruning failure is reported as failure.
-   Only after capture, service restart, upload, retention and scratch cleanup
+   Pass is detected from its existing Compose container (even stopped), dedicated database, or `COMPOSE_PROFILES=pass` or `COMPOSE_PROFILES=*`. Set `BACKUP_PASS_ENABLED=1` in backup.conf for every installation using Pass, so a missing database/container fails instead of being mistaken for an unused profile. Missing Pass keys, credentials or unreadable data fail the whole backup, including when its database exists but its volume is missing. To deliberately exclude Pass from a snapshot, set `BACKUP_PASS_EXCLUDE=1` in the trusted backup configuration; the controller logs `pass_explicitly_excluded`. Such a snapshot cannot recover Pass. Remove the override after the emergency.
+
+   After detection succeeds, Pass failures write `pass` to `last-failure` and observe reports `backup_pass_failure`. Capture starts emit `pass_capture_start`; a completed capture emits `pass_captured`. Detection errors and other failures report `backup_failure`; a successful run clears the failure marker. A lock overlap logs `overlap` without changing either marker. Observe also alerts on a missing or stale `last-success`. Failures before the marker can be written must be caught by systemd/journal monitoring. Only after capture, service restart, upload, retention and scratch cleanup
    succeed does the script atomically replace `OBSERVE_BACKUP_DIR/last-success`.
+
 4. Install `deploy/backup/opensuite-backup.service` and
    `deploy/backup/opensuite-backup.timer` into `/etc/systemd/system/` (edit
    paths if the checkout is elsewhere), then run `systemctl daemon-reload` and
    `systemctl enable --now opensuite-backup.timer`. The persistent timer catches
    missed runs after reboot. Check `systemctl list-timers` and the journal.
+
+For a secondary copy, use a separately administered host with read-only access
+to the primary and append-only or write-only access to the secondary. Pull and
+run `restic copy` there; the production host must not hold secondary credentials.
+Use `rest-server --append-only` or a B2 key without `deleteFiles` with Object
+Lock, tested against the provider's semantics. Grant the minimum read and list
+operations restic requires while denying deletion. Prune only from the separate
+admin host, using a separately protected prune key kept offline when practical.
+Compare snapshot ID and time with an independently recorded last success before
+restoring to detect rollback. See [Pass recovery](pass-recovery.md).
 
 Restic keeps 7 daily, 5 weekly and 12 monthly snapshots, grouped by captured
 path, then prunes unreferenced data. This is a rolling selection, not a
@@ -117,14 +131,20 @@ policies must not interfere with restic's repository operations.
    password to `/etc/opensuite`, with restricted permissions. In a clean
    checkout with **no `.env` and empty Compose volumes**, run
    `deploy/backup/restore.sh` (or pass a restic snapshot ID). It refuses
-   nonempty secrets, Caddy, RocksDB, PostgreSQL volumes or object prefixes. The script
+   nonempty secrets, Caddy, RocksDB, PostgreSQL or Pass volumes, existing `.env`, or object prefixes. `COMPOSE_PROJECT_NAME=recovery restore.sh --force --confirm-project recovery [snapshot-id]` explicitly replaces local volumes and restored files only when all project services are stopped; it is for an isolated recovery target. Both prefixes must pass checks and dry-run listings before local state is cleared. Existing objects must match the snapshot; missing objects are copied without overwriting and the complete prefixes are checked. A retry with `--force` is safe only after fencing all writers; failures can leave a partial target. The script
    decrypts to scratch, restores the recorded `.env`, external secrets and env files, Compose and
    Stalwart config, object bytes, secrets and RocksDB volumes, then starts only
-   PostgreSQL and restores the roles and both databases. A failed restore may
+   PostgreSQL and restores the roles and databases, including the dedicated Pass database and its matching volume. It does not start Pass. A failed restore may
    leave partial files, volumes or objects: discard the isolated target and
    retry from empty storage. The restored backup configuration is available in
    the encrypted snapshot; retain the independently supplied recovery copy
    until its paths and credentials have been checked.
+   If the confirmed project is `opensuite`, the repository Compose name, or
+   the project name recorded in the current or saved `.env`, the script also
+   requires `--i-understand-this-is-production` after `--confirm-project
+PROJECT`. Use this only after explicitly fencing and accepting replacement
+   of that production project. An unresolved repository name also requires the
+   acknowledgement.
 3. Inspect `.env`, permissions, restored image pins and external secrets;
    ensure the exact Git revision matches `config/git-revision` in the snapshot.
    Confirm the provider credentials and endpoints are correct. Run
@@ -134,7 +154,7 @@ policies must not interfere with restic's repository operations.
    restored queue entries may be delivered again. Reconcile the inbound
    archive and ingestion ledger before replay or cutover. Only then enable
    external traffic, scheduled workers, backups and DNS on the new host.
-   Record timings and results; repeat regularly.
+   Record timings and results; repeat regularly. See [Pass recovery](pass-recovery.md) for the Pass-specific recovery and validation steps.
 
 ## Recovery objectives and limits
 
@@ -159,3 +179,5 @@ proof of B2 compatibility.
 Run the isolated test with `./scripts/backup-integration.sh`; it creates a
 throwaway MinIO service and Compose projects, imports mail, captures, destroys
 and restores fresh volumes and object prefixes. It makes no AWS or B2 calls.
+
+Run the Pass recovery check with `node scripts/backup-restore-drill.mjs --report /tmp/pass-drill.xml` after installing dependencies. It uses disposable fixture credentials, a local MinIO S3 substitute, the pinned Bitwarden CLI, and isolated Compose projects; the report contains no vault export. This is not proof of real B2 behavior.

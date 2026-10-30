@@ -36,6 +36,7 @@ export interface QueueStats {
 export interface Sources {
   ready(service: string): Promise<boolean>;
   backupAge(): Promise<number>;
+  backupFailure(): Promise<"pass" | "backup" | null>;
   diskPercent(): Promise<number>;
   certificateDays(service: "https" | "submission" | "imaps"): Promise<number>;
   setupOk(): Promise<boolean>;
@@ -78,6 +79,17 @@ export async function inspect(
     ...(config.OBSERVE_INGEST_ENABLED === "true" ? ["ingest"] : []),
   ];
   await Promise.all([
+    (async () => {
+      try {
+        const failure = await sources.backupFailure();
+        if (failure !== null)
+          alerts.push({
+            code: failure === "pass" ? "backup_pass_failure" : "backup_failure",
+          });
+      } catch {
+        alerts.push({ code: "backup_failure_status_unavailable" });
+      }
+    })(),
     ...services.map((name) =>
       check(
         `${name}_readiness`,

@@ -9,6 +9,7 @@ const config = Config.parse({
 const healthy: Sources = {
   ready: () => Promise.resolve(true),
   backupAge: () => Promise.resolve(100),
+  backupFailure: () => Promise.resolve(null),
   diskPercent: () => Promise.resolve(50),
   certificateDays: () => Promise.resolve(60),
   setupOk: () => Promise.resolve(true),
@@ -35,6 +36,15 @@ describe("observations", () => {
       queue_depth: 0,
       dlq_depth: 0,
     });
+  });
+  it("reports a Pass backup failure without disclosing details", async () => {
+    const report = await run({
+      ...healthy,
+      backupFailure: () => Promise.resolve("pass"),
+    });
+    expect(report.alerts.map((alert) => alert.code)).toEqual([
+      "backup_pass_failure",
+    ]);
   });
   it("reports independent failures and thresholds without exception details", async () => {
     const report = await run({

@@ -154,51 +154,14 @@ client. Built-in Vaultwarden rate limiting remains enabled independently.
 
 ## Backups and recovery
 
-**The existing scheduled Esuno backup does not capture the Pass database or
-volume and does not quiesce Pass.** Set up and test a separate encrypted backup
-before storing real vaults. Back up the Pass database, the complete
-`vaultwarden-data` volume (including attachments, RSA keys and config), the
-Pass database secret, the admin hash and any SMTP/push files together with the
-image pin and configuration. Keep recovery keys independently protected and a
-second backup location. Restrict access: even encrypted-vault metadata, server
-keys, configuration and backup files are sensitive.
-
-For a consistent manual capture, stop Pass to quiesce writes, dump PostgreSQL
-with `pg_dump -Fc` and archive the data volume while it is stopped, using
-private encrypted scratch and an encrypted backup repository. For example,
-with a protected, encrypted `$PASS_BACKUP_DIR` and the default database user:
-
-```sh
-(
-  set -eu
-  trap 'docker compose --profile pass start pass' EXIT
-  trap 'exit 1' HUP INT TERM
-  docker compose --profile pass stop pass
-  docker compose exec -T postgres pg_dump -U opensuite -Fc opensuite_pass > "$PASS_BACKUP_DIR/pass.dump"
-  docker compose --profile pass run --rm -T --no-deps --entrypoint tar pass -C /data -cf - . > "$PASS_BACKUP_DIR/pass-data.tar"
-)
-```
-
-Ensure Pass is restarted even if a capture command fails. Securely capture the
-secret files separately, encrypt and upload the complete set with the chosen
-backup tool, check the result, and remove scratch according to its policy. A
-restore requires a fenced, isolated environment with matching secrets and the
-same pinned image. The following **destructive** in-place commands replace the
-Pass database and data volume; they do not touch the application or Drive
-databases. Substitute the configured PostgreSQL superuser for `opensuite`:
-
-```sh
-docker compose --profile pass stop pass
-docker compose exec -T postgres dropdb -U opensuite --if-exists --force opensuite_pass
-docker compose --profile pass run --rm -T --no-deps pass-provision
-docker compose exec -T postgres pg_restore -U opensuite --exit-on-error --no-owner --role=opensuite_pass -d opensuite_pass < "$PASS_BACKUP_DIR/pass.dump"
-docker compose --profile pass run --rm -T --no-deps --entrypoint sh pass -c 'find /data -mindepth 1 -delete && tar -xf - -C /data' < "$PASS_BACKUP_DIR/pass-data.tar"
-docker compose --profile pass up -d --no-deps --force-recreate --wait pass
-```
-
-Verify vault access, attachments and keys before considering an upgrade.
-Automated Pass backup, restore and a complete disaster recovery drill remain
-open work; the commands above have not established a tested recovery procedure.
+The scheduled Esuno restic backup captures the Pass database, stopped data
+volume, generated database credential, and configured admin, SMTP and push
+files with the rest of the suite. Set `BACKUP_PASS_ENABLED=1` in the protected
+backup configuration and test the schedule. The vault container does not receive
+backup credentials. See [backup operations](backup.md) and the [Pass recovery
+runbook](pass-recovery.md) for off-server escrow, complete server loss,
+limitations and independent testing. Recovery has not been verified against a
+real B2 account.
 
 ## Upgrade and rollback
 
