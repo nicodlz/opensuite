@@ -2,7 +2,7 @@
 
 Pass uses Vaultwarden with official Bitwarden clients. Compatibility is specific
 to each client version and deployment; it is not a security audit. Pass accounts
-are independent of OpenSuite accounts. Use your dedicated HTTPS Pass origin (for
+are independent of Esuno accounts. Use your dedicated HTTPS Pass origin (for
 example `https://pass.example.org`) and an invited account.
 
 ## Server selection and evidence
@@ -34,13 +34,13 @@ Pass container logging is disabled in the tested Compose configuration, so the
 log search checks the available Caddy output and the empty Pass log stream.
 
 The second user could not list or fetch the first user's item or attachment
-through the CLI. In the raw API, the requested 403/404 status contract failed:
-Vaultwarden returned 400 for both the other user's item and attachment instead.
-Access was denied, but that status differs from the requested contract. The
+through the CLI. The raw API returned 400 for both the other user's item and
+attachment. Access was denied. The
 [Vaultwarden item route](https://github.com/dani-garcia/vaultwarden/blob/1.37.4/src/api/core/ciphers.rs)
-uses different errors for inaccessible and nonexistent items, which may reveal
-whether a guessed item ID exists. The automated Pass project retains this
-failing check.
+uses different errors for inaccessible and nonexistent items, creating an
+existence oracle for guessed item IDs. These IDs are random UUIDv4 values, so
+guessing one is infeasible. This upstream behavior should be reported to
+Vaultwarden; no report has been submitted.
 
 A trusted public certificate is recommended. Local test certificates require
 client trust configuration; never disable TLS verification. Vaultwarden

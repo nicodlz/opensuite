@@ -514,6 +514,18 @@ describe("Bitwarden CLI against Pass", () => {
   }, 240_000);
 
   test("second user cannot list or fetch the first user's item or attachment", async () => {
+    const ownerBefore = object(await bw(0, ["get", "item", itemId]));
+    const beforeFile = join(temp, "isolation-before.bin");
+    await bw(0, [
+      "get",
+      "attachment",
+      attachmentId,
+      "--itemid",
+      itemId,
+      "--output",
+      beforeFile,
+    ]);
+    expect(await readFile(beforeFile)).toEqual(await readFile(file));
     await bw(1, ["sync"]);
     expect(JSON.parse(await bw(1, ["list", "items"]))).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ id: itemId })]),
@@ -550,15 +562,39 @@ describe("Bitwarden CLI against Pass", () => {
       `/api/ciphers/${itemId}/attachment/${attachmentId}`,
       { headers },
     );
-    expect(deniedItem.body).not.toContain(marker);
-    expect(deniedAttachment.body).not.toContain(marker);
-    // Keep the requested 403/404 contract visible: upstream 1.37.4 returns
-    // 400 for at least the item request despite denying access.
-    expect(
-      [deniedItem.status, deniedAttachment.status].filter(
-        (status) => ![403, 404].includes(status),
-      ),
-    ).toEqual([]);
+    for (const [response, message] of [
+      [deniedItem, "Cipher is not owned by user"],
+      [deniedAttachment, "Cipher is not accessible"],
+    ] as const) {
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(response.status).toBeLessThan(500);
+      expect(response.status).toBe(400);
+      // Exact error shape excludes ciphertext, attachment URLs and item fields.
+      expect(parseJson(response.body)).toEqual({
+        message,
+        validationErrors: { "": [message] },
+        errorModel: { message, object: "error" },
+        error: "",
+        error_description: "",
+        exceptionMessage: null,
+        exceptionStackTrace: null,
+        innerExceptionMessage: null,
+        object: "error",
+      });
+    }
+    await bw(0, ["sync"]);
+    expect(object(await bw(0, ["get", "item", itemId]))).toEqual(ownerBefore);
+    const afterFile = join(temp, "isolation-after.bin");
+    await bw(0, [
+      "get",
+      "attachment",
+      attachmentId,
+      "--itemid",
+      itemId,
+      "--output",
+      afterFile,
+    ]);
+    expect(await readFile(afterFile)).toEqual(await readFile(beforeFile));
   }, 120_000);
 
   test("plaintext marker is absent from database, Pass volume and logs", async () => {

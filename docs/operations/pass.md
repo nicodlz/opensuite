@@ -150,5 +150,5 @@ build with `pnpm exec playwright install chromium` first. These tests use
 disposable projects, accounts, ports and volumes; they do not establish
 production recovery or audit the deployment. The CLI trusts the disposable
 Caddy CA via `NODE_EXTRA_CA_CERTS`; registration pins the test certificate in
-Chromium after checking its CA chain and hostname. The suite reports the known
-raw API denial-status mismatch described in the compatibility guide.
+Chromium after checking its CA chain and hostname. The suite checks the known
+raw API denial responses described in the compatibility guide.
