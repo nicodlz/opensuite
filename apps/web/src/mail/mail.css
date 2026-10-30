@@ -675,14 +675,11 @@
   height: 64px;
   margin-bottom: 6px;
   border-radius: 20px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--night-card);
 }
 .reading-illustration .product-mark {
   width: 44px;
   height: 44px;
-  padding: 6px;
-  border-radius: 12px;
 }
 .reading-hint {
   margin-top: 10px;
