@@ -2,6 +2,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import {
   awsQueue,
+  awsRecovery,
   awsStorage,
   databaseLedger,
   IngestService,
@@ -298,7 +299,26 @@ try {
     }
   } else if (command === "operator") {
     const result = await operatorCommand(
-      { db: db.value, ledger, delivery, storage },
+      {
+        db: db.value,
+        ledger,
+        delivery,
+        storage,
+        recovery: {
+          store: awsRecovery(
+            s3,
+            archive,
+            c.INBOUND_BUCKET,
+            c.ARCHIVE_BUCKET,
+            c.ARCHIVE_PREFIX,
+          ),
+          scope: {
+            bucket: c.INBOUND_BUCKET,
+            topic: c.INBOUND_TOPIC_ARN,
+            bufferPrefix: c.INBOUND_BUFFER_PREFIX,
+          },
+        },
+      },
       process.argv.slice(3),
     );
     process.stdout.write(`${JSON.stringify(result)}\n`);

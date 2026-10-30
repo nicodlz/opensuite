@@ -605,6 +605,31 @@ describe("held unknown recipients", () => {
     expect(memory.messageStates.get("ses-1")).toBe("imported");
   });
 
+  it("replays variants of one message together so every recipient receives it", async () => {
+    const { memory, service } = create();
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    // Same SES message, two envelopes: the first variant alone would
+    // complete the message and delete its object before Bob's copy.
+    memory.archives.set(
+      "notifications/a.json",
+      JSON.stringify(notification(["alice@example.test"])),
+    );
+    memory.archives.set(
+      "notifications/b.json",
+      JSON.stringify(notification(["hidden@example.test"])),
+    );
+    await service.reconcile(86_400 * 3650);
+    expect(memory.imports.map((item) => item.destination).toSorted()).toEqual([
+      "alice",
+      "bob",
+    ]);
+    expect(memory.buffers.has("ses-1")).toBe(false);
+    expect(memory.messageStates.get("ses-1")).toBe("imported");
+    // Imported, yet replayed again: nothing more is delivered.
+    await service.reconcile(86_400 * 3650);
+    expect(memory.imports).toHaveLength(2);
+  });
+
   it("keeps a completed message for replay when deleting its object fails", async () => {
     const memory = synthetic();
     let failures = 1;

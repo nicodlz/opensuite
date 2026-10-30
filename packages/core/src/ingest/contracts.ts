@@ -27,6 +27,24 @@ export interface Storage {
   readBuffer(bucket: string, key: string): Outcome<Uint8Array>;
   deleteBuffer(bucket: string, key: string): Outcome<void>;
 }
+/** Storage operations used only by operator recovery from the archives. */
+export interface RecoveryStore {
+  /** Objects written by Firehose under a prefix of the buffer bucket. */
+  firehoseObjects(prefix: string): Outcome<{ key: string; modified: Date }[]>;
+  readFirehose(key: string): Outcome<Uint8Array>;
+  archiveExists(key: string): Outcome<boolean>;
+  /** Creates an archive entry unless one exists, as a conditional write. */
+  archiveIfAbsent(key: string, body: string): Outcome<"written" | "present">;
+  bufferExists(bucket: string, key: string): Outcome<boolean>;
+  /** Newest stored version of an object, ignoring deletion markers. */
+  latestVersion(bucket: string, key: string): Outcome<string | null>;
+  /** Copies a version back as the current object unless one exists. */
+  restoreIfAbsent(
+    bucket: string,
+    key: string,
+    versionId: string,
+  ): Outcome<"restored" | "present">;
+}
 export type RecipientState =
   | "received"
   | "importing"

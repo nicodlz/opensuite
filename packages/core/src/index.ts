@@ -2,6 +2,7 @@ export * from "./services/readiness.ts";
 export * from "./domain/notification.ts";
 export * from "./ingest/contracts.ts";
 export * from "./ingest/service.ts";
+export * from "./ingest/recovery.ts";
 export * from "./adapters/aws.ts";
 export * from "./adapters/database.ts";
 export * from "./adapters/jmap.ts";
