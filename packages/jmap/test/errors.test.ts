@@ -126,3 +126,47 @@ describe("JMAP errors", () => {
     expect(called).toBe(false);
   });
 });
+
+const submissionReply = (notUpdated: object | null) =>
+  response({
+    methodResponses: [
+      [
+        "EmailSubmission/set",
+        { accountId: "a", created: { item: { id: "submission" } } },
+        "0",
+      ],
+      [
+        "Email/set",
+        {
+          accountId: "a",
+          updated: notUpdated ? null : { email: null },
+          notUpdated,
+        },
+        "0",
+      ],
+    ],
+    sessionState: "s",
+  });
+
+it("accepts and checks the follow-up update returned by submission", async () => {
+  expect(
+    (
+      await clientWith(submissionReply(null)).submit(
+        session,
+        "a",
+        "email",
+        "identity",
+        undefined,
+        "sent",
+      )
+    ).isOk(),
+  ).toBe(true);
+  const failed = await clientWith(
+    submissionReply({ email: { type: "forbidden" } }),
+  ).submit(session, "a", "email", "identity", undefined, "sent");
+  expect(errorOf(failed)).toMatchObject({
+    kind: "set",
+    method: "Email/set",
+    type: "forbidden",
+  });
+});

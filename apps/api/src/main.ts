@@ -1,5 +1,10 @@
 import { createReadinessService, httpProbe } from "@opensuite/core";
-import { createDatabase, createDatabaseProbe } from "@opensuite/db";
+import {
+  createDatabase,
+  createDatabaseProbe,
+  createMailboxStore,
+} from "@opensuite/db";
+import { createMailService } from "@opensuite/core/services/mail";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import {
@@ -52,12 +57,33 @@ if (authConfig.isErr()) {
   process.exit(1);
 }
 const auth = createAuthRuntime(database.value, authConfig.value);
+const mailOrigin = process.env["JMAP_ORIGIN"];
+const encryptionKey = process.env["PROVIDER_ENCRYPTION_KEY"];
+let mail: ReturnType<typeof createMailService> | undefined;
+if (mailOrigin !== undefined && encryptionKey !== undefined) {
+  const store = createMailboxStore(database.value, encryptionKey);
+  if (store.isErr() || !URL.canParse(mailOrigin)) {
+    process.stderr.write(
+      `${JSON.stringify({ level: "fatal", msg: "invalid mail configuration" })}\n`,
+    );
+    process.exit(1);
+  }
+  const mailboxStore = store.value;
+  mail = createMailService({
+    store: {
+      getForOwner: async (userId, accountId) =>
+        mailboxStore.getForOwner(userId, accountId),
+    },
+    origin: mailOrigin,
+  });
+}
 const app = await buildServer({
   config: { ...config.value, trustProxy: authConfig.value.trustedProxyIp },
   readiness,
   monotonicMs,
   identity: auth.identity,
   accounts: auth.accounts,
+  ...(mail === undefined ? {} : { mail }),
 });
 let running: Promise<void> | undefined;
 const work = async () => {

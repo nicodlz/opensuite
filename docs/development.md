@@ -261,3 +261,24 @@ public links are checked on each request.
 Compose project with random loopback ports, migrates a fresh database, tests
 against LocalStack, and removes its containers and volumes on exit. The Compose
 smoke test also stops Drive and LocalStack and verifies mail remains available.
+
+## Mail API composition
+
+The mail routes use the authenticated actor supplied by the API identity adapter.
+Configure `JMAP_ORIGIN` with the Stalwart JMAP origin and
+`PROVIDER_ENCRYPTION_KEY` with the same 64-character hexadecimal key used to
+protect mailbox credentials. Both belong on the API server; the browser only
+receives the application session cookie. The JMAP session's advertised URLs
+must use that same origin. The auth startup composition must pass its identity
+adapter to `buildServer` so requests can resolve the current session; it may
+also supply the mail service through the `mail` dependency. The web app uses
+its synthetic mailbox in the Vite dev server and the API in production builds.
+
+Attachment links are scoped to the signed-in user and expire after one minute.
+They are held in process memory, so deployments with multiple API instances
+need sticky routing or a shared token store. Replacing a draft creates a new
+JMAP email ID; callers must use the ID returned by each update. A successful
+submission means Stalwart accepted the message for delivery, not that a remote
+recipient received it. If submission times out or its follow-up mailbox update
+fails, delivery may already be underway; inspect the mailbox and delivery queue
+before retrying.

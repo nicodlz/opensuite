@@ -59,7 +59,7 @@ function contentOf(draft: Draft): DraftContent {
 export function MailPage() {
   const queryClient = useQueryClient();
   const [theme, setTheme] = useState<ThemeChoice>(themeInitial);
-  const [folder, setFolder] = useState("inbox");
+  const [selectedFolder, setFolder] = useState("");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<MailSearch>({});
   const [showFilters, setShowFilters] = useState(false);
@@ -88,6 +88,10 @@ export function MailPage() {
     queryKey: [...key, "mailboxes"],
     queryFn: () => mailClient.mailboxes({ accountId }),
   });
+  const folder =
+    selectedFolder ||
+    mailboxes.data?.mailboxes.find((item) => item.role === "inbox")?.id ||
+    "";
   const draftList = useQuery({
     queryKey: [...key, "drafts"],
     queryFn: () => mailClient.drafts({ accountId }),
@@ -95,6 +99,7 @@ export function MailPage() {
   const listKey = [...key, "threads", folder, search, filters, sort, cursor];
   const threads = useQuery({
     queryKey: listKey,
+    enabled: Boolean(folder),
     queryFn: () =>
       mailClient.threads({
         accountId,
@@ -138,6 +143,7 @@ export function MailPage() {
             if (
               change.type === "archive" ||
               change.type === "trash" ||
+              change.type === "delete" ||
               change.type === "move"
             )
               return [];
@@ -157,7 +163,8 @@ export function MailPage() {
       if (
         variables.change.type === "move" ||
         variables.change.type === "archive" ||
-        variables.change.type === "trash"
+        variables.change.type === "trash" ||
+        variables.change.type === "delete"
       ) {
         dispatch({ type: "select", id: variables.threadId });
         setReading(true);
@@ -187,15 +194,22 @@ export function MailPage() {
     if (
       change.type === "archive" ||
       change.type === "trash" ||
+      change.type === "delete" ||
       change.type === "move"
     ) {
-      setUndo({ threadId: selected, mailboxId: folder });
+      setUndo(
+        change.type === "delete"
+          ? null
+          : { threadId: selected, mailboxId: folder },
+      );
       setNotice(
         change.type === "archive"
           ? "Conversation archived."
           : change.type === "trash"
             ? "Conversation moved to trash."
-            : "Conversation moved.",
+            : change.type === "delete"
+              ? "Conversation deleted."
+              : "Conversation moved.",
       );
       setReading(false);
       dispatch({ type: "select", id: null });
@@ -342,7 +356,7 @@ export function MailPage() {
                 aria-current={folder === item.id ? "page" : undefined}
                 onClick={() => selectFolder(item.id)}
               >
-                <span aria-hidden="true">{folderIcons[item.id] ?? "▱"}</span>
+                <span aria-hidden="true">{folderIcons[item.role] ?? "▱"}</span>
                 <span>{item.name}</span>
                 {item.unread > 0 && <strong>{item.unread}</strong>}
               </button>
@@ -576,7 +590,8 @@ export function MailPage() {
                   </select>
                 </label>
               </div>
-              {folder === "drafts" ? (
+              {mailboxes.data?.mailboxes.find((item) => item.id === folder)
+                ?.role === "drafts" ? (
                 <div>
                   {draftList.data?.drafts.length ? (
                     draftList.data.drafts.map((draft) => (
@@ -759,10 +774,35 @@ export function MailPage() {
                         <Button
                           variant="ghost"
                           size="small"
-                          aria-label="Delete"
-                          onClick={() => perform({ type: "trash" })}
+                          aria-label={
+                            mailboxes.data?.mailboxes.find(
+                              (item) => item.id === folder,
+                            )?.role === "trash"
+                              ? "Delete permanently"
+                              : "Delete"
+                          }
+                          onClick={() => {
+                            const inTrash =
+                              mailboxes.data?.mailboxes.find(
+                                (item) => item.id === folder,
+                              )?.role === "trash";
+                            if (!inTrash) perform({ type: "trash" });
+                            else if (
+                              window.confirm(
+                                "Permanently delete this conversation?",
+                              )
+                            )
+                              perform({ type: "delete" });
+                          }}
                         >
-                          ♲ <span>Delete</span>
+                          ♲{" "}
+                          <span>
+                            {mailboxes.data?.mailboxes.find(
+                              (item) => item.id === folder,
+                            )?.role === "trash"
+                              ? "Delete permanently"
+                              : "Delete"}
+                          </span>
                         </Button>
                         <label className="move-label">
                           <span className="visually-hidden">
@@ -1121,6 +1161,7 @@ function Composer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const draftId = useRef(draft.id);
   useEffect(() => {
     if (busy) return undefined;
     const timer = window.setTimeout(() => {
@@ -1133,11 +1174,12 @@ function Composer({
       };
       saveQueue.current = saveQueue.current
         .then(async () => {
-          await mailClient.updateDraft({
+          const saved = await mailClient.updateDraft({
             accountId,
-            draftId: draft.id,
+            draftId: draftId.current,
             draft: value,
           });
+          draftId.current = saved.id;
           return undefined;
         })
         .catch(() => {
@@ -1146,7 +1188,7 @@ function Composer({
         });
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [content, to, cc, bcc, draft.id, busy]);
+  }, [content, to, cc, bcc, busy]);
   function build(): DraftContent {
     return {
       ...content,
@@ -1158,11 +1200,12 @@ function Composer({
   }
   async function save() {
     await saveQueue.current;
-    await mailClient.updateDraft({
+    const saved = await mailClient.updateDraft({
       accountId,
-      draftId: draft.id,
+      draftId: draftId.current,
       draft: build(),
     });
+    draftId.current = saved.id;
     onRefresh();
   }
   async function close() {
@@ -1185,17 +1228,18 @@ function Composer({
         return;
       }
       await saveQueue.current;
-      await mailClient.updateDraft({
+      const saved = await mailClient.updateDraft({
         accountId,
-        draftId: draft.id,
+        draftId: draftId.current,
         draft: value,
       });
-      await mailClient.send({ accountId, draftId: draft.id });
+      draftId.current = saved.id;
+      await mailClient.send({ accountId, draftId: draftId.current });
       onNotice("Message sent.");
       onClose();
     } catch {
       setError(
-        "Could not send this message. Check the addresses and try again.",
+        "Sending could not be confirmed. Check Sent before trying again.",
       );
     } finally {
       setBusy(false);
@@ -1205,7 +1249,7 @@ function Composer({
     setBusy(true);
     try {
       await saveQueue.current;
-      await mailClient.deleteDraft({ accountId, draftId: draft.id });
+      await mailClient.deleteDraft({ accountId, draftId: draftId.current });
       onNotice("Draft discarded.");
       onClose();
     } catch {

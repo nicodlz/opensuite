@@ -198,6 +198,12 @@ const router = api.router({
         (!input.messageIds || input.messageIds.includes(message.id)),
     );
     if (!group.length) throw errors.NOT_FOUND();
+    if (input.action.type === "delete") {
+      const ids = new Set(group.map((message) => message.id));
+      const remaining = messages.filter((message) => !ids.has(message.id));
+      messages.splice(0, messages.length, ...remaining);
+      return { success: true };
+    }
     for (const message of group) {
       const action = input.action;
       switch (action.type) {

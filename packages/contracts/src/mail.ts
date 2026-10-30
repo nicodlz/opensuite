@@ -139,6 +139,7 @@ export const mailContract = {
           z.object({ type: z.literal("move"), mailboxId: IdSchema }),
           z.object({ type: z.literal("archive") }),
           z.object({ type: z.literal("trash") }),
+          z.object({ type: z.literal("delete") }),
           z.object({ type: z.literal("labels"), labels: z.array(IdSchema) }),
         ]),
       }),
@@ -191,4 +192,5 @@ export type MailAction =
   | { type: "move"; mailboxId: string }
   | { type: "archive" }
   | { type: "trash" }
+  | { type: "delete" }
   | { type: "labels"; labels: string[] };
