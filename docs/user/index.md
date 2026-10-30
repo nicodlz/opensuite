@@ -16,7 +16,7 @@ The underlying authentication API is: `POST /api/auth/sign-in/email`, `POST /api
 
 Open **Mail**. Choose a folder and select a conversation to read it. The reading pane provides reply, reply all, forward, archive, trash, move, unread, star and label actions where applicable. Message HTML is sanitized and sandboxed; remote images require an explicit choice for each message. Select an attachment to download it.
 
-Mail that fails spam or virus checks, or whose sender authentication fails, is delivered to **Junk**: look there before assuming a message was lost.
+Mail that spam or virus scanning flags or cannot clear, or whose sender authentication fails or cannot be checked, is delivered to **Junk**: look there before assuming a message was lost.
 
 Use **New message** to enter recipients, subject and message text; add attachments with the composer. Drafts can be saved and reopened, or discarded. Send submits the message to the mail server; it does not establish that the recipient received it. If a send times out, check Sent and ask the administrator to inspect the queue before retrying, because delivery may already be underway.
 

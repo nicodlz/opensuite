@@ -52,7 +52,7 @@ describe("inbound verdict policy", () => {
     );
   });
 
-  it("quarantines unchecked DMARC unless SPF or DKIM passed", () => {
+  it("quarantines unchecked DMARC unless an aligned DKIM signature passed", () => {
     // A spoof with SPF softfail and a malformed signature.
     expect(
       reason({
@@ -68,9 +68,10 @@ describe("inbound verdict policy", () => {
         dmarc: "PROCESSING_FAILED",
       }),
     ).toBe("dmarc_unchecked");
+    // SPF passes for the envelope sender, which a forger chooses.
     expect(
-      policy({ spf: "PASS", dkim: "GRAY", dmarc: "PROCESSING_FAILED" }),
-    ).toBe("deliver");
+      reason({ spf: "PASS", dkim: "GRAY", dmarc: "PROCESSING_FAILED" }),
+    ).toBe("dmarc_unchecked");
     expect(
       policy({ spf: "GRAY", dkim: "PASS", dmarc: "PROCESSING_FAILED" }),
     ).toBe("deliver");

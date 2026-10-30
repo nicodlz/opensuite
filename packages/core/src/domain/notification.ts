@@ -125,7 +125,9 @@ export type QuarantineReason =
  * DKIM FAIL unless DMARC passed, as forwarding and mailing lists break them
  * while the aligned identifier holds. DMARC that could not be checked
  * (PROCESSING_FAILED, for instance a DNS error or a malformed signature)
- * quarantines unless SPF or DKIM passed, so it cannot hide a forged From.
+ * quarantines unless DKIM passed: SES reports DKIM PASS only for a
+ * signature aligned with From, whereas SPF PASS concerns the envelope
+ * sender, which a forger controls.
  */
 export function quarantineReason(
   notification: Notification,
@@ -138,11 +140,7 @@ export function quarantineReason(
   if (dmarc === "PASS") return null;
   if (r.spfVerdict.status === "FAIL") return "spf_fail";
   if (r.dkimVerdict.status === "FAIL") return "dkim_fail";
-  if (
-    dmarc === "PROCESSING_FAILED" &&
-    r.spfVerdict.status !== "PASS" &&
-    r.dkimVerdict.status !== "PASS"
-  )
+  if (dmarc === "PROCESSING_FAILED" && r.dkimVerdict.status !== "PASS")
     return "dmarc_unchecked";
   return null;
 }
