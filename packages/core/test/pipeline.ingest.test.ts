@@ -934,20 +934,36 @@ describe("local ingestion pipeline", () => {
       "failed",
       "Destination is not configured",
     ]);
-    await operatorCommand(
-      {
-        db: prisma,
-        ledger: databaseLedger(prisma),
-        delivery: linked,
-        storage: dependencies.storage,
-      },
-      [
+    const operating = {
+      db: prisma,
+      ledger: databaseLedger(prisma),
+      delivery: linked,
+      storage: dependencies.storage,
+    };
+    const reject = () =>
+      operatorCommand(operating, [
         "reject",
         stuck.idempotencyKey,
         "operator",
         "Mailbox closed; sender told",
-      ],
-    );
+      ]);
+    // Never while the mailbox could still receive it.
+    await expect(reject()).rejects.toThrow("Mailbox is active");
+    await prisma.mailboxLink.update({
+      where: { userId: "carol" },
+      data: { status: "disabling" },
+    });
+    // Nor for another failure, which may be transient.
+    await prisma.inboundRecipient.update({
+      where: { idempotencyKey: stuck.idempotencyKey },
+      data: { error: "Destination lookup failed: database_error" },
+    });
+    await expect(reject()).rejects.toThrow("Only a held recipient");
+    await prisma.inboundRecipient.update({
+      where: { idempotencyKey: stuck.idempotencyKey },
+      data: { error: "Destination is not configured" },
+    });
+    await reject();
     expect(
       await prisma.inboundResolutionAudit.findFirstOrThrow({
         where: { recipientKey: stuck.idempotencyKey },

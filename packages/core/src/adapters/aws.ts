@@ -17,7 +17,10 @@ import type { Queue, Storage } from "../ingest/contracts.ts";
 
 const failure = (cause: unknown) => ({
   message: cause instanceof Error ? cause.message : String(cause),
-  ...(cause instanceof Error ? { code: cause.name } : {}),
+  // Only a plain error name is kept, whatever the S3-compatible provider.
+  ...(cause instanceof Error
+    ? { code: /^[\w.-]{1,64}$/.test(cause.name) ? cause.name : "unknown" }
+    : {}),
 });
 const queueResponse = z
   .object({

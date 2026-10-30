@@ -103,6 +103,19 @@ export async function operatorCommand(
         )
       )
         throw new Error(notRejectable);
+      // A mailbox that is usable again (re-enabled, or linked delivery off)
+      // would receive this mail on the next replay: never discard it.
+      if (
+        row.state === "failed" &&
+        (await tx.mailboxLink.count({
+          where: {
+            accountId: row.destination,
+            status: "active",
+            user: { disabled: false },
+          },
+        })) > 0
+      )
+        throw new Error("Mailbox is active; run replay instead");
       const updated = await tx.inboundRecipient.updateMany({
         where: {
           idempotencyKey: key,
