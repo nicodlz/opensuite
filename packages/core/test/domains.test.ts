@@ -30,12 +30,11 @@ function fixture() {
   };
   const audits: string[] = [];
   const store: ReturnType<typeof createDomainStore> = {
-    withAddressLock: (_domain, work) => {
-      return ResultAsync.fromPromise(work(), () => ({
+    withUserLease: (_user, work) =>
+      ResultAsync.fromPromise(work(), () => ({
         kind: "unavailable" as const,
         message: "failed",
-      }));
-    },
+      })),
     isManagedAddress: () => success(false),
     verificationTargets: () => success([]),
     audit: (_actor, action) => {

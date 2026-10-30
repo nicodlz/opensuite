@@ -15,6 +15,12 @@ const value = async <T>(
 ): Promise<T> => {
   const result = await promise;
   if (result.isOk()) return result.value;
+  if (result.error.kind === "limit")
+    throw new ORPCError("ALIAS_CAP_REACHED", {
+      status: 429,
+      defined: true,
+      message: "Alias cap reached",
+    });
   const code =
     result.error.kind === "invalid"
       ? "BAD_REQUEST"
@@ -36,11 +42,17 @@ export const aliasesRouter = aliases.router({
     .handler(({ context, input }) =>
       value(service(context).list(context.actor.id, input.search)),
     ),
-  create: aliases.create.use(requireSession).handler(({ context, input }) => {
-    if (!context.aliasCreationLimit(context.actor.id))
-      throw new ORPCError("TOO_MANY_REQUESTS");
-    return value(service(context).create(context.actor.id, input));
-  }),
+  create: aliases.create
+    .use(requireSession)
+    .handler(async ({ context, input }) => {
+      const instance = service(context);
+      const existing = await value(
+        instance.findRequest(context.actor.id, input.requestId),
+      );
+      if (!existing && !context.aliasCreationLimit(context.actor.id))
+        throw new ORPCError("TOO_MANY_REQUESTS");
+      return value(instance.create(context.actor.id, input));
+    }),
   update: aliases.update
     .use(requireSession)
     .handler(({ context, input }) =>

@@ -33,10 +33,17 @@ export async function configureDomains(
     await readFile(config.DOMAINS_STALWART_PASSWORD_FILE, "utf8")
   ).trim();
   if (!password) throw new Error("empty Stalwart administrator password");
-  const admin = new StalwartAdmin(config.DOMAINS_STALWART_ORIGIN, {
-    username: config.DOMAINS_STALWART_USER,
-    password,
-  });
+  const admin = new StalwartAdmin(
+    config.DOMAINS_STALWART_ORIGIN,
+    {
+      username: config.DOMAINS_STALWART_USER,
+      password,
+    },
+    {
+      fetch: (input, init) =>
+        fetch(input, { ...init, signal: AbortSignal.timeout(10_000) }),
+    },
+  );
   const mail: DomainMail = {
     async createDomain(name) {
       return (await admin.createDomain(name)).mapErr(failure);

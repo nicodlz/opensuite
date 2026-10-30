@@ -1,5 +1,6 @@
 import type { DomainService } from "./routes/domains.ts";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { createAliasLimiter } from "./auth/alias-limits.ts";
 import type { AliasService } from "@opensuite/core/services/aliases";
 import { AliasWebsite } from "@opensuite/contracts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
@@ -80,17 +81,7 @@ export const buildServer = async (
     trustProxy: dependencies.config.trustProxy ?? false,
   });
   const startedAt = dependencies.monotonicMs();
-  const limits = new Map<string, { count: number; expires: number }>();
-  const consume = (key: string, max: number) => {
-    const now = Date.now();
-    for (const [name, bucket] of limits)
-      if (bucket.expires <= now) limits.delete(name);
-    if (!limits.has(key) && limits.size >= 10_000) return false;
-    const bucket = limits.get(key) ?? { count: 0, expires: now + 60_000 };
-    bucket.count++;
-    limits.set(key, bucket);
-    return bucket.count <= max;
-  };
+  const aliasLimits = createAliasLimiter();
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("x-request-id", request.id);
     done();
@@ -338,7 +329,7 @@ export const buildServer = async (
       },
     },
     async (request, reply) => {
-      if (!consume(`ip:${request.ip}`, 60))
+      if (!aliasLimits.ip(request.ip))
         return reply.code(429).send({ error: "Too many requests" });
       const secret = request.headers["authentication"];
       if (
@@ -347,12 +338,11 @@ export const buildServer = async (
         dependencies.aliases === undefined
       )
         return reply.code(401).send({ error: "Invalid API key" });
-      const keyBucket = createHash("sha256").update(secret).digest("hex");
-      if (!consume(`key:${keyBucket}`, 20))
-        return reply.code(429).send({ error: "Too many requests" });
       const actor = await dependencies.aliases.authenticate(secret);
       if (actor.isErr())
         return reply.code(401).send({ error: "Invalid API key" });
+      if (!aliasLimits.key(actor.value.keyId))
+        return reply.code(429).send({ error: "Too many requests" });
       const parsed = z
         .object({ hostname: AliasWebsite.optional() })
         .strict()
@@ -363,7 +353,7 @@ export const buildServer = async (
         .safeParse(request.body);
       if (!parsed.success || !body.success)
         return reply.code(400).send({ error: "Invalid request" });
-      if (!consume(`user:${actor.value.userId}`, 20))
+      if (!aliasLimits.user(actor.value.userId))
         return reply.code(429).send({ error: "Too many requests" });
       const result = await dependencies.aliases.create(actor.value.userId, {
         ...(parsed.data.hostname === undefined
@@ -380,7 +370,12 @@ export const buildServer = async (
                 ? 400
                 : 503,
           )
-          .send({ error: "Could not create alias" });
+          .send({
+            error:
+              result.error.kind === "limit"
+                ? "Alias cap reached"
+                : "Could not create alias",
+          });
       return reply.code(201).send({ alias: result.value.address });
     },
   );
@@ -638,7 +633,7 @@ export const buildServer = async (
         accounts: dependencies.accounts,
         domains: dependencies.domains,
         aliases: dependencies.aliases,
-        aliasCreationLimit: (userId) => consume(`user:${userId}`, 20),
+        aliasCreationLimit: (userId) => aliasLimits.user(userId),
         log: request.log,
         readiness: dependencies.readiness,
         uptimeSeconds: () =>

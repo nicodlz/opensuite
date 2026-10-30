@@ -1,4 +1,9 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { AliasPrefix, AliasWebsite } from "@opensuite/contracts";
 import type { Prisma, PrismaClient } from "@opensuite/db";
 import { err, ok, type Result } from "neverthrow";
@@ -17,6 +22,7 @@ type Row = {
   note: string | null;
   enabled: boolean;
   ready: boolean;
+  detachedByDomain: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -37,6 +43,7 @@ const view = (row: Row) => ({
   note: row.note,
   enabled: row.enabled,
   ready: row.ready,
+  detachedByDomain: row.detachedByDomain,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
@@ -81,7 +88,6 @@ const validDomain = async (tx: Prisma.TransactionClient, domainId: string) =>
   tx.domain.findFirst({
     where: {
       id: domainId,
-      enabled: true,
       status: "verified",
       stalwartId: { not: null },
     },
@@ -100,33 +106,43 @@ export function createAliasService(
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 427391))`;
         return work(tx);
       },
-      { timeout: 120_000, maxWait: 30_000 },
+      { timeout: 10_000, maxWait: 5_000 },
     );
   const sync = async (
     userId: string,
     id: string,
   ): Output<ReturnType<typeof view>> =>
-    run(() =>
-      locked(userId, async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(9876)`;
-        const row = await tx.emailAlias.findFirst({
+    run(async () => {
+      const token = randomUUID();
+      const now = new Date();
+      const claim = await db.user.updateMany({
+        where: {
+          id: userId,
+          OR: [{ aliasSyncUntil: null }, { aliasSyncUntil: { lt: now } }],
+        },
+        data: {
+          aliasSyncToken: token,
+          aliasSyncUntil: new Date(now.getTime() + 120_000),
+        },
+      });
+      if (!claim.count) return err(failure("unavailable"));
+      try {
+        const row = await db.emailAlias.findFirst({
           where: { id, userId },
           include: { domain: true, user: { include: { mailbox: true } } },
         });
         if (!row) return err(failure("not_found"));
         const mailbox = row.user.mailbox;
-        if (!mailbox || !row.domain.stalwartId) {
-          await tx.emailAlias.update({
-            where: { id },
-            data: { updatedAt: new Date() },
-          });
+        if (!mailbox || !row.domain.stalwartId)
           return err(failure("unavailable"));
-        }
+        const detachedByDomain =
+          row.enabled &&
+          row.deletedAt === null &&
+          row.domain.status !== "verified";
         const enabled =
           row.enabled &&
           row.deletedAt === null &&
-          row.domain.enabled &&
-          row.domain.status === "verified" &&
+          !detachedByDomain &&
           !row.user.disabled &&
           mailbox.status === "active";
         const result = await mail.set(
@@ -138,28 +154,66 @@ export function createAliasService(
           enabled,
         );
         if (result.isErr()) {
-          await tx.emailAlias.update({
-            where: { id },
+          await db.emailAlias.updateMany({
+            where: { id, userId, revision: row.revision },
             data: { updatedAt: new Date() },
           });
           return err(failure("unavailable"));
         }
-        const saved = await tx.emailAlias.update({
-          where: { id },
-          data: { ready: enabled === row.enabled || row.deletedAt !== null },
+        const saved = await db.emailAlias.updateMany({
+          where: {
+            id,
+            userId,
+            revision: row.revision,
+            domain: { status: row.domain.status },
+            user: {
+              aliasSyncToken: token,
+              disabled: row.user.disabled,
+              mailbox: { status: mailbox.status },
+            },
+          },
+          data: {
+            ready:
+              !row.enabled ||
+              row.deletedAt !== null ||
+              enabled ||
+              detachedByDomain,
+            detachedByDomain,
+          },
         });
-        if (row.enabled && row.deletedAt === null && !enabled)
+        if (!saved.count) {
+          await db.emailAlias.updateMany({
+            where: { id, userId },
+            data: { ready: false },
+          });
           return err(failure("unavailable"));
-        return ok(view(saved));
-      }),
-    );
+        }
+        const current = await db.emailAlias.findFirstOrThrow({
+          where: { id, userId },
+        });
+        if (current.enabled && !enabled && !detachedByDomain)
+          return err(failure("unavailable"));
+        return ok(view(current));
+      } finally {
+        await db.user.updateMany({
+          where: { id: userId, aliasSyncToken: token },
+          data: { aliasSyncToken: null, aliasSyncUntil: null },
+        });
+      }
+    });
   return {
+    findRequest: (userId: string, requestId: string) =>
+      run(async () => {
+        const row = await db.emailAlias.findUnique({
+          where: { userId_requestId: { userId, requestId } },
+        });
+        return ok(row !== null);
+      }),
     domains: () =>
       run(async () =>
         ok(
           await db.domain.findMany({
             where: {
-              enabled: true,
               status: "verified",
               stalwartId: { not: null },
             },
@@ -227,7 +281,7 @@ export function createAliasService(
           });
           const domainId = input.domainId ?? user?.defaultAliasDomainId;
           if (!user || !domainId) return err(failure("invalid"));
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(9876)`;
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, 9876))`;
           const domain = await validDomain(tx, domainId);
           if (!domain) return err(failure("invalid"));
           if (
@@ -256,7 +310,14 @@ export function createAliasService(
           return ok(alias);
         });
         if (reserved.isErr()) return err(reserved.error);
-        return sync(userId, reserved.value.id);
+        if (reserved.value.ready)
+          return reserved.value.detachedByDomain
+            ? err(failure("unavailable"))
+            : ok(view(reserved.value));
+        const result = await sync(userId, reserved.value.id);
+        return result.isOk() && result.value.detachedByDomain
+          ? err(failure("unavailable"))
+          : result;
       }),
     update: (
       userId: string,
@@ -308,6 +369,8 @@ export function createAliasService(
             data: {
               enabled: desired === "enable",
               ready: false,
+              detachedByDomain: false,
+              revision: { increment: 1 },
               ...(desired === "delete" && !row.deletedAt
                 ? { deletedAt: new Date() }
                 : {}),

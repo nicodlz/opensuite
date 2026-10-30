@@ -30,6 +30,8 @@ model User {
   twoFactor        TwoFactor?
   mailbox          MailboxLink?
   mailboxProvision MailboxProvision?
+  aliasSyncToken String?
+  aliasSyncUntil DateTime?
   emailAliases     EmailAlias[]
   aliasApiKeys     AliasApiKey[]
   defaultAliasDomainId String?
@@ -123,7 +125,6 @@ model Domain {
   checkedAt DateTime?
   createdAt DateTime  @default(now())
   addresses Address[]
-  enabled Boolean @default(true)
   defaultForUsers User[] @relation("DefaultAliasDomain")
   emailAliases EmailAlias[]
 
@@ -160,6 +161,8 @@ model EmailAlias {
   note String?
   enabled Boolean @default(true)
   ready Boolean @default(false)
+  detachedByDomain Boolean @default(false)
+  revision Int @default(0)
   requestId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -1,5 +1,5 @@
 import { createAliasService } from "@opensuite/core/services/aliases";
-import { createAliasMail } from "./routes/alias-mail.ts";
+import { createAliasMail, createAliasSendGuard } from "./routes/alias-mail.ts";
 import { createReadinessService, httpProbe } from "@opensuite/core";
 import {
   createDatabase,
@@ -87,11 +87,12 @@ const mail = createMailService({
           enabled: true,
           ready: true,
           deletedAt: null,
-          domain: { enabled: true, status: "verified" },
+          domain: { status: "verified" },
         },
         select: { id: true },
       }),
     ),
+  beforeAliasSend: createAliasSendGuard(database.value),
 });
 const aliases = createAliasService(
   database.value,

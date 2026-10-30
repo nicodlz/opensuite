@@ -1,4 +1,5 @@
 import { ResultAsync } from "neverthrow";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { PrismaClient } from "./generated/index.js";
 
@@ -41,15 +42,31 @@ const convert = (row: {
   checkedAt: row.checkedAt?.toISOString() ?? null,
 });
 export const createDomainStore = (db: PrismaClient) => ({
-  withAddressLock<T>(_domainId: string, work: () => Promise<T>) {
+  withUserLease<T>(userId: string, work: () => Promise<T>) {
     return ResultAsync.fromPromise(
-      db.$transaction(
-        async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(9876)`;
-          return work();
-        },
-        { timeout: 120_000, maxWait: 30_000 },
-      ),
+      (async () => {
+        const token = randomUUID();
+        const now = new Date();
+        const claimed = await db.user.updateMany({
+          where: {
+            id: userId,
+            OR: [{ aliasSyncUntil: null }, { aliasSyncUntil: { lt: now } }],
+          },
+          data: {
+            aliasSyncToken: token,
+            aliasSyncUntil: new Date(now.getTime() + 120_000),
+          },
+        });
+        if (!claimed.count) throw new Error("address operation busy");
+        try {
+          return await work();
+        } finally {
+          await db.user.updateMany({
+            where: { id: userId, aliasSyncToken: token },
+            data: { aliasSyncToken: null, aliasSyncUntil: null },
+          });
+        }
+      })(),
       failure,
     );
   },
@@ -132,7 +149,7 @@ export const createDomainStore = (db: PrismaClient) => ({
   ) {
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(9876)`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${id}, 9876))`;
         const previous = await tx.domain.findUniqueOrThrow({
           where: { id },
           select: { status: true },
@@ -141,7 +158,11 @@ export const createDomainStore = (db: PrismaClient) => ({
         if (previous.status !== data.status) {
           await tx.emailAlias.updateMany({
             where: { domainId: id, deletedAt: null, enabled: true },
-            data: { ready: false },
+            data: {
+              ready: false,
+              detachedByDomain: false,
+              revision: { increment: 1 },
+            },
           });
         }
         await tx.auditEvent.create({
@@ -246,7 +267,7 @@ export const createDomainStore = (db: PrismaClient) => ({
                     enabled: true,
                     ready: true,
                     deletedAt: null,
-                    domain: { enabled: true, status: "verified" },
+                    domain: { status: "verified" },
                   },
                 },
               },

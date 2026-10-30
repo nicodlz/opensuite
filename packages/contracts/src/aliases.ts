@@ -24,6 +24,7 @@ const alias = z.object({
   note: z.string().nullable(),
   enabled: z.boolean(),
   ready: z.boolean(),
+  detachedByDomain: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

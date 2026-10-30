@@ -48,6 +48,7 @@ const cleanup = async () => {
 };
 const key = randomBytes(32).toString("hex");
 let db: PrismaClient;
+let databaseUrl = "";
 let disconnect = () => Promise.resolve();
 
 beforeAll(async () => {
@@ -77,6 +78,7 @@ beforeAll(async () => {
     url.port = port;
     url.username = "opensuite";
     url.password = password;
+    databaseUrl = url.toString();
     const result = createDatabase(url.toString());
     if (result.isErr()) throw new Error(result.error.message);
     db = result.value;
@@ -97,6 +99,30 @@ afterAll(async () => {
 }, 60_000);
 
 describe("PostgreSQL schema and adapters", () => {
+  it("has no Prisma schema drift after migrations", async () => {
+    const result = await run(
+      "pnpm",
+      [
+        "--filter",
+        "@opensuite/db",
+        "exec",
+        "prisma",
+        "migrate",
+        "diff",
+        "--from-schema-datasource",
+        "prisma/schema.prisma",
+        "--to-schema-datamodel",
+        "prisma/schema.prisma",
+        "--exit-code",
+      ],
+      {
+        cwd: root,
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+        maxBuffer: 4_000_000,
+      },
+    );
+    expect(result.stdout).toContain("No difference detected");
+  }, 60_000);
   it("enforces case-insensitive names and routes addresses belonging to another user", async () => {
     const owner = `domain-owner-${randomUUID()}`;
     const target = `domain-target-${randomUUID()}`;

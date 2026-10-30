@@ -9,6 +9,8 @@ import {
   type Session,
 } from "../src/index.ts";
 import { StalwartAdmin } from "../src/admin.ts";
+import { createAliasMail } from "../../../apps/api/src/routes/alias-mail.ts";
+import { ok } from "neverthrow";
 import type { Result } from "neverthrow";
 
 const run = promisify(execFile);
@@ -214,6 +216,19 @@ describe("Stalwart JMAP integration", () => {
       await admin.createAccount("alice", domainId, password),
     );
     const address = "private-reply@example.test";
+    const adapter = createAliasMail(
+      { origin: base, username: "admin", password: "integration-password" },
+      {
+        getForOwner: () =>
+          Promise.resolve(
+            ok({
+              accountId: account.id,
+              address: "alice@example.test",
+              secret: password,
+            }),
+          ),
+      },
+    );
     const send = async (
       client: JmapClient,
       session: Session,
@@ -261,7 +276,18 @@ describe("Stalwart JMAP integration", () => {
       };
       return poll(40);
     };
-    value(await admin.createAlias(account.id, "private-reply", domainId));
+    expect(
+      (
+        await adapter.set(
+          account.id,
+          "private-reply",
+          domainId,
+          address,
+          "alice",
+          true,
+        )
+      ).isOk(),
+    ).toBe(true);
     await send(
       bob,
       bobSession,
@@ -289,7 +315,18 @@ describe("Stalwart JMAP integration", () => {
     ).ids;
     const reply = value(await bob.emails(bobSession, bobId, replyIds)).list[0];
     expect(reply?.from?.[0]?.email).toBe(address);
-    value(await admin.removeAlias(account.id, "private-reply", domainId));
+    expect(
+      (
+        await adapter.set(
+          account.id,
+          "private-reply",
+          domainId,
+          address,
+          "alice",
+          false,
+        )
+      ).isOk(),
+    ).toBe(true);
     expect(
       value(await alice.identities(aliceSession, aliceId)).list.some(
         (item) => item.email === address,
@@ -306,7 +343,18 @@ describe("Stalwart JMAP integration", () => {
     expect(
       await delivered(alice, aliceSession, aliceId, "alias-disabled"),
     ).toBe(false);
-    value(await admin.createAlias(account.id, "private-reply", domainId));
+    expect(
+      (
+        await adapter.set(
+          account.id,
+          "private-reply",
+          domainId,
+          address,
+          "alice",
+          true,
+        )
+      ).isOk(),
+    ).toBe(true);
     await send(
       bob,
       bobSession,

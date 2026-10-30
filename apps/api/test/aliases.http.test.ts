@@ -2,12 +2,20 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { createReadinessService } from "@opensuite/core";
-import { createAliasService } from "@opensuite/core/services/aliases";
-import { createDatabase, type PrismaClient } from "@opensuite/db";
+import {
+  createAliasService,
+  type AliasService,
+} from "@opensuite/core/services/aliases";
+import {
+  createDatabase,
+  createDomainStore,
+  type PrismaClient,
+} from "@opensuite/db";
 import type { FastifyInstance } from "fastify";
 import { err, ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.ts";
+import { createAliasSendGuard } from "../src/routes/alias-mail.ts";
 
 const run = promisify(execFile);
 const container = `opensuite-alias-test-${randomUUID().slice(0, 8)}`;
@@ -20,7 +28,11 @@ let domainId: string;
 let pendingId: string;
 let disabledId: string;
 let failMail = false;
+let aliases: AliasService;
+let mailCalls = 0;
+let pauseMail: (() => Promise<void>) | undefined;
 const clock = () => performance.now();
+const noop = () => {};
 const headers = (user: string) => ({ origin, cookie: `test-user=${user}` });
 const wait = async (attempt: number): Promise<void> => {
   try {
@@ -102,20 +114,20 @@ beforeAll(async () => {
         data: {
           userId: "alice",
           name: "disabled.test",
-          status: "verified",
-          enabled: false,
+          status: "failing",
           stalwartId: "domain3",
         },
       })
     ).id;
     await db.user.updateMany({ data: { defaultAliasDomainId: domainId } });
-    const aliases = createAliasService(
+    aliases = createAliasService(
       db,
       {
-        set: () =>
-          Promise.resolve(
-            failMail ? err({ kind: "unavailable" }) : ok(undefined),
-          ),
+        set: async () => {
+          mailCalls++;
+          await pauseMail?.();
+          return failMail ? err({ kind: "unavailable" }) : ok(undefined);
+        },
       },
       2,
     );
@@ -174,14 +186,14 @@ describe("alias API", () => {
     });
     expect(alice.statusCode).toBe(200);
     expect(bob.statusCode).toBe(200);
-    const a = alice.json<{ id: string }>();
-    const b = bob.json<{ id: string }>();
-    const cases: { user: string; target: string }[] = [
-      { user: "alice", target: b.id },
-      { user: "bob", target: a.id },
+    const a = alice.json<{ id: string; address: string }>();
+    const b = bob.json<{ id: string; address: string }>();
+    const cases: { user: string; target: string; address: string }[] = [
+      { user: "alice", target: b.id, address: b.address },
+      { user: "bob", target: a.id, address: a.address },
     ];
     await Promise.all(
-      cases.map(async ({ user, target }) => {
+      cases.map(async ({ user, target, address }) => {
         expect(
           (
             await app.inject({
@@ -192,6 +204,32 @@ describe("alias API", () => {
             })
           ).statusCode,
         ).toBe(404);
+        expect(
+          (
+            await app.inject({
+              method: "POST",
+              url: `/aliases/${target}/enable`,
+              headers: headers(user),
+              payload: {},
+            })
+          ).statusCode,
+        ).toBe(404);
+        expect(
+          (
+            await app.inject({
+              method: "DELETE",
+              url: `/aliases/${target}`,
+              headers: headers(user),
+            })
+          ).statusCode,
+        ).toBe(404);
+        const matched = await app.inject({
+          method: "POST",
+          url: "/aliases/match",
+          headers: headers(user),
+          payload: { addresses: [address] },
+        });
+        expect(matched.json<unknown[]>()).toEqual([]);
         expect(
           (
             await app.inject({
@@ -236,6 +274,34 @@ describe("alias API", () => {
         })
       ).statusCode,
     ).toBe(404);
+    const bobKey = (
+      await app.inject({
+        method: "POST",
+        url: "/aliases/keys",
+        headers: headers("bob"),
+        payload: { name: "Bob" },
+      })
+    ).json<{ secret: string }>();
+    const created = await app.inject({
+      method: "POST",
+      url: "/alias/random/new",
+      headers: { authentication: bobKey.secret },
+      payload: { note: "Bob" },
+    });
+    expect(created.statusCode).toBe(201);
+    const createdRow = await db.emailAlias.findFirstOrThrow({
+      where: { address: created.json<{ alias: string }>().alias },
+    });
+    expect(createdRow.userId).toBe("bob");
+    expect(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: `/aliases/${createdRow.id}`,
+          headers: headers("bob"),
+        })
+      ).statusCode,
+    ).toBe(200);
   });
   it("rejects unavailable domains and enforces the per-user cap", async () => {
     const domains = await app.inject({
@@ -277,6 +343,11 @@ describe("alias API", () => {
     expect(
       attempts.map((response) => response.statusCode).toSorted((a, b) => a - b),
     ).toEqual([200, 429]);
+    expect(
+      attempts
+        .find((response) => response.statusCode === 429)
+        ?.json<{ code: string }>().code,
+    ).toBe("ALIAS_CAP_REACHED");
   });
   it("supports the Bitwarden contract, scoped CORS, and key-only authentication", async () => {
     const key = (
@@ -341,6 +412,23 @@ describe("alias API", () => {
     });
     expect(row.website).toBe("example.org");
     expect(row.note).toBe("Generated by Bitwarden");
+    await Promise.all(
+      Array.from({ length: 25 }, (_, i) =>
+        app.inject({
+          method: "POST",
+          url: "/aliases",
+          headers: headers("alice"),
+          payload: { requestId: `rate-${i}` },
+        }),
+      ),
+    );
+    const retry = await app.inject({
+      method: "POST",
+      url: "/aliases",
+      headers: headers("alice"),
+      payload: { requestId: "alice-1" },
+    });
+    expect(retry.statusCode).toBe(200);
     expect(
       (
         await app.inject({
@@ -386,6 +474,12 @@ describe("alias API", () => {
     });
     expect(pending.ready).toBe(false);
     failMail = false;
+    const reconciled = await aliases.reconcile();
+    expect(reconciled.isOk() && reconciled.value).toBe(0);
+    expect(
+      (await db.emailAlias.findUniqueOrThrow({ where: { id: pending.id } }))
+        .ready,
+    ).toBe(true);
     const retried = await app.inject({
       method: "POST",
       url: "/aliases",
@@ -438,5 +532,116 @@ describe("alias API", () => {
         })
       ).statusCode,
     ).toBe(404);
+  });
+  it("detaches once when domain verification fails and reattaches when restored", async () => {
+    const store = createDomainStore(db);
+    expect(
+      (
+        await store.save(
+          "alice",
+          domainId,
+          { status: "failing", records: [] },
+          "test.domain",
+        )
+      ).isOk(),
+    ).toBe(true);
+    const first = await aliases.reconcile();
+    expect(first.isOk() && first.value).toBe(0);
+    const detached = await db.emailAlias.findMany({
+      where: { domainId, enabled: true, deletedAt: null },
+    });
+    expect(detached.length).toBeGreaterThan(0);
+    expect(detached.every((row) => row.ready && row.detachedByDomain)).toBe(
+      true,
+    );
+    const calls = mailCalls;
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    expect(mailCalls).toBe(calls);
+    expect(
+      (
+        await store.save(
+          "alice",
+          domainId,
+          { status: "verified", records: [] },
+          "test.domain",
+        )
+      ).isOk(),
+    ).toBe(true);
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    const restored = await db.emailAlias.findMany({
+      where: { domainId, enabled: true, deletedAt: null },
+    });
+    expect(restored.every((row) => row.ready && !row.detachedByDomain)).toBe(
+      true,
+    );
+  });
+  it("does not let an old network result confirm a newer state", async () => {
+    const row = await db.emailAlias.findFirstOrThrow({
+      where: { userId: "bob", deletedAt: null, enabled: true },
+    });
+    let entered = noop;
+    let release = noop;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    pauseMail = async () => {
+      entered();
+      await waiting;
+    };
+    const disabling = aliases.transition("bob", row.id, "disable");
+    await started;
+    const enabling = await aliases.transition("bob", row.id, "enable");
+    expect(enabling.isErr()).toBe(true);
+    expect(await db.user.count()).toBeGreaterThan(0);
+    pauseMail = undefined;
+    release();
+    expect((await disabling).isErr()).toBe(true);
+    expect((await aliases.reconcile()).isOk()).toBe(true);
+    const latest = await db.emailAlias.findUniqueOrThrow({
+      where: { id: row.id },
+    });
+    expect(latest.enabled && latest.ready).toBe(true);
+  });
+  it("audits alias submission attempts and enforces the per-user send limit", async () => {
+    const row = await db.emailAlias.findFirstOrThrow({
+      where: { userId: "bob", enabled: true, ready: true, deletedAt: null },
+    });
+    const guard = createAliasSendGuard(db);
+    const results = await Promise.all(
+      Array.from({ length: 31 }, () => guard("bob", row.address)),
+    );
+    expect(results.filter(Boolean)).toHaveLength(30);
+    const events = await db.auditEvent.findMany({
+      where: { userId: "bob", action: "alias.submission.attempt" },
+    });
+    expect(events).toHaveLength(30);
+    expect(
+      events.every(
+        (event) =>
+          JSON.stringify(event.detail) === JSON.stringify({ aliasId: row.id }),
+      ),
+    ).toBe(true);
+  });
+  it("keeps an alias pending while its owner is disabled and restores it afterwards", async () => {
+    const row = await db.emailAlias.findFirstOrThrow({
+      where: { userId: "bob", enabled: true, deletedAt: null },
+    });
+    await db.user.update({ where: { id: "bob" }, data: { disabled: true } });
+    await db.emailAlias.update({
+      where: { id: row.id },
+      data: { ready: false },
+    });
+    await aliases.reconcile();
+    expect(
+      (await db.emailAlias.findUniqueOrThrow({ where: { id: row.id } })).ready,
+    ).toBe(false);
+    await db.user.update({ where: { id: "bob" }, data: { disabled: false } });
+    await aliases.reconcile();
+    expect(
+      (await db.emailAlias.findUniqueOrThrow({ where: { id: row.id } })).ready,
+    ).toBe(true);
   });
 });
