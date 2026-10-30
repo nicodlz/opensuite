@@ -515,9 +515,10 @@ export const buildServer = async (
           request.method === "POST" &&
           actor?.sessionId
         ) {
-          await (
-            dependencies.pushCleanup ?? dependencies.push?.store
-          )?.unsubscribeSession(actor.id, actor.sessionId);
+          // Best effort: a cleanup failure must never block signing out.
+          await (dependencies.pushCleanup ?? dependencies.push?.store)
+            ?.unsubscribeSession(actor.id, actor.sessionId)
+            .catch(() => request.log.warn("push session cleanup failed"));
         }
         if (path === "/auth/sign-up/email" && actor?.role !== "admin") {
           await identity.audit?.({

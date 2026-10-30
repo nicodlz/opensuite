@@ -695,9 +695,10 @@ export function enableAuthenticator(db: PrismaClient) {
               verified: false,
             },
           });
+          // Existing backup codes are never shown again; only new ones are.
           return {
             secret: hasKeys ? existing.secret : encrypted,
-            backupCodes: hasKeys ? existing.backupCodes : encryptedCodes,
+            backupCodes: hasKeys ? null : encryptedCodes,
           };
         }
         await tx.twoFactor.create({
@@ -721,14 +722,17 @@ export function enableAuthenticator(db: PrismaClient) {
           ctx.body.issuer ?? "Esuno",
           user.email,
         ),
-        backupCodes: z.array(z.string()).parse(
-          JSON.parse(
-            await symmetricDecrypt({
-              key: ctx.context.secretConfig,
-              data: stored.backupCodes,
-            }),
-          ),
-        ),
+        backupCodes:
+          stored.backupCodes === null
+            ? []
+            : z.array(z.string()).parse(
+                JSON.parse(
+                  await symmetricDecrypt({
+                    key: ctx.context.secretConfig,
+                    data: stored.backupCodes,
+                  }),
+                ),
+              ),
       });
     },
   );

@@ -490,10 +490,14 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                 <code className="auth-secret">
                   {new URL(enrollment.totpURI).searchParams.get("secret")}
                 </code>
-                <p>Save these backup codes somewhere safe:</p>
-                <code className="auth-secret">
-                  {enrollment.backupCodes.join("\n")}
-                </code>
+                {enrollment.backupCodes.length > 0 ? (
+                  <>
+                    <p>Save these backup codes somewhere safe:</p>
+                    <code className="auth-secret">
+                      {enrollment.backupCodes.join("\n")}
+                    </code>
+                  </>
+                ) : null}
                 {!factors.data?.totp ? (
                   <>
                     <TextField
