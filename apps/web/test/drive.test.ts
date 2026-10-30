@@ -325,13 +325,45 @@ describe("Drive drag and drop", () => {
         return Promise.resolve();
       },
     });
-    expect(uploaded).toBe(2);
+    expect(uploaded).toEqual({ uploaded: 2, failed: [] });
     expect(calls).toEqual([
       "folder Album in target",
       "folder Raw in id-Album",
       "file b.raw in id-Raw",
       "file a.jpg in id-Album",
     ]);
+  });
+  it("skips unreadable or failing items and uploads the rest", async () => {
+    const broken = {
+      name: "locked.bin",
+      isFile: true,
+      isDirectory: false,
+      file: (_success: (file: File) => void, failure: (error: Error) => void) =>
+        failure(new Error("NotReadableError")),
+    };
+    const plan = await planDrop([
+      {
+        entry: directoryEntry("Docs", [
+          fileEntry("a.txt"),
+          broken,
+          fileEntry("bad\\name.txt"),
+          fileEntry("c.txt"),
+        ]),
+        file: null,
+      },
+    ]);
+    expect(plan.skipped).toEqual(["Docs/locked.bin"]);
+    const result = await executePlan(plan, "target", {
+      createFolder: (name) => Promise.resolve(`id-${name}`),
+      upload: (file) =>
+        file.name.includes("\\")
+          ? Promise.reject(new Error("invalid name"))
+          : Promise.resolve(),
+    });
+    expect(result).toEqual({
+      uploaded: 2,
+      failed: ["Docs/bad\\name.txt"],
+    });
   });
   it("stops a plan when it is cancelled", async () => {
     const controller = new AbortController();

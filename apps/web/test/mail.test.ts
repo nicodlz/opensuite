@@ -23,9 +23,9 @@ describe("mail helpers", () => {
     expect(formatDate(new Date(2025, 2, 3).toISOString(), now)).toContain(
       "2025",
     );
-    expect(
-      formatDate(new Date(2026, 2, 3).toISOString(), now),
-    ).not.toContain("2026");
+    expect(formatDate(new Date(2026, 2, 3).toISOString(), now)).not.toContain(
+      "2026",
+    );
   });
   it("parses recipient fields and reports invalid addresses", () => {
     expect(

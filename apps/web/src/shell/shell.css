@@ -33,6 +33,9 @@
 .shell-logo img {
   width: 30px;
   height: 30px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--ivory);
 }
 .shell-rail-link {
   display: flex;

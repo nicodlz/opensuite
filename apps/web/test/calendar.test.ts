@@ -4,6 +4,8 @@ import type { CalendarEvent } from "@opensuite/contracts";
 import {
   addDays,
   applyEventChange,
+  isPending,
+  isRecurring,
   dateAtMinutes,
   dayDifference,
   dayKey,
@@ -432,6 +434,10 @@ describe("event editor", () => {
   });
 });
 
+function content({ id: _id, seriesId: _seriesId, ...rest }: CalendarEvent) {
+  return rest;
+}
+
 describe("optimistic changes", () => {
   const single = event("lunch", "2026-10-27T11:30:00Z", "2026-10-27T12:30:00Z");
   const first = event(
@@ -449,9 +455,6 @@ describe("optimistic changes", () => {
     start: "2026-11-04T08:30:00Z",
     end: "2026-11-04T08:45:00Z",
   };
-  const content = ({ id: _id, seriesId: _seriesId, ...rest }: CalendarEvent) =>
-    rest;
-
   it("adds, moves and removes single events", () => {
     const created = applyEventChange([single], {
       type: "create",
@@ -472,6 +475,17 @@ describe("optimistic changes", () => {
     expect(
       applyEventChange(moved, { type: "delete", event: single }),
     ).toHaveLength(1);
+  });
+
+  it("treats occurrences as a series even without a simple recurrence", () => {
+    const odd = { ...first, recurrence: "none" as const };
+    const other = { ...second, recurrence: "none" as const };
+    expect(isRecurring(odd)).toBe(true);
+    expect(isRecurring(single)).toBe(false);
+    expect(isPending({ ...single, id: "draft-1" })).toBe(true);
+    expect(
+      applyEventChange([single, odd, other], { type: "delete", event: odd }),
+    ).toEqual([single]);
   });
 
   it("shifts and deletes every loaded occurrence of a series", () => {

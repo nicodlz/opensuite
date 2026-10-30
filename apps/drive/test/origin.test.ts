@@ -33,18 +33,22 @@ afterAll(async () => {
 });
 
 it("refuses writes from origins outside the application list", async () => {
-  for (const origin of [undefined, "https://other.example.test", "null"]) {
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/folders",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        ...(origin === undefined ? {} : { origin }),
-      },
-      payload: "name=x",
-    });
-    expect(response.statusCode).toBe(403);
-  }
+  const refused = await Promise.all(
+    [undefined, "https://other.example.test", "null"].map((origin) =>
+      app.inject({
+        method: "POST",
+        url: "/v1/folders",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...(origin === undefined ? {} : { origin }),
+        },
+        payload: "name=x",
+      }),
+    ),
+  );
+  expect(refused.map((response) => response.statusCode)).toEqual([
+    403, 403, 403,
+  ]);
   const allowed = await app.inject({
     method: "POST",
     url: "/v1/folders",

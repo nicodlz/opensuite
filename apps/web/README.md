@@ -1,6 +1,8 @@
 # Web client
 
-The production build serves Mail, Drive, Domains, the setup wizard and API status through Caddy. Calendar and Contacts are placeholders. The sign-in and MFA interface is on `om-web-fix` and has not yet been merged into this checkout; see the [user guide](../../docs/user/index.md) and [administrator guide](../../docs/admin/index.md) for access and wizard limitations.
+The production build serves Mail, Calendar, Drive, Domains, the setup wizard and API status through Caddy. Contacts is a placeholder. Calendar uses the account-scoped contract in `packages/contracts/src/calendar.ts`; it has no invitations, reminders or sharing yet. See the [user guide](../../docs/user/index.md) and [administrator guide](../../docs/admin/index.md) for access and wizard limitations.
+
+The applications share one frame (`src/shell`). On a single origin they live under `/mail`, `/calendar` and `/drive`. When the API reports separate origins at `/api/origins`, each application is served at the root of its own origin, links between them are absolute, and old paths move to the right origin with their query. Sign-in happens on the mail origin; Drive and Calendar receive the session through a single-use token (`src/auth/handoff.tsx`). The browser test `e2e/split-origins.spec.ts` covers this with the production build on `*.localhost` origins and needs Docker for PostgreSQL.
 
 The mail workspace at `/mail` uses the account-scoped oRPC contract in `packages/contracts/src/mail.ts`. The development server (`pnpm --filter @opensuite/web dev`) uses a synthetic in-memory mail router; its changes disappear on reload. The production build excludes that router and calls `/api/mail/*`. The production client uses the authenticated user’s `default` account. Never use the synthetic implementation for real mail.
 

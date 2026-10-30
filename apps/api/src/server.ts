@@ -310,7 +310,7 @@ export const buildServer = async (
   const openapi = await new OpenAPIGenerator({
     schemaConverters: [new ZodToJsonSchemaConverter()],
   }).generate(router, {
-    info: { title: "OpenSuite API", version: "0.0.0" },
+    info: { title: "Esuno API", version: "0.0.0" },
   });
 
   app.get("/openapi.json", () => openapi);
@@ -405,8 +405,7 @@ export const buildServer = async (
       const headers = new Headers();
       const cookie = request.headers.cookie;
       if (cookie !== undefined) headers.set("cookie", cookie);
-      const handoffActor = await identity.actor?.(headers);
-      if (handoffActor === null || handoffActor === undefined)
+      if (((await identity.actor?.(headers)) ?? null) === null)
         return reply
           .code(401)
           .send({ code: "UNAUTHORIZED", message: "Unauthorized" });

@@ -84,7 +84,7 @@ const hrefOf = (product: Product) =>
     ? hubHref(activeLayout(), product === "admin" ? "/status" : "/contacts")
     : productHref(activeLayout(), product);
 
-export function AppearanceItems() {
+function AppearanceItems() {
   const theme = useTheme();
   return (
     <>
@@ -189,7 +189,7 @@ export function AppShell({
         <AppLink
           href={hrefOf("mail")}
           className="shell-logo"
-          aria-label="OpenSuite home"
+          aria-label="Esuno home"
         >
           <img src="/mark.svg" alt="" />
         </AppLink>

@@ -73,7 +73,9 @@ export function ThreadRow({
           {thread.hasAttachment && (
             <Icon name="paperclip" size={14} label="Has attachment" />
           )}
-          <time dateTime={thread.updatedAt}>{formatDate(thread.updatedAt)}</time>
+          <time dateTime={thread.updatedAt}>
+            {formatDate(thread.updatedAt)}
+          </time>
         </span>
         <span className="thread-subject">
           {thread.unread && <span className="visually-hidden">Unread, </span>}
