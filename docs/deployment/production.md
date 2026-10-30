@@ -692,8 +692,13 @@ ingestion and subscription DLQs before their 14 days run out.
 
 4. Run `recover objects OPERATOR`, redirected to `objects.json`, then with
    `--apply`. Investigate every `unrecoverable` message (its original is
-   gone) and every `divergent` one.
-5. Run replay once by hand (`deploy/ingest/replay.sh`). It must exit 0; then
+   gone) and every `divergent` one. A recipient an earlier replay marked
+   permanently failed because its original was missing stays so after the
+   object is restored: `inspect` every permanent row in `operator list` and,
+   when it reads the original, use `resolve ... retry`, never `reject`.
+5. Run replay once by hand (`deploy/ingest/replay.sh`). It exits 0 once no
+   permanent failure remains; close those with `inspect`, `resolve` or
+   `reject` as in [operator recovery](../architecture/ingestion.md#operator-recovery). Then
    check that a second dry run of both commands reports `missing` and
    `restorable` at 0, that `operator list` holds nothing unexpected, that no
    `ingest_duplicate` or new `ingest_buffer_without_notification` event
@@ -703,7 +708,9 @@ ingestion and subscription DLQs before their 14 days run out.
    `unset` the credentials and revoke the principal.
 
 Both commands can be repeated safely; they exit with an error while any
-read, write or restore failed or an original is unrecoverable, and applied
+read, write or restore failed, an original is unrecoverable or notifications
+of one message disagree beyond their envelope (an error that persists, once
+each such message is investigated, as long as the archive keeps them), and applied
 runs, complete or not, are recorded in the audit log. Before relying on
 them, test on the real buckets with the recovery principal: a conditional
 write on an existing key must answer 412, one on a key whose current version
