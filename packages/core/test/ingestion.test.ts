@@ -1,4 +1,4 @@
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it } from "vitest";
 import {
   parseNotification,
@@ -59,6 +59,34 @@ describe("SES ingestion", () => {
       },
     ]);
     expect(parseNotification("{}").isErr()).toBe(true);
+  });
+  it("resolves newly added addresses without restarting and retains mail if routing fails", async () => {
+    const memory = synthetic();
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    let available = false;
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: memory.sink,
+      routes: [],
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+      resolveRoutes: () =>
+        Promise.resolve(
+          available
+            ? ok([{ address: "sales@example.test", destination: "account" }])
+            : err({ message: "database unavailable" }),
+        ),
+    });
+    const body = JSON.stringify(notification(["Sales@Example.Test"]));
+    expect((await service.process(body)).isErr()).toBe(true);
+    expect(memory.buffers.has("ses-1")).toBe(true);
+    available = true;
+    expect((await service.process(body)).isOk()).toBe(true);
+    expect(memory.imports.map((item) => item.destination)).toEqual(["account"]);
   });
   it("archives before delivery, imports unchanged once per mailbox and deduplicates redelivery", async () => {
     const { memory, service } = create();

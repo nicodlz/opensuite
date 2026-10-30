@@ -1,5 +1,6 @@
 import { contract } from "@opensuite/contracts";
 import { implement, ORPCError } from "@orpc/server";
+import { domainsRouter } from "./domains.ts";
 import type { ApiContext } from "./context.ts";
 
 const account = implement(contract.account).$context<ApiContext>();
@@ -27,6 +28,7 @@ export const accountRouter = account.router({
   }),
 });
 export const adminRouter = admin.router({
+  domains: domainsRouter,
   accounts: {
     list: admin.accounts.list.handler(async ({ context }) => {
       if (context.actor === null) throw new ORPCError("UNAUTHORIZED");

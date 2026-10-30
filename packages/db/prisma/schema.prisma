@@ -113,6 +113,10 @@ model Domain {
   userId    String
   user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
   name      String    @unique
+  stalwartId String?
+  status String @default("pending")
+  records Json @default("[]")
+  checkedAt DateTime?
   createdAt DateTime  @default(now())
   addresses Address[]
 
@@ -125,7 +129,7 @@ model Address {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
   domainId  String
-  domain    Domain   @relation(fields: [domainId, userId], references: [id, userId], onDelete: Restrict)
+  domain    Domain   @relation(fields: [domainId], references: [id], onDelete: Restrict)
   localPart String
   isAlias   Boolean  @default(false)
   createdAt DateTime @default(now())

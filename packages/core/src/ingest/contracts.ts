@@ -64,6 +64,7 @@ export interface IngestDependencies {
   ledger: Ledger;
   delivery: Delivery;
   routes: Route[];
+  resolveRoutes?: (addresses: string[]) => Outcome<Route[]>;
   events: Events;
   bucket: string;
   bufferPrefix: string;

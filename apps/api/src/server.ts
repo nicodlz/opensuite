@@ -1,3 +1,4 @@
+import type { DomainService } from "./routes/domains.ts";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
 import { OpenAPIGenerator } from "@orpc/openapi";
@@ -24,6 +25,7 @@ export interface ServerDependencies {
     }) => Promise<void>;
   };
   readonly accounts?: AccountService;
+  readonly domains?: DomainService;
 }
 
 export const buildServer = async (
@@ -198,6 +200,7 @@ export const buildServer = async (
       context: {
         actor,
         accounts: dependencies.accounts,
+        domains: dependencies.domains,
         log: request.log,
         readiness: dependencies.readiness,
         uptimeSeconds: () =>

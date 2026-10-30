@@ -97,6 +97,39 @@ afterAll(async () => {
 }, 60_000);
 
 describe("PostgreSQL schema and adapters", () => {
+  it("enforces case-insensitive names and routes addresses belonging to another user", async () => {
+    const owner = `domain-owner-${randomUUID()}`;
+    const target = `domain-target-${randomUUID()}`;
+    await db.user.createMany({
+      data: [
+        { id: owner, email: `${owner}@example.test`, name: "Owner" },
+        { id: target, email: `${target}@example.test`, name: "Target" },
+      ],
+    });
+    const name = `${randomUUID()}.example.test`;
+    const domain = await db.domain.create({ data: { name, userId: owner } });
+    await expect(
+      db.domain.create({ data: { name: name.toUpperCase(), userId: owner } }),
+    ).rejects.toThrow("Unique constraint");
+    await db.address.create({
+      data: {
+        domainId: domain.id,
+        userId: target,
+        localPart: "Sales",
+        isAlias: true,
+      },
+    });
+    await expect(
+      db.address.create({
+        data: {
+          domainId: domain.id,
+          userId: target,
+          localPart: "sales",
+          isAlias: true,
+        },
+      }),
+    ).rejects.toThrow("Unique constraint");
+  });
   it("encrypts a mailbox credential and restricts lookup to its owner", async () => {
     const storeResult = createMailboxStore(db, key);
     if (storeResult.isErr()) throw new Error(storeResult.error.message);
@@ -144,7 +177,7 @@ describe("PostgreSQL schema and adapters", () => {
       .parse(
         await db.$queryRaw`SELECT migration_name, checksum, finished_at FROM "_prisma_migrations"`,
       );
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(5);
     const migration = rows.find(
       (row) => row.migration_name === "20261029000000_initial",
     );
@@ -304,12 +337,7 @@ describe("PostgreSQL schema and adapters", () => {
     ).rejects.toThrow(/Unique constraint/);
   });
 
-  it("prevents cross-owner address references and scopes provider lookups", async () => {
-    await expect(
-      db.address.create({
-        data: { userId: "user-b", domainId: "domain-a", localPart: "stolen" },
-      }),
-    ).rejects.toThrow(/Foreign key constraint/);
+  it("scopes provider lookups to their owner", async () => {
     const storeResult = createProviderStore(db, key);
     if (storeResult.isErr()) throw new Error(storeResult.error.message);
     const store = storeResult.value;

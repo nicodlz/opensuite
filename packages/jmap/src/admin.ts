@@ -522,6 +522,33 @@ export class StalwartAdmin {
         });
   }
 
+  /** Remove an existing alias without changing other account aliases. */
+  async removeAlias(
+    accountId: string,
+    name: string,
+    domainId: string,
+  ): Promise<AdminResult<void>> {
+    const result = await this.#transport.call(
+      this.#api,
+      "x:Account/get",
+      { ids: [accountId] },
+      using,
+      GetSchema(AccountSchema),
+    );
+    if (result.isErr()) return err(result.error);
+    const account = result.value.list[0];
+    if (account === undefined || result.value.notFound.length !== 0)
+      return err({ kind: "invalidResponse", message: "Account not found" });
+    const entry = Object.entries(account.aliases).find(
+      ([, alias]) =>
+        alias.name.toLowerCase() === name.toLowerCase() &&
+        alias.domainId === domainId,
+    );
+    return entry === undefined
+      ? ok(undefined)
+      : this.#update("Account", accountId, { [`aliases/${entry[0]}`]: null });
+  }
+
   /** A returned app password is only available once. Reconcile ambiguous failures. */
   async createAppPassword(
     accountId: string,

@@ -1,8 +1,14 @@
 import { createReadinessService, httpProbe } from "@opensuite/core";
-import { createDatabase, createDatabaseProbe } from "@opensuite/db";
+import {
+  createDatabase,
+  createDatabaseProbe,
+  createDomainStore,
+} from "@opensuite/db";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { loadApplicationDatabaseUrl, loadConfig } from "./config.ts";
+import { startDomainJob } from "./routes/domain-job.ts";
+import { configureDomains } from "./routes/domain-setup.ts";
 import { buildServer } from "./server.ts";
 
 const config = loadConfig(process.env);
@@ -39,8 +45,25 @@ const readiness = createReadinessService({
   monotonicMs,
 });
 
-const app = await buildServer({ config: config.value, readiness, monotonicMs });
+const domainStore = createDomainStore(database.value);
+const domains = await configureDomains(process.env, domainStore);
+const app = await buildServer({
+  config: config.value,
+  readiness,
+  monotonicMs,
+  ...(domains === undefined ? {} : { domains }),
+});
+const stopDomainJob =
+  domains === undefined
+    ? undefined
+    : startDomainJob(
+        domainStore,
+        domains,
+        process.env["DOMAINS_CHECK_INTERVAL_SECONDS"],
+        () => app.log.warn("domain verification failed"),
+      );
 app.addHook("onClose", async () => {
+  await stopDomainJob?.();
   await database.value.$disconnect();
 });
 

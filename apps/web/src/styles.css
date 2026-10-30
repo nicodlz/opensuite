@@ -1523,3 +1523,20 @@ h1 {
     height: 26px;
   }
 }
+
+.domain-card {
+  margin-top: 1.5rem;
+}
+.domain-records {
+  display: grid;
+  gap: 1rem;
+}
+.domain-record {
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 1rem;
+  overflow-wrap: anywhere;
+}
+.domain-record code {
+  overflow-wrap: anywhere;
+}

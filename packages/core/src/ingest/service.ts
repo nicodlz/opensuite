@@ -41,10 +41,18 @@ export class IngestService {
       return err({ message: "Unexpected bucket or topic" });
     const archive = await storage.archive(`${digest(body)}.json`, body);
     if (archive.isErr()) return archive;
-    const recipients = resolveRecipients(
-      n.receipt.recipients,
-      this.deps.routes,
-    );
+    const dynamic = await this.deps.resolveRoutes?.(n.receipt.recipients);
+    if (dynamic?.isErr()) return err(dynamic.error);
+    const routes = [...this.deps.routes];
+    for (const route of dynamic?.isOk() === true ? dynamic.value : []) {
+      const existing = routes.find(
+        (item) => item.address.toLowerCase() === route.address.toLowerCase(),
+      );
+      if (existing !== undefined && existing.destination !== route.destination)
+        return err({ message: "Conflicting recipient routes" });
+      if (existing === undefined) routes.push(route);
+    }
+    const recipients = resolveRecipients(n.receipt.recipients, routes);
     const prepared = await ledger.prepare(n, recipients);
     if (prepared.isErr()) return err(prepared.error);
     const outcomes = await Promise.all(

@@ -6,18 +6,21 @@
   "license": "AGPL-3.0-or-later",
   "exports": {
     ".": "./src/index.ts",
-    "./services/*": "./src/services/*.ts"
+    "./services/*": "./src/services/*.ts",
+    "./adapters/*": "./src/adapters/*.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@opensuite/contracts": "workspace:*",
-    "neverthrow": "catalog:",
     "@aws-sdk/client-s3": "catalog:",
+    "@aws-sdk/client-ses": "catalog:",
+    "@aws-sdk/client-sesv2": "catalog:",
     "@aws-sdk/client-sqs": "catalog:",
+    "@opensuite/contracts": "workspace:*",
     "@opensuite/db": "workspace:*",
     "@opensuite/jmap": "workspace:*",
+    "neverthrow": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

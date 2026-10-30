@@ -11,7 +11,11 @@ import {
   bucketProbe,
   queueProbe,
 } from "@opensuite/core";
-import { createDatabase, createDatabaseProbe } from "@opensuite/db";
+import {
+  createDatabase,
+  createDatabaseProbe,
+  createDomainStore,
+} from "@opensuite/db";
 import { z } from "zod";
 import { createHealthServer } from "./health.ts";
 
@@ -148,6 +152,10 @@ const service = new IngestService({
   ledger,
   delivery: jmapDelivery(c.INGEST_DESTINATIONS),
   routes: c.INGEST_ROUTES,
+  resolveRoutes: async (addresses) => {
+    const result = await createDomainStore(db.value).routes(addresses);
+    return result;
+  },
   bucket: c.INBOUND_BUCKET,
   bufferPrefix: c.INBOUND_BUFFER_PREFIX,
   topic: c.INBOUND_TOPIC_ARN,
