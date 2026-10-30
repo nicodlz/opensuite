@@ -178,12 +178,37 @@ but do not stop the API or HTTPS; repair and rerun the job.
 
 ## Optional Pass
 
-Pass uses a separate public hostname and can run independently of the mail and
-application services. Before enabling the `pass` profile, follow
-[Pass operations](../operations/pass.md) for operator-managed DNS, TLS, the
-loopback-only administrator, invitations, SMTP and recovery. The scheduled
-Esuno backup currently does not include the Pass database or data volume;
-arrange and test a separate encrypted backup before storing real vaults.
+Pass is optional and is not production-ready until security and recovery have
+been verified. It can run without the mail and application services, but shares
+Caddy, PostgreSQL and the server. Use the ordered [Pass setup and operations
+procedure](../operations/pass.md#enable-and-first-administrator) for the
+following steps:
+
+1. Create the `pass.example.com` A record yourself, and an AAAA record only if
+   IPv6 works. Esuno and Compose never create it. Allow 80/443 for Caddy to
+   obtain and renew a publicly trusted TLS certificate. Use a dedicated origin.
+2. Set `PASS_PUBLIC_HOST=pass.example.com` in `.env`; Compose derives Caddy's
+   `PASS_SITE_ADDRESS` and Vaultwarden's HTTPS `DOMAIN` from it. Set
+   `COMPOSE_PROFILES=pass` so ordinary Compose upgrades include the profile.
+   Keep `PASS_IMAGE` pinned to the official version and digest, and choose
+   non-overlapping `PASS_NETWORK_SUBNET`, `PASS_NETWORK_IP_RANGE` and
+   `PASS_CADDY_IP` together. See the [environment template](../../deploy/env.example)
+   for defaults and the setup guide for required Drive configuration and builds.
+3. Configure the protected admin token file and SES SMTP on port 2587 with
+   STARTTLS. Open the loopback admin port locally or through SSH, invite the
+   first vault user, and choose `PASS_ORG_CREATION_USERS` as described in the
+   [setup guide](../operations/pass.md#enable-and-first-administrator). Mobile
+   push is optional and requires the external relay and protected installation
+   key; see [SMTP and notifications](../operations/pass.md#smtp-and-notifications).
+4. Add `pass=https://pass.example.com` to `AUTH_PRODUCT_ORIGINS` and recreate
+   the API to enable the Esuno launcher. See [shell status](../operations/pass.md#esuno-shell-status).
+   For alias API keys and Bitwarden's username generator, follow the
+   [alias setup](../architecture/aliases.md#api-and-bitwarden).
+5. Set `BACKUP_PASS_ENABLED=1`, configure the scheduled encrypted backup and
+   complete the [independent recovery test](../operations/pass-recovery.md#independent-recovery-tests-and-expected-loss).
+   The scheduled backup includes the Pass database and data volume when enabled.
+   Use the [upgrade and rollback procedure](../operations/pass.md#upgrade-and-rollback)
+   before changing the pinned image.
 
 ## First administrator
 
@@ -290,8 +315,12 @@ INGEST_ROUTES='[{"address":"user@example.com","destination":"ACCOUNT_ID"}]'
 INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","authorization":"Basic <encoded-credential>","quarantineMailbox":"JUNK_ID","rewriteSessionUrls":true}]'
 ```
 
-Add a route for every address and alias, and one destination per mailbox. The
-`destination` value in each route must match a destination's `id`. Protect and
+Add a static route for each independently configured mailbox address and one
+destination per mailbox. Managed aliases resolve from the database; do not add
+them to `INGEST_ROUTES`, because static routes can bypass alias disablement.
+Every static route's `destination` must match a destination's `id`; each alias
+owner's mailbox must also have an `INGEST_DESTINATIONS` entry. See
+[alias inbound behavior](../architecture/aliases.md#inbound-behavior-and-limits). Protect and
 back up these files; safely delete the intermediate destination file after use.
 The exact schema, permission requirements, ambiguity handling and replay
 procedure are in [ingestion](../architecture/ingestion.md). Maintain routes
