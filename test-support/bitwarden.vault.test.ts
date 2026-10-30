@@ -526,7 +526,7 @@ describe("Bitwarden CLI against Vault", () => {
         const favicon = await page
           .locator('link[rel="icon"][sizes="32x32"]')
           .getAttribute("href");
-        expect(favicon).toBe("/esuno-vault/images/favicon-32x32.png?v=1");
+        expect(favicon).toBe("/esuno-vault/images/favicon-32x32.png?v=2");
         if (!favicon) throw new Error("Favicon link missing");
         for (const [url, fileName] of [
           [logoPath, logo],
@@ -549,14 +549,31 @@ describe("Bitwarden CLI against Vault", () => {
         const manifestHref = await page
           .locator('link[rel="manifest"]')
           .getAttribute("href");
-        expect(manifestHref).toBe("/esuno-vault/manifest.json?v=1");
+        expect(manifestHref).toBe("/esuno-vault/manifest.json?v=2");
         const manifest = await page.evaluate(
           async (url) => (await fetch(url)).text(),
           manifestHref ?? "",
         );
+        const app = z
+          .object({
+            name: z.string(),
+            short_name: z.string(),
+            icons: z.array(
+              z.object({ sizes: z.string(), purpose: z.string() }),
+            ),
+          })
+          .parse(JSON.parse(manifest));
+        expect([app.name, app.short_name]).toEqual(["Esuno Vault", "Vault"]);
         expect(
-          z.object({ name: z.string() }).parse(JSON.parse(manifest)).name,
-        ).toBe("Esuno Vault");
+          app.icons
+            .map((entry) => `${entry.purpose} ${entry.sizes}`)
+            .toSorted(),
+        ).toEqual([
+          "any 192x192",
+          "any 512x512",
+          "maskable 192x192",
+          "maskable 512x512",
+        ]);
         if (screenshots)
           await page.screenshot({
             path: join(screenshots, `login-${theme}.png`),

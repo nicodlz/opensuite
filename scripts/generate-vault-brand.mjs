@@ -11,6 +11,8 @@ import { chromium } from "@playwright/test";
 const image =
   "vaultwarden/server:1.37.4@sha256:efb3cde962015fcc036b2ea625242248611943b27212ebf4392841fb30fad055";
 const root = "deploy/vaultwarden/brand";
+// Bump when the app icons change: browsers keep favicons and manifests apart from HTTP caching.
+const iconVersion = 2;
 const images = join(root, "esuno-vault/images");
 await mkdir(join(images, "icons"), { recursive: true });
 await mkdir(join(images, "register-layout"), { recursive: true });
@@ -33,12 +35,20 @@ const dark = logo("#1d1727");
 const white = logo("#f6f4f8");
 // Replace the upstream welcome illustration, which contains a branded vault screenshot.
 const welcome = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 452"><rect width="1220" height="452" rx="20" fill="#140d1b"/><circle cx="1050" cy="70" r="230" fill="#342649"/><circle cx="140" cy="440" r="210" fill="#5630a8"/><rect x="250" y="62" width="720" height="328" rx="24" fill="#f6f4f8"/><rect x="250" y="62" width="160" height="328" rx="24" fill="#1c1427"/><g transform="translate(275 90) scale(.48)">${symbol("#f6f4f8")}</g><rect x="455" y="110" width="270" height="22" rx="11" fill="#5630a8"/><rect x="455" y="160" width="450" height="48" rx="10" fill="#ebe6f5"/><rect x="455" y="225" width="450" height="48" rx="10" fill="#ebe6f5"/><rect x="455" y="290" width="450" height="48" rx="10" fill="#ebe6f5"/><circle cx="480" cy="184" r="8" fill="#4f9c28"/><circle cx="480" cy="249" r="8" fill="#4f9c28"/><circle cx="480" cy="314" r="8" fill="#4f9c28"/></svg>\n`;
-const favicon = await readFile("apps/web/public/favicon.svg", "utf8");
+// Vault's app icon: the Vault mark on the dark Esuno tile, plus a full-bleed
+// maskable variant whose mark stays inside the central 80% safe zone.
+const mark = (await readFile("apps/web/public/vault-mark.svg", "utf8")).match(
+  /<path[\s\S]*\/>/,
+)?.[0];
+if (!mark) throw new Error("Vault mark paths changed; update generator");
+const favicon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-14 -17 128 128"><rect x="-14" y="-17" width="128" height="128" rx="24" fill="#1c1427"/>${mark}</svg>\n`;
+const maskable = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-38 -41 176 176"><rect x="-38" y="-41" width="176" height="176" fill="#1c1427"/>${mark}</svg>\n`;
+const pinned = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 94">${mark.replaceAll(/fill="#[0-9a-f]+"/g, 'fill="#000000"')}</svg>\n`;
 for (const [name, data] of Object.entries({
   "logo.svg": dark,
   "logo-white.svg": white,
   "icon-white.svg": icon("#f6f4f8"),
-  "safari-pinned-tab.svg": icon("#000000"),
+  "safari-pinned-tab.svg": pinned,
   "register-layout/logo-horizontal-white.svg": white,
   "welcome-dialog-graphic.svg": welcome,
 }))
@@ -100,11 +110,20 @@ try {
           size,
         ]),
     ),
+    ...[192, 512].map(
+      (size) =>
+        /** @type {[string, string, number, number]} */ ([
+          `maskable-${size}x${size}.png`,
+          maskable,
+          size,
+          size,
+        ]),
+    ),
   ];
   for (const [name, svg, width, height] of outputs) {
     const data = await png(svg, width, height);
     await writeFile(join(images, name), data);
-    if (/^(favicon-|apple-touch|mstile-|android-chrome-)/.test(name))
+    if (/^(favicon-|apple-touch|mstile-|android-chrome-|maskable-)/.test(name))
       await writeFile(join(images, "icons", name), data);
   }
   // ICO supports embedded PNGs; provide a fallback for browsers requesting /favicon.ico.
@@ -150,12 +169,15 @@ for (const name of [
 ]) {
   replaceOnce(
     `href="images/${name}"`,
-    `href="/esuno-vault/images/${name}?v=1"`,
+    `href="/esuno-vault/images/${name}?v=${iconVersion}"`,
   );
 }
 const manifest = index.match(/href="([a-f0-9]+\.json)"/);
 if (!manifest) throw new Error("Pinned index manifest not found");
-replaceOnce(`href="${manifest[1]}"`, 'href="/esuno-vault/manifest.json?v=1"');
+replaceOnce(
+  `href="${manifest[1]}"`,
+  `href="/esuno-vault/manifest.json?v=${iconVersion}"`,
+);
 replaceOnce('alt="Vaultwarden"', 'alt="Esuno"');
 await writeFile(join(root, "index.html"), index);
 await writeFile(
@@ -163,12 +185,15 @@ await writeFile(
   JSON.stringify(
     {
       name: "Esuno Vault",
-      short_name: "Esuno Vault",
-      icons: [192, 512].map((size) => ({
-        src: `/esuno-vault/images/icons/android-chrome-${size}x${size}.png?v=1`,
-        sizes: `${size}x${size}`,
-        type: "image/png",
-      })),
+      short_name: "Vault",
+      icons: ["android-chrome", "maskable"].flatMap((kind) =>
+        [192, 512].map((size) => ({
+          src: `/esuno-vault/images/icons/${kind}-${size}x${size}.png?v=${iconVersion}`,
+          sizes: `${size}x${size}`,
+          type: "image/png",
+          purpose: kind === "maskable" ? "maskable" : "any",
+        })),
+      ),
       theme_color: "#5630a8",
       background_color: "#f6f4f8",
     },
