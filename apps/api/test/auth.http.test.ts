@@ -1602,7 +1602,8 @@ describe("identity over HTTP", () => {
     const enrollmentData = z
       .object({ totpURI: z.string(), backupCodes: z.array(z.string()) })
       .parse(await enrollment.json());
-    expect(enrollmentData.backupCodes).toEqual(firstCodes);
+    // Existing backup codes are never shown again after they were issued.
+    expect(enrollmentData.backupCodes).toEqual([]);
     const uri = enrollmentData.totpURI;
     const pendingBeforeConfirmation = cookieOf(
       await post("sign-in/email", account),
@@ -1782,7 +1783,7 @@ describe("identity over HTTP", () => {
     expect(new URL(reopened.totpURI).searchParams.get("secret")).toBe(
       new URL(enrollment.totpURI).searchParams.get("secret"),
     );
-    expect(reopened.backupCodes).toEqual(enrollment.backupCodes);
+    expect(reopened.backupCodes).toEqual([]);
     const duplicateOptions = z
       .object({ id: z.string(), options: z.object({ challenge: z.string() }) })
       .parse(
