@@ -3,6 +3,7 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
 
 export const DropdownMenu = Menu.Root;
 export const DropdownTrigger = Menu.Trigger;
+export const DropdownItem = Menu.Item;
 export const DropdownRadioGroup = Menu.RadioGroup;
 export const DropdownRadioItem = Menu.RadioItem;
 export const DropdownItemIndicator = Menu.ItemIndicator;

@@ -1,3 +1,4 @@
+import { AccountMenu } from "../auth/components.tsx";
 import * as React from "react";
 import { themeChoices, type ThemeChoice } from "@opensuite/design-tokens";
 import type { DriveCommand } from "@opensuite/contracts";
@@ -309,7 +310,13 @@ export function DrivePage() {
   function openEntry(entry: DriveEntry) {
     setSelected(entry);
     if (entry.kind === "folder") openFolder(entry);
-    else if (canPreview(entry)) {
+    else if (entry.contentType === "application/pdf" && canPreview(entry)) {
+      window.open(
+        driveTransport.preview(entry.id),
+        "_blank",
+        "noopener,noreferrer",
+      );
+    } else if (canPreview(entry)) {
       setPreviewUrl(driveTransport.preview(entry.id));
       setNotice("");
       setModal("preview");
@@ -485,6 +492,7 @@ export function DrivePage() {
             />
           </div>
           <div className="mail-top-actions">
+            <AccountMenu />
             <DropdownMenu>
               <DropdownTrigger asChild>
                 <Button
@@ -982,16 +990,13 @@ export function DrivePage() {
         {modal === "preview" && selected && (
           <DialogContent title={selected.name} description="Protected preview">
             <div className="drive-preview">
-              {previewUrl &&
-                (selected.contentType === "application/pdf" ? (
-                  <iframe
-                    title={`Preview of ${selected.name}`}
-                    src={previewUrl}
-                    sandbox=""
-                  />
-                ) : (
-                  <img src={previewUrl} alt={`Preview of ${selected.name}`} />
-                ))}
+              {previewUrl && (
+                <iframe
+                  title={`Preview of ${selected.name}`}
+                  src={previewUrl}
+                  sandbox=""
+                />
+              )}
             </div>
             <div className="dialog-actions">
               <Button
@@ -1012,7 +1017,7 @@ export function DrivePage() {
           >
             <div className="drive-share">
               <TextField
-                label="User ID"
+                label="User ID (not email)"
                 value={userId}
                 onChange={(event) => setUserId(event.target.value)}
               />
@@ -1052,8 +1057,9 @@ export function DrivePage() {
                 </Button>
               </div>
               <p className="field-description">
-                Existing shares are not listed by the server. Enter a user ID to
-                change or revoke access.
+                Existing shares are not listed by the server. Enter the
+                account’s user ID (not its email address) to change or revoke
+                access.
               </p>
               {selected.kind === "file" && (
                 <>

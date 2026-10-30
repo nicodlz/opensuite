@@ -65,6 +65,25 @@ describe("mail helpers", () => {
       threadId: "t",
       references: ["<old@example.test>", "<m@example.test>"],
     });
+    const withReplyTo = {
+      ...message,
+      replyTo: [{ email: "reply@example.test" }],
+      to: [{ email: "reply@example.test" }, { email: "other@example.test" }],
+    };
+    expect(replyDraft(withReplyTo, "all", "you@example.test")).toMatchObject({
+      to: withReplyTo.replyTo,
+      cc: [{ email: "other@example.test" }],
+    });
+    const forwarded = replyDraft(
+      {
+        ...message,
+        htmlBody:
+          "<p>Hello <b>there</b></p><script>bad()</script><p>Second line</p>",
+      },
+      "forward",
+    );
+    expect(forwarded.textBody).toContain("Hello there\nSecond line");
+    expect(forwarded.textBody).not.toMatch(/<p>|bad\(\)/);
     expect(emptyDraft().attachmentBlobIds).toEqual([]);
   });
 });
@@ -79,6 +98,16 @@ describe("email sanitization", () => {
     expect(result.srcDoc).toContain("default-src 'none'");
     expect(result.srcDoc).toContain('rel="noopener noreferrer"');
     expect(result.srcDoc).toContain('target="_blank"');
+  });
+  it("only replaces matching inline image IDs with trusted blob URLs", () => {
+    const result = sanitizeEmail(
+      '<img src="cid:photo%40example.test"><img src="cid:missing"><img src="blob:https://evil.test/id">',
+      false,
+      { "photo@example.test": "blob:https://app.test/safe" },
+    );
+    expect(result.srcDoc).toContain('src="blob:https://app.test/safe"');
+    expect(result.srcDoc).not.toContain("blob:https://evil.test/id");
+    expect(result.srcDoc).not.toContain("cid:missing");
   });
   it("allows remote images only on request while preserving other restrictions", () => {
     const result = sanitizeEmail(malicious, true);

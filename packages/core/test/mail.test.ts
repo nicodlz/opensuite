@@ -31,7 +31,36 @@ const emails = [
     from: [{ name: null, email: "sender@example.test" }],
     to: [{ name: null, email: "alice@example.test" }],
     messageId: ["m1"],
-    attachments: [],
+    replyTo: [{ name: null, email: "reply@example.test" }],
+    attachments: [
+      {
+        partId: "img",
+        blobId: "inline",
+        name: "photo.png",
+        type: "image/png",
+        size: 3,
+        cid: "inline@example.test",
+      },
+    ],
+    textBody: [
+      {
+        partId: "plain",
+        blobId: null,
+        name: null,
+        type: "text/plain",
+        size: 12,
+      },
+    ],
+    htmlBody: [
+      {
+        partId: "plain",
+        blobId: null,
+        name: null,
+        type: "text/plain",
+        size: 12,
+      },
+    ],
+    bodyValues: { plain: { value: "<plain text>" } },
     preview: "Preview",
   },
   {
@@ -151,6 +180,23 @@ const service = createMailService({
 });
 
 describe("mail service", () => {
+  it("maps only matching body types, inline IDs and Reply-To", async () => {
+    const result = await service.thread(actor, "default", "t1");
+    expect(result.isOk()).toBe(true);
+    if (result.isErr()) throw new Error("Expected thread");
+    expect(result.value.messages[0]).toMatchObject({
+      htmlBody: "",
+      textBody: "<plain text>",
+      replyTo: [{ email: "reply@example.test" }],
+      attachments: [{ cid: "inline@example.test", blobId: "inline" }],
+    });
+    expect(
+      requests.findLast((request) => request.method === "Email/get")?.args[
+        "properties"
+      ],
+    ).toContain("replyTo");
+  });
+
   it("scopes access to the session owner and never uses a client for another account", async () => {
     requests.length = 0;
     expect(

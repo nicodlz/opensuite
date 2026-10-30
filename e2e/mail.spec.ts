@@ -30,10 +30,12 @@ for (const theme of themes) {
     const frame = page.locator('iframe[title="Message from Maya Chen"]');
     await expect(frame).toHaveAttribute(
       "sandbox",
-      "allow-popups allow-popups-to-escape-sandbox",
+      "allow-same-origin allow-popups allow-popups-to-escape-sandbox",
     );
     await expect(frame).toHaveAttribute("srcdoc", /default-src 'none'/);
     await expect(frame).not.toHaveAttribute("srcdoc", /src="https:\/\/images/);
+    await expect(frame).toHaveAttribute("srcdoc", /src="blob:/);
+    await expect(frame).toHaveCSS("min-height", /px/);
     await page.getByRole("button", { name: "Load images" }).click();
     await expect(frame).toHaveAttribute("srcdoc", /src="https:\/\/images/);
     await axe(page);
@@ -112,14 +114,16 @@ test("production bundle excludes synthetic mail", async () => {
   expect(scripts.length).toBeGreaterThan(0);
   expect(scripts.join("\n")).not.toContain("OPENMAIL_SYNTHETIC_FIXTURE_ONLY");
   expect(scripts.join("\n")).not.toContain("maya@example.test");
+  expect(scripts.join("\n")).not.toContain("synthetic-password");
 });
 
 test("upstream error retries and failed actions roll back", async ({
   page,
 }) => {
-  await page.addInitScript(() =>
-    sessionStorage.setItem("mail-fixture-fail-list", "1"),
-  );
+  await page.addInitScript(() => {
+    if (window === window.top)
+      sessionStorage.setItem("mail-fixture-fail-list", "1");
+  });
   await page.goto("/mail");
   await expect(page.getByText("Mail is unavailable")).toBeVisible();
   await page.evaluate(() =>
@@ -187,4 +191,35 @@ test("multiple drafts can be saved, reopened and sent with an attachment", async
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: /note.txt/ }).click();
   expect((await download).suggestedFilename()).toBe("note.txt");
+});
+
+test("reply-to and HTML-only forwarding", async ({ page }) => {
+  await page.goto("/mail");
+  await page.getByRole("button", { name: /Alex Rivera/ }).click();
+  await page.keyboard.press("r");
+  const composer = page.getByRole("region", { name: "Compose message" });
+  await expect(composer.getByLabel("To", { exact: true })).toHaveValue(
+    "replies@example.test",
+  );
+  await composer.getByRole("button", { name: "Save and close draft" }).click();
+  await page.keyboard.press("f");
+  await expect(
+    composer.getByLabel("Message body", { exact: true }),
+  ).toHaveValue(/Are you free to catch up this weekend\?/);
+  await expect(
+    composer.getByLabel("Message body", { exact: true }),
+  ).not.toHaveValue(/<p>/);
+});
+
+test("plain-text messages preserve literal markup and line breaks", async ({
+  page,
+}) => {
+  await page.goto("/mail");
+  await page.getByRole("button", { name: /Studio Notes/ }).click();
+  const body = page
+    .frameLocator('iframe[title="Message from Studio Notes"]')
+    .locator("body");
+  await expect(body).toContainText("Plain text with <b>literal markup</b>");
+  await expect(body.locator("b")).toHaveCount(0);
+  await expect(body.locator("br")).toHaveCount(1);
 });

@@ -2,6 +2,8 @@ import * as React from "react";
 import { themeChoices, type ThemeChoice } from "@opensuite/design-tokens";
 import {
   QueryClient,
+  QueryCache,
+  MutationCache,
   QueryClientProvider,
   useQuery,
 } from "@tanstack/react-query";
@@ -16,6 +18,9 @@ import {
 } from "@tanstack/react-router";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
+import { ORPCError } from "@orpc/client";
+import { AuthError } from "./auth/client.ts";
+import { LoginPage, Protected, expireSession } from "./auth/components.tsx";
 import { MailPage } from "./mail/mail-page.tsx";
 import { DrivePage } from "./drive/drive-page.tsx";
 import { getHealth, getReadiness } from "./api.ts";
@@ -33,7 +38,16 @@ import { useKeyboardShortcut } from "./ui/keyboard-shortcut.ts";
 import { TextField } from "./ui/text-field.tsx";
 import { Toast, ToastProvider } from "./ui/toast.tsx";
 
+function onRequestError(error: unknown) {
+  if (
+    (error instanceof ORPCError || error instanceof AuthError) &&
+    error.status === 401
+  )
+    expireSession();
+}
 const queryClient = new QueryClient({
+  queryCache: new QueryCache({ onError: onRequestError }),
+  mutationCache: new MutationCache({ onError: onRequestError }),
   defaultOptions: { queries: { retry: false, refetchInterval: 30_000 } },
 });
 
@@ -78,8 +92,19 @@ function Shell() {
     if (value === "system" || value === "light" || value === "dark")
       setTheme(value);
   }
-  if (product === "/mail") return <MailPage />;
-  if (product === "/drive") return <DrivePage />;
+  if (product === "/login") return <Outlet />;
+  if (product === "/mail")
+    return (
+      <Protected>
+        <MailPage />
+      </Protected>
+    );
+  if (product === "/drive")
+    return (
+      <Protected>
+        <DrivePage />
+      </Protected>
+    );
   return (
     <ToastProvider>
       <a href="#main-content" className="skip-link">
@@ -435,6 +460,11 @@ const indexRoute = createRoute({
   path: "/",
   component: StatusPage,
 });
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/login",
+  component: LoginPage,
+});
 const mailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mail",
@@ -458,11 +488,18 @@ const driveRoute = createRoute({
 const router = createRouter({
   routeTree: rootRoute.addChildren([
     indexRoute,
+    loginRoute,
     mailRoute,
     calendarRoute,
     contactsRoute,
     driveRoute,
   ]),
+});
+window.addEventListener("opensuite-session-expired", () => {
+  void queryClient.cancelQueries().then(() => {
+    queryClient.clear();
+    return router.navigate({ to: "/login" });
+  });
 });
 declare module "@tanstack/react-router" {
   interface Register {

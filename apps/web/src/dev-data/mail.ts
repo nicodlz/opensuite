@@ -4,6 +4,7 @@ import {
   type Message,
   type ThreadSummary,
 } from "@opensuite/contracts";
+import { ORPCError } from "@orpc/client";
 import { createRouterClient, implement } from "@orpc/server";
 
 // Synthetic mailbox data lives only in the development bundle.
@@ -24,9 +25,18 @@ const initial: Message[] = [
     references: [],
     headers: [],
     htmlBody:
-      '<p>Hi there,</p><p>Here’s the latest update. I thought you might like a look before Friday.</p><p>Let me know what you think!</p><p>Maya</p><img src="https://images.example.test/update.png" alt="Project update">',
+      '<p>Hi there,</p><p>Here’s the latest update. I thought you might like a look before Friday.</p><p>Let me know what you think!</p><p>Maya</p><img src="https://images.example.test/update.png" alt="Project update"><img src="cid:photo@example.test" alt="Inline photo">',
     textBody: "Hi there, Here’s the latest update. Let me know what you think!",
-    attachments: [],
+    attachments: [
+      {
+        id: "inline",
+        blobId: "inline",
+        cid: "photo@example.test",
+        name: "photo.png",
+        type: "image/png",
+        size: 68,
+      },
+    ],
     unread: true,
     starred: false,
     labels: ["work"],
@@ -36,6 +46,7 @@ const initial: Message[] = [
     threadId: "t2",
     mailboxIds: ["inbox"],
     from: { name: "Alex Rivera", email: "alex@example.test" },
+    replyTo: [{ email: "replies@example.test" }],
     to: [account],
     cc: [],
     bcc: [],
@@ -45,7 +56,7 @@ const initial: Message[] = [
     references: [],
     headers: [],
     htmlBody: "<p>Are you free to catch up this weekend?</p>",
-    textBody: "Are you free to catch up this weekend?",
+    textBody: "",
     attachments: [],
     unread: false,
     starred: true,
@@ -63,8 +74,8 @@ const initial: Message[] = [
     sentAt: "2026-10-25T08:00:00.000Z",
     references: [],
     headers: [],
-    htmlBody: "<p>A few ideas to brighten your week.</p>",
-    textBody: "A few ideas to brighten your week.",
+    htmlBody: "",
+    textBody: "Plain text with <b>literal markup</b>\nand a second line.",
     attachments: [],
     unread: false,
     starred: false,
@@ -73,7 +84,17 @@ const initial: Message[] = [
 ];
 const messages = structuredClone(initial);
 let drafts: Draft[] = [];
-const blobs = new Map<string, { name: string; type: string; base64: string }>();
+const blobs = new Map<string, { name: string; type: string; base64: string }>([
+  [
+    "inline",
+    {
+      name: "photo.png",
+      type: "image/png",
+      base64:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a9sAAAAASUVORK5CYII=",
+    },
+  ],
+]);
 const folders = [
   { id: "inbox", name: "Inbox", role: "inbox" },
   { id: "drafts", name: "Drafts", role: "drafts" },
@@ -127,6 +148,8 @@ const router = api.router({
     }),
   })),
   threads: api.threads.handler(({ input, errors }) => {
+    if (sessionStorage.getItem("mail-fixture-unauthorized") === "1")
+      throw new ORPCError("UNAUTHORIZED", { status: 401 });
     if (sessionStorage.getItem("mail-fixture-fail-list") === "1")
       throw errors.UPSTREAM_UNAVAILABLE();
     const search = input.search;

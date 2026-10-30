@@ -38,6 +38,7 @@ const PartSchema = z.object({
   type: z.string(),
   size: z.number(),
   charset: z.string().nullable().optional(),
+  cid: z.string().nullable().optional(),
 });
 const EmailSchema = z.object({
   id: z.string(),
@@ -49,6 +50,7 @@ const EmailSchema = z.object({
   subject: z.string().nullable(),
   from: z.array(AddressSchema).nullable(),
   to: z.array(AddressSchema).nullable(),
+  replyTo: z.array(AddressSchema).nullable().default(null),
   messageId: z.array(z.string()).nullable(),
   attachments: z.array(PartSchema),
   cc: z.array(AddressSchema).nullable().default(null),
@@ -235,6 +237,7 @@ export class JmapClient {
           "subject",
           "from",
           "to",
+          "replyTo",
           "messageId",
           "attachments",
           "cc",
