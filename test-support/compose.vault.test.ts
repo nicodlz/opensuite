@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
 import { z } from "zod";
@@ -81,3 +82,18 @@ test("Caddyfile validates", async () => {
   );
   expect(result.stderr + result.stdout).toContain("Valid configuration");
 }, 60_000);
+
+// The branded shell names the bundle files of one web-vault build.
+test("Vault image pins match the generated web-vault shell", async () => {
+  const pin = /vaultwarden\/server:[^\s"'}]+/;
+  const [compose, example, generator] = await Promise.all(
+    [
+      "compose.yaml",
+      "deploy/env.example",
+      "scripts/generate-vault-brand.mjs",
+    ].map(async (path) => (await readFile(path, "utf8")).match(pin)?.[0]),
+  );
+  expect(compose).toBeDefined();
+  expect(example).toBe(compose);
+  expect(generator).toBe(compose);
+});
