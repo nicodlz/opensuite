@@ -174,3 +174,10 @@ it("logs safe error details without disclosing exception secrets", async () => {
   });
   expect(JSON.stringify(logged)).toContain("stack");
 });
+
+it("forbids caching of the origin map", async () => {
+  const response = await (await start()).inject("/origins");
+  expect(response.statusCode).toBe(200);
+  expect(response.headers["cache-control"]).toBe("no-store");
+  expect(response.json()).toEqual({});
+});

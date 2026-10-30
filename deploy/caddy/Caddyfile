@@ -59,6 +59,9 @@
 				try_files {path} /index.html
 				@index path /index.html
 				header @index Cache-Control "no-cache"
+				# The asset-recovery script is not fingerprinted; always revalidate.
+				@boot path /boot.js
+				header @boot Cache-Control "no-cache"
 				file_server
 			}
 		}

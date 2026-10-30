@@ -498,7 +498,9 @@ export const buildServer = async (
               (accountEmail === undefined
                 ? null
                 : ((await identity.userIdForEmail?.(accountEmail)) ?? null)),
-            action: `${action}.${response.ok ? (challenge ? "challenge" : "success") : "failure"}`,
+            // Better Auth applies its own per-IP limit (3 sign-ins per 10 s
+            // in production); a refusal there is not a wrong password.
+            action: `${action}.${response.ok ? (challenge ? "challenge" : "success") : response.status === 429 ? "rate_limited" : "failure"}`,
           });
         }
         // Clear cookies left by the previous naming on this host. A cookie
@@ -514,6 +516,10 @@ export const buildServer = async (
   }
 
   const handleApi = async (request: FastifyRequest, reply: FastifyReply) => {
+    // The origin map decides cross-origin navigation; never let a browser
+    // or intermediary keep an old copy.
+    if (request.url.split("?")[0] === "/origins")
+      reply.header("cache-control", "no-store");
     const headers = new Headers();
     for (const [name, value] of Object.entries(request.headers)) {
       if (value === undefined) continue;
