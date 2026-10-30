@@ -1,3 +1,4 @@
+import { createReadinessService, probe } from "@opensuite/core";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { PrismaClient } from "./db/generated/index.js";
@@ -42,10 +43,22 @@ const storage = createStorage({
   secretAccessKey: config.DRIVE_S3_SECRET_KEY,
   forcePathStyle: config.DRIVE_S3_PATH_STYLE === "true",
 });
+const readiness = createReadinessService({
+  probes: [
+    probe("database", async () => {
+      await db.$queryRaw`SELECT 1`;
+    }),
+    probe("object-storage", (signal) => storage.check(signal)),
+  ],
+  timeoutMs: 2000,
+  now: () => new Date(),
+  monotonicMs: () => performance.now(),
+});
 const app = buildServer(
   createDrive(db, storage, config.DRIVE_QUOTA_BYTES),
   storage,
   httpSessionVerifier(config.DRIVE_SESSION_API),
+  readiness,
 );
 app.addHook("onClose", async () => {
   storage.close();

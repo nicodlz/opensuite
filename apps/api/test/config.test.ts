@@ -6,6 +6,7 @@ describe("loadConfig", () => {
   it("applies safe defaults", () => {
     expect(loadConfig({})).toEqual(
       ok({
+        stalwartReadyUrl: "http://stalwart:8080/healthz/ready",
         host: "127.0.0.1",
         port: 3000,
         logLevel: "info",
@@ -23,6 +24,7 @@ describe("loadConfig", () => {
     });
     expect(config).toEqual(
       ok({
+        stalwartReadyUrl: "http://stalwart:8080/healthz/ready",
         host: "0.0.0.0",
         port: 8080,
         logLevel: "debug",

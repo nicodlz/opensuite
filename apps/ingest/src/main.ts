@@ -6,9 +6,14 @@ import {
   databaseLedger,
   IngestService,
   jmapDelivery,
+  createReadinessService,
+  httpProbe,
+  bucketProbe,
+  queueProbe,
 } from "@opensuite/core";
-import { createDatabase } from "@opensuite/db";
+import { createDatabase, createDatabaseProbe } from "@opensuite/db";
 import { z } from "zod";
+import { createHealthServer } from "./health.ts";
 
 const route = z.object({ address: z.email(), destination: z.string().min(1) });
 const destination = z.object({
@@ -42,12 +47,13 @@ const configSchema = z
     }),
     INGEST_DESTINATIONS: z.string().transform((s, ctx) => {
       try {
-        return destination.array().parse(JSON.parse(s));
+        return destination.array().min(1).parse(JSON.parse(s));
       } catch {
         ctx.addIssue({ code: "custom", message: "Invalid destinations JSON" });
         return z.NEVER;
       }
     }),
+    INGEST_HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(3002),
     INGEST_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(5),
     INGEST_AGE_SECONDS: z.coerce.number().int().min(1).default(3600),
   })
@@ -90,13 +96,17 @@ const configSchema = z
   });
 const config = configSchema.safeParse(process.env);
 if (!config.success) {
-  process.stderr.write(`Invalid configuration: ${config.error.message}\n`);
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", event: "invalid_configuration", fields: config.error.issues.map((issue) => issue.path.join(".")) })}\n`,
+  );
   process.exit(1);
 }
 const c = config.data;
 const db = createDatabase(c.DATABASE_URL);
 if (db.isErr()) {
-  process.stderr.write(`${db.error.message}\n`);
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", event: "invalid_database_configuration" })}\n`,
+  );
   process.exit(1);
 }
 const s3 = new S3Client({
@@ -146,23 +156,54 @@ const service = new IngestService({
     emit(event, fields) {
       const count = (counters.get(event) ?? 0) + 1;
       counters.set(event, count);
-      process.stdout.write(`${JSON.stringify({ event, count, ...fields })}\n`);
+      const safe = {
+        stage: fields["stage"],
+        attempts: fields["attempts"],
+        delaySeconds: fields["delaySeconds"],
+      };
+      process.stdout.write(
+        `${JSON.stringify({ level: "info", event, count, ...safe })}\n`,
+      );
     },
   },
 });
 const queue = awsQueue(sqs, c.INBOUND_QUEUE_URL);
 const command = process.argv[2] ?? "worker";
+const readiness = createReadinessService({
+  probes: [
+    createDatabaseProbe(db.value),
+    queueProbe(sqs, c.INBOUND_QUEUE_URL),
+    bucketProbe("buffer-storage", s3, c.INBOUND_BUCKET),
+    bucketProbe("archive-storage", archive, c.ARCHIVE_BUCKET),
+    ...c.INGEST_DESTINATIONS.map((target, index) =>
+      httpProbe(
+        `mail-server-${String(index + 1)}`,
+        new URL("/healthz/ready", target.origin).toString(),
+      ),
+    ),
+  ],
+  timeoutMs: 2000,
+  now: () => new Date(),
+  monotonicMs: () => performance.now(),
+});
+let healthServer: ReturnType<typeof createHealthServer> | undefined;
 try {
   if (command === "replay") {
     const reset = await ledger.resetFailures();
-    if (reset.isErr()) throw new Error(reset.error.message);
+    if (reset.isErr()) throw new Error("replay reset failed");
     const result = await service.reconcile(c.INGEST_AGE_SECONDS);
     if (result.isErr()) {
-      process.stderr.write(`${result.error.message}\n`);
+      process.stderr.write(
+        `${JSON.stringify({ level: "error", event: "replay_failed" })}\n`,
+      );
       process.exitCode = 1;
     }
   } else if (command === "worker") {
     let stopping = false;
+    healthServer = createHealthServer(readiness, () => stopping);
+    await new Promise<void>((resolve) =>
+      healthServer?.listen(c.INGEST_HEALTH_PORT, "0.0.0.0", resolve),
+    );
     process.on("SIGTERM", () => {
       stopping = true;
     });
@@ -174,7 +215,7 @@ try {
       const received = await queue.receive();
       if (received.isErr()) {
         process.stderr.write(
-          `${JSON.stringify({ event: "ingest_failure", stage: "queue", message: received.error.message })}\n`,
+          `${JSON.stringify({ level: "error", event: "ingest_failure", stage: "queue" })}\n`,
         );
         await new Promise((resolve) => setTimeout(resolve, 5000));
         return poll();
@@ -186,10 +227,18 @@ try {
     };
     await poll();
   } else {
-    process.stderr.write("Usage: node src/main.ts [worker|replay]\n");
+    process.stderr.write(
+      `${JSON.stringify({ level: "error", event: "unknown_command" })}\n`,
+    );
     process.exitCode = 2;
   }
 } finally {
+  if (healthServer !== undefined)
+    await new Promise<void>((resolve, reject) =>
+      healthServer?.close((error) =>
+        error === undefined ? resolve() : reject(error),
+      ),
+    );
   await db.value.$disconnect();
   s3.destroy();
   archive.destroy();

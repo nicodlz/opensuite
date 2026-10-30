@@ -3,13 +3,21 @@
 # Add `--profile dev` for local AWS substitutes (LocalStack).
 name: opensuite
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-restart: &restart
   restart: unless-stopped
+  logging: *logging
 
 services:
   # Generates local secrets once, into a dedicated volume. Each consumer
   # mounts only its own sub-directory, read-only. Nothing reaches Git or .env.
   secrets:
+    logging: *logging
     image: alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
     command:
       - sh
@@ -96,11 +104,68 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+        - "fetch('http://127.0.0.1:3000/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
       interval: 10s
       timeout: 5s
       retries: 6
       start_period: 10s
+
+  # Ingestion needs a separately provisioned queue, buckets and mailbox credentials.
+  ingest:
+    profiles: [ingest]
+    <<: *restart
+    build:
+      context: .
+      dockerfile: apps/ingest/Dockerfile
+    image: opensuite-ingest:local
+    env_file:
+      - path: ${INGEST_ENV_FILE:-./deploy/ingest.env}
+        required: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3002/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  observe:
+    <<: *restart
+    build:
+      context: .
+      dockerfile: apps/observe/Dockerfile
+    image: opensuite-observe:local
+    env_file:
+      - path: ${OBSERVE_ENV_FILE:-./deploy/observe.env}
+        required: false
+    environment:
+      OBSERVE_CERT_HOST: ${OPENSUITE_PUBLIC_HOST:-localhost}
+    volumes:
+      - type: bind
+        source: ${OBSERVE_BACKUP_DIR:-./deploy/backup-status}
+        target: /backup
+        read_only: true
+      - type: bind
+        source: ${OBSERVE_DISK_PATH:-/var/lib/docker}
+        target: /host-disk
+        read_only: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3003/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
 
   # Drive has its own process and migration; mail does not depend on it.
   drive:
@@ -139,7 +204,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3001/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+          "fetch('http://127.0.0.1:3001/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
         ]
       interval: 10s
       timeout: 5s
@@ -147,6 +212,7 @@ services:
       start_period: 10s
 
   drive-migrate:
+    logging: *logging
     build:
       context: .
       dockerfile: apps/drive/Dockerfile
@@ -199,6 +265,7 @@ services:
 
   # Apply versioned migrations before starting the API.
   migrate:
+    logging: *logging
     build:
       context: .
       dockerfile: deploy/postgres/Dockerfile
@@ -280,6 +347,7 @@ services:
   # Applies idempotent server settings (stdout logs, proxy trust) once the
   # mail server is healthy. Safe to re-run on every start.
   stalwart-setup:
+    logging: *logging
     image: stalwartlabs/stalwart:v1.0.1@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b
     entrypoint: ["/bin/sh", "/opt/opensuite/setup.sh"]
     environment:

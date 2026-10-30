@@ -164,6 +164,9 @@ settings:
 
 catalogs:
   default:
+    '@aws-sdk/client-cloudwatch':
+      specifier: 3.1150.0
+      version: 3.1150.0
     '@aws-sdk/client-s3':
       specifier: 3.1150.0
       version: 3.1150.0
@@ -404,6 +407,9 @@ importers:
       '@opensuite/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@opensuite/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@orpc/openapi':
         specifier: 'catalog:'
         version: 1.16.1(fastify@5.12.7)(ws@8.22.0)
@@ -450,6 +456,28 @@ importers:
       '@opensuite/db':
         specifier: workspace:*
         version: link:../../packages/db
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@opensuite/typescript-config':
+        specifier: workspace:*
+        version: link:../../packages/typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.5
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  apps/observe:
+    dependencies:
+      '@aws-sdk/client-cloudwatch':
+        specifier: 'catalog:'
+        version: 3.1150.0
+      '@aws-sdk/client-sqs':
+        specifier: 'catalog:'
+        version: 3.1150.0
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -684,6 +712,10 @@ packages:
 
   '@aws-sdk/checksums@3.1001.7':
     resolution: {integrity: sha512-hUlYwqlsiDuPyhI5nQLgLZYKo0bFvMKaVk9JRfpb9S2kXxT2ZhyHZ5RTfH3PBpD3dMnDkGrA0/aY1AeAMFLmrQ==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-cloudwatch@3.1150.0':
+    resolution: {integrity: sha512-7A06Mw01Oj2M2/zYqobPfPV6dy/rTC7Y6JNc8vO3PxPcI383HI2GrcXN5WGppDRBZpe+gTKECv18UQoHkTX4/w==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-s3@3.1150.0':
@@ -2180,6 +2212,10 @@ packages:
     resolution: {integrity: sha512-ycSJu3tFAQ4v04CBB0agqFMVsSQ1iG3yw+SpgxRqKfaURpQD4CZ8Wn0zPMmSnOuTpTh65Vz+EA0rMrw089wvkA==}
     engines: {node: '>=18.0.0'}
 
+  '@smithy/middleware-compression@4.6.2':
+    resolution: {integrity: sha512-Q9d+luiRjyHT6kCL/9NyGpdZJgodh4vtvfHC6H8SqoVKrV2k9RoyI9/IloVfdCYks3/2DIi7BsYYLcda5KZS0A==}
+    engines: {node: '>=18.0.0'}
+
   '@smithy/node-http-handler@4.13.0':
     resolution: {integrity: sha512-/GGcPoNJ2nzGytdAanpbx7mpp9Coa8LP+/Rpmbktr8YeLuIXs9B0SEz+X3AeonHdyzOIFJdKbN7jOZ+Tj+pMGw==}
     engines: {node: '>=18.0.0'}
@@ -2737,6 +2773,9 @@ packages:
     peerDependenciesMeta:
       picomatch:
         optional: true
+
+  fflate@0.8.3:
+    resolution: {integrity: sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==}
 
   find-my-way@9.10.0:
     resolution: {integrity: sha512-eru+uCPQ2g+nLBkf84MHP/KyNNMar0BDy0j+i8Fb72GF9/YHBZ58q7FODUtfVV7XU9nfRUHXSmaM8NmZcIbZ4Q==}
@@ -3518,6 +3557,18 @@ snapshots:
       '@aws-sdk/core': 3.978.7
       '@aws-sdk/types': 3.975.0
       '@smithy/core': 3.37.0
+      '@smithy/types': 4.19.0
+      tslib: 2.8.1
+
+  '@aws-sdk/client-cloudwatch@3.1150.0':
+    dependencies:
+      '@aws-sdk/core': 3.978.7
+      '@aws-sdk/credential-provider-node': 3.972.90
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.37.0
+      '@smithy/fetch-http-handler': 5.8.0
+      '@smithy/middleware-compression': 4.6.2
+      '@smithy/node-http-handler': 4.13.0
       '@smithy/types': 4.19.0
       tslib: 2.8.1
 
@@ -4858,6 +4909,13 @@ snapshots:
       '@smithy/types': 4.19.0
       tslib: 2.8.1
 
+  '@smithy/middleware-compression@4.6.2':
+    dependencies:
+      '@smithy/core': 3.37.0
+      '@smithy/types': 4.19.0
+      fflate: 0.8.3
+      tslib: 2.8.1
+
   '@smithy/node-http-handler@4.13.0':
     dependencies:
       '@smithy/core': 3.37.0
@@ -5377,6 +5435,8 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
+
+  fflate@0.8.3: {}
 
   find-my-way@9.10.0:
     dependencies:

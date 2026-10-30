@@ -1,4 +1,4 @@
-import { createReadinessService } from "@opensuite/core";
+import { createReadinessService, httpProbe } from "@opensuite/core";
 import { createDatabase, createDatabaseProbe } from "@opensuite/db";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
@@ -30,7 +30,10 @@ if (database.isErr()) {
 }
 
 const readiness = createReadinessService({
-  probes: [createDatabaseProbe(database.value)],
+  probes: [
+    createDatabaseProbe(database.value),
+    httpProbe("mail-server", config.value.stalwartReadyUrl),
+  ],
   timeoutMs: config.value.readinessTimeoutMs,
   now: () => new Date(),
   monotonicMs,

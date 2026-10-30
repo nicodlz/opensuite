@@ -67,7 +67,7 @@ describe("readiness service", () => {
     expect(readiness.dependencies[0]?.status).toBe("down");
     expect(failures[0]?.failure).toEqual({
       kind: "unavailable",
-      message: "driver crashed",
+      message: "dependency check failed",
     });
   });
 

@@ -8,6 +8,7 @@ const EnvSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
+  STALWART_READY_URL: z.url().default("http://stalwart:8080/healthz/ready"),
   READINESS_TIMEOUT_MS: z.coerce
     .number()
     .int()
@@ -17,6 +18,7 @@ const EnvSchema = z.object({
 });
 
 export interface ApiConfig {
+  readonly stalwartReadyUrl: string;
   readonly host: string;
   readonly port: number;
   readonly logLevel: z.infer<typeof EnvSchema>["LOG_LEVEL"];
@@ -42,6 +44,7 @@ export const loadConfig = (
     });
   }
   return ok({
+    stalwartReadyUrl: parsed.data.STALWART_READY_URL,
     host: parsed.data.API_HOST,
     port: parsed.data.API_PORT,
     logLevel: parsed.data.LOG_LEVEL,
