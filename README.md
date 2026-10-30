@@ -3,7 +3,7 @@
 A self-hostable suite for mail, calendar, contacts and file storage.
 
 > **Status: early development.** Only the pieces listed below exist. Mail
-> application-level mail provisioning, the production mail API, calendar and contacts features, drive and
+> application-level mail provisioning, the production mail API, calendar and contacts features and
 > the setup wizard are planned and not implemented yet.
 
 ## What works today
@@ -24,6 +24,7 @@ A self-hostable suite for mail, calendar, contacts and file storage.
   [object storage guide](docs/operations/object-storage.md) covers restart,
   migration, backup and recovery requirements.
 - **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
+- **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. Authentication integration is pending; see [development](docs/development.md#drive).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).
   - `GET /health`: liveness; answers `200` while the process runs.
@@ -69,6 +70,7 @@ pnpm test          # Vitest unit project
 pnpm build         # static web client
 pnpm test:e2e      # Vite preview and a local API; install Chromium first
 pnpm exec vitest run --project stalwart  # real server; Docker required
+pnpm exec vitest run --project drive     # disposable PostgreSQL and LocalStack
 CLEITO_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
@@ -84,7 +86,7 @@ corresponding infrastructure.
 | `apps/api`                   | HTTP API server                                        |
 | `apps/web`                   | Mail workspace and API status page                     |
 | `apps/ingest`                | Inbound mail ingestion worker                          |
-| `apps/drive`                 | File storage service (placeholder)                     |
+| `apps/drive`                 | Independent file storage service                       |
 | `packages/contracts`         | Shared API schemas and procedure contracts             |
 | `packages/core`              | Domain, services and provider adapters                 |
 | `packages/jmap`              | JMAP and server-side provisioning clients              |

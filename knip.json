@@ -8,6 +8,9 @@
     "packages/*": {},
     "apps/web": {
       "entry": ["src/styles.css"]
+    },
+    "apps/drive": {
+      "ignoreDependencies": ["@prisma/client"]
     }
   }
 }

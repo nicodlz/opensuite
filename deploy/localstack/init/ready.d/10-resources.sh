@@ -5,6 +5,9 @@ bucket="${INBOUND_BUCKET:-opensuite-inbound}"
 queue="${INBOUND_QUEUE:-opensuite-inbound}"
 awslocal s3api create-bucket --bucket "$bucket" >/dev/null
 awslocal s3api create-bucket --bucket "${ARCHIVE_BUCKET:-opensuite-archive}" >/dev/null
+awslocal s3api create-bucket --bucket "${DRIVE_S3_BUCKET:-opensuite-drive}" >/dev/null
+# Local development only. Production buckets need an origin-specific CORS policy.
+awslocal s3api put-bucket-cors --bucket "${DRIVE_S3_BUCKET:-opensuite-drive}" --cors-configuration '{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMethods":["PUT","GET","HEAD"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag"],"MaxAgeSeconds":300}]}' >/dev/null
 dlq_url="$(awslocal sqs create-queue --queue-name "$queue-dlq" --attributes MessageRetentionPeriod=1209600 --query QueueUrl --output text)"
 dlq_arn="$(awslocal sqs get-queue-attributes --queue-url "$dlq_url" --attribute-names QueueArn --query Attributes.QueueArn --output text)"
 queue_url="$(awslocal sqs create-queue --queue-name "$queue" --attributes MessageRetentionPeriod=1209600 --query QueueUrl --output text)"

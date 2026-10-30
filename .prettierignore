@@ -4,3 +4,4 @@ dist/
 coverage/
 .turbo/
 **/src/generated/
+apps/drive/src/db/generated/
