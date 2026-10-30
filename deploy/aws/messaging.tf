@@ -52,7 +52,7 @@ resource "aws_sqs_queue" "ingestion" {
   sqs_managed_sse_enabled    = true
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.ingestion_dlq.arn
-    maxReceiveCount     = 5
+    maxReceiveCount     = 100
   })
 }
 

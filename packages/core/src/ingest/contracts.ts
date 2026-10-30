@@ -1,7 +1,11 @@
 import type { Result } from "neverthrow";
 import type { Notification, Recipient, Route } from "../domain/notification.ts";
 
-export type Failure = { message: string; ambiguous?: boolean };
+export type Failure = {
+  message: string;
+  ambiguous?: boolean;
+  permanent?: boolean;
+};
 export type Outcome<T> = PromiseLike<Result<T, Failure>>;
 export interface QueueMessage {
   body: string;
@@ -33,18 +37,24 @@ export interface LedgerRecipient {
   key: string;
   state: RecipientState;
   attempts: number;
+  destination: string;
+  known: boolean;
 }
 export interface Ledger {
   prepare(
     notification: Notification,
     recipients: Recipient[],
   ): Outcome<LedgerRecipient[]>;
-  claim(key: string): Outcome<boolean>;
+  claim(key: string, owner: string): Outcome<boolean>;
+  renew(key: string, owner: string): Outcome<boolean>;
+  expireClaims(): Outcome<void>;
   finish(
     key: string,
     state: RecipientState,
     remoteId?: string,
     error?: string,
+    owner?: string,
+    chargeAttempt?: boolean,
   ): Outcome<void>;
   messageState(id: string, state: string): Outcome<void>;
   resetFailures(): Outcome<void>;
@@ -54,6 +64,16 @@ export interface Delivery {
     destination: string,
     bytes: Uint8Array,
     quarantine: boolean,
+    receivedAt: string,
+    key: string,
+    uploads: Map<string, string>,
+  ): Outcome<string>;
+  reconcile(
+    destination: string,
+    bytes: Uint8Array,
+    quarantine: boolean,
+    receivedAt: string,
+    key: string,
   ): Outcome<string>;
 }
 export interface Events {

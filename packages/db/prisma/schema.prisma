@@ -191,6 +191,8 @@ model InboundRecipient {
   state          String         @default("received")
   attempts       Int            @default(0)
   remoteId       String?
+  claimedAt      DateTime?
+  claimOwner     String?
   error          String?
   updatedAt      DateTime       @updatedAt
 

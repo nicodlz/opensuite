@@ -14,6 +14,12 @@ resource "aws_iam_user_policy" "ingestion" {
         Resource = "${aws_s3_bucket.buffer.arn}/${local.message_prefix}*"
       },
       {
+        Effect    = "Allow"
+        Action    = ["s3:ListBucket"]
+        Resource  = aws_s3_bucket.buffer.arn
+        Condition = { StringLike = { "s3:prefix" = ["${local.message_prefix}*"] } }
+      },
+      {
         Effect   = "Allow"
         Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"]
         Resource = aws_sqs_queue.ingestion.arn

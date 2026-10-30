@@ -10,18 +10,22 @@ import {
 import { createDatabase } from "@opensuite/db";
 import { JmapCapability, JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
-import { err, ok, type Result } from "neverthrow";
+import { err, type Result } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { awsQueue, awsStorage } from "../src/adapters/aws.ts";
 import { databaseLedger } from "../src/adapters/database.ts";
+import { jmapDelivery } from "../src/adapters/jmap.ts";
+import {
+  parseNotification,
+  resolveRecipients,
+} from "../src/domain/notification.ts";
 import { IngestService } from "../src/ingest/service.ts";
 import { notification } from "./fixtures.ts";
-import type { Delivery } from "../src/ingest/contracts.ts";
 import type { JmapError, Session } from "@opensuite/jmap";
 
 const exec = promisify(execFile);
 const root = new URL("../../../", import.meta.url);
-const runId = (process.env["CLEITO_RUN_ID"] ?? randomBytes(5).toString("hex"))
+const runId = (process.env["INGEST_RUN_ID"] ?? randomBytes(5).toString("hex"))
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-");
 const project = `opensuite-ingest-${runId}-${randomBytes(3).toString("hex")}`;
@@ -113,6 +117,39 @@ const connectClients = async () => {
   );
 };
 
+const connectService = () => {
+  if (s3 === undefined || db === undefined || db.isErr())
+    throw new Error("Clients not initialized");
+  const delivery = jmapDelivery(
+    ["alice", "bob"].map((name) => {
+      const mailbox = clients.get(name);
+      if (mailbox === undefined) throw new Error("Missing client");
+      return {
+        id: name,
+        origin,
+        authorization: `Basic ${Buffer.from(`${name}@example.test:${password}`).toString("base64")}`,
+        quarantineMailbox: mailbox.quarantine,
+        rewriteSessionUrls: true,
+      };
+    }),
+  );
+  service = new IngestService({
+    storage: awsStorage(s3, s3, "inbound", "archive", "notifications/", ""),
+    ledger: databaseLedger(db.value),
+    delivery,
+    routes: [
+      { address: "alice@example.test", destination: "alice" },
+      { address: "alias@other.test", destination: "alice" },
+      { address: "hidden@example.test", destination: "bob" },
+    ],
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 5,
+    events: { emit() {} },
+  });
+};
+
 describe("local ingestion pipeline", () => {
   beforeAll(async () => {
     try {
@@ -128,7 +165,7 @@ describe("local ingestion pipeline", () => {
         { cwd: root, env: { ...process.env, DATABASE_URL: databaseUrl } },
       );
       db = createDatabase(databaseUrl);
-      const database = unwrap(db);
+      unwrap(db);
       const config = {
         region: "us-east-1",
         endpoint: aws,
@@ -153,48 +190,7 @@ describe("local ingestion pipeline", () => {
         ),
       );
       await connectClients();
-      const delivery: Delivery = {
-        async import(destination, bytes, quarantine) {
-          const mailbox = clients.get(destination);
-          if (mailbox === undefined)
-            return err({ message: "Unknown destination" });
-          const upload = await mailbox.client.upload(
-            mailbox.session,
-            mailbox.account,
-            bytes,
-          );
-          if (upload.isErr())
-            return err({ message: JSON.stringify(upload.error) });
-          const imported = await mailbox.client.importEmail(
-            mailbox.session,
-            mailbox.account,
-            {
-              blobId: upload.value.blobId,
-              mailboxIds: {
-                [quarantine ? mailbox.quarantine : mailbox.inbox]: true,
-              },
-            },
-          );
-          return imported.isErr()
-            ? err({ message: JSON.stringify(imported.error), ambiguous: true })
-            : ok(imported.value.id);
-        },
-      };
-      service = new IngestService({
-        storage: awsStorage(s3, s3, "inbound", "archive", "notifications/", ""),
-        ledger: databaseLedger(database),
-        delivery,
-        routes: [
-          { address: "alice@example.test", destination: "alice" },
-          { address: "alias@other.test", destination: "alice" },
-          { address: "hidden@example.test", destination: "bob" },
-        ],
-        bucket: "inbound",
-        bufferPrefix: "",
-        topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
-        maxAttempts: 5,
-        events: { emit() {} },
-      });
+      connectService();
     } catch (error) {
       await compose("down", "--volumes", "--remove-orphans");
       throw error;
@@ -252,7 +248,7 @@ describe("local ingestion pipeline", () => {
       }),
     );
   }, 90_000);
-  it("quarantines a failed verdict and retains the object for an unknown recipient", async () => {
+  it("quarantines a failed verdict and records an unknown recipient", async () => {
     if (s3 === undefined || db === undefined || db.isErr())
       throw new Error("Clients not initialized");
     const raw = Buffer.from(
@@ -299,7 +295,7 @@ describe("local ingestion pipeline", () => {
         "",
       ).bufferKeys(),
     );
-    expect(list).toContain("ses-fail");
+    expect(list).not.toContain("ses-fail");
   }, 90_000);
 
   it("replays an archived notification after queue loss with a large attachment", async () => {
@@ -381,12 +377,135 @@ describe("local ingestion pipeline", () => {
       origin = `http://127.0.0.1:${await port("stalwart", "8080")}`;
       await ready(`${origin}/healthz/ready`, 120);
       await connectClients();
+      connectService();
     }
     expect((await service.process(body)).isOk()).toBe(true);
     const rows = await db.value.inboundRecipient.findMany({
       where: { messageId: "ses-outage" },
     });
     expect(rows[0]?.state).toBe("imported");
-    expect(rows[0]?.attempts).toBe(2);
+    expect(rows[0]?.attempts).toBe(0);
   }, 120_000);
+  it("reconciles a lost import response against Stalwart without a duplicate", async () => {
+    if (s3 === undefined || db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    const alice = clients.get("alice");
+    if (alice === undefined) throw new Error("Missing Alice");
+    const raw = Buffer.from(
+      "Message-ID: <reconcile@example.test>\r\nFrom: sender@example.test\r\nTo: alice@example.test\r\nSubject: Reconcile\r\n\r\nHello\r\n",
+    );
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-reconcile",
+        Body: raw,
+      }),
+    );
+    const delivery = jmapDelivery([
+      {
+        id: "alice",
+        origin,
+        authorization: `Basic ${Buffer.from(`alice@example.test:${password}`).toString("base64")}`,
+        quarantineMailbox: alice.quarantine,
+        rewriteSessionUrls: true,
+      },
+    ]);
+    const ledger = databaseLedger(db.value);
+    const recovering = new IngestService({
+      storage: awsStorage(s3, s3, "inbound", "archive", "notifications/", ""),
+      ledger,
+      delivery: {
+        ...delivery,
+        async import(...args) {
+          const result = await delivery.import(...args);
+          return result.isErr()
+            ? result
+            : err({ message: "response lost", ambiguous: true });
+        },
+      },
+      routes: [{ address: "alice@example.test", destination: "alice" }],
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 5,
+      events: { emit() {} },
+    });
+    const body = JSON.stringify(
+      notification(["alice@example.test"], "PASS", "ses-reconcile"),
+    );
+    expect((await recovering.process(body)).isErr()).toBe(true);
+    expect((await recovering.process(body)).isErr()).toBe(true);
+    const stored = await db.value.inboundMessage.findUniqueOrThrow({
+      where: { id: "ses-reconcile" },
+    });
+    expect(stored.notification).toMatchObject({ notificationType: "Received" });
+    expect((await recovering.reconcile(1)).isOk()).toBe(true);
+    const row = await db.value.inboundRecipient.findFirstOrThrow({
+      where: { messageId: "ses-reconcile" },
+    });
+    expect(row.state).toBe("imported");
+    const ids = getValue(
+      await alice.client.queryEmails(alice.session, alice.account, {
+        filter: { subject: "Reconcile" },
+      }),
+    ).ids;
+    expect(ids).toHaveLength(1);
+    const email = getValue(
+      await alice.client.emails(alice.session, alice.account, ids),
+    ).list[0];
+    expect(email?.receivedAt).toBe("2026-01-02T03:04:05Z");
+    expect(row.remoteId).toBe(ids[0]);
+  }, 90_000);
+
+  it("moves a stale claim to uncertain and fences its old owner", async () => {
+    if (s3 === undefined || db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    const body = JSON.stringify(
+      notification(["alice@example.test"], "PASS", "ses-stale"),
+    );
+    const parsed = parseNotification(body);
+    if (parsed.isErr()) throw new Error(parsed.error);
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-stale",
+        Body: "Message-ID: <stale@example.test>\r\n\r\nbody",
+      }),
+    );
+    const ledger = databaseLedger(db.value);
+    const rows = unwrap(
+      await ledger.prepare(
+        parsed.value,
+        resolveRecipients(
+          ["alice@example.test"],
+          [{ address: "alice@example.test", destination: "alice" }],
+        ),
+      ),
+    );
+    const key = rows[0]?.key;
+    if (key === undefined) throw new Error("Missing row");
+    expect(unwrap(await ledger.claim(key, "old-owner"))).toBe(true);
+    await db.value.inboundRecipient.update({
+      where: { idempotencyKey: key },
+      data: { claimedAt: new Date(Date.now() - 700_000) },
+    });
+    expect((await service.process(body)).isErr()).toBe(true);
+    expect(
+      (
+        await ledger.finish(key, "imported", "late", undefined, "old-owner")
+      ).isErr(),
+    ).toBe(true);
+    const row = await db.value.inboundRecipient.findUniqueOrThrow({
+      where: { idempotencyKey: key },
+    });
+    expect(row.state).toBe("uncertain");
+    expect((await service.reconcile(1)).isErr()).toBe(true);
+    expect(
+      (
+        await db.value.inboundRecipient.findUniqueOrThrow({
+          where: { idempotencyKey: key },
+        })
+      ).state,
+    ).toBe("uncertain");
+  }, 90_000);
 });

@@ -1,5 +1,5 @@
-import { err } from "neverthrow";
-import { describe, expect, it } from "vitest";
+import { err, ok } from "neverthrow";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseNotification,
   resolveRecipients,
@@ -78,7 +78,7 @@ describe("SES ingestion", () => {
     expect(memory.archives.size).toBe(1);
     expect(memory.buffers.size).toBe(0);
   });
-  it("quarantines failures and preserves buffer for unknown recipients", async () => {
+  it("quarantines failures and treats unknown recipients as terminal", async () => {
     const { memory, service } = create();
     memory.buffers.set("ses-1", new Uint8Array([1]));
     expect(
@@ -94,7 +94,7 @@ describe("SES ingestion", () => {
       ).isOk(),
     ).toBe(true);
     expect(memory.imports[0]?.quarantine).toBe(true);
-    expect(memory.buffers.has("ses-1")).toBe(true);
+    expect(memory.buffers.has("ses-1")).toBe(false);
     expect([...memory.records.values()].map((r) => r.state)).toEqual([
       "quarantined",
       "rejected",
@@ -120,6 +120,7 @@ it("retains an ambiguous import without repeating it or deleting its source", as
     storage: memory.storage,
     ledger: memory.ledger,
     delivery: {
+      reconcile: (...args) => memory.delivery.reconcile(...args),
       import() {
         attempts++;
         return Promise.resolve(
@@ -135,9 +136,218 @@ it("retains an ambiguous import without repeating it or deleting its source", as
     maxAttempts: 3,
   });
   const body = JSON.stringify(notification(["alice@example.test"]));
-  expect((await service.process(body)).isOk()).toBe(true);
-  expect((await service.process(body)).isOk()).toBe(true);
+  expect((await service.process(body)).isErr()).toBe(true);
+  expect((await service.process(body)).isErr()).toBe(true);
+  expect((await service.reconcile(1)).isErr()).toBe(true);
   expect(attempts).toBe(1);
   expect([...memory.records.values()][0]?.state).toBe("uncertain");
   expect(memory.buffers.has("ses-1")).toBe(true);
+});
+
+it("keeps uncertain queue items unacknowledged, then reconciles a confirmed import", async () => {
+  const { memory } = create();
+  memory.buffers.set("ses-1", new Uint8Array([1]));
+  let imports = 0;
+  let confirmed = false;
+  const service = new IngestService({
+    storage: memory.storage,
+    ledger: memory.ledger,
+    delivery: {
+      import() {
+        imports++;
+        return Promise.resolve(
+          err({ message: "lost response", ambiguous: true }),
+        );
+      },
+      reconcile() {
+        return Promise.resolve(
+          confirmed
+            ? ok("confirmed")
+            : err({ message: "not yet visible", ambiguous: true }),
+        );
+      },
+    },
+    events: memory.sink,
+    routes,
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 3,
+  });
+  const deleted: string[] = [];
+  const delays: number[] = [];
+  const queue = {
+    receive: () => Promise.resolve(ok([])),
+    delete: (receipt: string) => {
+      deleted.push(receipt);
+      return Promise.resolve(ok(undefined));
+    },
+    defer: (_receipt: string, seconds: number) => {
+      delays.push(seconds);
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  const item = {
+    body: JSON.stringify(notification(["alice@example.test"])),
+    receipt: "r",
+    attempts: 1,
+  };
+  expect((await service.handle(queue, item)).isErr()).toBe(true);
+  expect((await service.handle(queue, item)).isErr()).toBe(true);
+  expect(deleted).toEqual([]);
+  expect(delays).toEqual([60, 60]);
+  expect((await service.reconcile(1)).isErr()).toBe(true);
+  confirmed = true;
+  expect((await service.reconcile(1)).isOk()).toBe(true);
+  expect((await service.handle(queue, item)).isOk()).toBe(true);
+  expect(deleted).toEqual(["r"]);
+  expect(imports).toBe(1);
+  expect(memory.buffers.size).toBe(0);
+});
+
+it("reads once and serializes recipient imports without charging infrastructure failures", async () => {
+  const { memory } = create();
+  memory.buffers.set("ses-1", new Uint8Array([1]));
+  let reads = 0;
+  let active = 0;
+  let peak = 0;
+  let failed = false;
+  const service = new IngestService({
+    storage: {
+      ...memory.storage,
+      readBuffer(bucket, key) {
+        reads++;
+        return memory.storage.readBuffer(bucket, key);
+      },
+    },
+    ledger: memory.ledger,
+    delivery: {
+      ...memory.delivery,
+      async import() {
+        active++;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        active--;
+        if (!failed) {
+          failed = true;
+          return err({ message: "offline" });
+        }
+        return ok("id");
+      },
+    },
+    events: memory.sink,
+    routes,
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 1,
+  });
+  const body = JSON.stringify(notification());
+  expect((await service.process(body)).isErr()).toBe(true);
+  expect(reads).toBe(1);
+  expect(peak).toBe(1);
+  expect([...memory.records.values()].map((r) => r.attempts)).toEqual([0, 0]);
+  expect((await service.process(body)).isOk()).toBe(true);
+});
+
+it("replays archives when listing the buffer fails and reports the listing failure", async () => {
+  const { memory } = create();
+  memory.archives.set(
+    "saved",
+    JSON.stringify(notification(["alice@example.test"])),
+  );
+  memory.buffers.set("ses-1", new Uint8Array([1]));
+  const service = new IngestService({
+    storage: {
+      ...memory.storage,
+      bufferKeys: () => Promise.resolve(err({ message: "denied" })),
+    },
+    ledger: memory.ledger,
+    delivery: memory.delivery,
+    events: memory.sink,
+    routes,
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 3,
+  });
+  expect((await service.reconcile(1)).isErr()).toBe(true);
+  expect(memory.imports).toHaveLength(1);
+  expect(memory.buffers.size).toBe(0);
+});
+
+it("renews the recipient lease and queue visibility during a long import", async () => {
+  vi.useFakeTimers();
+  try {
+    const { memory } = create();
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    let finish: (() => void) | undefined;
+    let renewals = 0;
+    let extensions = 0;
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: {
+        ...memory.ledger,
+        renew(key, owner) {
+          renewals++;
+          return memory.ledger.renew(key, owner);
+        },
+      },
+      delivery: {
+        ...memory.delivery,
+        import() {
+          return new Promise((resolve) => {
+            finish = () => resolve(ok("id"));
+          });
+        },
+      },
+      events: memory.sink,
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    const queue = {
+      receive: () => Promise.resolve(ok([])),
+      delete: () => Promise.resolve(ok(undefined)),
+      defer: (_receipt: string, seconds: number) => {
+        if (seconds === 300) extensions++;
+        return Promise.resolve(ok(undefined));
+      },
+    };
+    const pending = service.handle(queue, {
+      body: JSON.stringify(notification(["alice@example.test"])),
+      receipt: "r",
+      attempts: 1,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(renewals).toBe(1);
+    expect(extensions).toBe(1);
+    if (finish === undefined) throw new Error("Import did not start");
+    finish();
+    expect((await pending).isOk()).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("continues processing the original durable destination after routes change", async () => {
+  const { memory, service } = create();
+  const body = JSON.stringify(notification(["alice@example.test"]));
+  expect((await service.process(body)).isErr()).toBe(true);
+  memory.buffers.set("ses-1", new Uint8Array([1]));
+  const changed = new IngestService({
+    storage: memory.storage,
+    ledger: memory.ledger,
+    delivery: memory.delivery,
+    events: memory.sink,
+    routes: [{ address: "alice@example.test", destination: "different" }],
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 3,
+  });
+  expect((await changed.process(body)).isOk()).toBe(true);
+  expect(memory.imports.map((item) => item.destination)).toEqual(["alice"]);
 });
