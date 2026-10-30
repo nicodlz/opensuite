@@ -21,3 +21,6 @@ export { createMailPushStore } from "./mail-push.ts";
 
 export { createCalendarReminderStore } from "./calendar-reminders.ts";
 export type { PlannedCalendarReminder } from "./calendar-reminders.ts";
+
+export { createAddressStore } from "./addresses.ts";
+export type { AddressStore } from "./addresses.ts";

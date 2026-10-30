@@ -170,7 +170,14 @@ model Address {
   isAlias   Boolean  @default(false)
   createdAt DateTime @default(now())
   emailAlias EmailAlias?
+  mailboxManaged Boolean @default(false)
+  ready Boolean @default(false)
+  removalPending Boolean @default(false)
+  lastAccountId String?
+  revision Int @default(0)
+  updatedAt DateTime @default(now()) @updatedAt
 
+  @@index([mailboxManaged, ready, updatedAt])
   @@unique([domainId, localPart])
   @@index([userId])
 }

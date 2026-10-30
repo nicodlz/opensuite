@@ -1,3 +1,4 @@
+import { addressesClient } from "../addresses/client.ts";
 import * as React from "react";
 import type {
   DraftContent,
@@ -155,6 +156,12 @@ export function MailPage() {
   const aliasList = useQuery({
     queryKey: ["aliases", "list"],
     queryFn: listSenders,
+    retry: false,
+    staleTime: 30_000,
+  });
+  const mailboxAddresses = useQuery({
+    queryKey: ["addresses"],
+    queryFn: () => addressesClient.list({}),
     retry: false,
     staleTime: 30_000,
   });
@@ -1070,7 +1077,12 @@ export function MailPage() {
             key={state.key}
             state={state}
             from={identity.data?.address.email}
-            aliases={(aliasList.data ?? []).filter(canSendFrom)}
+            aliases={[
+              ...(aliasList.data ?? []).filter(canSendFrom),
+              ...(mailboxAddresses.data?.addresses ?? []).filter(
+                (item) => !item.primary && item.ready,
+              ),
+            ]}
             minimized={minimized.has(state.key)}
             onMinimize={(value) =>
               setMinimized((previous) => {

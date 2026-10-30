@@ -7,11 +7,13 @@ import { createMailService } from "@opensuite/core/services/mail";
 import {
   configureApplicationRole,
   createDatabase,
+  createAddressStore,
   createDomainStore,
   createMailboxStore,
 } from "@opensuite/db";
 import { JmapClient } from "@opensuite/jmap";
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { createAuthRuntime } from "../src/auth/runtime.ts";
 import { buildServer } from "../src/server.ts";
@@ -81,7 +83,7 @@ const cleanup = async () => {
   await closeDb();
   await Promise.all(
     [pg, mail].map((name) =>
-      run("docker", ["rm", "-f", name]).catch(() => undefined),
+      run("docker", ["rm", "-fv", name]).catch(() => undefined),
     ),
   );
 };
@@ -161,7 +163,6 @@ beforeAll(async () => {
       run("docker", [
         "run",
         "-d",
-        "--rm",
         "--name",
         pg,
         "-e",
@@ -175,7 +176,6 @@ beforeAll(async () => {
       run("docker", [
         "run",
         "-d",
-        "--rm",
         "--name",
         mail,
         "-e",
@@ -267,7 +267,13 @@ beforeAll(async () => {
         monotonicMs,
       }),
       monotonicMs,
-      identity: runtime.identity,
+      identity: {
+        ...runtime.identity,
+        resolveAddress: createAddressStore(db.value, [
+          "example.test",
+          "second.test",
+        ]).resolveLogin,
+      },
       accounts: runtime.accounts,
       mail: mailService,
     });
@@ -709,5 +715,114 @@ it("provisions a public claim through the normal sign-up path", async () => {
     await expect(claimSignUp(input)).rejects.toThrow("address unavailable");
   } finally {
     await client.value.$disconnect();
+  }
+}, 120_000);
+
+it("resolves a ready mailbox address for sign-in while excluding hide-my-email aliases and preserving MFA", async () => {
+  const extraAccount = {
+    email: "extra-login@example.test",
+    password: "long-test-password-extra",
+    name: "Extra login",
+  };
+  await bootstrap(extraAccount.email, extraAccount.password, extraAccount.name);
+  const owner = createDatabase(databaseUrl);
+  if (owner.isErr()) throw new Error("database unavailable");
+  try {
+    const id = await userId(extraAccount.email);
+    const domain = await owner.value.domain.upsert({
+      where: { name: "example.test" },
+      create: {
+        name: "example.test",
+        userId: id,
+        status: "verified",
+        stalwartId: "test-domain",
+      },
+      update: {
+        status: "verified",
+        stalwartId: "test-domain",
+        removalPending: false,
+      },
+    });
+    await owner.value.address.createMany({
+      data: [
+        {
+          userId: id,
+          domainId: domain.id,
+          localPart: "extra-login-alt",
+          isAlias: false,
+          mailboxManaged: true,
+          ready: true,
+        },
+        {
+          userId: id,
+          domainId: domain.id,
+          localPart: "extra-login-hidden",
+          isAlias: true,
+        },
+      ],
+    });
+    const signed = await post("/auth/sign-in/email", {
+      email: "EXTRA-LOGIN-ALT@example.test",
+      password: extraAccount.password,
+    });
+    expect(signed.status).toBe(200);
+    const cookie = cookieOf(signed);
+    const rejectedAlias = await post("/auth/sign-in/email", {
+      email: "extra-login-hidden@example.test",
+      password: extraAccount.password,
+    });
+    const unknown = await post("/auth/sign-in/email", {
+      email: "unknown-extra@example.test",
+      password: extraAccount.password,
+    });
+    const wrong = await post("/auth/sign-in/email", {
+      email: extraAccount.email,
+      password: "wrong-password-123",
+    });
+    expect([rejectedAlias.status, unknown.status, wrong.status]).toEqual([
+      401, 401, 401,
+    ]);
+    expect(await rejectedAlias.json()).toEqual(await unknown.clone().json());
+    expect(await unknown.json()).toEqual(await wrong.json());
+    const enabled = await post(
+      "/auth/two-factor/enable",
+      { password: extraAccount.password },
+      cookie,
+    );
+    expect(enabled.status).toBe(200);
+    const enrollment = z
+      .object({ totpURI: z.string() })
+      .parse(await enabled.json());
+    const secret = new URL(enrollment.totpURI).searchParams.get("secret");
+    if (!secret) throw new Error("missing secret");
+    const verified = await post(
+      "/auth/two-factor/verify-totp",
+      { code: totp(secret) },
+      cookie,
+    );
+    expect(verified.status).toBe(200);
+    const challenge = await post("/auth/sign-in/email", {
+      email: "extra-login-alt@example.test",
+      password: extraAccount.password,
+    });
+    expect(challenge.status).toBe(200);
+    expect(await challenge.json()).toMatchObject({ twoFactorRedirect: true });
+    const limited = await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        post("/auth/sign-in/email", {
+          email:
+            index % 2 ? extraAccount.email : "extra-login-alt@example.test",
+          password: "wrong-password-123",
+        }),
+      ),
+    );
+    expect(limited.some((response) => response.status === 429)).toBe(true);
+    expect(
+      await owner.value.auditEvent.count({
+        where: { userId: id, action: "authentication.rate_limited" },
+      }),
+    ).toBeGreaterThan(0);
+  } finally {
+    await owner.value.$disconnect();
   }
 }, 120_000);

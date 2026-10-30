@@ -13,12 +13,14 @@ import { createAliasMail } from "../../../apps/api/src/adapters/alias-mail.ts";
 import { ok } from "neverthrow";
 import {
   createAliasStore,
+  createAddressStore,
   createDatabase,
   createMailPushStore,
   createMailboxStore,
   createPushStore,
   type PrismaClient,
 } from "../../db/src/index.ts";
+import { createAddressService } from "../../core/src/services/addresses.ts";
 import { createAliasService } from "../../core/src/services/aliases.ts";
 import type { Result } from "neverthrow";
 import { startMailNotifier } from "../../../apps/api/src/adapters/mail-notifier.ts";
@@ -156,7 +158,6 @@ describe("Stalwart JMAP integration", () => {
       await run("docker", [
         "run",
         "-d",
-        "--rm",
         "--name",
         pgContainer,
         "-e",
@@ -200,14 +201,14 @@ describe("Stalwart JMAP integration", () => {
       if (database.isErr()) throw new Error("PostgreSQL configuration failed");
       aliasDb = database.value;
     } catch (error) {
-      await run("docker", ["rm", "-f", pgContainer]).catch(() => undefined);
+      await run("docker", ["rm", "-fv", pgContainer]).catch(() => undefined);
       await compose("down", "--volumes", "--remove-orphans");
       throw error;
     }
   }, 120_000);
   afterAll(async () => {
     await aliasDb?.$disconnect();
-    await run("docker", ["rm", "-f", pgContainer]).catch(() => undefined);
+    await run("docker", ["rm", "-fv", pgContainer]).catch(() => undefined);
     await compose("down", "--volumes", "--remove-orphans");
   }, 180_000);
 
@@ -654,6 +655,55 @@ describe("Stalwart JMAP integration", () => {
       await delivered(alice, aliceSession, aliceId, "alias-restored"),
     ).toBe(true);
     value(await admin.removeAlias(account.id, "private-reply", domainId));
+    const addresses = createAddressService(
+      createAddressStore(aliasDb, ["example.test"]),
+      adapter,
+      () => Promise.resolve(5),
+      () => Promise.resolve(ok(undefined)),
+      ["example.test"],
+    );
+    const actor = {
+      id: userId,
+      email: "alias-owner@example.test",
+      role: "user" as const,
+    };
+    const created = await addresses.create(actor, {
+      domainId: domain.id,
+      localPart: "extra-mailbox",
+    });
+    expect(created.isOk()).toBe(true);
+    if (created.isErr()) throw new Error("address provisioning failed");
+    expect(created.value.ready).toBe(true);
+    const ownSender = await addresses.canSendAs(userId, created.value.address);
+    const otherSender = await addresses.canSendAs(
+      "another-user",
+      created.value.address,
+    );
+    expect(ownSender.isOk() && ownSender.value).toBe(created.value.id);
+    expect(otherSender.isOk() && otherSender.value).toBeNull();
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      created.value.address,
+      "extra-before-removal",
+    );
+    expect(
+      await delivered(alice, aliceSession, aliceId, "extra-before-removal"),
+    ).toBe(true);
+    expect((await addresses.remove(actor, created.value.id)).isOk()).toBe(true);
+    await send(
+      bob,
+      bobSession,
+      bobId,
+      "bob@example.test",
+      created.value.address,
+      "extra-after-removal",
+    );
+    expect(
+      await delivered(alice, aliceSession, aliceId, "extra-after-removal"),
+    ).toBe(false);
   }, 60_000);
 
   it("imports identical MIME twice, retains bytes, keywords, date and an attachment, then moves it", async () => {

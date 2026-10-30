@@ -607,6 +607,7 @@ it("expires and bounds uploaded metadata and returns the new draft when removal 
 
 it("rate limits alias submissions and invokes the audit gate before sending", async () => {
   let allow = false;
+  let ownsAddress = true;
   let checks = 0;
   let lookups = 0;
   let submissions = 0;
@@ -672,9 +673,13 @@ it("rate limits alias submissions and invokes the audit gate before sending", as
     },
     client: () =>
       new JmapClient(origin, { authorization: "fixture", fetch: fake }),
-    canSendAs: () => {
+    canSendAs: (userId, address) => {
       lookups++;
-      return Promise.resolve("alias-id");
+      return Promise.resolve(
+        ownsAddress && userId === actor.id && address === "alias@example.test"
+          ? "alias-id"
+          : null,
+      );
     },
     beforeAliasSend: (userId, aliasId) => {
       expect([userId, aliasId]).toEqual(["alice", "alias-id"]);
@@ -689,5 +694,9 @@ it("rate limits alias submissions and invokes the audit gate before sending", as
   expect((await mail.send(actor, "default", "draft")).isOk()).toBe(true);
   expect(checks).toBe(2);
   expect(lookups).toBe(2);
+  expect(submissions).toBe(1);
+  ownsAddress = false;
+  const forbidden = await mail.send(actor, "default", "draft");
+  expect(forbidden.isErr() && forbidden.error.kind).toBe("forbidden");
   expect(submissions).toBe(1);
 });

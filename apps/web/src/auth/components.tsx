@@ -208,7 +208,7 @@ export function LoginPage() {
           ) : (
             <>
               <TextField
-                label="Email"
+                label="Email address (any of your Esuno addresses)"
                 type="email"
                 autoComplete="username"
                 value={email}

@@ -8,8 +8,11 @@ import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { createAddressService } from "@opensuite/core/services/addresses";
+import { err, ok } from "neverthrow";
 import {
   createDatabase,
+  createAddressStore,
   createDatabaseProbe,
   createPushStore,
   createMailPushStore,
@@ -121,6 +124,160 @@ afterAll(async () => {
 }, 180_000);
 
 describe("PostgreSQL schema and adapters", () => {
+  it("reserves one namespace and enforces the address limit under concurrent creates", async () => {
+    const userId = `address-${randomUUID()}`;
+    await db.user.create({
+      data: {
+        id: userId,
+        name: "Address owner",
+        email: `${userId}@example.test`,
+        role: "admin",
+      },
+    });
+    await db.mailboxLink.create({
+      data: {
+        userId,
+        accountId: `account-${userId}`,
+        address: `${userId}@example.test`,
+        credentialId: "test",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const domain = await db.domain.create({
+      data: {
+        name: `${userId}.test`,
+        userId,
+        status: "verified",
+        stalwartId: "domain",
+      },
+    });
+    const store = createAddressStore(db, []);
+    const results = await Promise.all([
+      store.reserve(userId, domain.id, "first", 2),
+      store.reserve(userId, domain.id, "second", 2),
+    ]);
+    expect(results.filter((result) => result.isOk())).toHaveLength(1);
+    expect(
+      results
+        .filter((result) => result.isErr())
+        .map((result) => result.isErr() && result.error.kind),
+    ).toEqual(["limit"]);
+    const row = results.find((result) => result.isOk());
+    if (!row || row.isErr()) throw new Error("reservation missing");
+    const collision = await store.reserve(
+      userId,
+      domain.id,
+      row.value.localPart.toUpperCase(),
+      null,
+    );
+    expect(collision.isErr() && collision.error.kind).toBe("conflict");
+    const aliasRecord = await db.address.create({
+      data: { userId, domainId: domain.id, localPart: "hidden", isAlias: true },
+    });
+    const aliasCollision = await store.reserve(
+      userId,
+      domain.id,
+      "hidden",
+      null,
+    );
+    expect(aliasCollision.isErr() && aliasCollision.error.kind).toBe(
+      "conflict",
+    );
+    expect(
+      await store.withPrimaryReservation(`hidden@${domain.name}`, () =>
+        Promise.resolve("created"),
+      ),
+    ).toBeNull();
+    expect((await store.remove(userId, aliasRecord.id)).isErr()).toBe(true);
+    expect((await store.remove(userId, row.value.id)).isOk()).toBe(true);
+    expect((await store.reserve(userId, domain.id, "third", 2)).isErr()).toBe(
+      true,
+    );
+    const leased = await store.withUserLease(userId, async (token) => {
+      const snapshot = await store.snapshot(userId, row.value.id);
+      if (snapshot.isErr() || !snapshot.value)
+        throw new Error("snapshot missing");
+      return store.finish(
+        userId,
+        row.value.id,
+        token,
+        snapshot.value,
+        snapshot.value.lastAccountId,
+        false,
+      );
+    });
+    expect(leased.isOk() && leased.value.isOk() && leased.value.value).toBe(
+      true,
+    );
+    expect((await store.reserve(userId, domain.id, "third", 2)).isOk()).toBe(
+      true,
+    );
+  });
+
+  it("reconciles ambiguous address provisioning and retains a pending removal reservation", async () => {
+    const id = `retry-${randomUUID()}`;
+    await db.user.create({
+      data: { id, name: "Owner", email: `${id}@example.test`, role: "admin" },
+    });
+    await db.mailboxLink.create({
+      data: {
+        userId: id,
+        accountId: `account-${id}`,
+        address: `${id}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const domain = await db.domain.create({
+      data: {
+        userId: id,
+        name: `${id}.test`,
+        status: "verified",
+        stalwartId: "domain",
+      },
+    });
+    const store = createAddressStore(db, []);
+    let unavailable = true;
+    const service = createAddressService(
+      store,
+      {
+        set: () =>
+          Promise.resolve(
+            unavailable ? err({ kind: "unavailable" }) : ok(undefined),
+          ),
+      },
+      () => Promise.resolve(3),
+      () => Promise.resolve(ok(undefined)),
+      [],
+    );
+    const actor = {
+      id,
+      name: "Owner",
+      email: `${id}@example.test`,
+      role: "admin" as const,
+    };
+    const created = await service.create(actor, {
+      domainId: domain.id,
+      localPart: "retry",
+    });
+    expect(created.isErr()).toBe(true);
+    const pending = await service.list(actor);
+    if (pending.isErr()) throw new Error("missing address");
+    const row = pending.value.addresses.find((address) => !address.primary);
+    expect(row?.ready).toBe(false);
+    if (!row) throw new Error("missing reservation");
+    unavailable = false;
+    expect((await service.reconcile()).isOk()).toBe(true);
+    expect((await store.resolveLogin(`retry@${domain.name}`))?.id).toBe(id);
+    unavailable = true;
+    expect((await service.remove(actor, row.id)).isErr()).toBe(true);
+    expect(await store.resolveLogin(`retry@${domain.name}`)).toBeNull();
+    expect((await store.reserve(id, domain.id, "retry", 3)).isErr()).toBe(true);
+    unavailable = false;
+    expect((await service.reconcile()).isOk()).toBe(true);
+    expect((await store.reserve(id, domain.id, "retry", 3)).isOk()).toBe(true);
+  });
+
   it("isolates push subscriptions and deduplicates tags atomically", async () => {
     const alice = `push-a-${randomUUID()}`;
     const bob = `push-b-${randomUUID()}`;
