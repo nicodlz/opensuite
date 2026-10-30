@@ -1940,3 +1940,155 @@ h1 {
     max-width: none;
   }
 }
+
+/* Drive visual hierarchy */
+.drive-app .drive-sidebar {
+  border-right: 1px solid var(--line-dark);
+  background: var(--night);
+}
+.drive-app .mail-brand {
+  letter-spacing: -0.05em;
+}
+.drive-app .mail-product {
+  background: var(--night-soft);
+  border-color: rgba(201, 178, 255, 0.22);
+}
+.drive-app .mail-product-icon {
+  background: var(--green);
+  color: var(--night);
+}
+.drive-app .drive-new {
+  min-height: 46px;
+}
+.drive-app .mail-folder.active {
+  color: var(--green);
+  background: var(--night-card);
+}
+.drive-app .drive-storage {
+  padding: 16px 12px;
+  border: 1px solid var(--line-dark);
+  border-radius: 10px;
+  background: var(--night-soft);
+}
+.drive-app .mail-topbar {
+  border-bottom-color: rgba(201, 178, 255, 0.16);
+}
+.drive-app .mail-search {
+  border-color: rgba(201, 178, 255, 0.22);
+  background: var(--night-soft);
+}
+.drive-content {
+  padding-top: 32px;
+}
+.drive-heading {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-height: 184px;
+  align-items: end;
+  padding: clamp(24px, 3vw, 40px);
+  border: 1px solid rgba(201, 178, 255, 0.25);
+  border-radius: var(--radius-card);
+  background: linear-gradient(120deg, var(--night) 20%, var(--night-card) 100%);
+  color: var(--ivory);
+}
+.drive-heading::after {
+  position: absolute;
+  z-index: -1;
+  top: -190px;
+  right: 6%;
+  width: 360px;
+  height: 360px;
+  border: 1px solid rgba(201, 178, 255, 0.22);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 55px rgba(201, 178, 255, 0.035),
+    0 0 0 110px rgba(201, 178, 255, 0.025);
+  content: "";
+  pointer-events: none;
+}
+.drive-heading .mail-eyebrow {
+  margin-bottom: 14px;
+  color: var(--green);
+}
+.drive-heading h1 {
+  font-size: clamp(2rem, 3.3vw, 3.2rem);
+  font-weight: 550;
+  letter-spacing: -0.045em;
+  line-height: 1.03;
+}
+.drive-heading .mail-heading-subtitle {
+  margin-top: 12px;
+  color: var(--muted-light);
+  line-height: 1.6;
+}
+.drive-heading .button-secondary {
+  border-color: rgba(246, 244, 248, 0.4);
+  background: transparent;
+  color: var(--ivory);
+}
+.drive-heading .button-secondary:hover:not(:disabled) {
+  border-color: var(--ivory);
+  background: rgba(246, 244, 248, 0.08);
+}
+.drive-heading .button:disabled {
+  opacity: 0.55;
+}
+.drive-toolbar {
+  padding: 16px 2px;
+}
+.drive-breadcrumbs button[aria-current] {
+  color: var(--accent);
+}
+.drive-panel {
+  border-radius: var(--radius-card);
+  box-shadow: 0 16px 45px rgba(29, 23, 39, 0.04);
+}
+.drive-list-heading {
+  background: var(--surface-muted);
+}
+.drive-item-main {
+  min-height: 76px;
+}
+.drive-file-icon {
+  border: 1px solid var(--border);
+}
+.drive-items.grid .drive-item {
+  border-radius: 12px;
+  background: var(--surface-muted);
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.drive-items.grid .drive-item:hover,
+.drive-items.grid .drive-item.selected {
+  border-color: var(--accent);
+  box-shadow: 0 12px 28px rgba(29, 23, 39, 0.08);
+}
+.drive-items.grid .drive-item-main {
+  min-height: 180px;
+}
+.drive-actions {
+  padding: 14px;
+  border-radius: 12px;
+}
+@media (max-width: 700px) {
+  .drive-heading {
+    min-height: 0;
+    padding: 24px;
+  }
+  .drive-heading::after {
+    right: -150px;
+  }
+  .drive-heading h1 {
+    font-size: 2rem;
+  }
+}
+.drive-heading :focus-visible {
+  outline-color: var(--green);
+}
+@media (prefers-reduced-motion: reduce) {
+  .drive-items.grid .drive-item {
+    transition: none;
+  }
+}
