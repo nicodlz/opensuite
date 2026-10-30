@@ -244,6 +244,10 @@ test("alias service errors do not interrupt Mail or replies", async ({
 for (const theme of ["light", "dark"] as const)
   test(`${theme} aliases are accessible on mobile`, async ({ page }) => {
     await mockAliases(page);
+    await page.addInitScript(() => {
+      if (!localStorage.getItem("opensuite-theme"))
+        localStorage.setItem("opensuite-theme", "system");
+    });
     await page.emulateMedia({ colorScheme: theme });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/vault/aliases");

@@ -5,12 +5,17 @@ const storageKey = "opensuite-theme";
 const listeners = new Set<() => void>();
 
 function read(): ThemeChoice {
-  const stored = localStorage.getItem(storageKey);
-  return stored === "light" || stored === "dark" ? stored : "system";
+  try {
+    const stored = localStorage.getItem(storageKey);
+    return stored === "light" || stored === "dark" || stored === "system"
+      ? stored
+      : "light";
+  } catch {
+    return "light";
+  }
 }
 function apply(choice: ThemeChoice) {
-  if (choice === "system") delete document.documentElement.dataset["theme"];
-  else document.documentElement.dataset["theme"] = choice;
+  document.documentElement.dataset["theme"] = choice;
 }
 let current = read();
 apply(current);

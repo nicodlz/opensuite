@@ -26,6 +26,10 @@ function row(page: Page, name: string) {
 const themes: ("light" | "dark")[] = ["light", "dark"];
 for (const theme of themes) {
   test(`${theme} Drive navigation and accessibility`, async ({ page }) => {
+    await page.addInitScript(() => {
+      if (!localStorage.getItem("opensuite-theme"))
+        localStorage.setItem("opensuite-theme", "system");
+    });
     await page.emulateMedia({ colorScheme: theme });
     await page.goto("/drive");
     await expect(page.getByRole("heading", { name: "My drive" })).toBeVisible();

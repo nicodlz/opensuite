@@ -96,16 +96,17 @@ const blobs = new Map<string, { name: string; type: string; base64: string }>([
   ],
 ]);
 const folders = [
-  { id: "inbox", name: "Inbox", role: "inbox" },
-  { id: "drafts", name: "Drafts", role: "drafts" },
+  { id: "junk", name: "Junk Mail", role: "junk" },
+  { id: "work", name: "Work", role: "custom" },
+  { id: "trash", name: "Trash", role: "trash" },
   { id: "sent", name: "Sent", role: "sent" },
   { id: "archive", name: "Archive", role: "archive" },
-  { id: "trash", name: "Trash", role: "trash" },
-  { id: "work", name: "Work", role: "custom" },
+  { id: "inbox", name: "Inbox", role: "inbox" },
+  { id: "drafts", name: "Drafts", role: "drafts" },
 ] satisfies {
   id: string;
   name: string;
-  role: "inbox" | "drafts" | "sent" | "archive" | "trash" | "custom";
+  role: "inbox" | "drafts" | "sent" | "archive" | "junk" | "trash" | "custom";
 }[];
 const api = implement(mailContract);
 function summaries(): ThreadSummary[] {

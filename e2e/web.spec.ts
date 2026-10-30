@@ -26,6 +26,10 @@ for (const theme of ["light", "dark"]) {
   test(`${theme} theme: keyboard controls, focus and accessibility`, async ({
     page,
   }) => {
+    await page.addInitScript(() => {
+      if (!localStorage.getItem("opensuite-theme"))
+        localStorage.setItem("opensuite-theme", "system");
+    });
     await page.emulateMedia({
       colorScheme: theme === "light" ? "light" : "dark",
     });
@@ -98,6 +102,39 @@ for (const theme of ["light", "dark"]) {
     await expect(page).toHaveURL(/\/calendar$/);
   });
 }
+
+test("light is the default across products while saved and system choices remain available", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await mockHealthy(page);
+  async function checkDefault(path: string) {
+    await page.goto(path);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+  }
+  await checkDefault("/");
+  await checkDefault("/mail");
+  await checkDefault("/calendar");
+  await checkDefault("/drive");
+  await checkDefault("/vault");
+  await page.goto("/");
+  const menu = page.getByRole("button", {
+    name: "Account and appearance menu",
+  });
+  await menu.click();
+  await page.getByRole("menuitemradio", { name: "Dark theme" }).click();
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+  await menu.click();
+  await page.getByRole("menuitemradio", { name: "Use system theme" }).click();
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "system");
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+});
 
 test("loading, degraded readiness and dependency detail", async ({ page }) => {
   await page.route("**/api/health", (route) =>

@@ -43,6 +43,14 @@ const folderIcons: Record<string, IconName> = {
   trash: "trash",
   junk: "junk",
 };
+const folderOrder: Record<string, number> = {
+  inbox: 0,
+  drafts: 1,
+  sent: 2,
+  archive: 3,
+  junk: 4,
+  trash: 5,
+};
 type ThreadPage = { threads: ThreadSummary[]; nextCursor: string | null };
 type Undo = { threadIds: string[]; mailboxId: string };
 const removes = (change: MailAction) =>
@@ -491,7 +499,11 @@ export function MailPage() {
   };
   const allChecked =
     list.length > 0 && list.every((thread) => checked.has(thread.id));
-  const system = boxes.filter((item) => item.role !== "custom");
+  const system = boxes
+    .filter((item) => item.role !== "custom")
+    .toSorted(
+      (a, b) => (folderOrder[a.role] ?? 99) - (folderOrder[b.role] ?? 99),
+    );
   const custom = boxes.filter((item) => item.role === "custom");
   return (
     <AppShell

@@ -7,6 +7,17 @@
 // At most three reloads within any sliding minute, so a lasting failure
 // cannot loop.
 (function () {
+  // Set the saved appearance before the stylesheet loads to avoid a flash.
+  let theme = "light";
+  try {
+    const saved = localStorage.getItem("opensuite-theme");
+    if (saved === "light" || saved === "dark" || saved === "system")
+      theme = saved;
+  } catch {
+    // Storage may be unavailable; use the default appearance.
+  }
+  document.documentElement.dataset.theme = theme;
+
   const key = "esuno-asset-reload";
   let scheduled = false;
   let loaded = false;

@@ -64,6 +64,10 @@ test("launcher, text-only status and generator copy", async ({
 for (const theme of ["light", "dark"] as const)
   test(`${theme} Vault is accessible on mobile`, async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => {
+      if (!localStorage.getItem("opensuite-theme"))
+        localStorage.setItem("opensuite-theme", "system");
+    });
     await page.emulateMedia({ colorScheme: theme });
     await origins(page, true);
     await page.goto("/vault");
