@@ -33,6 +33,20 @@ export const makeSources = (config: Config): Sources => {
     async backupAge() {
       return (Date.now() - (await stat("/backup/last-success")).mtimeMs) / 1000;
     },
+    async backupFailure() {
+      try {
+        const failure = (await readFile("/backup/last-failure", "utf8")).trim();
+        return failure === "pass" ? "pass" : "backup";
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "ENOENT"
+        )
+          return null;
+        throw error;
+      }
+    },
     async diskPercent() {
       const disk = await statfs("/host-disk");
       return 100 * (1 - disk.bavail / disk.blocks);

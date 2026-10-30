@@ -307,6 +307,13 @@ test.afterAll(async () => {
   );
 });
 
+const isSignIn = (response: {
+  url(): string;
+  request(): { method(): string };
+}) =>
+  response.url().endsWith("/api/auth/sign-in/email") &&
+  response.request().method() === "POST";
+
 async function signIn(
   page: Page,
   account: { email: string; password: string },
@@ -402,6 +409,67 @@ test("the second factor is required before any sibling origin gets a session", a
   await page.getByLabel("Authenticator code").fill(totp(totpSecret));
   await page.getByRole("button", { name: "Verify" }).click();
   await expect(page).toHaveURL(`${drive}/?folder=projects`);
+});
+
+test("an MFA account signs out on calendar and signs in again with its password", async ({
+  page,
+}) => {
+  await page.goto(`${calendar}/`);
+  const first = page.waitForResponse(isSignIn);
+  await signIn(page, mfa);
+  expect((await first).status()).toBe(200);
+  await expect(
+    page.getByRole("heading", { name: "Verify your identity" }),
+  ).toBeVisible();
+  await page.getByLabel("Authenticator code").fill(totp(totpSecret));
+  await page.getByRole("button", { name: "Verify" }).click();
+  await expect(page).toHaveURL(`${calendar}/`);
+
+  // Answer the move to mail with 204 so the browser stays on calendar's
+  // /login document: it must show no form there.
+  await page.route(`${mail}/login`, (route) => route.fulfill({ status: 204 }));
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page.getByRole("status")).toHaveText("Redirecting to sign-in…");
+  await expect(page.getByLabel("Email")).toHaveCount(0);
+  expect(page.url()).toBe(`${calendar}/login`);
+  await page.unrouteAll({ behavior: "wait" });
+  await page.goto(`${mail}/login`);
+
+  // Same browser, same password: the second factor is asked again.
+  const second = page.waitForResponse(isSignIn);
+  await signIn(page, mfa);
+  const response = await second;
+  expect(response.status()).toBe(200);
+  expect(await response.json()).toMatchObject({ twoFactorRedirect: true });
+  await expect(
+    page.getByRole("heading", { name: "Verify your identity" }),
+  ).toBeVisible();
+});
+
+test("a lazy page chunk that fails once is reloaded on the production build", async ({
+  page,
+}) => {
+  await page.goto(`${single}/login`);
+  await page.getByLabel("Email").fill(user.email);
+  await page.getByLabel("Password").fill(user.password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL(`${single}/mail`);
+  let aborted = 0;
+  await page.route("**/assets/drive-page-*.js", async (route) => {
+    if (aborted === 0) {
+      aborted += 1;
+      await route.abort("internetdisconnected");
+    } else await route.continue();
+  });
+  await page.goto(`${single}/drive`);
+  await expect(
+    page.getByRole("navigation", { name: "Products" }).getByRole("link", {
+      name: "Calendar",
+    }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /^New$/ })).toBeVisible();
+  expect(aborted).toBe(1);
 });
 
 test("forged or replayed callbacks are refused", async ({ page }) => {

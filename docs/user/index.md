@@ -41,3 +41,11 @@ The mail server supports IMAP and submission, but the application currently has 
 ## Email aliases
 
 The mail alias API can create addresses that deliver into your existing mailbox. Each address can be disabled or deleted, and deleted addresses remain reserved. To use Bitwarden's forwarded email generator, create an alias API key and select a default domain, then follow the [alias setup guide](../architecture/aliases.md#api-and-bitwarden). The web interface for managing aliases is planned; currently these operations require an API client.
+## Pass
+
+Open **Pass** to launch your vault in a new tab, check its connection, or generate
+a password or passphrase locally. Your vault master password is separate from
+your Esuno sign-in and is never sent to Esuno. Pass must be enabled by your
+administrator. Connect official Bitwarden clients using the server URL shown in
+**Apps and extensions**; see the [client setup guide](pass-clients.md) for details.
+Alias management is planned.

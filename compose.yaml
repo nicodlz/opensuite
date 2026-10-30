@@ -134,6 +134,7 @@ services:
       # Optional separate application origins, e.g.
       # drive=https://drive.example.org,calendar=https://calendar.example.org
       AUTH_PRODUCT_ORIGINS: ${AUTH_PRODUCT_ORIGINS:-}
+      PASS_PUBLIC_HOST: ${PASS_PUBLIC_HOST:-pass.localhost}
       MAIL_DOMAIN: ${MAIL_DOMAIN:-localhost.test}
       STALWART_INTERNAL_ORIGIN: http://stalwart-management:8080
       STALWART_MANAGEMENT_CLIENT_IP: ${MAIL_MANAGEMENT_API_IP:-172.30.248.10}
