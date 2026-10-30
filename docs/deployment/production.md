@@ -371,29 +371,47 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 ## Rollback
 
 Before running a worker release that predates held recipients, convert the
-ledger to states that release knows. Older code fails on any message that has a
+ledger to states that release knows (procedure checked against the previous
+release's ledger on PostgreSQL). Older code fails on any message that has a
 `held` or `rerouted` recipient, including a duplicate or redriven SQS
 notification for a message that was already delivered, and sends it to the
 dead-letter queue after its retries:
 
-1. Stop the current worker and let it drain (SIGTERM); leave the queues in
-   place.
+1. Stop the current worker and let it drain (SIGTERM), and stop the scheduled
+   replay (`systemctl stop opensuite-replay.timer`) so nothing changes the
+   ledger during the conversion; leave the queues in place.
 2. With the current release, finish every held recipient: list them with
-   `operator list held`, then provision the address and run replay, or reject
-   them, until the list is empty.
-3. Mark routed rows as finished in a form the older release treats as terminal:
+   `operator list held`, then provision the address and run replay once by
+   hand, or reject them, until the list is empty. Stop again before step 3.
+3. Take a database backup (or at least export the affected rows), then relabel
+   routed rows in one transaction that records each change in the append-only
+   `InboundResolutionAudit` table:
 
    ```sql
+   BEGIN;
+   INSERT INTO "InboundResolutionAudit"
+     ("id", "recipientKey", "operator", "reason", "action", "previousState")
+   SELECT gen_random_uuid()::text, "idempotencyKey", '<operator>',
+          'Relabelled before rollback to a release without rerouted',
+          'rollback-relabel', 'rerouted'
+   FROM "InboundRecipient" WHERE state = 'rerouted';
    UPDATE "InboundRecipient"
-   SET state = 'rejected', error = 'Rerouted before rollback'
+   SET state = 'rejected', error = 'Rerouted; relabelled before rollback'
    WHERE state = 'rerouted';
+   COMMIT;
    ```
 
-   A `rerouted` row has no addresses left; its message was delivered through
-   the mailbox recipient, so this only changes how the row is labelled.
+   `rerouted` only means the address was moved, under the message lock and
+   before any import attempt, to a mailbox recipient of the same message. It
+   says nothing about delivery: that destination recipient keeps its own
+   state (`received`, `failed`, `importing`, `uncertain`, `imported` or
+   `quarantined`), which this statement leaves unchanged and which the older
+   release processes as usual. Check those destination recipients before and
+   after, for example with `operator list` and the rows of the same messages.
 
-4. Start the older worker. It then processes the queue backlog and any redrive
-   normally; mail for unknown recipients is again rejected and its object
+4. Start the older worker and re-enable the replay timer. The worker then
+   processes the queue backlog, any redrive and unfinished destination
+   recipients; mail for unknown recipients is again rejected and its object
    deleted once the other recipients finish.
 
 Pause new submissions and preserve the Stalwart outbound queue, SES buffer,
