@@ -358,7 +358,14 @@ export type BillingConfig =
 export async function loadBillingConfig(
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<Result<BillingConfig, ConfigError>> {
-  const parsed = BillingEnvironment.safeParse(env);
+  const parsed = BillingEnvironment.safeParse({
+    ...env,
+    STRIPE_SECRET_KEY_FILE: env["STRIPE_SECRET_KEY_FILE"] || undefined,
+    STRIPE_WEBHOOK_SECRET_FILE: env["STRIPE_WEBHOOK_SECRET_FILE"] || undefined,
+    BILLING_INTERNAL_TOKEN_FILE:
+      env["BILLING_INTERNAL_TOKEN_FILE"] || undefined,
+    BILLING_CANCEL_URL: env["BILLING_CANCEL_URL"] || undefined,
+  });
   if (!parsed.success)
     return err({
       kind: "invalid_environment",

@@ -13,6 +13,15 @@ import { createDrive } from "../src/services/drive.ts";
 import { buildServer } from "../src/server.ts";
 import type { SessionVerifier } from "../src/domain/session.ts";
 import type { DriveCommand } from "@opensuite/contracts";
+import {
+  S3Client,
+  PutObjectCommand,
+  HeadObjectCommand,
+} from "@aws-sdk/client-s3";
+import {
+  reconcileObjects,
+  type ReconciliationFinding,
+} from "../src/services/reconcile.ts";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const run = promisify(execFile);
@@ -60,6 +69,7 @@ let db: PrismaClient;
 let storage: ReturnType<typeof createStorage>;
 let drive: ReturnType<typeof createDrive>;
 let app: ReturnType<typeof buildServer>;
+let s3Endpoint: string;
 let closeResources = () => Promise.resolve();
 const sessions: SessionVerifier = {
   verify: (cookie) =>
@@ -132,6 +142,7 @@ beforeAll(async () => {
     );
     db = new PrismaClient({ datasources: { db: { url: url.toString() } } });
     const endpoint = `http://127.0.0.1:${s3Port}`;
+    s3Endpoint = endpoint;
     storage = createStorage({
       endpoint,
       publicEndpoint: endpoint,
@@ -498,6 +509,257 @@ it("serializes concurrent quota reservations", async () => {
   const reservation = resultId.parse(entry.value);
   await command("quota-user", { action: "trash", id: reservation.id });
   await command("quota-user", { action: "delete", id: reservation.id });
+}, 120_000);
+
+it("uses the owner's shared quota under the reservation lock and fails closed", async () => {
+  const calls: string[] = [];
+  let available = true;
+  const metered = createDrive(db, storage, async (owner) => {
+    await Promise.resolve();
+    calls.push(owner);
+    if (!available) throw new Error("offline");
+    return {
+      quotaBytes: 7_000_000,
+      mailBytes: 1_000_000,
+      uploadsAllowed: true,
+    };
+  });
+  const folder = resultId.parse(
+    await metered.command("meter-owner", {
+      action: "folder",
+      name: "shared",
+      parentId: null,
+    }),
+  );
+  await metered.command("meter-owner", {
+    action: "share",
+    id: folder.id,
+    userId: "meter-writer",
+    access: "write",
+  });
+  const input: DriveCommand = {
+    action: "upload",
+    name: "reservation.bin",
+    parentId: folder.id,
+    size: 4_000_000,
+    checksum: digest(Buffer.alloc(0)),
+    contentType: "application/octet-stream",
+    multipart: false,
+  };
+  const attempts = await Promise.allSettled([
+    metered.command("meter-writer", input),
+    metered.command("meter-writer", input),
+  ]);
+  expect(
+    attempts.filter((result) => result.status === "fulfilled"),
+  ).toHaveLength(1);
+  expect(
+    attempts.filter((result) => result.status === "rejected"),
+  ).toHaveLength(1);
+  expect(calls).toEqual(["meter-owner", "meter-owner"]);
+  expect(await metered.usage("meter-owner")).toBe(4_000_000);
+  available = false;
+  await expect(
+    metered.command("meter-writer", { ...input, size: 1 }),
+  ).rejects.toMatchObject({
+    status: 503,
+  });
+  const fulfilled = attempts.find((result) => result.status === "fulfilled");
+  if (fulfilled?.status !== "fulfilled") throw new Error("reservation missing");
+  const id = resultId.parse(fulfilled.value).id;
+  await metered.command("meter-owner", { action: "trash", id });
+  expect(await metered.usage("meter-owner")).toBe(4_000_000);
+  await metered.command("meter-owner", { action: "delete", id });
+}, 120_000);
+
+it("protects internal usage with the configured bearer token", async () => {
+  const token = "x".repeat(32);
+  const internal = buildServer(
+    drive,
+    storage,
+    sessions,
+    undefined,
+    undefined,
+    token,
+  );
+  try {
+    expect(
+      (await internal.inject("/internal/usage/meter-owner")).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await internal.inject({
+          url: "/internal/usage/meter-owner",
+          headers: { authorization: `Bearer ${"y".repeat(32)}` },
+        })
+      ).statusCode,
+    ).toBe(401);
+    const response = await internal.inject({
+      url: "/internal/usage/meter-owner",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ driveBytes: 0 });
+  } finally {
+    await internal.close();
+  }
+});
+
+it("refreshes mail quota after finish and delete without blocking on failure", async () => {
+  const calls: string[] = [];
+  const service = createDrive(db, storage, null, (owner) => {
+    calls.push(owner);
+    if (calls.length === 1) throw new Error("synchronous failure");
+    return Promise.reject(new Error("unavailable"));
+  });
+  const bytes = Buffer.from("quota refresh fixture");
+  const upload = signed.parse(
+    await service.command("refresh-owner", {
+      action: "upload",
+      name: "fixture.txt",
+      parentId: null,
+      size: bytes.length,
+      checksum: digest(bytes),
+      contentType: "text/plain",
+      multipart: false,
+    }),
+  );
+  if (upload.url === null) throw new Error("upload URL missing");
+  expect(
+    (
+      await fetch(upload.url, {
+        method: "PUT",
+        headers: { "content-type": "text/plain" },
+        body: bytes,
+      })
+    ).ok,
+  ).toBe(true);
+  await service.command("refresh-owner", { action: "finish", id: upload.id });
+  await service.command("refresh-owner", { action: "trash", id: upload.id });
+  await service.command("refresh-owner", { action: "delete", id: upload.id });
+  expect(calls).toEqual(["refresh-owner", "refresh-owner"]);
+}, 120_000);
+
+it("reports storage drift and only deletes old, unreferenced staging objects on request", async () => {
+  const client = new S3Client({
+    endpoint: s3Endpoint,
+    region: "us-east-1",
+    credentials: { accessKeyId: "test", secretAccessKey: "test" },
+    forcePathStyle: true,
+  });
+  const prefix = `reconcile-${randomUUID()}/`;
+  const bucket = "opensuite-drive";
+  const missingId = randomUUID();
+  const mismatchId = randomUUID();
+  const orphanId = randomUUID();
+  const liveId = randomUUID();
+  const orphanKey = `${prefix}pending/${orphanId}`;
+  const liveKey = `${prefix}pending/${liveId}`;
+  const finalOrphan = `${prefix}objects/${randomUUID()}`;
+  const mismatchKey = `${prefix}objects/${mismatchId}`;
+  const missingKey = `${prefix}objects/${missingId}`;
+  try {
+    await db.entry.createMany({
+      data: [
+        {
+          id: missingId,
+          ownerId: "reconcile",
+          name: "missing",
+          kind: "file",
+          state: "ready",
+          size: 10n,
+          objectKey: missingKey,
+        },
+        {
+          id: mismatchId,
+          ownerId: "reconcile",
+          name: "mismatch",
+          kind: "file",
+          state: "ready",
+          size: 10n,
+          objectKey: mismatchKey,
+        },
+        {
+          id: liveId,
+          ownerId: "reconcile",
+          name: "pending",
+          kind: "file",
+          state: "pending",
+          size: 5n,
+        },
+      ],
+    });
+    await Promise.all(
+      [orphanKey, liveKey, finalOrphan, mismatchKey].map((Key) =>
+        client.send(new PutObjectCommand({ Bucket: bucket, Key, Body: "abc" })),
+      ),
+    );
+    const findings: ReconciliationFinding[] = [];
+    const reconcile = (deleteStaging: boolean) =>
+      reconcileObjects(
+        db,
+        client,
+        {
+          bucket,
+          prefix,
+          deleteStaging,
+          now: new Date(Date.now() + 8 * 86_400_000),
+        },
+        (finding) => findings.push(finding),
+      );
+    await reconcile(false);
+    expect(findings).toEqual(
+      expect.arrayContaining([
+        { kind: "missing", key: missingKey, entryId: missingId },
+        {
+          kind: "size_mismatch",
+          key: mismatchKey,
+          entryId: mismatchId,
+          expected: "10",
+          actual: 3,
+        },
+        { kind: "orphan", key: orphanKey },
+        { kind: "orphan", key: finalOrphan },
+      ]),
+    );
+    expect(findings).not.toContainEqual({ kind: "orphan", key: liveKey });
+    await client.send(
+      new HeadObjectCommand({ Bucket: bucket, Key: orphanKey }),
+    );
+    // Never retry unconditionally if an S3 substitute lacks this feature.
+    const failure: unknown = await reconcile(true).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const failureName =
+      failure === null
+        ? null
+        : z.object({ name: z.string() }).parse(failure).name;
+    expect([null, "NotImplemented"]).toContain(failureName);
+    const deleted = failure === null;
+    expect(
+      findings.some(
+        (finding) =>
+          finding.kind === "deleted_staging" && finding.key === orphanKey,
+      ),
+    ).toBe(deleted);
+    const exists = await client
+      .send(new HeadObjectCommand({ Bucket: bucket, Key: orphanKey }))
+      .then(
+        () => true,
+        () => false,
+      );
+    expect(exists).toBe(!deleted);
+    await client.send(new HeadObjectCommand({ Bucket: bucket, Key: liveKey }));
+    await client.send(
+      new HeadObjectCommand({ Bucket: bucket, Key: finalOrphan }),
+    );
+  } finally {
+    await db.entry.deleteMany({
+      where: { id: { in: [missingId, mismatchId, liveId] } },
+    });
+    client.destroy();
+  }
 }, 120_000);
 
 it("allows a write share to create a file in the owner's folder", async () => {

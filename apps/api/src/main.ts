@@ -2,7 +2,7 @@ import { createAddressService } from "@opensuite/core/services/addresses";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, ok } from "neverthrow";
 import { timedFetch } from "./adapters/timed-fetch.ts";
-import { operatorAddressLimit } from "./address-limit.ts";
+import { entitledAddressLimit } from "./address-limit.ts";
 import { createAliasService } from "@opensuite/core/services/aliases";
 import {
   createAliasMail,
@@ -23,11 +23,14 @@ import { createCalendarService } from "@opensuite/core/services/calendar";
 import { createMailService } from "@opensuite/core/services/mail";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
+import { readFile } from "node:fs/promises";
+import { z } from "zod";
 import {
   loadApplicationDatabaseUrl,
   loadAuthConfig,
   loadConfig,
   loadMailPushConfig,
+  loadBillingConfig,
 } from "./config.ts";
 import { startMailNotifier } from "./adapters/mail-notifier.ts";
 import { createAuthRuntime } from "./auth/runtime.ts";
@@ -38,6 +41,13 @@ import { buildServer } from "./server.ts";
 import { startCalendarReminderJob } from "./calendar-reminder-job.ts";
 import { configurePush } from "./push-runtime.ts";
 import type { PushProduct } from "@opensuite/contracts";
+import { createEntitlements } from "./billing/entitlements.ts";
+import { createStorageMeter } from "./billing/storage.ts";
+import { createStripeBilling } from "./billing/stripe.ts";
+import { createClaimService } from "./billing/claims.ts";
+import { createWebhookProcessor } from "./billing/webhook.ts";
+import { startQuotaJob } from "./billing/quota-job.ts";
+import { startCustomerMetadataJob } from "./billing/customer-job.ts";
 
 const config = loadConfig(process.env);
 if (config.isErr()) {
@@ -47,6 +57,19 @@ if (config.isErr()) {
   process.exit(1);
 }
 
+const billingEnv = {
+  ...process.env,
+  BILLING_INTERNAL_TOKEN_FILE:
+    process.env["BILLING_INTERNAL_TOKEN_OVERRIDE_FILE"] ||
+    process.env["BILLING_INTERNAL_TOKEN_FILE"],
+};
+const billing = await loadBillingConfig(billingEnv);
+if (billing.isErr()) {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "invalid billing configuration", issues: billing.error.issues })}\n`,
+  );
+  process.exit(1);
+}
 const monotonicMs = () => performance.now();
 const url = await loadApplicationDatabaseUrl(process.env);
 if (url.isErr()) {
@@ -100,6 +123,80 @@ const readiness = createReadinessService({
 });
 
 const auth = createAuthRuntime(database.value, authConfig.value);
+const internalToken =
+  billing.value.mode === "cloud"
+    ? billing.value.internalToken
+    : billingEnv.BILLING_INTERNAL_TOKEN_FILE
+      ? (await readFile(billingEnv.BILLING_INTERNAL_TOKEN_FILE, "utf8")).trim()
+      : undefined;
+if (internalToken !== undefined && internalToken.length < 32) {
+  process.stderr.write("invalid billing internal token\n");
+  process.exit(1);
+}
+const entitlements = createEntitlements(
+  database.value,
+  billing.value,
+  config.value.aliasPerUserCap,
+  billing.value.mode === "cloud"
+    ? async (subscription) => {
+        if (stripeBilling === undefined) throw new Error("billing unavailable");
+        return stripeBilling.verifySubscription(subscription);
+      }
+    : undefined,
+);
+const driveOrigin = z
+  .url()
+  .refine((value) => {
+    const parsedUrl = new URL(value);
+    return (
+      ["http:", "https:"].includes(parsedUrl.protocol) &&
+      parsedUrl.origin === value
+    );
+  })
+  .safeParse(process.env["BILLING_DRIVE_ORIGIN"] || "http://drive:3001");
+if (!driveOrigin.success) {
+  process.stderr.write("invalid billing Drive origin\n");
+  process.exit(1);
+}
+const storageMeter = createStorageMeter(
+  database.value,
+  entitlements,
+  auth.mailAdmin,
+  driveOrigin.data,
+  internalToken,
+);
+const stripeBilling =
+  billing.value.mode === "cloud"
+    ? createStripeBilling(
+        database.value,
+        billing.value,
+        authConfig.value.publicOrigin,
+        entitlements,
+      )
+    : undefined;
+const claims =
+  stripeBilling === undefined
+    ? undefined
+    : createClaimService(
+        database.value,
+        stripeBilling.client,
+        authConfig.value.mailDomain,
+        auth.claimSignUp,
+        storageMeter.refresh,
+      );
+const webhookProcessor =
+  stripeBilling === undefined
+    ? undefined
+    : createWebhookProcessor(
+        database.value,
+        stripeBilling.client,
+        storageMeter.refresh,
+        (eventId, eventType) => {
+          process.stderr.write(
+            `${JSON.stringify({ level: "error", msg: "unrecognized Stripe subscription", eventId, eventType })}\n`,
+          );
+        },
+      );
 const store = createMailboxStore(database.value, authConfig.value.mailboxKey);
 if (store.isErr()) {
   process.stderr.write(
@@ -126,6 +223,9 @@ const aliases = createAliasService(
   aliasStore,
   aliasMail,
   config.value.aliasPerUserCap,
+  billing.value.mode === "cloud"
+    ? async (userId) => (await entitlements.get(userId)).aliasLimit
+    : undefined,
 );
 const addressStore = createAddressStore(
   database.value,
@@ -148,7 +248,7 @@ const addressAdmin = new StalwartAdmin(
 const addresses = createAddressService(
   addressStore,
   aliasMail,
-  operatorAddressLimit(config.value.addressPerUserCap),
+  entitledAddressLimit(entitlements, config.value.addressPerUserCap),
   async () => {
     const result = await addressStore.ensureConfigured(async (name) => {
       const domain = await addressAdmin.createDomain(name);
@@ -219,11 +319,42 @@ const app = await buildServer({
   mail,
   calendar,
   aliases,
+  entitlements,
+  storageMeter,
+  ...(internalToken === undefined ? {} : { internalToken }),
+  ...(stripeBilling === undefined ||
+  claims === undefined ||
+  webhookProcessor === undefined ||
+  billing.value.mode !== "cloud"
+    ? {}
+    : {
+        billing: stripeBilling,
+        claims,
+        webhook: {
+          secret: billing.value.webhookSecret,
+          processor: webhookProcessor,
+        },
+        ...(billing.value.cancelUrl === undefined
+          ? {}
+          : { publicCheckoutOrigin: new URL(billing.value.cancelUrl).origin }),
+      }),
   addresses,
   ...(push === undefined ? {} : { push }),
   pushCleanup,
 });
 logPushFailure = (event) => app.log.warn(event, "push delivery failed");
+const stopQuotaJob =
+  billing.value.mode === "cloud"
+    ? startQuotaJob(database.value, storageMeter, () =>
+        app.log.warn("mail quota refresh failed"),
+      )
+    : undefined;
+const stopCustomerJob =
+  stripeBilling === undefined
+    ? undefined
+    : startCustomerMetadataJob(database.value, stripeBilling.client, () =>
+        app.log.warn("billing customer synchronization failed"),
+      );
 const mailPushConfig = loadMailPushConfig(process.env);
 if (mailPushConfig.isErr())
   app.log.error(
@@ -296,6 +427,8 @@ const timer = setInterval(() => {
 }, 60_000);
 app.addHook("onClose", async () => {
   clearInterval(timer);
+  await stopQuotaJob?.();
+  await stopCustomerJob?.();
   await stopDomainJob?.();
   await stopMailNotifier?.();
   await stopCalendarReminders?.();

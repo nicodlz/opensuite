@@ -91,4 +91,11 @@ it("requires exact trusted origins in the configuration", () => {
     "https://drive.example.test",
     "https://mail.example.test",
   ]);
+  expect(parsed.isOk() && parsed.value.DRIVE_QUOTA_BYTES).toBeUndefined();
+  const limited = loadConfig({
+    ...base,
+    DRIVE_TRUSTED_ORIGINS: "https://drive.example.test",
+    DRIVE_QUOTA_BYTES: "42",
+  });
+  expect(limited.isOk() && limited.value.DRIVE_QUOTA_BYTES).toBe(42);
 });

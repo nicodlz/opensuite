@@ -45,6 +45,7 @@ model User {
   defaultAliasDomainId String?
   defaultAliasDomain Domain? @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
   billingCustomer BillingCustomer?
+  billingGrant BillingGrant?
   subscriptions Subscription[]
 }
 
@@ -384,7 +385,19 @@ model BillingCustomer {
   userId           String   @id
   user             User     @relation(fields: [userId], references: [id], onDelete: Restrict)
   stripeCustomerId String   @unique
+  metadataSyncedAt DateTime?
   createdAt        DateTime @default(now())
+}
+
+// Complimentary access is managed by operators, never by public procedures.
+model BillingGrant {
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  plan      String
+  reason    String
+  grantedAt DateTime @default(now())
+  expiresAt DateTime?
+  revokedAt DateTime?
 }
 
 model Subscription {
@@ -419,6 +432,7 @@ model StripeEvent {
   createdAt   DateTime
   receivedAt  DateTime  @default(now())
   processedAt DateTime?
+  ignoredAt   DateTime?
   attempts    Int       @default(0)
   @@index([processedAt, receivedAt])
 }

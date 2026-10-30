@@ -125,6 +125,59 @@ export class StalwartAdmin {
       ...options,
     });
   }
+  /** Current account storage usage, as reported by the management API. */
+  async diskUsage(accountId: string): Promise<AdminResult<number>> {
+    const schema = GetSchema(
+      z.object({
+        id: z.string(),
+        usedDiskQuota: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(Number.MAX_SAFE_INTEGER),
+      }),
+    );
+    const result = await this.#transport.call(
+      this.#api,
+      "x:Account/get",
+      { ids: [accountId], properties: ["id", "usedDiskQuota"] },
+      using,
+      schema,
+    );
+    if (result.isErr()) return err(result.error);
+    const item = result.value.list[0];
+    return item === undefined ||
+      item.id !== accountId ||
+      result.value.notFound.length !== 0
+      ? err({ kind: "invalidResponse", message: "Account usage unavailable" })
+      : ok(item.usedDiskQuota);
+  }
+  /** Null removes the account limit; zero must never be used (it means unlimited). */
+  async setDiskQuota(
+    accountId: string,
+    bytes: number | null,
+  ): Promise<AdminResult<void>> {
+    if (bytes !== null && (!Number.isSafeInteger(bytes) || bytes < 1))
+      return err({ kind: "invalidInput", message: "Invalid disk quota" });
+    const method = "x:Account/set";
+    const result = await this.#transport.call(
+      this.#api,
+      method,
+      { update: { [accountId]: { "quotas/maxDiskQuota": bytes } } },
+      using,
+      SetSchema,
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notUpdated);
+    if (failure !== undefined) return err(failure);
+    return result.value.updated !== undefined &&
+      Object.hasOwn(result.value.updated, accountId)
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "Missing account quota update",
+        });
+  }
   async #list<T>(
     object: string,
     schema: z.ZodType<T>,

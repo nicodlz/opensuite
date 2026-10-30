@@ -193,6 +193,23 @@ export const createAuthRuntime = (
   };
   return {
     reconcile,
+    mailAdmin: admin,
+    claimSignUp: async (input: {
+      email: string;
+      password: string;
+      name: string;
+    }) => {
+      if (input.email.toLowerCase().split("@")[1] !== config.mailDomain)
+        throw new Error("address unavailable");
+      try {
+        const created = await identity.api.signUpEmail({ body: input });
+        await audit({ userId: created.user.id, action: "sign_up.success" });
+        return created.user.id;
+      } catch {
+        await audit({ userId: null, action: "sign_up.failure" });
+        throw new Error("address unavailable");
+      }
+    },
     bootstrap: async (email: string, password: string, name: string) => {
       if (!(await isMailDomain(email.toLowerCase().split("@")[1])))
         throw new Error("email domain is not configured");

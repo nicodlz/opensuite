@@ -28,6 +28,7 @@ export function createAliasService(
   store: AliasStore,
   mail: AliasMail,
   cap: number,
+  limitForUser?: (userId: string) => Promise<number>,
 ) {
   const sync = createAliasSync(store, mail);
   return {
@@ -36,7 +37,7 @@ export function createAliasService(
     domains: async () => store.domains(),
     list: async (userId: string, search?: string) =>
       (await store.list(userId, search)).map((rows) => rows.map(view)),
-    ...createAliasOperations(store, cap, sync),
+    ...createAliasOperations(store, cap, sync, limitForUser),
     transition: (
       userId: string,
       id: string,
