@@ -34,7 +34,8 @@ SELECT 'CREATE DATABASE opensuite_pass OWNER opensuite_pass'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'opensuite_pass') \gexec
 REVOKE ALL ON DATABASE opensuite_pass FROM PUBLIC;
 GRANT CONNECT ON DATABASE opensuite_pass TO opensuite_pass;
--- Preserve existing login roles' implicit access before revoking PUBLIC. Create
+-- Preserve other login roles' implicit access before revoking PUBLIC; the
+-- application roles only receive their own database below. Create
 -- inactive application roles when needed; their migration jobs enable them.
 SELECT 'CREATE ROLE opensuite_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'opensuite_app') \gexec
@@ -43,7 +44,8 @@ WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'opensuite_drive') \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO %I', d.datname, r.rolname)
 FROM pg_database d CROSS JOIN pg_roles r
 WHERE d.datallowconn AND d.datname <> 'opensuite_pass' AND r.rolcanlogin
-  AND r.rolname <> 'opensuite_pass' AND has_database_privilege('public', d.oid, 'CONNECT') \gexec
+  AND r.rolname NOT IN ('opensuite_pass', 'opensuite_app', 'opensuite_drive')
+  AND has_database_privilege('public', d.oid, 'CONNECT') \gexec
 SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC, opensuite_pass', datname)
 FROM pg_database WHERE datallowconn AND datname <> 'opensuite_pass' \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO opensuite_app', :'app_database') \gexec
