@@ -14,7 +14,7 @@ With an administrator session, open **Setup wizard** at `/setup`. The wizard off
 4. **Create users** provides a form for email, display name and initial password. The address must use `MAIL_DOMAIN`, and that managed domain must already be added.
 5. **Finish** summarizes the checks and links to Mail, Drive and operating guides. Unknown and pending checks need investigation; completing the wizard does not prove production readiness.
 
-The wizard requires an existing administrator session. The sign-in and MFA interface is on `om-web-fix` and has not yet been merged into main; see the [user guide](../user/index.md#signing-in-and-mfa). Vite development uses synthetic setup data.
+The wizard requires an existing administrator session. See the [user guide](../user/index.md#signing-in-and-mfa) for sign-in and MFA. Vite development uses synthetic setup data.
 
 ## Users
 

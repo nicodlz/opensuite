@@ -8,10 +8,10 @@ their configuration and DNS cutover remain deployment steps.
 > **Status: early development.** The mail API, mailbox provisioning, Drive,
 > ingestion and backup tools are implemented. Real SES/B2 behavior and the
 > complete production recovery process still require operator verification.
-> Calendar and contacts web interfaces remain placeholders. The setup wizard
+> Calendar lacks invitations, reminders and sharing; Contacts is a placeholder. The setup wizard
 > and administrator account controls are available; see the [admin guide](docs/admin/index.md)
-> for their current limitations. The sign-in and MFA interface is on the
-> `om-web-fix` branch and is not yet in this checkout.
+> for their current limitations. Pass is not production-ready until security
+> and recovery are verified.
 
 ## Release status
 
@@ -26,7 +26,7 @@ This first release is an early, single-server baseline. The repository contains:
 - **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
 - **Web client** (`apps/web`): a mail workspace and live API status page. Mail uses
   synthetic in-browser data in development and the mail and Drive APIs in
-  production. Calendar and contacts are placeholders. See [apps/web/README.md](apps/web/README.md).
+  production. Calendar provides event views and editing; Contacts is a placeholder. See [apps/web/README.md](apps/web/README.md).
 - **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
 - **Mail blob storage:** local by default, with an optional S3-compatible
   backend for new or migrated installations. The
@@ -34,7 +34,7 @@ This first release is an early, single-server baseline. The repository contains:
   migration, backup and recovery requirements.
 - **Outbound mail:** server-only Stalwart relay configuration and DKIM DNS records; see [outbound operations](docs/operations/outbound.md) for SES, queue limits and deployment steps.
 - **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
-- **Pass** (optional `pass` Compose profile): Vaultwarden on a dedicated origin with its own PostgreSQL database. See [Pass operations](docs/operations/pass.md) for setup and backup limitations.
+- **Pass** (optional `pass` Compose profile): Vaultwarden on a dedicated origin, a separate PostgreSQL database, a launcher and hide-my-email aliases. Local automated coverage exists, but security, real-provider recovery and client compatibility remain unverified. See [Pass operations and readiness](docs/operations/pass.md).
 - **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. See [development](docs/development.md#drive).
 - **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
   contracts in `packages/contracts`) with structured JSON logs (pino).

@@ -41,7 +41,8 @@ provider-specific retention and lock behavior before relying on it.
 
 ## Restore to a new VPS
 
-1. Fence the lost/old server and external writers. Obtain the escrowed restic
+1. For an actual takeover, fence the lost/old server and external writers. For
+   a drill, isolate the recovery target from the live system instead. Obtain the escrowed restic
    password, B2 key, repository URL and configuration. Prepare a new VPS with
    Docker Compose, Git, `flock`, the saved Esuno revision, pinned images,
    encrypted private scratch and empty Compose volumes. Prepare empty isolated
@@ -105,15 +106,27 @@ relevant credentials using a separately reviewed incident procedure.
 ## Independent recovery tests and expected loss
 
 At least quarterly, and after changes to the backup, Vaultwarden version,
-credentials or storage, retrieve the escrowed material independently and
-restore a recent snapshot to a separate disposable VPS or isolated Compose
-project and object store. Fence the original writers and prevent test mail,
-push, public DNS or external access. Verify login with a test account, decrypt
-a known item, download and compare an attachment, compare the RSA key, check
-the admin credential and record snapshot time, results and elapsed recovery
-time. Test the secondary location separately. Destroy the isolated target and
-its decrypted scratch after verification. Never write an unencrypted vault
-export to disk.
+credentials or storage, an operator other than the person maintaining the
+backup should perform and record this drill where practical:
+
+1. Retrieve the recovery procedure, credentials, restic password, image pins and
+   snapshot record from their independent escrow. Select a recent snapshot and
+   compare its ID and time with the independently recorded last success.
+2. Prepare a separate disposable VPS or isolated Compose project with isolated,
+   empty object storage. Prevent the recovered system from sending mail or push,
+   receiving public traffic or writing to live services. Use the [new VPS restore
+   steps](#restore-to-a-new-vps) with the selected snapshot. Do not fence or
+   interrupt the live server for a test; fence it only in an actual takeover.
+3. With a disposable test account, sign in and decrypt a known item, download
+   and compare an attachment, compare the RSA key and check the admin credential.
+   Exercise configured MFA and invitations in isolation when applicable.
+4. Record the snapshot ID and time, versions, operator, results, failures and
+   elapsed recovery time in an independently held log. Repeat independently
+   from the secondary location. Resolve failures and rerun the affected steps.
+5. Destroy the isolated target and decrypted scratch after verification. Never
+   write an unencrypted vault export to disk.
+
+No independent real-VPS or real-B2 drill is recorded for this project.
 
 The automated check `node scripts/backup-restore-drill.mjs --report
 /tmp/pass-drill.xml` tests a local substitute, not real B2 or a production-sized
