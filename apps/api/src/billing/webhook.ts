@@ -257,8 +257,14 @@ export function createWebhookProcessor(
           where: { stripeCustomerId: customerId },
         });
         if (existing?.userId && owner && existing.userId !== owner.userId)
-          return ignore();
+          return rejectExisting();
         const userId = existing?.userId ?? owner?.userId ?? null;
+        if (
+          userId !== null &&
+          customer.metadata["userId"] &&
+          customer.metadata["userId"] !== userId
+        )
+          return rejectExisting();
         if (userId !== null)
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 71035))`;
         const item = currentItem;

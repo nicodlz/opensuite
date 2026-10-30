@@ -101,6 +101,8 @@ export const billingRouter = billing.router({
   checkout: billing.checkout.handler(({ context, input }) => {
     const service = context.billing;
     if (service === undefined) return disabled();
+    if (context.actor !== null && !context.signedBillingLimit(context.actor.id))
+      throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
     if (context.actor === null && !context.publicCheckoutLimit())
       throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
     return logged(context, () => service.checkout(context.actor, input));
@@ -110,6 +112,8 @@ export const billingRouter = billing.router({
     if (service === undefined) return disabled();
     const actor = context.actor;
     if (actor === null) throw new ORPCError("UNAUTHORIZED");
+    if (!context.signedBillingLimit(actor.id))
+      throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
     return logged(context, () => service.portal(actor, input));
   }),
   portal: billing.portal.handler(({ context }) => {
@@ -117,6 +121,8 @@ export const billingRouter = billing.router({
     if (service === undefined) return disabled();
     const actor = context.actor;
     if (actor === null) throw new ORPCError("UNAUTHORIZED");
+    if (!context.signedBillingLimit(actor.id))
+      throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
     return logged(context, () => service.portal(actor));
   }),
   checkoutStatus: billing.checkoutStatus.handler(({ context, input }) => {
@@ -126,6 +132,14 @@ export const billingRouter = billing.router({
     if (!context.claimLimit("status"))
       throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
     return logged(context, () => service.status(input.sessionId));
+  }),
+  releaseClaim: billing.releaseClaim.handler(({ context, input }) => {
+    const service = context.claims;
+    if (context.billing === undefined || service === undefined)
+      return disabled();
+    if (!context.claimLimit("claim"))
+      throw new ORPCError("TOO_MANY_REQUESTS", { status: 429, defined: true });
+    return logged(context, () => service.release(input.sessionId));
   }),
   claim: billing.claim.handler(({ context, input }) => {
     const service = context.claims;

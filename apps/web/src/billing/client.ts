@@ -21,6 +21,7 @@ export const billing: ContractRouterClient<typeof billingContract> = {
   portal: (input) => selected().portal(input),
   checkoutStatus: (input) => selected().checkoutStatus(input),
   claim: (input) => selected().claim(input),
+  releaseClaim: (input) => selected().releaseClaim(input),
 };
 export const billingQuery = {
   queryKey: ["billing", "overview"],

@@ -94,6 +94,7 @@ export const fakeBilling: ContractRouterClient<typeof billingContract> = {
       interval: "month",
       domain: "example.test",
     }),
+  releaseClaim: () => Promise.resolve({ released: true }),
   claim: (input) =>
     Promise.resolve({ email: `${input.localPart}@example.test` }),
 };

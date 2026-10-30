@@ -909,7 +909,13 @@ export const buildServer = async (
           checkoutLimits.consume(`checkout:${request.ip}`, 10, 60_000) ===
             undefined &&
           checkoutLimits.consume("checkout:global", 100, 60_000) === undefined,
+        signedBillingLimit: (userId) =>
+          checkoutLimits.consume(`billing-user:${userId}`, 10, 60_000) ===
+          undefined,
         claimLimit: (kind) =>
+          (kind !== "status" ||
+            checkoutLimits.consume("status:global", 600, 60_000) ===
+              undefined) &&
           checkoutLimits.consume(
             `${kind}:${request.ip}`,
             kind === "status" ? 60 : 10,

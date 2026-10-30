@@ -36,3 +36,11 @@ describe("mailbox address names", () => {
     expect(isReservedMailLocalPart("member")).toBe(false);
   });
 });
+
+it("uses the same mailbox syntax for paid claims", async () => {
+  const { ClaimLocalPart } = await import("../src/billing.ts");
+  for (const name of ["person_name", "x".repeat(40)])
+    expect(ClaimLocalPart.safeParse(name).success).toBe(false);
+  for (const name of ["x", "a".repeat(39), "First.Last"])
+    expect(ClaimLocalPart.parse(name)).toBe(AddressLocalPart.parse(name));
+});

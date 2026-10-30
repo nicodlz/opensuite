@@ -3,7 +3,12 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ORPCError } from "@orpc/client";
 import { auth } from "../auth/client.ts";
-import { BillingInterval, PlanId, plans } from "@opensuite/contracts";
+import {
+  BillingInterval,
+  ClaimLocalPart,
+  PlanId,
+  plans,
+} from "@opensuite/contracts";
 import { Button } from "../ui/button.tsx";
 import { TextField } from "../ui/text-field.tsx";
 import { billing } from "./client.ts";
@@ -192,7 +197,13 @@ export function WelcomePage() {
       query.state.data?.state === "pending" && !pollExpired ? 3000 : false,
   });
   const [name, setName] = useState("");
-  const [localPart, setLocalPart] = useState("");
+  const [localPartInput, setLocalPart] = useState<string | null>(null);
+  const localPart =
+    localPartInput ??
+    (status.data?.state === "claimable"
+      ? status.data.reservedLocalPart
+      : null) ??
+    "";
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [estimate, setEstimate] = useState<{
@@ -229,14 +240,9 @@ export function WelcomePage() {
       setError("Passwords do not match.");
       return;
     }
-    if (
-      !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(localPart.trim().toLowerCase()) ||
-      localPart.trim().length < 3 ||
-      localPart.trim().length > 40
-    ) {
-      setError(
-        "Use 3–40 letters, numbers, dots, underscores or hyphens for your address.",
-      );
+    const validated = ClaimLocalPart.safeParse(localPart);
+    if (!validated.success) {
+      setError("Use 1–39 letters, numbers, dots or hyphens for your address.");
       return;
     }
     setBusy(true);
@@ -244,7 +250,7 @@ export function WelcomePage() {
       const result = await billing.claim({
         sessionId,
         name: name.trim(),
-        localPart: localPart.trim().toLowerCase(),
+        localPart: validated.data,
         password,
       });
       sessionStorage.removeItem("billing-checkout-session");
@@ -308,6 +314,26 @@ export function WelcomePage() {
             Create your account for{" "}
             {status.data.plan ? plans[status.data.plan].name : "Esuno Cloud"}.
           </p>
+          {status.data.reservedLocalPart && (
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void billing
+                  .releaseClaim({ sessionId })
+                  .then(async () => {
+                    setLocalPart("");
+                    await status.refetch();
+                    return undefined;
+                  })
+                  .catch((failure: unknown) => setError(billingError(failure)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Clear reserved address
+            </Button>
+          )}
           <form className="auth-form" onSubmit={(event) => void submit(event)}>
             <TextField
               label="Name"

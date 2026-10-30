@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { plans } from "@opensuite/contracts";
 import type { PrismaClient } from "@opensuite/db";
 import type Stripe from "stripe";
@@ -43,8 +44,19 @@ export function startSubscriptionSync(
         customerId === row.stripeCustomerId &&
         !customer.deleted &&
         customer.metadata["esuno"] === "1" &&
-        customer.metadata["userId"] === userId &&
+        (customer.metadata["userId"] === undefined ||
+          customer.metadata["userId"] === "" ||
+          customer.metadata["userId"] === userId) &&
         price !== null;
+      if (owned && !customer.metadata["userId"]) {
+        try {
+          await stripe.customers.update(row.stripeCustomerId, {
+            metadata: { userId, esuno: "1", integration: BILLING_INTEGRATION },
+          });
+        } catch {
+          onError();
+        }
+      }
       await db.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${row.id}, 71032))`;
         const local = await tx.subscription.findUnique({
@@ -100,29 +112,109 @@ export function startSubscriptionSync(
     /* oxlint-disable eslint/no-await-in-loop */
     do {
       const page = await db.subscription.findMany({
-        where: { userId: { not: null } },
+        where: {
+          userId: { not: null },
+          OR: [
+            {
+              endedAt: null,
+              status: { notIn: ["canceled", "incomplete_expired"] },
+            },
+            { endedAt: { gte: new Date(Date.now() - 30 * 86_400_000) } },
+            {
+              endedAt: null,
+              canceledAt: { gte: new Date(Date.now() - 30 * 86_400_000) },
+            },
+            {
+              endedAt: null,
+              canceledAt: null,
+              updatedAt: { gte: new Date(Date.now() - 30 * 86_400_000) },
+            },
+          ],
+        },
         orderBy: { id: "asc" },
         take: 100,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
         select: { id: true, userId: true, stripeCustomerId: true },
       });
-      for (let i = 0; i < page.length; i += 4)
+      for (let i = 0; i < page.length; i += 4) {
         await Promise.all(page.slice(i, i + 4).map(sync));
+        if (i + 4 < page.length || page.length === 100)
+          await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+      }
       cursor = page.length === 100 ? page.at(-1)?.id : undefined;
     } while (cursor !== undefined);
     /* oxlint-enable eslint/no-await-in-loop */
   };
   const tick = () => {
     if (running) return;
-    running = work()
+    running = (async () => {
+      const now = new Date();
+      const leaseToken = randomUUID();
+      await db.billingSyncState.upsert({
+        where: { id: "subscriptions" },
+        create: { id: "subscriptions" },
+        update: {},
+      });
+      const claimed = await db.billingSyncState.updateMany({
+        where: {
+          id: "subscriptions",
+          AND: [
+            {
+              OR: [
+                { lastCompletedAt: null },
+                {
+                  lastCompletedAt: {
+                    lte: new Date(now.getTime() - 6 * 60 * 60 * 1000),
+                  },
+                },
+              ],
+            },
+            { OR: [{ leaseUntil: null }, { leaseUntil: { lte: now } }] },
+          ],
+        },
+        data: { leaseToken, leaseUntil: new Date(now.getTime() + 120_000) },
+      });
+      if (!claimed.count) return;
+      const heartbeat = setInterval(() => {
+        void db.billingSyncState
+          .updateMany({
+            where: { id: "subscriptions", leaseToken },
+            data: { leaseUntil: new Date(Date.now() + 120_000) },
+          })
+          .catch(onError);
+      }, 30_000);
+      heartbeat.unref();
+      try {
+        await work();
+        await db.billingSyncState.updateMany({
+          where: { id: "subscriptions", leaseToken },
+          data: {
+            lastCompletedAt: new Date(),
+            leaseUntil: null,
+            leaseToken: null,
+          },
+        });
+      } catch (error) {
+        await db.billingSyncState.updateMany({
+          where: { id: "subscriptions", leaseToken },
+          data: { leaseUntil: null, leaseToken: null },
+        });
+        throw error;
+      } finally {
+        clearInterval(heartbeat);
+      }
+    })()
       .catch(onError)
       .finally(() => {
         running = undefined;
       });
   };
-  const timer = setInterval(tick, 6 * 60 * 60 * 1000);
+  const startup = setTimeout(tick, 5_000 + Math.floor(Math.random() * 25_000));
+  startup.unref();
+  const timer = setInterval(tick, 30_000);
   timer.unref();
   return async () => {
+    clearTimeout(startup);
     clearInterval(timer);
     await running;
   };

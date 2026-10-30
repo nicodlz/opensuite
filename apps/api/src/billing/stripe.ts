@@ -29,43 +29,6 @@ export function createStripeBilling(
   }),
 ) {
   const resolvePrice = createPriceResolver(client);
-  const verifySubscription = async (local: {
-    id: string;
-    stripeCustomerId: string;
-    userId: string | null;
-    plan: string;
-    interval: string;
-    status: string;
-    priceId: string;
-  }) => {
-    const current = await client.subscriptions.retrieve(local.id);
-    const item = current.items.data[0];
-    const price =
-      item === undefined || current.items.data.length !== 1
-        ? null
-        : classifyPrice(item.price);
-    const customerId =
-      typeof current.customer === "string"
-        ? current.customer
-        : current.customer.id;
-    if (
-      current.metadata["esuno"] !== "1" ||
-      customerId !== local.stripeCustomerId ||
-      price === null ||
-      price.plan !== local.plan ||
-      price.interval !== local.interval ||
-      item?.quantity !== 1 ||
-      item.price.id !== local.priceId ||
-      current.status !== local.status
-    )
-      return false;
-    const customer = await client.customers.retrieve(customerId);
-    return (
-      !customer.deleted &&
-      customer.metadata["esuno"] === "1" &&
-      customer.metadata["userId"] === local.userId
-    );
-  };
   const updatedUrl = `${origin}/settings/billing?billing=updated`;
   const canceledUrl = `${origin}/settings/billing?billing=canceled`;
   const verifyCustomer = async (id: string, userId: string) => {
@@ -212,17 +175,29 @@ export function createStripeBilling(
     if (session.url === null) throw new Error("checkout URL unavailable");
     return { url: session.url };
   };
-  const checkout = async (actor: Actor | null, choice: PlanChoice) => {
-    if (actor === null) return checkoutUnlocked(actor, choice);
-    return db.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${actor.id}, 71034))`;
-        return checkoutUnlocked(actor, choice);
-      },
-      { timeout: 45_000 },
-    );
+  const busy = new Set<string>();
+  const serialize = async <T>(
+    userId: string,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    if (busy.has(userId))
+      throw new ORPCError("CONFLICT", {
+        status: 409,
+        defined: true,
+        message: "A billing request is already in progress",
+      });
+    busy.add(userId);
+    try {
+      return await work();
+    } finally {
+      busy.delete(userId);
+    }
   };
-  const portal = async (actor: Actor, choice?: PlanChoice) => {
+  const checkout = async (actor: Actor | null, choice: PlanChoice) =>
+    actor === null
+      ? checkoutUnlocked(null, choice)
+      : serialize(actor.id, () => checkoutUnlocked(actor, choice));
+  const portalUnlocked = async (actor: Actor, choice?: PlanChoice) => {
     const customer = await db.billingCustomer.findUnique({
       where: { userId: actor.id },
     });
@@ -287,13 +262,14 @@ export function createStripeBilling(
     );
     return { url: session.url };
   };
+  const portal = (actor: Actor, choice?: PlanChoice) =>
+    serialize(actor.id, () => portalUnlocked(actor, choice));
   return {
     client,
     checkout,
     portal,
     resolvePrice,
     updatedUrl,
-    verifySubscription,
   };
 }
 export type StripeBilling = ReturnType<typeof createStripeBilling>;

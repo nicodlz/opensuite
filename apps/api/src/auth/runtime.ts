@@ -196,15 +196,25 @@ export const createAuthRuntime = (
       email: string;
       password: string;
       name: string;
+      userId: string;
     }) => {
       if (input.email.toLowerCase().split("@")[1] !== config.mailDomain)
         throw new Error("address unavailable");
       try {
-        const created = await primaryReservations.withPrimaryReservation(
-          input.email,
-          () => identity.api.signUpEmail({ body: input }),
-        );
-        if (!created) throw new Error("address unavailable");
+        if (
+          await db.user.findUnique({
+            where: { id: input.userId },
+            select: { id: true },
+          })
+        )
+          throw new Error("address unavailable");
+        const created = await identity.claimSignUpWithId(input.userId, {
+          email: input.email,
+          password: input.password,
+          name: input.name,
+        });
+        if (created.user.id !== input.userId)
+          throw new Error("claim identity mismatch");
         await audit({ userId: created.user.id, action: "sign_up.success" });
         return created.user.id;
       } catch {

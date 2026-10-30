@@ -235,18 +235,27 @@ export const createDrive = (
                 uploadsAllowed: boolean;
               };
               try {
-                entitlement =
-                  typeof quota === "function"
-                    ? await Promise.race([
-                        quota(owner),
-                        new Promise<never>((_, reject) =>
-                          setTimeout(
-                            () => reject(new Error("entitlements timeout")),
-                            1500,
-                          ),
-                        ),
-                      ])
-                    : { quotaBytes: quota, mailBytes: 0, uploadsAllowed: true };
+                if (typeof quota === "function") {
+                  let timer: ReturnType<typeof setTimeout> | undefined;
+                  try {
+                    entitlement = await Promise.race([
+                      quota(owner),
+                      new Promise<never>((_, reject) => {
+                        timer = setTimeout(
+                          () => reject(new Error("entitlements timeout")),
+                          1500,
+                        );
+                      }),
+                    ]);
+                  } finally {
+                    if (timer !== undefined) clearTimeout(timer);
+                  }
+                } else
+                  entitlement = {
+                    quotaBytes: quota,
+                    mailBytes: 0,
+                    uploadsAllowed: true,
+                  };
               } catch {
                 throw new ORPCError("SERVICE_UNAVAILABLE", {
                   message: "Entitlements unavailable",

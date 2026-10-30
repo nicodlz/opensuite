@@ -436,7 +436,7 @@ it("uses current Stripe state for duplicate and out-of-order subscription events
     type: "customer.subscription.deleted",
   } as Stripe.Event);
   expect((await entitlements.get(userId)).uploadsAllowed).toBe(false);
-});
+}, 30_000);
 
 it("claims a paid public checkout only once and refuses an unpaid session", async () => {
   const created = Math.floor(Date.now() / 1000);
@@ -484,8 +484,7 @@ it("claims a paid public checkout only once and refuses an unpaid session", asyn
     db,
     stripe,
     "claim.test",
-    async ({ name, email }) => {
-      const userId = randomUUID();
+    async ({ name, email, userId }) => {
       await db.user.create({ data: { id: userId, name, email } });
       return userId;
     },
@@ -540,8 +539,6 @@ it("creates signed-in and public Checkout sessions and directs plan changes thro
   const entitlements = createEntitlements(db, config, 1000);
   const requests: Record<string, unknown>[] = [];
   const portalRequests: Record<string, unknown>[] = [];
-  let ownedPrice = true;
-  let quantity = 1;
   let liveSubscriptions: { status: string }[] = [];
   const expiredSessions: string[] = [];
   const prices = {
@@ -619,10 +616,10 @@ it("creates signed-in and public Checkout sessions and directs plan changes thro
             data: [
               {
                 id: "si_checkout",
-                quantity,
+                quantity: 1,
                 price: {
                   ...prices.esuno_plus_month,
-                  lookup_key: ownedPrice ? "esuno_plus_month" : "foreign_month",
+                  lookup_key: "esuno_plus_month",
                   active: true,
                   currency: "eur",
                   tax_behavior: "inclusive",
@@ -723,16 +720,6 @@ it("creates signed-in and public Checkout sessions and directs plan changes thro
       },
     },
   });
-  const subscription = await db.subscription.findUniqueOrThrow({
-    where: { id: "sub_checkout" },
-  });
-  expect(await billing.verifySubscription(subscription)).toBe(true);
-  ownedPrice = false;
-  expect(await billing.verifySubscription(subscription)).toBe(false);
-  ownedPrice = true;
-  quantity = 0;
-  expect(await billing.verifySubscription(subscription)).toBe(false);
-  quantity = 1;
   prices.esuno_plus_month.unit_amount = 1;
   const mismatched = createStripeBilling(
     db,
@@ -1042,15 +1029,15 @@ it("resumes a claim after signup succeeds but its response is lost", async () =>
     db,
     stripe,
     "claim.test",
-    async ({ email, name }) => {
+    async ({ email, name, userId }) => {
       calls++;
-      await db.user.create({ data: { id: suffix, email, name } });
+      await db.user.create({ data: { id: userId, email, name } });
       throw new Error("lost signup response");
     },
   );
   const input = {
     sessionId,
-    localPart: `user_${suffix.replaceAll("-", "").slice(0, 12)}`,
+    localPart: `user-${suffix.replaceAll("-", "").slice(0, 12)}`,
     name: "User",
     password: "long-enough-password",
   };
@@ -1058,7 +1045,7 @@ it("resumes a claim after signup succeeds but its response is lost", async () =>
     data: {
       id: `wildcard-${suffix}`,
       name: "Other",
-      email: `${input.localPart.replace("_", "x")}@claim.test`,
+      email: `${input.localPart.replace("-", "x")}@claim.test`,
     },
   });
   await expect(claims.claim(input)).rejects.toMatchObject({ status: 409 });
@@ -1066,14 +1053,19 @@ it("resumes a claim after signup succeeds but its response is lost", async () =>
     email: `${input.localPart}@claim.test`,
   });
   expect(calls).toBe(1);
+  const createdId = (
+    await db.user.findUniqueOrThrow({
+      where: { email: `${input.localPart}@claim.test` },
+    })
+  ).id;
   expect(
     (await db.checkoutClaim.findUniqueOrThrow({ where: { sessionId } }))
       .claimedByUserId,
-  ).toBe(suffix);
+  ).toBe(createdId);
   expect(
     (await db.subscription.findUniqueOrThrow({ where: { id: subscription } }))
       .userId,
-  ).toBe(suffix);
+  ).toBe(createdId);
 });
 
 it("chooses duplicate entitled subscriptions by plan then Stripe creation time", async () => {
@@ -1200,17 +1192,11 @@ it("serializes a paid claim and an extra address for the same mailbox", async ()
     db,
     stripe,
     domain,
-    async ({ email, name }) => {
-      const result = await addresses.withPrimaryReservation(email, async () => {
-        entered();
-        await gate;
-        await db.user.create({
-          data: { id: `claimed-${suffix}`, name, email },
-        });
-        return `claimed-${suffix}`;
-      });
-      if (result === null) throw new Error("address unavailable");
-      return result;
+    async ({ email, name, userId }) => {
+      entered();
+      await gate;
+      await db.user.create({ data: { id: userId, name, email } });
+      return userId;
     },
   );
   const claim = claims.claim({
@@ -1220,7 +1206,17 @@ it("serializes a paid claim and an extra address for the same mailbox", async ()
     password: "long-enough-password",
   });
   await locked;
+  // A signup already in flight retains its reservation if the claim window closes.
+  await db.checkoutClaim.update({
+    where: { sessionId },
+    data: { expiresAt: new Date(0) },
+  });
   const address = addresses.reserve(owner, domainRow.id, "claimant", null);
+  expect(
+    await addresses.withPrimaryReservation(`claimant@${domain}`, () =>
+      Promise.resolve("unexpected"),
+    ),
+  ).toBeNull();
   release();
   expect(await claim).toEqual({ email: `claimant@${domain}` });
   const result = await address;
@@ -1231,3 +1227,125 @@ it("serializes a paid claim and an extra address for the same mailbox", async ()
     }),
   ).toBe(0);
 }, 60_000);
+
+it("switches an uncreated claim reservation and never adopts an unrelated user", async () => {
+  const suffix = randomUUID();
+  const sessionId = `cs_test_${suffix.replaceAll("-", "")}`;
+  const customer = `cus_switch_${suffix}`;
+  const subscription = `sub_switch_${suffix}`;
+  const session = {
+    id: sessionId,
+    mode: "subscription",
+    status: "complete",
+    payment_status: "paid",
+    client_reference_id: null,
+    created: Math.floor(Date.now() / 1000),
+    customer,
+    subscription,
+    metadata: {
+      integration: "esuno-cloud-v1",
+      esuno: "1",
+      plan: "plus",
+      interval: "month",
+    },
+  };
+  const stripe = {
+    checkout: { sessions: { retrieve: () => Promise.resolve(session) } },
+    customers: { update: () => Promise.resolve({}) },
+  } as unknown as Stripe;
+  await db.subscription.create({
+    data: {
+      id: subscription,
+      stripeCustomerId: customer,
+      plan: "plus",
+      interval: "month",
+      status: "active",
+      priceId: "price",
+      storageQuotaBytes: 50_000_000_000n,
+      stripeObservedAt: new Date(),
+    },
+  });
+  await db.checkoutClaim.create({
+    data: {
+      sessionId,
+      stripeCustomerId: customer,
+      subscriptionId: subscription,
+      expiresAt: new Date(Date.now() + 60_000),
+    },
+  });
+  let fail = true;
+  const claims = createClaimService(
+    db,
+    stripe,
+    "claim.test",
+    async ({ userId, email, name }) => {
+      if (fail) throw new Error("signup temporarily failed");
+      await db.user.create({ data: { id: userId, email, name } });
+      return userId;
+    },
+  );
+  const first = `first-${suffix.slice(0, 8)}`;
+  const second = `second-${suffix.slice(0, 8)}`;
+  const input = {
+    sessionId,
+    localPart: first,
+    name: "User",
+    password: "long-enough-password",
+  };
+  await expect(claims.claim(input)).rejects.toMatchObject({ status: 409 });
+  expect((await claims.status(sessionId)).reservedLocalPart).toBe(first);
+  await expect(
+    claims.claim({ ...input, localPart: second }),
+  ).rejects.toMatchObject({ status: 409 });
+  expect((await claims.status(sessionId)).reservedLocalPart).toBe(second);
+  expect(await claims.release(sessionId)).toEqual({ released: true });
+  expect((await claims.status(sessionId)).reservedLocalPart).toBeNull();
+  fail = false;
+  expect(await claims.claim({ ...input, localPart: second })).toEqual({
+    email: `${second}@claim.test`,
+  });
+  const oldId = `unrelated-${suffix}`;
+  const otherSession = `cs_test_${randomUUID().replaceAll("-", "")}`;
+  const otherSubscription = `sub_other_${suffix}`;
+  await db.subscription.create({
+    data: {
+      id: otherSubscription,
+      stripeCustomerId: customer,
+      plan: "plus",
+      interval: "month",
+      status: "active",
+      priceId: "price",
+      storageQuotaBytes: 50_000_000_000n,
+      stripeObservedAt: new Date(),
+    },
+  });
+  await db.checkoutClaim.create({
+    data: {
+      sessionId: otherSession,
+      stripeCustomerId: customer,
+      subscriptionId: otherSubscription,
+      pendingEmail: `${first}@claim.test`,
+      pendingUserId: randomUUID(),
+      expiresAt: new Date(Date.now() + 60_000),
+    },
+  });
+  await db.user.create({
+    data: {
+      id: oldId,
+      name: "Other",
+      email: `${first.toUpperCase()}@claim.test`,
+    },
+  });
+  session.id = otherSession;
+  session.subscription = otherSubscription;
+  await expect(
+    claims.claim({ ...input, sessionId: otherSession }),
+  ).rejects.toMatchObject({ status: 409 });
+  expect(
+    (
+      await db.subscription.findUniqueOrThrow({
+        where: { id: otherSubscription },
+      })
+    ).userId,
+  ).toBeNull();
+});

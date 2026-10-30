@@ -53,6 +53,19 @@ export function createAddressStore(
             )
               return null;
           }
+          if (
+            await tx.checkoutClaim.count({
+              where: {
+                pendingEmail: email.toLowerCase(),
+                claimedAt: null,
+                OR: [
+                  { expiresAt: { gt: new Date() } },
+                  { signupLeaseUntil: { gt: new Date() } },
+                ],
+              },
+            })
+          )
+            return null;
           return work();
         },
         { timeout: 60000 },
@@ -228,6 +241,16 @@ export function createAddressStore(
           >`SELECT "id", "userId", "removedAt", "mailboxManaged", "isAlias" FROM "Address" WHERE "domainId" = ${domainId} AND lower("localPart") = ${localPart} LIMIT 1`;
           const prior = occupied[0];
           if (
+            (await tx.checkoutClaim.count({
+              where: {
+                pendingEmail: full.toLowerCase(),
+                claimedAt: null,
+                OR: [
+                  { expiresAt: { gt: new Date() } },
+                  { signupLeaseUntil: { gt: new Date() } },
+                ],
+              },
+            })) ||
             primary.length ||
             (prior &&
               (prior.userId !== userId ||

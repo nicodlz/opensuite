@@ -56,8 +56,12 @@ let closeDb = () => Promise.resolve();
 let reconcile = () => Promise.resolve(0);
 let bootstrap = (_email: string, _password: string, _name: string) =>
   Promise.resolve();
-let claimSignUp = (_input: { name: string; email: string; password: string }) =>
-  Promise.resolve("");
+let claimSignUp = (_input: {
+  name: string;
+  email: string;
+  password: string;
+  userId: string;
+}) => Promise.resolve("");
 let failIssue = false;
 let failSuspend = false;
 const wait = async (
@@ -699,6 +703,7 @@ it("provisions and authenticates accounts on every configured or managed domain 
 it("provisions a public claim through the normal sign-up path", async () => {
   const input = {
     name: "Claimed user",
+    userId: "claim-fixture-user",
     email: "claim-fixture@example.test",
     password: "long-claim-password-123",
   };

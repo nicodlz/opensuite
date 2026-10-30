@@ -545,3 +545,32 @@ test("Drive explains when there is no plan", async ({ page }) => {
     page.getByText("Choose a plan to enable uploads and incoming mail."),
   ).toBeVisible();
 });
+
+test("welcome pre-fills a reserved address", async ({ page }) => {
+  await live(page);
+  let reservedLocalPart: string | null = "saved-name";
+  await page.route("**/api/billing/claim/release", (route) => {
+    reservedLocalPart = null;
+    return route.fulfill({ json: { released: true } });
+  });
+  await page.route("**/api/billing/checkout/cs_test_reserved", (route) =>
+    route.fulfill({
+      json: {
+        state: "claimable",
+        plan: "plus",
+        interval: "month",
+        domain: "example.test",
+        reservedLocalPart,
+      },
+    }),
+  );
+  await page.goto("/welcome?session_id=cs_test_reserved");
+  await expect(page.getByLabel("Address", { exact: true })).toHaveValue(
+    "saved-name",
+  );
+  await page.getByRole("button", { name: "Clear reserved address" }).click();
+  await expect(page.getByLabel("Address", { exact: true })).toHaveValue("");
+  await expect(
+    page.getByRole("button", { name: "Clear reserved address" }),
+  ).toHaveCount(0);
+});

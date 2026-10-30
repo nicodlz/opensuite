@@ -446,8 +446,18 @@ model CheckoutClaim {
   stripeCustomerId String
   subscriptionId   String    @unique
   pendingEmail     String?   @unique
+  pendingUserId    String?   @unique
+  signupLeaseUntil DateTime?
+  signupLeaseToken String?
   claimedByUserId  String?   @unique
   claimedAt        DateTime?
   expiresAt        DateTime
   createdAt        DateTime  @default(now())
+}
+
+model BillingSyncState {
+  id String @id
+  lastCompletedAt DateTime?
+  leaseUntil DateTime?
+  leaseToken String?
 }

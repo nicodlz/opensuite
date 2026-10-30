@@ -137,3 +137,14 @@ that flag only attempts conditional deletion of unreferenced UUID staging keys
 older than seven days. Final objects are never deleted. The local S3 substitute
 does not implement the condition and the command fails closed. **Verify on B2
 before using `--delete-orphans`.**
+
+### Acknowledging a permanently failed webhook
+
+After independently verifying the event and resolving its subscription state, an operator may stop the stuck-event alert by marking that specific event ignored and processed in PostgreSQL:
+
+```sql
+UPDATE "StripeEvent" SET "ignoredAt" = now(), "processedAt" = now()
+WHERE id = 'evt_REPLACE_WITH_VERIFIED_ID' AND "processedAt" IS NULL;
+```
+
+Record the event ID and reason in the incident log; reconciliation remains responsible for repairing subscription state.

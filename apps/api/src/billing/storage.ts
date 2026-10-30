@@ -75,12 +75,19 @@ export const createStorageMeter = (
     if (
       previous &&
       previous.value === quota &&
-      Date.now() - previous.at < 300_000
-    )
+      Date.now() - previous.at < 3_600_000
+    ) {
+      lastQuota.delete(link.accountId);
+      lastQuota.set(link.accountId, { value: quota, at: Date.now() });
       return;
+    }
     const result = await mail.setDiskQuota(link.accountId, quota);
     if (result.isErr()) throw new Error("mail quota unavailable");
-    if (lastQuota.size >= 1000) lastQuota.clear();
+    lastQuota.delete(link.accountId);
+    if (lastQuota.size >= 1000) {
+      const oldest = lastQuota.keys().next().value;
+      if (oldest !== undefined) lastQuota.delete(oldest);
+    }
     lastQuota.set(link.accountId, { value: quota, at: Date.now() });
   };
   const jobs = new Map<

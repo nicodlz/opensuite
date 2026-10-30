@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { generateId } from "@better-auth/core/utils/id";
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { oneTimeToken, twoFactor } from "better-auth/plugins";
@@ -28,6 +30,7 @@ export interface IdentityDependencies {
 }
 
 export const createIdentity = (dependencies: IdentityDependencies) => {
+  const claimId = new AsyncLocalStorage<string>();
   const totp = twoFactor();
   const build = (disableSignUp: boolean) =>
     betterAuth({
@@ -72,6 +75,12 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
         oneTimeToken({ expiresIn: 1, storeToken: "hashed" }),
       ],
       advanced: {
+        database: {
+          generateId: ({ model }) =>
+            model === "user"
+              ? (claimId.getStore() ?? generateId())
+              : generateId(),
+        },
         useSecureCookies: false,
         cookiePrefix: authCookiePrefix,
         defaultCookieAttributes: {
@@ -106,6 +115,10 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
   const publicIdentity = build(true);
   return {
     ...internal,
+    claimSignUpWithId: (
+      userId: string,
+      body: { name: string; email: string; password: string },
+    ) => claimId.run(userId, () => internal.api.signUpEmail({ body })),
     handler: Object.assign(publicIdentity.handler, {
       adminSignUp: (body: { name: string; email: string; password: string }) =>
         internal.api.signUpEmail({ body, asResponse: true }),

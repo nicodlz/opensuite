@@ -1,5 +1,6 @@
 import { oc } from "@orpc/contract";
 import { z } from "zod";
+import { AddressLocalPart } from "./addresses.ts";
 
 export const DeploymentMode = z.enum(["self-hosted", "cloud"]);
 export type DeploymentMode = z.infer<typeof DeploymentMode>;
@@ -96,13 +97,7 @@ const PlanInput = z
 const CheckoutSessionId = z
   .string()
   .regex(/^cs_(test|live)_[A-Za-z0-9]{1,200}$/);
-export const ClaimLocalPart = z
-  .string()
-  .trim()
-  .toLowerCase()
-  .min(3)
-  .max(40)
-  .regex(/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/);
+export const ClaimLocalPart = AddressLocalPart;
 const RedirectUrl = z.object({ url: z.url() });
 const procedure = oc.errors({
   BILLING_DISABLED: { status: 404, message: "Billing is not enabled" },
@@ -147,11 +142,16 @@ export const billingContract = {
     .output(
       z.object({
         state: z.enum(["pending", "claimable", "claimed", "expired"]),
+        reservedLocalPart: z.string().max(40).nullable().optional(),
         plan: PlanId.nullable(),
         interval: BillingInterval.nullable(),
         domain: z.string(),
       }),
     ),
+  releaseClaim: procedure
+    .route({ method: "POST", path: "/billing/claim/release" })
+    .input(z.object({ sessionId: CheckoutSessionId }).strict())
+    .output(z.object({ released: z.literal(true) })),
   claim: procedure
     .route({ method: "POST", path: "/billing/claim" })
     .input(

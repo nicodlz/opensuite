@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isReservedMailLocalPart } from "@opensuite/core";
 import { ORPCError } from "@orpc/server";
 import { BillingInterval, ClaimLocalPart, PlanId } from "@opensuite/contracts";
@@ -35,6 +36,7 @@ export function createClaimService(
     name: string;
     email: string;
     password: string;
+    userId: string;
   }) => Promise<string>,
   refresh?: (userId: string) => Promise<void>,
 ) {
@@ -76,6 +78,10 @@ export function createClaimService(
       plan: checked.plan,
       interval: checked.interval,
       domain,
+      reservedLocalPart:
+        state === "claimable" && existing?.pendingEmail?.endsWith(`@${domain}`)
+          ? existing.pendingEmail.slice(0, -(domain.length + 1))
+          : null,
     } as const;
   };
   const claim = async (input: ClaimInput) => {
@@ -105,94 +111,175 @@ export function createClaimService(
     const customer = id(checked.session.customer);
     const subscription = id(checked.session.subscription);
     if (customer === undefined || subscription === undefined) throw bad();
-    // Reserve the address before the independent Better Auth transaction. A retry
-    // can recover an account created just before a process crash.
-    const reservation = await db.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${input.sessionId}, 71033))`;
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${subscription}, 71032))`;
-      const record = await tx.checkoutClaim.findUniqueOrThrow({
-        where: { sessionId: input.sessionId },
-      });
-      if (
-        record.claimedAt !== null ||
-        record.stripeCustomerId !== customer ||
-        record.subscriptionId !== subscription ||
-        record.expiresAt <= new Date()
-      )
-        throw conflict();
-      if (record.pendingEmail !== null && record.pendingEmail !== email)
-        throw conflict();
-      const subscriptionRow = await tx.subscription.findUnique({
-        where: { id: subscription },
-      });
-      if (
-        subscriptionRow === null ||
-        subscriptionRow.stripeCustomerId !== customer ||
-        (subscriptionRow.userId !== null &&
-          subscriptionRow.userId !== record.claimedByUserId)
-      )
-        throw bad();
-      if (record.pendingEmail === null) {
-        const [existingUser, address] = await Promise.all([
-          tx.user.findFirst({
-            where: { email: email },
-            select: { id: true },
-          }),
-          tx.address.findFirst({
-            where: {
-              localPart: input.localPart,
-              domain: { name: domain },
-            },
-            select: { id: true },
-          }),
-        ]);
-        if (existingUser !== null || address !== null) throw conflict();
-        await tx.checkoutClaim.update({
-          where: { sessionId: input.sessionId },
-          data: { pendingEmail: email },
+    // Serialize reservation changes with address and primary-account creation.
+    let reservedUserId: string;
+    const signupLeaseToken = randomUUID();
+    try {
+      reservedUserId = await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domain}, 9876))`;
+        const domainRow = await tx.domain.findUnique({
+          where: { name: domain },
+          select: { id: true },
         });
-      }
-      return record;
-    });
-    const reservedUserId = await db.$transaction(
-      async (tx) => {
+        if (domainRow)
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainRow.id}, 9876))`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${input.sessionId}, 71033))`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${subscription}, 71032))`;
         const record = await tx.checkoutClaim.findUniqueOrThrow({
           where: { sessionId: input.sessionId },
         });
-        if (record.claimedAt !== null || record.pendingEmail !== email)
+        if (
+          record.claimedAt ||
+          record.stripeCustomerId !== customer ||
+          record.subscriptionId !== subscription ||
+          record.expiresAt <= new Date()
+        )
           throw conflict();
-        let userId = record.claimedByUserId;
-        if (userId === null) {
-          const existing =
-            reservation.pendingEmail === null
-              ? null
-              : await tx.user.findFirst({
-                  where: { email: email },
-                  select: { id: true },
-                });
-          if (existing !== null) userId = existing.id;
-          else {
-            try {
-              userId = await signUp({
-                name: input.name,
-                email,
-                password: input.password,
-              });
-            } catch {
-              throw conflict();
-            }
-          }
-          await tx.checkoutClaim.update({
-            where: { sessionId: input.sessionId },
-            data: { claimedByUserId: userId },
-          });
-        }
-        return userId;
-      },
-      { timeout: 45_000 },
-    );
+        if (record.signupLeaseUntil && record.signupLeaseUntil > new Date())
+          throw conflict();
+        const row = await tx.subscription.findUnique({
+          where: { id: subscription },
+        });
+        if (
+          !row ||
+          row.stripeCustomerId !== customer ||
+          (row.userId !== null && row.userId !== record.claimedByUserId)
+        )
+          throw bad();
+        const existingExpected = record.pendingUserId
+          ? await tx.user.findUnique({
+              where: { id: record.pendingUserId },
+              select: { id: true, email: true },
+            })
+          : null;
+        if (
+          record.pendingEmail !== null &&
+          record.pendingEmail !== email &&
+          (record.claimedByUserId !== null ||
+            existingExpected !== null ||
+            (
+              await tx.$queryRaw<
+                { id: string }[]
+              >`SELECT "id" FROM "User" WHERE lower("email") = ${record.pendingEmail} LIMIT 1`
+            ).length > 0)
+        )
+          throw conflict();
+        const expectedUserId =
+          record.pendingEmail === email
+            ? (record.claimedByUserId ?? record.pendingUserId ?? randomUUID())
+            : randomUUID();
+        const existing = await tx.$queryRaw<
+          { id: string }[]
+        >`SELECT "id" FROM "User" WHERE lower("email") = ${email} LIMIT 1`;
+        if (existing[0] && existing[0].id !== expectedUserId) throw conflict();
+        if (
+          domainRow &&
+          (
+            await tx.$queryRaw<
+              { id: string }[]
+            >`SELECT "id" FROM "Address" WHERE "domainId" = ${domainRow.id} AND lower("localPart") = ${input.localPart} LIMIT 1`
+          ).length
+        )
+          throw conflict();
+        await tx.checkoutClaim.updateMany({
+          where: {
+            pendingEmail: email,
+            expiresAt: { lte: new Date() },
+            claimedAt: null,
+            OR: [
+              { signupLeaseUntil: null },
+              { signupLeaseUntil: { lte: new Date() } },
+            ],
+            sessionId: { not: input.sessionId },
+          },
+          data: { pendingEmail: null },
+        });
+        await tx.checkoutClaim.update({
+          where: { sessionId: input.sessionId },
+          data: {
+            pendingEmail: email,
+            pendingUserId: expectedUserId,
+            signupLeaseUntil: new Date(Date.now() + 120_000),
+            signupLeaseToken,
+          },
+        });
+        return expectedUserId;
+      });
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "P2002"
+      )
+        throw conflict();
+      throw error;
+    }
+    const heartbeat = setInterval(() => {
+      void db.checkoutClaim
+        .updateMany({
+          where: {
+            sessionId: input.sessionId,
+            signupLeaseToken,
+            claimedAt: null,
+          },
+          data: { signupLeaseUntil: new Date(Date.now() + 120_000) },
+        })
+        .catch(() => {});
+    }, 30_000);
+    heartbeat.unref();
+    try {
+      const existing = await db.user.findUnique({
+        where: { id: reservedUserId },
+        select: { email: true },
+      });
+      if (existing !== null) {
+        if (existing.email !== email) throw conflict();
+      } else {
+        const createdId = await signUp({
+          name: input.name,
+          email,
+          password: input.password,
+          userId: reservedUserId,
+        });
+        if (createdId !== reservedUserId) throw conflict();
+        const created = await db.user.findUnique({
+          where: { id: reservedUserId },
+          select: { email: true },
+        });
+        if (created === null || created.email !== email) throw conflict();
+      }
+      const linked = await db.checkoutClaim.updateMany({
+        where: {
+          sessionId: input.sessionId,
+          pendingEmail: email,
+          pendingUserId: reservedUserId,
+          claimedAt: null,
+          signupLeaseUntil: { gt: new Date() },
+          signupLeaseToken,
+        },
+        data: {
+          claimedByUserId: reservedUserId,
+          signupLeaseUntil: null,
+          signupLeaseToken: null,
+        },
+      });
+      if (linked.count !== 1) throw conflict();
+    } catch (error) {
+      await db.checkoutClaim.updateMany({
+        where: {
+          sessionId: input.sessionId,
+          pendingUserId: reservedUserId,
+          claimedAt: null,
+          signupLeaseToken,
+        },
+        data: { signupLeaseUntil: null, signupLeaseToken: null },
+      });
+      if (error instanceof ORPCError) throw error;
+      throw conflict();
+    } finally {
+      clearInterval(heartbeat);
+    }
     return db
       .$transaction(
         async (tx) => {
@@ -251,6 +338,52 @@ export function createClaimService(
         return { email: claimedEmail };
       });
   };
-  return { status, claim };
+  const release = async (sessionId: string) => {
+    await db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domain}, 9876))`;
+      const domainRow = await tx.domain.findUnique({
+        where: { name: domain },
+        select: { id: true },
+      });
+      if (domainRow)
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainRow.id}, 9876))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${sessionId}, 71033))`;
+      const record = await tx.checkoutClaim.findUnique({
+        where: { sessionId },
+      });
+      if (!record || record.claimedAt || record.expiresAt <= new Date())
+        throw bad();
+      if (
+        record.claimedByUserId ||
+        (record.signupLeaseUntil && record.signupLeaseUntil > new Date())
+      )
+        throw conflict();
+      if (
+        record.pendingEmail &&
+        (
+          await tx.$queryRaw<
+            { id: string }[]
+          >`SELECT "id" FROM "User" WHERE lower("email") = ${record.pendingEmail} LIMIT 1`
+        ).length
+      )
+        throw conflict();
+      if (
+        record.pendingUserId &&
+        (await tx.user.count({ where: { id: record.pendingUserId } }))
+      )
+        throw conflict();
+      await tx.checkoutClaim.update({
+        where: { sessionId },
+        data: {
+          pendingEmail: null,
+          pendingUserId: null,
+          signupLeaseUntil: null,
+          signupLeaseToken: null,
+        },
+      });
+    });
+    return { released: true as const };
+  };
+  return { status, claim, release };
 }
 export type ClaimService = ReturnType<typeof createClaimService>;

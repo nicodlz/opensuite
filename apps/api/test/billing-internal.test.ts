@@ -235,3 +235,101 @@ it("limits status and claim calls per client and maps missing Stripe sessions", 
     await app.close();
   }
 });
+
+it("shares a per-user limit across checkout, change and portal", async () => {
+  const service = {
+    checkout: () =>
+      Promise.resolve({ url: "https://checkout.stripe.test/session" }),
+    portal: () =>
+      Promise.resolve({ url: "https://billing.stripe.test/session" }),
+  } as unknown as NonNullable<Parameters<typeof buildServer>[0]["billing"]>;
+  const app = await buildServer({
+    config: { logLevel: "silent" },
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: () => 0,
+    }),
+    monotonicMs: () => 0,
+    identity: {
+      handler: () => Promise.resolve(new Response()),
+      publicOrigin: "https://mail.example.test",
+      actor: () =>
+        Promise.resolve({
+          id: "same-user",
+          email: "user@example.test",
+          role: "user",
+        }),
+    },
+    billing: service,
+  });
+  try {
+    const results = await Promise.all(
+      Array.from({ length: 11 }, (_, i) =>
+        app.inject({
+          method: "POST",
+          url: i % 2 ? "/billing/portal" : "/billing/checkout",
+          headers: { origin: "https://mail.example.test" },
+          payload: i % 2 ? {} : { plan: "plus", interval: "month" },
+        }),
+      ),
+    );
+    expect(results.filter((result) => result.statusCode === 429)).toHaveLength(
+      1,
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+it("caps checkout status globally across client addresses", async () => {
+  let calls = 0;
+  const claims = {
+    status: () => {
+      calls++;
+      return Promise.resolve({
+        state: "pending",
+        plan: null,
+        interval: null,
+        domain: "example.test",
+      });
+    },
+  } as unknown as NonNullable<Parameters<typeof buildServer>[0]["claims"]>;
+  const service = {} as NonNullable<
+    Parameters<typeof buildServer>[0]["billing"]
+  >;
+  const app = await buildServer({
+    config: { logLevel: "silent" },
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: () => 0,
+    }),
+    monotonicMs: () => 0,
+    identity: {
+      handler: () => Promise.resolve(new Response()),
+      publicOrigin: "https://mail.example.test",
+    },
+    billing: service,
+    claims,
+  });
+  try {
+    const results = await Promise.all(
+      Array.from({ length: 601 }, (_, index) =>
+        app.inject({
+          method: "GET",
+          url: "/billing/checkout/cs_test_a",
+          remoteAddress: `10.0.${Math.floor(index / 250)}.${(index % 250) + 1}`,
+        }),
+      ),
+    );
+    expect(
+      results.filter((response) => response.statusCode === 429),
+    ).toHaveLength(1);
+    expect(calls).toBe(600);
+  } finally {
+    await app.close();
+  }
+});

@@ -2,7 +2,7 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { okAsync } from "neverthrow";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { PrismaClient } from "@opensuite/db";
 import type { StalwartAdmin } from "@opensuite/jmap/admin";
 import type { Entitlements } from "../src/billing/entitlements.ts";
@@ -127,4 +127,53 @@ it("coalesces refresh requests and skips unchanged quotas", async () => {
   expect(writes).toBe(1);
   await storage.refresh("owner");
   expect(writes).toBe(1);
+});
+
+it("renews the one-hour quota cache on a hit and evicts the least recently used account", async () => {
+  const now = vi.spyOn(Date, "now");
+  let time = 0;
+  now.mockImplementation(() => time);
+  const writes: string[] = [];
+  const db = {
+    mailboxLink: {
+      findUnique: ({ where }: { where: { userId: string } }) =>
+        Promise.resolve({ accountId: where.userId, status: "active" }),
+    },
+  } as unknown as PrismaClient;
+  const mail = {
+    setDiskQuota: (id: string) => {
+      writes.push(id);
+      return okAsync(undefined);
+    },
+  } as unknown as StalwartAdmin;
+  const entitlement = {
+    get: () => Promise.resolve({ quotaBytes: null }),
+  } as unknown as Entitlements;
+  const storage = createStorageMeter(
+    db,
+    entitlement,
+    mail,
+    "http://127.0.0.1",
+    undefined,
+  );
+  try {
+    /* oxlint-disable eslint/no-await-in-loop */
+    for (let offset = 0; offset < 1000; offset += 100)
+      await Promise.all(
+        Array.from({ length: 100 }, (_, index) =>
+          storage.refresh(`user-${offset + index}`),
+        ),
+      );
+    /* oxlint-enable eslint/no-await-in-loop */
+    time = 3_500_000;
+    await storage.refresh("user-0");
+    await storage.refresh("user-1000");
+    await storage.refresh("user-1");
+    expect(writes.filter((id) => id === "user-1")).toHaveLength(2);
+    time = 3_700_000;
+    await storage.refresh("user-0");
+    expect(writes.filter((id) => id === "user-0")).toHaveLength(1);
+  } finally {
+    now.mockRestore();
+  }
 });
