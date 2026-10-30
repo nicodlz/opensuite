@@ -436,6 +436,9 @@ services:
       VAULT_HTTPS_PORT: ${HTTPS_PORT:-443}
       ROCKET_PORT: 8080
       TEMPLATES_FOLDER: /opt/opensuite/vault-templates
+      SMTP_EMBED_IMAGES: "false"
+      SMTP_FROM_NAME: Esuno Vault
+      INVITATION_ORG_NAME: Esuno Vault
       ORG_CREATION_USERS: ${VAULT_ORG_CREATION_USERS:-none}
       SIGNUPS_ALLOWED: ${VAULT_SIGNUPS_ALLOWED:-false}
       INVITATIONS_ALLOWED: ${VAULT_INVITATIONS_ALLOWED:-true}

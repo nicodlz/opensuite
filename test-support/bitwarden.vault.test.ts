@@ -26,11 +26,13 @@ import { chromium, type BrowserContext } from "@playwright/test";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { createVaultFixture } from "./vault-fixture.js";
+import { captureVaultMail } from "./vault-smtp.js";
 
 const run = promisify(execFile);
 const id = randomBytes(5).toString("hex");
 const {
   env,
+  project,
   args: composeArgs,
   compose,
   chooseSubnets,
@@ -58,6 +60,7 @@ let ca = "";
 let direct = "";
 let certificatePin = "";
 let context: BrowserContext | undefined;
+let smtp: Awaited<ReturnType<typeof captureVaultMail>> | undefined;
 const sessions = ["", ""];
 const homes = ["", ""];
 let itemId = "";
@@ -182,6 +185,8 @@ async function cleanup() {
     try {
       await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
     } finally {
+      await smtp?.close();
+      smtp = undefined;
       if (temp) {
         await rm(temp, { recursive: true, force: true });
         temp = "";
@@ -203,6 +208,26 @@ async function register(
   });
   if (invite.status !== 200)
     throw new Error(`Admin invitation failed: ${invite.status}`);
+  if (!smtp) throw new Error("SMTP capture is not running");
+  // Registration may also have sent a welcome message for the previous user.
+  let mail = await smtp.take();
+  while (mail.subject !== "Join Esuno Vault") mail = await smtp.take();
+  const recipients = Array.isArray(mail.to) ? mail.to : [mail.to];
+  expect(recipients.map((recipient) => recipient?.text).join(", ")).toContain(
+    email,
+  );
+  expect(mail.from?.text).toContain("Esuno Vault");
+  expect(mail.text).toContain("Esuno Vault");
+  expect(mail.html).toContain("Esuno Vault");
+  // Preserve the upstream source-code URL; it is not a service-name label.
+  const serviceText =
+    `${mail.subject} ${mail.text ?? ""} ${mail.html || ""}`.replaceAll(
+      "https://github.com/dani-garcia/vaultwarden",
+      "",
+    );
+  expect(/vaultwarden|bitwarden/i.test(serviceText)).toBe(false);
+  if (!mail.html || !mail.text)
+    throw new Error("Invitation MIME parts missing");
   context = await chromium.launchPersistentContext(
     join(temp, `browser-${index}`),
     {
@@ -224,6 +249,30 @@ async function register(
   );
   context.setDefaultTimeout(90_000);
   const page = await context.newPage();
+  await page.setContent(mail.html);
+  const inviteUrl = await page.getByTestId("invite").getAttribute("href");
+  if (!inviteUrl) throw new Error("Invitation link missing");
+  expect(mail.text.includes(inviteUrl)).toBe(true);
+  expect(new URL(inviteUrl).origin).toBe(origin);
+  const logo = page.getByAltText("Esuno Vault");
+  expect(new URL((await logo.getAttribute("src")) ?? "").pathname).toBe(
+    "/esuno-vault/images/logo-white@2x.png",
+  );
+  await page.waitForFunction(() => {
+    const img = document.querySelector<HTMLImageElement>(
+      'img[alt="Esuno Vault"]',
+    );
+    return img?.complete && img.naturalWidth > 0;
+  });
+  const screenshots = process.env["VAULT_MAIL_SCREENSHOTS"];
+  if (screenshots && index === 0) {
+    await mkdir(screenshots, { recursive: true });
+    // The rendered screenshot must not retain the disposable invitation token.
+    await page.locator("a").evaluateAll((links) => {
+      for (const link of links) link.removeAttribute("href");
+    });
+    await page.screenshot({ path: join(screenshots, "invitation.png") });
+  }
   const errors: string[] = [];
   const consoleMessages: string[] = [];
   const bundleResponses: number[] = [];
@@ -262,7 +311,7 @@ async function register(
     errors.length = 0;
     bundleResponses.length = 0;
     try {
-      if (attempt === 0) await page.goto(`${origin}/#/register`);
+      if (attempt === 0) await page.goto(inviteUrl);
       else await page.reload();
       // The server's index is only a loading shell. Wait for its application
       // bundle before allowing extra time for Angular to render registration.
@@ -278,21 +327,21 @@ async function register(
         throw new Error(
           `Web vault bundle response: ${bundleResponses.join(", ")}`,
         );
-      await page.getByLabel("Email address").waitFor({ timeout: 120_000 });
+      await page
+        .locator('input[type="password"]')
+        .first()
+        .waitFor({ timeout: 120_000 });
       break;
     } catch (error) {
-      const url = page.url();
       await capture(String(attempt));
       if (attempt < 1) continue;
       throw new Error(
-        `Registration ${index} page failed to load at ${url}: ${errors.join("; ")}; bundle HTTP: ${bundleResponses.join(", ")}; console: ${consoleMessages.join("; ")}. Diagnostics captured in disposable test directory.`,
+        `Registration ${index} page failed to load: ${errors.join("; ")}; bundle HTTP: ${bundleResponses.join(", ")}; console: ${consoleMessages.join("; ")}. Diagnostics captured in disposable test directory.`,
         { cause: error },
       );
     }
   }
   try {
-    await page.getByLabel("Email address").fill(email);
-    await page.getByRole("button", { name: "Continue" }).click();
     await page.locator('input[type="password"]').nth(0).fill(masterPassword);
     await page.locator('input[type="password"]').nth(1).fill(masterPassword);
     await page.locator('input[type="checkbox"]').uncheck();
@@ -360,6 +409,22 @@ describe("Bitwarden CLI against Vault", () => {
       const port = await getPort("caddy", "443");
       origin = `https://vault.localhost:${port}`;
       env.VAULT_TEST_DOMAIN = origin;
+      const smtpHost = (
+        await run("docker", [
+          "network",
+          "inspect",
+          `${project}_pass-network`,
+          "--format",
+          "{{(index .IPAM.Config 0).Gateway}}",
+        ])
+      ).stdout.trim();
+      smtp = await captureVaultMail(smtpHost);
+      Object.assign(env, {
+        VAULT_SMTP_HOST: smtpHost,
+        VAULT_SMTP_PORT: String(smtp.port),
+        VAULT_SMTP_FROM: "vault@example.invalid",
+        VAULT_SMTP_SECURITY: "off",
+      });
       await compose("up", "-d", "--wait", "--wait-timeout", "180", "vault");
       direct = await getPort("vault", "8080");
       ca = await compose(
@@ -503,6 +568,10 @@ describe("Bitwarden CLI against Vault", () => {
         expect(css).toContain(".vw-sso-login");
         expect(css).toContain(".vw-passkey-login");
         await page.getByLabel("Email address").waitFor();
+        expect(
+          await page.getByRole("link", { name: "Create account" }).isVisible(),
+        ).toBe(false);
+        expect(css).toContain(".vw-signup-link");
         expect(await page.locator("html").getAttribute("class")).toContain(
           `theme_${theme}`,
         );
