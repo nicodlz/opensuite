@@ -127,7 +127,7 @@ export async function loadSubscriberDomains(
   const parsed = z
     .array(mailDomain)
     .min(1)
-    .safeParse(raw.split(",").map((name) => name.trim()));
+    .safeParse(raw.split(",").map((name) => name.trim().toLowerCase()));
   if (!parsed.success)
     return err({
       kind: "invalid_environment",
@@ -146,7 +146,11 @@ export async function loadSubscriberDomains(
         "SUBSCRIBER_DOMAINS contains a domain that is not an account domain",
       ],
     });
-  return ok(domains);
+  return ok(
+    mode === "cloud"
+      ? [accountDomain, ...domains.filter((domain) => domain !== accountDomain)]
+      : domains,
+  );
 }
 const AuthEnvironment = z.object({
   TRUSTED_PROXY_IP: z.ipv4(),

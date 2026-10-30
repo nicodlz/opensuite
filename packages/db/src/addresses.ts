@@ -87,11 +87,7 @@ export function createAddressStore(
           let failures = 0;
           // Bound management requests and preserve per-domain failure isolation.
           /* oxlint-disable eslint/no-await-in-loop */
-          for (const name of configured.filter(
-            (domain) =>
-              subscriberDomains === undefined ||
-              subscriberDomains.includes(domain),
-          )) {
+          for (const name of configured) {
             try {
               const existing = await db.domain.findUnique({ where: { name } });
               if (existing?.removalPending || existing?.stalwartId) continue;

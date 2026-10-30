@@ -70,27 +70,30 @@ export const createReserve = (
         const restricted =
           subscriberDomains !== undefined && user.role !== "admin";
         let domainId = input.domainId ?? user.defaultAliasDomainId;
-        // A stale default is ignored. The compatible API has no domain selector,
-        // so choose the first available subscriber domain in that case.
-        if (input.domainId === undefined && domainId && restricted) {
-          const existing = await tx.domain.findUnique({
-            where: { id: domainId },
-            select: { name: true },
-          });
+        // The compatible API has no domain selector. Ignore a stale default
+        // and choose the first available domain in the configured order.
+        if (input.domainId === undefined && restricted) {
+          const existing =
+            domainId === null
+              ? null
+              : await tx.domain.findUnique({
+                  where: { id: domainId },
+                  select: { name: true },
+                });
           if (!existing || !subscriberDomains.includes(existing.name)) {
+            const candidates = await tx.domain.findMany({
+              where: {
+                name: { in: [...subscriberDomains] },
+                status: "verified",
+                removalPending: false,
+                stalwartId: { not: null },
+              },
+              select: { id: true, name: true },
+            });
             domainId =
-              (
-                await tx.domain.findFirst({
-                  where: {
-                    name: { in: [...subscriberDomains] },
-                    status: "verified",
-                    removalPending: false,
-                    stalwartId: { not: null },
-                  },
-                  orderBy: { name: "asc" },
-                  select: { id: true },
-                })
-              )?.id ?? null;
+              subscriberDomains.flatMap((name) =>
+                candidates.filter((candidate) => candidate.name === name),
+              )[0]?.id ?? null;
           }
         }
         if (!domainId) return err({ kind: "invalid" });

@@ -1434,6 +1434,7 @@ describe("push API", () => {
 it("restricts subscriber choices and creation while preserving existing mail and admin access", async () => {
   const adminId = "policy-admin";
   const subscriberId = "policy-subscriber";
+  const newSubscriberId = "policy-new-subscriber";
   const allowed = ["esuno.net", "esn.pm"];
   const technical = "technical.example";
   const foreign = "other.example";
@@ -1446,14 +1447,19 @@ it("restricts subscriber choices and creation while preserving existing mail and
         role: "admin",
       },
       { id: subscriberId, email: `existing@${technical}`, name: "Subscriber" },
+      { id: newSubscriberId, email: "new@esuno.net", name: "New subscriber" },
     ],
   });
   await db.mailboxLink.createMany({
-    data: [adminId, subscriberId].map((userId) => ({
+    data: [adminId, subscriberId, newSubscriberId].map((userId) => ({
       userId,
       accountId: `${userId}-mail`,
       address:
-        userId === adminId ? `admin@${technical}` : `existing@${technical}`,
+        userId === adminId
+          ? `admin@${technical}`
+          : userId === subscriberId
+            ? `existing@${technical}`
+            : "new@esuno.net",
       credentialId: "fixture",
       secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
     })),
@@ -1647,11 +1653,32 @@ it("restricts subscriber choices and creation while preserving existing mail and
       payload: {},
     });
     expect(compat.statusCode).toBe(201);
-    expect(
-      allowed.some((domain) =>
-        compat.json<{ alias: string }>().alias.endsWith(`@${domain}`),
-      ),
-    ).toBe(true);
+    expect(compat.json<{ alias: string }>().alias).toMatch(/@esuno\.net$/);
+    const newKeyResult = await policyAliases.createKey(
+      newSubscriberId,
+      "New generator",
+    );
+    if (newKeyResult.isErr()) throw new Error("fixture key");
+    const newCompat = await policyApp.inject({
+      method: "POST",
+      url: "/alias/random/new",
+      headers: { authentication: newKeyResult.value.secret },
+      payload: {},
+    });
+    expect(newCompat.statusCode).toBe(201);
+    expect(newCompat.json<{ alias: string }>().alias).toMatch(/@esuno\.net$/);
+    await db.domain.update({
+      where: { name: "esuno.net" },
+      data: { status: "failing" },
+    });
+    const nextCompat = await policyApp.inject({
+      method: "POST",
+      url: "/alias/random/new",
+      headers: { authentication: newKeyResult.value.secret },
+      payload: {},
+    });
+    expect(nextCompat.statusCode).toBe(201);
+    expect(nextCompat.json<{ alias: string }>().alias).toMatch(/@esn\.pm$/);
     expect(
       (
         await policyAliases.create(subscriberId, {
@@ -1737,10 +1764,23 @@ it("restricts subscriber choices and creation while preserving existing mail and
         })
       ).isOk(),
     ).toBe(true);
-    expect(provisioned).toEqual(["included.example"]);
+    expect(provisioned).toEqual(["excluded.example", "included.example"]);
+    const excluded = await db.domain.findUnique({
+      where: { name: "excluded.example" },
+    });
+    expect(excluded).toMatchObject({
+      stalwartId: "remote-excluded.example",
+      status: "pending",
+    });
+    const adminChoices = await configuredStore.domains(adminId);
+    const subscriberChoices = await configuredStore.domains(subscriberId);
     expect(
-      await db.domain.findUnique({ where: { name: "excluded.example" } }),
-    ).toBeNull();
+      adminChoices.isOk() && adminChoices.value.map((row) => row.name),
+    ).toContain("excluded.example");
+    expect(
+      subscriberChoices.isOk() &&
+        subscriberChoices.value.map((row) => row.name),
+    ).not.toContain("excluded.example");
     expect(
       (await policyAliases.list(subscriberId))
         .match(

@@ -151,8 +151,8 @@ Record the event ID and reason in the incident log; reconciliation remains respo
 
 ### Subscriber domains
 
-Cloud requires `SUBSCRIBER_DOMAINS`, a comma-separated list of lowercase
-account domains. Each must be `MAIL_DOMAIN`, in `MAIL_DOMAINS`, or an
+Cloud requires `SUBSCRIBER_DOMAINS`, a comma-separated list of account
+domains. Entries are normalized to lowercase. Each must be `MAIL_DOMAIN`, in `MAIL_DOMAINS`, or an
 existing managed domain. The API refuses to start if the list is empty, a
 listed domain is not an account domain, or the billing account domain is
 missing from the list. For example, when the primary technical mailbox uses
@@ -165,8 +165,15 @@ SUBSCRIBER_DOMAINS=esuno.net,esn.pm
 BILLING_ACCOUNT_DOMAIN=esuno.net
 ```
 
-Provision and verify the subscriber domains for mail delivery. Non-admins
-can choose only listed domains for new addresses, aliases, and alias defaults;
-existing mailboxes and aliases continue to work. Administrators retain their
-existing domain choices. Self-hosted deployments may leave the list empty to
-keep the existing unrestricted behavior.
+Newly provisioned configured subscriber domains start as `pending`. The scheduled domain job
+excludes configured domains, so an administrator must run a manual DNS recheck
+in the Domains settings after configuring the required records. Both
+`esuno.net` and `esn.pm` must be `verified` before they can be used for aliases.
+
+Non-admins, including technical mailboxes without the admin role, can choose
+only listed domains for new addresses, aliases, and alias defaults; existing
+mailboxes and aliases continue to work. When no usable default is set, the
+API-key generator chooses the first available subscriber domain, with the
+billing account domain first in Cloud mode and the rest in list order.
+Administrators retain their existing domain choices. Self-hosted deployments
+may leave the list empty to keep the existing unrestricted behavior.

@@ -324,7 +324,16 @@ it("validates subscriber domains and the Cloud billing domain before startup", a
   expect((await validate("esuno.net,foreign.example", "cloud")).isErr()).toBe(
     true,
   );
-  expect((await validate("Esuno.net", "cloud")).isErr()).toBe(true);
+  const normalized = await validate("EsN.PM, ESUNO.NET, EsN.PM", "cloud");
+  expect(normalized.isOk() && normalized.value).toEqual([
+    "esuno.net",
+    "esn.pm",
+  ]);
+  const selfHostedOrder = await validate("EsN.PM, ESUNO.NET", "self-hosted");
+  expect(selfHostedOrder.isOk() && selfHostedOrder.value).toEqual([
+    "esn.pm",
+    "esuno.net",
+  ]);
   expect((await validate("esuno.net,", "cloud")).isErr()).toBe(true);
   expect(
     (await validate("esuno.net,esn.pm", "cloud", "technical.example")).isErr(),
