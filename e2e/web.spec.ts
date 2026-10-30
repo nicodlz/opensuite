@@ -163,3 +163,22 @@ test("live API probes reach the status page through the preview proxy", async ({
   await expect(page.getByText(/Uptime: \d+ seconds/)).toBeVisible();
   await expect(page.getByText("No dependencies declared")).toBeVisible();
 });
+
+test("a script that fails to load is retried once instead of leaving a blank page", async ({
+  page,
+}) => {
+  await mockHealthy(page);
+  let aborted = 0;
+  // A module of the initial graph fails once, as after a network change.
+  await page.route("**/src/ui/toast.tsx*", async (route) => {
+    if (aborted === 0) {
+      aborted += 1;
+      await route.abort("internetdisconnected");
+    } else await route.continue();
+  });
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "All checks operational" }),
+  ).toBeVisible();
+  expect(aborted).toBe(1);
+});

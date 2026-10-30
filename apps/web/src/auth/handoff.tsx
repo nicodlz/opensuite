@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { z } from "zod";
 import { activeLayout } from "../origins.ts";
 import { Button } from "../ui/button.tsx";
 import { auth } from "./client.ts";
@@ -29,11 +30,17 @@ const safePath = (value: unknown) =>
 export function startHandoff() {
   const layout = activeLayout();
   const now = Date.now();
-  const recent = (
-    JSON.parse(sessionStorage.getItem(attemptsKey) ?? "[]") as unknown[]
-  ).filter(
-    (time): time is number => typeof time === "number" && now - time < 60_000,
-  );
+  let stored: unknown = [];
+  try {
+    stored = JSON.parse(sessionStorage.getItem(attemptsKey) ?? "[]");
+  } catch {
+    stored = [];
+  }
+  const recent = z
+    .array(z.number())
+    .catch([])
+    .parse(stored)
+    .filter((time) => now - time < 60_000);
   if (recent.length >= 3) return false;
   sessionStorage.setItem(attemptsKey, JSON.stringify([...recent, now]));
   const state = randomState();
@@ -41,7 +48,10 @@ export function startHandoff() {
     pendingKey,
     JSON.stringify({
       state,
-      path: window.location.pathname + window.location.search,
+      // The callback page itself is never a page to come back to.
+      path: window.location.pathname.startsWith("/auth/")
+        ? "/"
+        : window.location.pathname + window.location.search,
       at: now,
     }),
   );
@@ -120,48 +130,50 @@ export function HandoffPage() {
   return <HandoffMessage title="Signing you in…" />;
 }
 
+const Pending = z.object({
+  state: z.string().regex(statePattern),
+  path: z.string(),
+  at: z.number(),
+});
+/** Reads the callback fragment and the pending request without changing them. */
+function readCallback() {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const token = fragment.get("token") ?? "";
+  let stored: unknown = null;
+  try {
+    stored = JSON.parse(sessionStorage.getItem(pendingKey) ?? "null");
+  } catch {
+    stored = null;
+  }
+  const pending = Pending.safeParse(stored);
+  return pending.success &&
+    pending.data.state === fragment.get("state") &&
+    Date.now() - pending.data.at < 5 * 60_000 &&
+    token.length >= 16
+    ? { token, path: safePath(pending.data.path) }
+    : null;
+}
+
 /** Sibling origin: redeems the token once, then restores the page. */
 export function CallbackPage() {
   const client = useQueryClient();
-  const [error, setError] = useState(false);
+  const [link] = useState(readCallback);
+  const [error, setError] = useState(link === null);
   useEffect(() => {
     // Remove the token from the address bar and history before any request.
-    const fragment = new URLSearchParams(window.location.hash.slice(1));
     window.history.replaceState(null, "", window.location.pathname);
-    const token = fragment.get("token") ?? "";
-    const state = fragment.get("state") ?? "";
-    let pending: unknown = null;
-    try {
-      pending = JSON.parse(sessionStorage.getItem(pendingKey) ?? "null");
-    } catch {
-      pending = null;
-    }
     sessionStorage.removeItem(pendingKey);
-    const expected =
-      typeof pending === "object" && pending !== null ? pending : {};
-    const valid =
-      "state" in expected &&
-      expected.state === state &&
-      statePattern.test(state) &&
-      "at" in expected &&
-      typeof expected.at === "number" &&
-      Date.now() - expected.at < 5 * 60_000 &&
-      token.length >= 16;
-    if (!valid) {
-      setError(true);
-      return;
-    }
-    const path = "path" in expected ? safePath(expected.path) : "/";
+    if (link === null) return;
     auth
-      .redeem(token)
+      .redeem(link.token)
       .then(async () => {
         sessionStorage.removeItem(attemptsKey);
         await client.invalidateQueries({ queryKey: ["auth", "session"] });
-        window.location.replace(path);
+        window.location.replace(link.path);
         return undefined;
       })
       .catch(() => setError(true));
-  }, [client]);
+  }, [client, link]);
   if (error)
     return (
       <HandoffMessage title="Sign-in link expired">

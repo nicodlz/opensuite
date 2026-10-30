@@ -1,5 +1,5 @@
 [Unit]
-Description=Check OpenSuite mail TLS certificate daily
+Description=Check Esuno mail TLS certificate daily
 
 [Timer]
 OnCalendar=*-*-* 04:17:00

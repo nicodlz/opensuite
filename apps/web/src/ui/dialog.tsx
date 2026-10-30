@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import { Button } from "./button.tsx";
 
 export const Dialog = DialogPrimitive.Root;
-export const DialogTrigger = DialogPrimitive.Trigger;
 
 export function DialogContent({
   title,

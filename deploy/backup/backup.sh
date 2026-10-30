@@ -77,6 +77,19 @@ case "${MAIL_BLOB_STORE:-local}" in
     ;;
   *) echo 'backup: unknown mail blob store' >&2; exit 1 ;;
 esac
+# Objects are copied to scratch while services are stopped. Refuse before
+# stopping anything when they cannot fit, keeping a reserve for dumps and
+# volumes (BACKUP_SCRATCH_RESERVE_BYTES, default 4 GiB).
+mail_bytes=$(objects size mail)
+drive_bytes=$(objects size drive)
+needed=$((mail_bytes + drive_bytes + ${BACKUP_SCRATCH_RESERVE_BYTES:-4294967296}))
+available=$(df -Pk "$BACKUP_STAGE" | awk 'NR == 2 { printf "%.0f", $4 * 1024 }')
+if [ "$needed" -gt "$available" ]; then
+  echo "backup: scratch too small: need $needed bytes (mail $mail_bytes, drive $drive_bytes, reserve), $available available" >&2
+  log scratch_too_small
+  exit 1
+fi
+log scratch_checked
 running=$(compose ps --services --filter status=running | awk '/^(caddy|api|drive|stalwart|ingest|observe|pass)$/ {print}')
 # Stop clients and workers before any snapshot; operators must stop external writers.
 [ -z "$running" ] || compose stop $running >&2

@@ -76,7 +76,7 @@
 	}
 	@admin path /admin /admin/*
 	respond @admin 404
-	reverse_proxy pass-vault:80 {
+	reverse_proxy pass-vault:8080 {
 		header_up X-Real-IP {remote_host}
 	}
 }

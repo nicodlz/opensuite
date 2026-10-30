@@ -77,6 +77,8 @@ import {
   type EventForm,
   type EventTiming,
   type TimedSegment,
+  isPending,
+  isRecurring,
 } from "./model.ts";
 // Vite injects the stylesheet; there is nothing to bind.
 // oxlint-disable-next-line import/no-unassigned-import
@@ -575,7 +577,8 @@ function CalendarWorkspace() {
     });
   }
   function requestTiming(event: CalendarEvent, timing: EventTiming) {
-    if (event.recurrence === "none") saveTiming(event, timing);
+    if (isPending(event)) return;
+    if (!isRecurring(event)) saveTiming(event, timing);
     else setConfirm({ kind: "change", event, timing });
   }
   function saveTiming(event: CalendarEvent, timing: EventTiming) {
@@ -605,7 +608,7 @@ function CalendarWorkspace() {
     setPopover(null);
   }
   function remove(event: CalendarEvent) {
-    mutation.mutate({ type: "delete", event });
+    if (!isPending(event)) mutation.mutate({ type: "delete", event });
     setConfirm(null);
     setPopover(null);
   }
@@ -683,8 +686,9 @@ function CalendarWorkspace() {
   };
   const detail =
     popover?.kind === "detail"
-      ? (events.data?.events.find((event) => event.id === popover.eventId) ??
-        null)
+      ? (events.data?.events.find(
+          (event) => event.id === popover.eventId && !isPending(event),
+        ) ?? null)
       : null;
   const periodName = view === "day" ? "day" : view;
   const title = periodTitle(view, anchor, range);
@@ -928,7 +932,7 @@ function CalendarWorkspace() {
           <DialogContent
             title={editor.event ? "Edit event" : "New event"}
             description={
-              editor.event && editor.event.recurrence !== "none"
+              editor.event && isRecurring(editor.event)
                 ? "Changes apply to every occurrence of this event."
                 : `Times use your time zone (${timeZone}).`
             }
@@ -951,14 +955,14 @@ function CalendarWorkspace() {
           <DialogContent
             title={
               confirm.kind === "delete"
-                ? confirm.event.recurrence === "none"
+                ? !isRecurring(confirm.event)
                   ? "Delete event?"
                   : "Delete recurring event?"
                 : "Change recurring event?"
             }
             description={
               confirm.kind === "delete"
-                ? confirm.event.recurrence === "none"
+                ? !isRecurring(confirm.event)
                   ? `“${titleOf(confirm.event)}” will be removed from your calendar.`
                   : `This deletes every occurrence of “${titleOf(confirm.event)}”.`
                 : `This changes every occurrence of “${titleOf(confirm.event)}”.`
@@ -973,7 +977,7 @@ function CalendarWorkspace() {
                   className="cal-danger"
                   onClick={() => remove(confirm.event)}
                 >
-                  {confirm.event.recurrence === "none"
+                  {!isRecurring(confirm.event)
                     ? "Delete"
                     : "Delete all occurrences"}
                 </Button>
@@ -1120,7 +1124,8 @@ function TimeGrid({
     )
       return;
     element.scrollTop = Math.max(0, initialMinute * PX_PER_MINUTE - 12);
-    autoScrolled.current = element.scrollTop;
+    // Once events are loaded the position belongs to the user.
+    autoScrolled.current = loading ? element.scrollTop : -1;
   }, [initialMinute, loading]);
 
   const segments = useMemo(() => timedSegments(shown, days), [shown, days]);
@@ -2417,7 +2422,10 @@ function EventEditor({
       calendarId: form.calendarId,
       location: form.location.trim(),
       description: form.description,
-      timeZone,
+      // Keep the event's own zone: a different zone moves the series and
+      // drops its exceptions. All-day events have none, so a timed version
+      // uses this browser's zone.
+      timeZone: content.allDay && !form.allDay ? timeZone : content.timeZone,
       ...timing,
     });
   }

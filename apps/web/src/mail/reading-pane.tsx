@@ -83,17 +83,19 @@ function useInlineImages(message: Message) {
             return null;
           }
           urls.push(objectUrl);
-          return [
-            part.cid?.replace(/^<|>$/g, "") ?? "",
-            objectUrl,
-          ] satisfies [string, string];
+          return [part.cid?.replace(/^<|>$/g, "") ?? "", objectUrl] satisfies [
+            string,
+            string,
+          ];
         } catch {
           return null;
         }
       }),
     ).then((entries) => {
       if (!cancelled)
-        setImages(Object.fromEntries(entries.filter((entry) => entry !== null)));
+        setImages(
+          Object.fromEntries(entries.filter((entry) => entry !== null)),
+        );
       return undefined;
     });
     return () => {
@@ -198,7 +200,9 @@ function MessageView({
         <div className="message-meta">
           <p>
             <strong>{sender}</strong>{" "}
-            <span className="message-address">&lt;{message.from.email}&gt;</span>
+            <span className="message-address">
+              &lt;{message.from.email}&gt;
+            </span>
           </p>
           <p className="message-recipients">To {recipients || "—"}</p>
         </div>
@@ -215,7 +219,10 @@ function MessageView({
           </button>
         </div>
       )}
-      <MessageFrame title={`Message from ${sender}`} srcDoc={sanitized.srcDoc} />
+      <MessageFrame
+        title={`Message from ${sender}`}
+        srcDoc={sanitized.srcDoc}
+      />
       {attachmentError && (
         <p role="alert" className="message-error">
           Could not download the attachment. Please try again.
@@ -474,7 +481,7 @@ export function ReadingPane({
             <MessageView
               key={message.id}
               message={message}
-              expanded={open.has(message.id)}
+              expanded={open.has(message.id) || message.id === last?.id}
               onToggle={() => setOpen(new Set([...open, message.id]))}
             />
           ))}

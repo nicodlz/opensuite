@@ -222,6 +222,63 @@ describe("calendar service", () => {
     );
   });
 
+  it("accepts exactly the candidate limit and refuses over-dense ranges", async () => {
+    const { server, service } = setup();
+    const calendar = unwrap(await service.calendars(actor, "default"))
+      .calendars[0]?.id;
+    if (calendar === undefined) throw new Error("Expected a calendar");
+    const stored = (id: string, extra: Record<string, unknown>): Item => ({
+      id,
+      calendarIds: { [calendar]: true },
+      title: id,
+      description: "",
+      locations: null,
+      start: "2020-01-06T10:00:00",
+      duration: "PT30M",
+      timeZone: "Europe/Paris",
+      showWithoutTime: false,
+      recurrenceRules: null,
+      excludedRecurrenceRules: null,
+      recurrenceOverrides: null,
+      ...extra,
+    });
+    for (let index = 0; index < 19_999; index += 1)
+      server.events.set(
+        `a${String(index).padStart(5, "0")}`,
+        stored(`a${index}`, {}),
+      );
+    server.events.set("z0", stored("z0", { start: "2026-10-14T10:00:00" }));
+    const week = { start: "2026-10-12T00:00:00Z", end: "2026-10-19T00:00:00Z" };
+    // 20,000 candidates fill the last page exactly and still succeed.
+    expect(
+      unwrap(await service.events(actor, "default", week)).events,
+    ).toHaveLength(1);
+    server.events.set("z1", stored("z1", { start: "2026-10-15T10:00:00" }));
+    expect(failure(await service.events(actor, "default", week))).toBe(
+      "unavailable",
+    );
+    server.events.clear();
+    // 30 daily series over 400 days exceed the response cap.
+    for (let index = 0; index < 30; index += 1)
+      server.events.set(
+        `d${index}`,
+        stored(`d${index}`, {
+          recurrenceRules: [{ "@type": "RecurrenceRule", frequency: "daily" }],
+        }),
+      );
+    expect(
+      failure(
+        await service.events(actor, "default", {
+          start: "2026-01-01T00:00:00Z",
+          end: "2027-02-01T00:00:00Z",
+        }),
+      ),
+    ).toBe("validation");
+    expect(
+      unwrap(await service.events(actor, "default", week)).events,
+    ).toHaveLength(30 * 7);
+  }, 60_000);
+
   it("scopes access to the session owner before any JMAP request", async () => {
     const { server, service } = setup();
     expect(
@@ -355,7 +412,7 @@ describe("calendar service", () => {
         (request) => request.method === "CalendarEvent/query",
       )?.args,
     ).toMatchObject({
-      filter: { before: "2026-11-02T00:00:00Z" },
+      filter: {},
       position: 0,
       limit: 500,
     });

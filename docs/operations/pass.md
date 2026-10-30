@@ -1,7 +1,7 @@
-# OpenSuite Pass operations
+# Esuno Pass operations
 
 Pass runs the official Vaultwarden web vault and compatible server independently
-of the OpenSuite application accounts. It shares PostgreSQL and Caddy, but does
+of the Esuno application accounts. It shares PostgreSQL and Caddy, but does
 not require the API, Drive, ingestion or Stalwart. Vault records and metadata
 are in the separate `opensuite_pass` database; attachments, signing keys and
 other Vaultwarden data are in the `vaultwarden-data` volume. Attachments do not
@@ -13,13 +13,15 @@ have not been verified here; this integration is not a security audit.
 1. The operator creates an A record (and AAAA only if IPv6 works) for a
    dedicated hostname such as `pass.example.org` pointing at the server. No DNS
    changes are made by Compose. Allow inbound 80 and 443, and set
-   `PASS_SITE_ADDRESS=pass.example.org` and `PASS_PUBLIC_HOST=pass.example.org`
+   `PASS_PUBLIC_HOST=pass.example.org`
    in `.env`. Caddy obtains and renews a public certificate for the name. The
    default `pass.localhost` uses Caddy's local CA and is for local use; clients
    must trust that CA. The Pass hostname must differ from the main site. Do not
-   proxy it under the SPA origin. `DOMAIN` is derived as
-   `https://${PASS_PUBLIC_HOST}`; use `PASS_DOMAIN` only for a deliberate
-   alternative origin and keep it consistent with Caddy.
+   proxy it under the SPA origin. Caddy and Vaultwarden both derive their
+   origin from `PASS_PUBLIC_HOST`, with HTTPS for the Vaultwarden `DOMAIN`.
+   Pass requires `HTTPS_PORT=443`; its startup rejects another value. Set a
+   non-overlapping `PASS_NETWORK_SUBNET`, `PASS_NETWORK_IP_RANGE`, and
+   `PASS_CADDY_IP` together when the defaults conflict with a host network.
 2. Generate a strong random admin password and keep it in a password manager.
    Generate its Argon2id PHC hash using the pinned image's interactive tool:
 
@@ -28,13 +30,18 @@ have not been verified here; this integration is not a security audit.
    ```
 
    Place only the resulting PHC string in a protected host file outside the
-   repository and `.env`, readable by the container (currently root), and set
+   repository and `.env`, readable by container uid 1000, and set
    `PASS_ADMIN_TOKEN_FILE` to its absolute path. Restrict host access (for
-   example mode 0600). Never put the plaintext or hash in Compose or Git. With
+   for example owned by uid 1000 with mode 0400). Never put the plaintext or hash in Compose or Git. With
    the default `/dev/null` the admin interface is disabled. Recreate Pass after
    changing the file or its path. A plaintext token is refused at startup.
 
-3. Configure SMTP as below before sending invitations. Start the services:
+3. Configure SMTP as below before sending invitations. Compose expands Drive's
+   required storage variables even when only Pass is started, so configure all
+   `DRIVE_S3_*` values and the existing secret-file path first. Caddy also
+   requires `apps/web/dist/index.html`; run `pnpm install --frozen-lockfile &&
+pnpm build` as in the deployment guide. Set `COMPOSE_PROFILES=pass` in `.env`
+   if ordinary upgrade commands should include Pass. Start the services:
 
    ```sh
    docker compose --profile pass up -d pass caddy
@@ -61,16 +68,25 @@ have not been verified here; this integration is not a security audit.
    listener is available on that loopback port, so limit host and SSH access.
    Sign in with the plaintext admin password, invite the first user and have
    them create their vault from the invitation. Ordinary signups default to
-   disabled; invitations default to enabled. Without SMTP, use Vaultwarden's
+   disabled; invitations default to enabled and invitees can create accounts
+   even with ordinary signups closed. `PASS_ORG_CREATION_USERS=none` disables
+   organization creation; set it to a comma-separated allowlist of trusted
+   email addresses when organizations are needed. Without SMTP, use Vaultwarden's
    invitation workflow as documented upstream and verify delivery/activation
    before relying on it. Vaultwarden admin settings saved in `/data/config.json`
    can override environment settings; treat that file as sensitive and verify
-   signup and invitation settings after changes.
+   signup and invitation settings after changes. On startup, Pass refuses a
+   saved `signups_allowed: true`, `disable_admin_token: true`, a non-empty
+   signup domain whitelist, or a saved admin token unless
+   `PASS_ALLOW_SAVED_SIGNUPS=true` is set
+   explicitly. The conservative check also refuses JSON Unicode escapes unless
+   that override is set; inspect the file before enabling it. A change made in
+   the admin interface can take effect immediately, before the next restart.
 
 ## SMTP and notifications
 
 Pass can connect directly to the existing SES SMTP endpoint without Stalwart.
-Set `PASS_SMTP_HOST`, `PASS_SMTP_PORT` (587 or the configured SES STARTTLS port),
+Set `PASS_SMTP_HOST`, `PASS_SMTP_PORT` (2587 for SES STARTTLS),
 `PASS_SMTP_SECURITY=starttls`, `PASS_SMTP_FROM` to a verified sender and
 `PASS_SMTP_USERNAME`. Put the SES SMTP password in a protected host file and set
 `PASS_SMTP_SECRET_FILE` to its absolute path. Leave the host empty to disable
@@ -87,17 +103,58 @@ if needed. This sends notification metadata to the external relay; verify the
 current upstream instructions and client behavior before enabling it.
 
 Caddy overwrites `X-Real-IP` from the connection address; Vaultwarden trusts it
-only from Caddy's `172.28.254.2` proxy address. A separate upstream proxy needs
+only from Caddy's `PASS_CADDY_IP` address on the dedicated Pass network. A
+separate upstream proxy needs
 an explicitly reviewed client-IP trust configuration. Login and admin limits
 are configurable through the `PASS_*_RATELIMIT_*` settings. Caddy applies HSTS,
 nosniff, no-referrer and removes `Server`; Vaultwarden provides its own CSP.
-Container logging for Pass and its provisioner is disabled so request data,
-credentials and database URLs are not retained in Docker logs. Use health and
-operator-side checks for availability; this reduces diagnostic visibility.
+Pass uses rotated Docker JSON logs with `LOG_LEVEL=warn` and extended logging
+turned off. Request lines and access-token query strings are not logged at this
+level. Avoid debug or trace logging: logs can contain usernames, IP addresses
+and sensitive diagnostic data. Provisioning emits fixed errors, suppresses its
+SQL output and disables PostgreSQL statement logging for its session. The role
+password nevertheless appears briefly in the `ALTER ROLE` query visible to
+PostgreSQL administrators through activity inspection; restrict database
+administration and monitoring access.
+
+The Vaultwarden process runs as uid 1000 with a read-only root filesystem,
+no added capabilities and a private writable data volume. PostgreSQL remains a
+shared dependency: its superuser can access all databases and its failure can
+interrupt Pass. Caddy is shared with the other sites. Pass has outbound network
+access for SMTP, notifications and other upstream features; Docker network
+isolation does not restrict outbound destinations. Database provisioning revokes
+PUBLIC's CONNECT on other connectable databases while preserving existing login
+roles' effective access and granting the Esuno application and Drive roles their
+own databases. New independent roles need explicit CONNECT grants. Re-run provisioning after
+creating another database: PostgreSQL grants PUBLIC access to new databases by
+default, including to the Pass login until those grants are reconciled.
+
+### Fail2ban for failed logins
+
+As an optional additional boundary, configure fail2ban to read the Pass
+container's Docker JSON log, including after container recreation and rotation.
+The following `/etc/fail2ban/filter.d/opensuite-pass.conf` filter matches the
+pinned Vaultwarden release's password and admin login errors:
+
+```ini
+[Definition]
+failregex = ^\{"log":".*Username or password is incorrect\. Try again\. IP: <HOST>\. Username:
+            ^\{"log":".*Invalid admin token\. IP: <HOST>(?:\\n|")
+ignoreregex =
+```
+
+Configure a jail with the current container's `LogPath` from `docker inspect`,
+appropriate `maxretry`, `findtime` and `bantime`, and an action that filters
+Docker-published traffic in the host's `DOCKER-USER` chain. Update the log path
+when the container is recreated; grant fail2ban access without making the logs
+public. Use `fail2ban-regex` with representative sanitized log lines and verify
+an actual ban from a controlled source. With another reverse proxy, review the
+client-IP trust chain first; otherwise a ban can target the proxy rather than the
+client. Built-in Vaultwarden rate limiting remains enabled independently.
 
 ## Backups and recovery
 
-The scheduled OpenSuite restic backup captures the Pass database, stopped data
+The scheduled Esuno restic backup captures the Pass database, stopped data
 volume, generated database credential, and configured admin, SMTP and push
 files with the rest of the suite. Set `BACKUP_PASS_ENABLED=1` in the protected
 backup configuration and test the schedule. The vault container does not receive
@@ -110,11 +167,11 @@ real B2 account.
 
 Review upstream release notes and database migration compatibility; record the
 current version and digest. Take and verify a consistent backup first. Update
-both the version tag and multi-platform digest in `compose.yaml` after checking
+the `PASS_IMAGE` version tag and multi-platform digest in `.env` after checking
 GitHub releases and the official registry, then run
 `docker compose --profile pass up -d pass` and check health, invitations and
 client access. Database migrations run automatically and may be irreversible.
 For rollback stop Pass, restore the pre-upgrade database **and** matching data
-volume and secrets into an isolated environment, then restore the previous
+volume and secrets into an isolated environment, then set `PASS_IMAGE` to the previous
 image pin. Do not point an older image at a migrated database without upstream
 confirmation. Test recovery before reconnecting users.

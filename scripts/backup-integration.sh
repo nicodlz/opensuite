@@ -226,6 +226,14 @@ if [ "$pass_drill" = 1 ]; then
   compose start pass
   case_done 'stopped Pass and missing RSA key fail capture'
 fi
+# A scratch area too small for the objects is refused before any service stops.
+before=$(compose ps --services --filter status=running | sort)
+if BACKUP_SCRATCH_RESERVE_BYTES=999999999999999999 ./deploy/backup/backup.sh 2>"$work/too-small"; then
+  echo 'backup ran without enough scratch space' >&2; exit 1
+fi
+grep -q 'scratch too small' "$work/too-small"
+[ "$(compose ps --services --filter status=running | sort)" = "$before" ]
+[ ! -e "$work/source/deploy/backup-status/last-success" ]
 ./deploy/backup/backup.sh
 [ -s "$work/source/deploy/backup-status/last-success" ]
 [ "$(stat -c %a "$work/source/deploy/backup-status/last-success")" = 644 ]
