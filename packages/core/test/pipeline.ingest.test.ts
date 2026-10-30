@@ -1,8 +1,13 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectVersionsCommand,
+  PutBucketVersioningCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -21,7 +26,7 @@ import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, ok, type Result } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { operatorCommand } from "../../../apps/ingest/src/operator.ts";
-import { awsQueue, awsStorage } from "../src/adapters/aws.ts";
+import { awsQueue, awsRecovery, awsStorage } from "../src/adapters/aws.ts";
 import { databaseLedger } from "../src/adapters/database.ts";
 import { jmapDelivery } from "../src/adapters/jmap.ts";
 import {
@@ -149,6 +154,14 @@ const bySubject = async (
     .list.filter((email) => email.subject === subject)
     .map((email) => email.id);
 };
+// A recovered test message with a stable Message-ID.
+const mime = (subject: string) =>
+  Buffer.from(
+    `From: sender@example.test\r\nTo: alice@example.test\r\nSubject: ${subject}\r\nMessage-ID: <${subject.replaceAll(" ", "-")}@example.test>\r\n\r\nRecovery\r\n`,
+  );
+// Firehose output: gzip of newline-terminated records.
+const lines = (...records: string[]) =>
+  gzipSync(records.map((record) => `${record}\n`).join(""));
 // Held mail is routed only within the hold window: date it now.
 const recent = (recipients: string[], status: string, messageId: string) => {
   const body = notification(recipients, status, messageId);
@@ -1364,4 +1377,177 @@ describe("local ingestion pipeline", () => {
       db.value.inboundResolutionAudit.delete({ where: { id: audit.id } }),
     ).rejects.toThrow(/append-only/);
   }, 90_000);
+  it("recovers mail from the Firehose archive and stored versions without a duplicate on an older ledger", async () => {
+    if (s3 === undefined || db === undefined || db.isErr())
+      throw new Error("Clients not initialized");
+    const client = s3;
+    const prisma = db.value;
+    await client.send(
+      new PutBucketVersioningCommand({
+        Bucket: "inbound",
+        VersioningConfiguration: { Status: "Enabled" },
+      }),
+    );
+    const put = (key: string, body: Uint8Array | string) =>
+      client.send(
+        new PutObjectCommand({ Bucket: "inbound", Key: key, Body: body }),
+      );
+    const present = async (key: string) => {
+      try {
+        await client.send(
+          new HeadObjectCommand({ Bucket: "inbound", Key: key }),
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const versions = async (key: string) =>
+      (
+        (
+          await client.send(
+            new ListObjectVersionsCommand({ Bucket: "inbound", Prefix: key }),
+          )
+        ).Versions ?? []
+      ).filter((item) => item.Key === key).length;
+    // A was delivered, then the database was restored from a backup taken
+    // before: the ledger no longer knows it and its object was deleted.
+    await put("rec-a", mime("Recovery A"));
+    const a = recent(["alice@example.test"], "PASS", "rec-a");
+    expect((await service.process(a)).isOk()).toBe(true);
+    expect(await present("rec-a")).toBe(false);
+    await prisma.inboundRecipient.deleteMany({ where: { messageId: "rec-a" } });
+    await prisma.inboundMessage.deleteMany({ where: { id: "rec-a" } });
+    // B1 (To) and B2 (Bcc) came as separate SES transactions and C twice with
+    // different envelopes; their queue messages never reached the worker.
+    await Promise.all(
+      ["rec-b1", "rec-b2", "rec-c"].map((key) =>
+        put(key, mime(`Recovery ${key.slice(4).toUpperCase()}`)),
+      ),
+    );
+    const b1 = recent(["alice@example.test"], "PASS", "rec-b1");
+    const b2 = recent(["hidden@example.test"], "PASS", "rec-b2");
+    const c1 = recent(["alice@example.test"], "PASS", "rec-c");
+    const c2 = recent(["hidden@example.test"], "PASS", "rec-c");
+    await put("metadata/2026/10/30/stream-1.gz", lines(b1, b1, b2, c1, "{"));
+    await put("metadata/2026/10/30/stream-2.gz", lines(c2));
+    const storage = awsStorage(
+      client,
+      client,
+      "inbound",
+      "archive",
+      "notifications/",
+      "",
+    );
+    const store = awsRecovery(
+      client,
+      client,
+      "inbound",
+      "archive",
+      "notifications/",
+    );
+    const operating = {
+      db: prisma,
+      ledger: databaseLedger(prisma),
+      delivery: jmapDelivery([]),
+      storage,
+      recovery: {
+        store,
+        scope: {
+          bucket: "inbound",
+          topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+          bufferPrefix: "",
+        },
+      },
+    };
+    const archived = unwrap(await storage.archives()).length;
+    const firehose = (...extra: string[]) =>
+      operatorCommand(operating, [
+        "recover",
+        "firehose",
+        "operator",
+        "metadata/",
+        ...extra,
+      ]);
+    expect(await firehose()).toMatchObject({
+      apply: false,
+      objects: 2,
+      records: 6,
+      invalid: 1,
+      notifications: 4,
+      missing: 4,
+      written: 0,
+      divergent: [{ messageId: "rec-c", variants: 2, recipientsDiffer: true }],
+    });
+    expect(unwrap(await storage.archives())).toHaveLength(archived);
+    expect(await firehose("--apply")).toMatchObject({ written: 4 });
+    expect(await firehose("--apply")).toMatchObject({
+      alreadyArchived: 4,
+      missing: 0,
+      written: 0,
+    });
+    expect(unwrap(await storage.archives())).toHaveLength(archived + 4);
+    expect(
+      await prisma.auditEvent.count({
+        where: { action: "ingest.recover.firehose" },
+      }),
+    ).toBe(2);
+    // Only A's object is missing, and its stored version brings it back.
+    const objects = (...extra: string[]) =>
+      operatorCommand(operating, ["recover", "objects", "operator", ...extra]);
+    expect(await objects()).toMatchObject({
+      apply: false,
+      restorable: 1,
+      restored: 0,
+    });
+    expect(await present("rec-a")).toBe(false);
+    expect(await objects("--apply")).toMatchObject({ restored: 1 });
+    expect(await objects("--apply")).toMatchObject({ restored: 0 });
+    expect(await present("rec-a")).toBe(true);
+    // Replay finds A already in Alice's mailbox and delivers the others
+    // once, C to both envelopes.
+    await service.reconcile(3600);
+    await service.reconcile(3600);
+    const alice = clients.get("alice");
+    const bob = clients.get("bob");
+    if (alice === undefined || bob === undefined)
+      throw new Error("Missing client");
+    const copies = async (mailbox: typeof alice, subject: string) =>
+      (await bySubject(mailbox, subject)).length;
+    expect([
+      await copies(alice, "Recovery A"),
+      await copies(alice, "Recovery B1"),
+      await copies(bob, "Recovery B2"),
+      await copies(alice, "Recovery C"),
+      await copies(bob, "Recovery C"),
+    ]).toEqual([1, 1, 1, 1, 1]);
+    expect(
+      (
+        await prisma.inboundMessage.findMany({
+          where: { id: { in: ["rec-a", "rec-b1", "rec-b2", "rec-c"] } },
+          select: { state: true },
+        })
+      ).map((row) => row.state),
+    ).toEqual(["imported", "imported", "imported", "imported"]);
+    expect(
+      await Promise.all(["rec-a", "rec-b1", "rec-b2", "rec-c"].map(present)),
+    ).toEqual([false, false, false, false]);
+    // Two concurrent restores: one writes, the other finds it present or
+    // conflicts; no stored version is ever removed.
+    const before = await versions("rec-a");
+    const versionId = unwrap(await store.latestVersion("inbound", "rec-a"));
+    if (versionId === null) throw new Error("Missing version");
+    const raced = await Promise.all([
+      store.restoreIfAbsent("inbound", "rec-a", versionId),
+      store.restoreIfAbsent("inbound", "rec-a", versionId),
+    ]);
+    expect(
+      raced.filter((result) => result.isOk() && result.value === "restored"),
+    ).toHaveLength(1);
+    expect(await versions("rec-a")).toBe(before + 1);
+    await client.send(
+      new DeleteObjectCommand({ Bucket: "inbound", Key: "rec-a" }),
+    );
+    expect(await versions("rec-a")).toBe(before + 1);
+  }, 180_000);
 });

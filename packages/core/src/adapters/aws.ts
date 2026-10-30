@@ -1,5 +1,4 @@
 import {
-  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -368,17 +367,36 @@ export function awsRecovery(
       );
     },
     restoreIfAbsent(name, key, versionId) {
+      // Read the version and write it back only if no current object exists:
+      // the condition is atomic on the destination, and some S3 services
+      // refuse to copy a version onto its own key.
       return ResultAsync.fromPromise(
-        unlessPresent(() =>
-          buffer.send(
-            new CopyObjectCommand({
+        (async () => {
+          const version = await buffer.send(
+            new GetObjectCommand({
               Bucket: name,
               Key: key,
-              CopySource: `${name}/${encodeURIComponent(key)}?versionId=${encodeURIComponent(versionId)}`,
-              IfNoneMatch: "*",
+              VersionId: versionId,
             }),
-          ),
-        ).then((restored) => (restored ? "restored" : "present")),
+          );
+          if (version.Body === undefined)
+            throw new Error("Missing S3 object body");
+          const bytes = await version.Body.transformToByteArray();
+          const restored = await unlessPresent(() =>
+            buffer.send(
+              new PutObjectCommand({
+                Bucket: name,
+                Key: key,
+                Body: bytes,
+                ...(version.ContentType === undefined
+                  ? {}
+                  : { ContentType: version.ContentType }),
+                IfNoneMatch: "*",
+              }),
+            ),
+          );
+          return restored ? ("restored" as const) : ("present" as const);
+        })(),
         failure,
       );
     },

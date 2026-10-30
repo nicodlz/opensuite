@@ -541,6 +541,40 @@ noncurrent versions (do not assume the Terraform module's 30 days; a bucket
 without a lifecycle configuration keeps deleted messages indefinitely) and that
 archive retention exceeds `INGEST_HOLD_DAYS`.
 
+## Recovering mail from the archives
+
+Use this after an SQS message expired or was lost, after losing the host, or
+after restoring the database from a backup older than recent mail. It relies
+on the Firehose notification archive and the versioned buffer in AWS and on
+the replay archive in B2, none of which live on the host.
+
+1. Quiesce the worker and replay as in step 1 of [Rollback](#rollback), and
+   restore the database and mail store first if the host was lost.
+2. Give the run a temporary recovery principal; the worker's own has no right
+   to read versions or write the buffer. On the buffer bucket it needs
+   `s3:ListBucket` and `s3:ListBucketVersions`, `s3:GetObject` on the
+   Firehose prefix, and `s3:GetObject`, `s3:GetObjectVersion` and
+   `s3:PutObject` on the message prefix. The archive credentials of
+   `deploy/ingest.env` already allow reading and writing the replay archive.
+   Pass the principal for this run only, for example with
+   `docker compose --profile ingest run --rm --no-deps -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY ingest node apps/ingest/src/main.ts operator ...`,
+   and remove it afterwards.
+3. Run `operator recover firehose <operator> <firehose-prefix> [since] [until]`
+   and read the report: notifications found, already archived, missing,
+   unreadable, invalid or foreign records, and divergent message IDs. Run it
+   again with `--apply`.
+4. Run `operator recover objects <operator>`, then with `--apply`. Investigate
+   any `unrecoverable` message: its original is gone.
+5. Run replay once by hand (`deploy/ingest/replay.sh`) and check
+   `operator list`, the `ingest_duplicate` alerts and the mailboxes concerned,
+   then restart the worker and the replay timer and remove the recovery
+   principal.
+
+Both commands can be repeated safely. The conditional writes have been tested
+against LocalStack; confirm that the production buckets honour
+`If-None-Match` (a failed precondition must answer 412) before relying on
+them, and that the buffer's noncurrent versions are kept long enough.
+
 ## Rollback
 
 To return to a worker release that has held recipients but not linked
