@@ -2,7 +2,11 @@ import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { oneTimeToken, twoFactor } from "better-auth/plugins";
 import type { PrismaClient } from "@opensuite/db";
-import { disableAuthenticator, securityKeys } from "./security-keys.ts";
+import {
+  disableAuthenticator,
+  enableAuthenticator,
+  securityKeys,
+} from "./security-keys.ts";
 
 /**
  * `__Host-` cookies cannot carry a Domain attribute, so a sibling subdomain
@@ -56,10 +60,15 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
           ...totp,
           endpoints: {
             ...totp.endpoints,
+            enableTwoFactor: enableAuthenticator(dependencies.database),
             disableTwoFactor: disableAuthenticator(dependencies.database),
           },
         },
-        securityKeys(dependencies.database, dependencies.publicOrigin),
+        securityKeys(
+          dependencies.database,
+          dependencies.publicOrigin,
+          dependencies.mayStartSession,
+        ),
         oneTimeToken({ expiresIn: 1, storeToken: "hashed" }),
       ],
       advanced: {
@@ -81,6 +90,8 @@ export const createIdentity = (dependencies: IdentityDependencies) => {
         },
         session: {
           create: {
+            // Security-key verification applies this same gate before its
+            // transaction creates the session; keep additional hooks in sync.
             before: async (session) =>
               (await dependencies.mayStartSession(session.userId))
                 ? undefined

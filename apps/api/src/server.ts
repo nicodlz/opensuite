@@ -24,14 +24,12 @@ import {
   createAuthLimiter,
   hasDuplicateAuthCookie,
   legacyAuthCookies,
+  hasPendingFactor,
+  hasTrustDevice,
+  withoutSessionCookie,
 } from "./auth/limits.ts";
 import { z } from "zod";
 import { router, type ApiContext } from "./routes/index.ts";
-
-const hasPendingFactor = (cookie: string | undefined) =>
-  (cookie ?? "")
-    .split(";")
-    .some((part) => /^__Host-opensuite\.two_factor=.+$/.test(part.trim()));
 
 export interface ServerDependencies {
   readonly config: Pick<ApiConfig, "logLevel"> & {
@@ -111,7 +109,6 @@ export const buildServer = async (
   app.addHook("onRequest", async (request, reply) => {
     const identity = dependencies.identity;
     const rawPath = request.url.split("?")[0] ?? "";
-    if (rawPath === "/alias/random/new") return undefined;
     if (
       identity !== undefined &&
       (rawPath.startsWith("/auth/") || rawPath.startsWith("/api/auth/"))
@@ -139,6 +136,18 @@ export const buildServer = async (
         code: "BAD_REQUEST",
         message: "Duplicate authentication cookie",
       });
+    if (identity !== undefined && hasTrustDevice(request.headers.cookie))
+      return reply
+        .header(
+          "set-cookie",
+          "__Host-opensuite.trust_device=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
+        )
+        .code(400)
+        .send({
+          code: "BAD_REQUEST",
+          message: "Trusted devices are not supported",
+        });
+    if (rawPath === "/alias/random/new") return undefined;
     const pendingFactor = hasPendingFactor(request.headers.cookie);
     if (
       identity !== undefined &&
@@ -462,36 +471,11 @@ export const buildServer = async (
             for (const part of value) headers.append(name, part);
           } else headers.set(name, value);
         }
-        // A previously issued trusted-device cookie must never skip MFA.
-        if (path === "/auth/sign-in/email") {
-          const cookie = headers.get("cookie");
-          if (cookie)
-            headers.set(
-              "cookie",
-              cookie
-                .split(";")
-                .filter(
-                  (part) =>
-                    !part.trim().startsWith("__Host-opensuite.trust_device="),
-                )
-                .join(";"),
-            );
-        }
         if (path === "/auth/get-session" && pendingFactor)
           return reply.send(null);
         if (path.startsWith("/auth/two-factor/") && pendingFactor) {
           const cookie = headers.get("cookie");
-          if (cookie)
-            headers.set(
-              "cookie",
-              cookie
-                .split(";")
-                .filter(
-                  (part) =>
-                    !part.trim().startsWith("__Host-opensuite.session_token="),
-                )
-                .join(";"),
-            );
+          if (cookie) headers.set("cookie", withoutSessionCookie(cookie));
         }
         if (path === "/auth/one-time-token/verify") {
           const token = z
@@ -508,6 +492,18 @@ export const buildServer = async (
             });
         }
         const actor = (await identity.actor?.(headers)) ?? null;
+        const reauthLimit = limiter.reauthenticate(path, actor?.id);
+        if (reauthLimit) {
+          if (reauthLimit.first)
+            await identity.audit?.({
+              userId: actor?.id ?? null,
+              action: "authentication.rate_limited",
+            });
+          return reply
+            .header("retry-after", String(reauthLimit.retryAfter))
+            .code(429)
+            .send({ code: "TOO_MANY_REQUESTS", message: "Try again later" });
+        }
         if (path === "/auth/sign-up/email" && actor?.role !== "admin") {
           await identity.audit?.({
             userId: actor?.id ?? null,
@@ -552,6 +548,19 @@ export const buildServer = async (
           request.method === "GET" || request.method === "HEAD"
             ? undefined
             : JSON.stringify(request.body);
+        if (path === "/auth/sign-out" && pendingFactor) {
+          const cancelled = await identity.handler(
+            new Request(
+              new URL("/api/auth/two-factor/cancel", identity.publicOrigin),
+              { method: "POST", headers, body: "{}" },
+            ),
+          );
+          if (!cancelled.ok)
+            return reply.code(503).send({
+              code: "UNAVAILABLE",
+              message: "Could not cancel sign-in",
+            });
+        }
         const signup = z
           .object({
             name: z.string().min(1),
@@ -600,8 +609,9 @@ export const buildServer = async (
           "/auth/two-factor/verify-backup-code": "mfa.verify",
           "/auth/two-factor/verify-security-key": "mfa.verify",
           "/auth/security-keys/register": "mfa.key.add",
+          "/auth/security-keys/register-options": "mfa.key.enrol_options",
           "/auth/security-keys/remove": "mfa.key.remove",
-          "/auth/two-factor/disable": "mfa.disable",
+          "/auth/two-factor/disable": "mfa.totp.remove",
           "/auth/two-factor/generate-backup-codes":
             "mfa.backup_codes.regenerate",
           "/auth/revoke-session": "session.revoke",
@@ -643,7 +653,8 @@ export const buildServer = async (
             });
           if (
             response.ok &&
-            path === "/auth/security-keys/remove" &&
+            (path === "/auth/security-keys/remove" ||
+              path === "/auth/two-factor/disable") &&
             z
               .object({ twoFactorEnabled: z.literal(false) })
               .safeParse(responseBody).success

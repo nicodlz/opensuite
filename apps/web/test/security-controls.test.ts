@@ -4,9 +4,21 @@ import { describe, expect, it } from "vitest";
 import {
   ChallengeInputs,
   FactorSummary,
+  errorMessage,
 } from "../src/auth/security-controls.tsx";
 
 describe("account security controls", () => {
+  it("explains browser cancellation and security-key errors", () => {
+    expect(errorMessage(new DOMException("raw", "NotAllowedError"))).toContain(
+      "cancelled or timed out",
+    );
+    expect(
+      errorMessage(new DOMException("raw", "InvalidStateError")),
+    ).toContain("already registered");
+    expect(errorMessage(new DOMException("raw", "SecurityError"))).toContain(
+      "sign-in address",
+    );
+  });
   it("shows the authenticator state and remaining recovery codes", () => {
     const panel = renderToStaticMarkup(
       React.createElement(FactorSummary, { totp: false, count: 3 }),

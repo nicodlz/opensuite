@@ -18,6 +18,8 @@
     "@orpc/server": "catalog:",
     "@orpc/zod": "catalog:",
     "better-auth": "catalog:",
+    "@better-auth/core": "catalog:",
+    "@better-auth/utils": "catalog:",
     "@simplewebauthn/server": "catalog:",
     "fastify": "catalog:",
     "neverthrow": "catalog:",

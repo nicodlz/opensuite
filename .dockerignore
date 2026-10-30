@@ -6,6 +6,9 @@
 !.npmrc
 !apps/api/package.json
 !apps/api/src/**
+!scripts/
+scripts/*
+!scripts/reset-mfa.mjs
 !packages/*/package.json
 !packages/contracts/src/**
 !packages/core/src/**

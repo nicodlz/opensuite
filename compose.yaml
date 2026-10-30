@@ -186,6 +186,23 @@ services:
       retries: 6
       start_period: 10s
 
+  mfa-recovery:
+    profiles: [recovery]
+    image: opensuite-api:local
+    entrypoint: ["node", "scripts/reset-mfa.mjs"]
+    restart: "no"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-opensuite}
+      APP_DATABASE_PASSWORD_FILE: /run/opensuite/app-database/password
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/app-database
+        read_only: true
+        volume:
+          subpath: app-database
+
   # Ingestion needs a separately provisioned queue, buckets and mailbox credentials.
   ingest:
     profiles: [ingest]
@@ -416,8 +433,8 @@ services:
     entrypoint: ["/bin/sh", "/opt/opensuite/start.sh"]
     environment:
       DOMAIN: https://${VAULT_PUBLIC_HOST:-vault.localhost}
-      YUBICO_CLIENT_ID: ${VAULT_YUBICO_CLIENT_ID:-}
-      YUBICO_SECRET_KEY: ${VAULT_YUBICO_SECRET_KEY:-}
+      VAULT_YUBICO_CLIENT_ID: ${VAULT_YUBICO_CLIENT_ID:-}
+      VAULT_YUBICO_SECRET_KEY: ${VAULT_YUBICO_SECRET_KEY:-}
       VAULT_PUBLIC_HOST: ${VAULT_PUBLIC_HOST:-vault.localhost}
       VAULT_MAIN_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
       VAULT_HTTPS_PORT: ${HTTPS_PORT:-443}
@@ -455,6 +472,7 @@ services:
         volume:
           nocopy: true
       - ./deploy/vaultwarden/start.sh:/opt/opensuite/start.sh:ro
+      - ./deploy/vaultwarden/yubico.sh:/opt/opensuite/vault-yubico.sh:ro
       - ./deploy/vaultwarden/templates:/opt/opensuite/vault-templates:ro
       - type: volume
         source: secrets
@@ -469,6 +487,10 @@ services:
       - type: bind
         source: ${VAULT_SMTP_SECRET_FILE:-/dev/null}
         target: /run/opensuite/vault-smtp-secret
+        read_only: true
+      - type: bind
+        source: ${VAULT_YUBICO_SECRET_FILE:-/dev/null}
+        target: /run/opensuite/vault-yubico-secret
         read_only: true
       - type: bind
         source: ${VAULT_PUSH_KEY_FILE:-/dev/null}
@@ -497,7 +519,7 @@ services:
     build:
       context: .
       dockerfile: deploy/postgres/Dockerfile
-    image: opensuite-migrate:local
+    image: ${OPENSUITE_MIGRATE_IMAGE:-opensuite-migrate:local}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-opensuite}
       POSTGRES_DB: ${POSTGRES_DB:-opensuite}

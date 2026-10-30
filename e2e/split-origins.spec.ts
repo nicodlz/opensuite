@@ -597,6 +597,10 @@ test("a security key is registered and used as a second factor against the real 
   ).toBeVisible();
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByText(/USB key — Added/)).toBeVisible();
+  await page.getByLabel("Current password").fill(keyUser.password);
+  await page.getByLabel("Security key name").fill("Duplicate");
+  await page.getByRole("button", { name: "Add security key" }).click();
+  await expect(page.getByRole("alert")).toContainText("already registered");
   await page.getByRole("button", { name: "Close dialog" }).click();
   await page.getByRole("button", { name: "Account menu" }).click();
   await page.getByRole("menuitem", { name: "Sign out" }).click();
@@ -609,6 +613,85 @@ test("a security key is registered and used as a second factor against the real 
     page.getByRole("button", { name: "Account menu" }),
   ).toBeVisible();
   await cdp.send("WebAuthn.disable");
+});
+
+test("security-key enrollment from Drive opens the sign-in origin security panel", async ({
+  page,
+}) => {
+  await page.goto(`${drive}/`);
+  await signIn(page, user);
+  await expect(page).toHaveURL(`${drive}/`);
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Account security" }).click();
+  const link = page.getByRole("link", {
+    name: "Add security key on the sign-in address",
+  });
+  await expect(link).toHaveAttribute("href", `${mail}/mail?security=1`);
+  await link.click();
+  await expect(
+    page.getByRole("dialog", { name: "Account security" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Add security key" }),
+  ).toBeVisible();
+});
+
+test("closing account security discards a late enrollment response", async ({
+  page,
+}) => {
+  await page.goto(`${mail}/login`);
+  await signIn(page, user);
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Account security" }).click();
+  await page.getByLabel("Current password").fill(user.password);
+  const gate = Promise.withResolvers<void>();
+  await page.route("**/api/auth/two-factor/enable", async (route) => {
+    await gate.promise;
+    await route.fulfill({
+      json: {
+        totpURI:
+          "otpauth://totp/Esuno:test@example.test?secret=JBSWY3DPEHPK3PXP&issuer=Esuno",
+        backupCodes: ["late-secret"],
+      },
+    });
+  });
+  const requested = page.waitForRequest("**/api/auth/two-factor/enable");
+  await page
+    .getByRole("button", { name: "Set up two-factor authentication" })
+    .click();
+  await requested;
+  await page.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Account security" }).click();
+  const response = page.waitForResponse("**/api/auth/two-factor/enable");
+  gate.resolve();
+  await response;
+  await expect(page.getByText("late-secret")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Set up two-factor authentication" }),
+  ).toBeVisible();
+});
+
+test("a failed challenge-method lookup offers a retry before showing choices", async ({
+  page,
+}) => {
+  let requests = 0;
+  await page.route("**/api/auth/two-factor/methods", async (route) => {
+    requests++;
+    if (requests === 1)
+      await route.fulfill({ status: 503, json: { message: "unavailable" } });
+    else await route.continue();
+  });
+  await page.goto(`${mail}/login`);
+  await signIn(page, mfa);
+  await expect(
+    page.getByRole("button", { name: "Retry loading verification methods" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Authenticator code")).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Retry loading verification methods" })
+    .click();
+  await expect(page.getByLabel("Authenticator code")).toBeVisible();
 });
 
 test("the real API enrols an authenticator from the displayed QR secret", async ({
@@ -625,6 +708,9 @@ test("the real API enrols an authenticator from the displayed QR secret", async 
   await expect(
     page.locator('svg[aria-label="Authenticator setup QR code"]'),
   ).toBeVisible();
+  const qr = page.getByRole("img", { name: "Authenticator setup QR code" });
+  await expect(qr.locator("path").first()).toHaveAttribute("fill", "#FFFFFF");
+  await expect(qr.locator("path").nth(1)).toHaveAttribute("d", /^M4[ ,]4/);
   const secret = await page.locator("code.auth-secret").first().textContent();
   if (!secret) throw new Error("Missing authenticator secret");
   await page.getByLabel("Authenticator code").fill(totp(secret));

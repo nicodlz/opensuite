@@ -52,12 +52,17 @@ export const fakeAuth: AuthClient = {
   enable(password) {
     if (password !== "synthetic-password")
       return Promise.reject(new Error("Incorrect password."));
+    if (mfa())
+      return Promise.reject(new Error("Authenticator already enabled."));
     sessionStorage.setItem("auth-fixture-enrolling", "1");
-    sessionStorage.setItem("auth-fixture-backup-code", "backup-code");
+    if (!keys().length)
+      sessionStorage.setItem("auth-fixture-backup-code", "backup-code");
     return Promise.resolve({
       totpURI:
         "otpauth://totp/Esuno:you@example.test?secret=JBSWY3DPEHPK3PXP&issuer=Esuno",
-      backupCodes: ["backup-code"],
+      backupCodes: [
+        sessionStorage.getItem("auth-fixture-backup-code") ?? "backup-code",
+      ],
     });
   },
   disable(password) {
@@ -90,7 +95,7 @@ export const fakeAuth: AuthClient = {
     Promise.resolve({
       totp: mfa(),
       securityKey: keys().length > 0,
-      backup: true,
+      backup: enabled(),
     }),
   addKey(password, name) {
     if (password !== "synthetic-password")
@@ -108,13 +113,15 @@ export const fakeAuth: AuthClient = {
         },
       ]),
     );
-    if (first)
+    if (first && !sessionStorage.getItem("auth-fixture-backup-code"))
       sessionStorage.setItem("auth-fixture-backup-code", "backup-code");
     return Promise.resolve(first ? ["backup-code"] : []);
   },
   removeKey(id, password) {
     if (password !== "synthetic-password")
       return Promise.reject(new Error("Incorrect password."));
+    if (!keys().some((key) => key.id === id))
+      return Promise.reject(new Error("Security key not found."));
     sessionStorage.setItem(
       "auth-fixture-keys",
       JSON.stringify(keys().filter((key) => key.id !== id)),

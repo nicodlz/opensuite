@@ -15,6 +15,9 @@ import {
   type AuthenticatorTransportFuture,
 } from "@simplewebauthn/server";
 import { z } from "zod";
+import { createOTP } from "@better-auth/utils/otp";
+import { generateId } from "@better-auth/core/utils/id";
+import { getIP } from "@better-auth/core/utils/ip";
 
 const invalid = () =>
   new APIError("UNAUTHORIZED", {
@@ -71,11 +74,22 @@ const transports = (values: string[]) =>
   );
 
 /** Pinned to Better Auth 1.7.13's two-factor challenge cookie and verification rows. */
-export function securityKeys(db: PrismaClient, origin: string) {
+export function securityKeys(
+  db: PrismaClient,
+  origin: string,
+  mayStartSession: (userId: string) => Promise<boolean>,
+) {
   const rpID = new URL(origin).hostname;
   const sessionUse = [sessionMiddleware];
   return {
     id: "security-keys",
+    rateLimit: [
+      {
+        pathMatcher: (path: string) => path.startsWith("/security-keys/"),
+        window: 10,
+        max: 5,
+      },
+    ],
     endpoints: {
       factorStatus: createAuthEndpoint(
         "/security-keys/status",
@@ -219,53 +233,70 @@ export function securityKeys(db: PrismaClient, origin: string) {
             key: ctx.context.secretConfig,
             data: randomBytes(24).toString("base64url"),
           });
-          const first = await db.$transaction(async (tx) => {
-            await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR UPDATE`;
-            const existing = await tx.twoFactor.findUnique({
-              where: { userId: user.id },
-            });
-            const count = await tx.securityKey.count({
-              where: { userId: user.id },
-            });
-            const hasFactor = existing?.verified === true || count > 0;
-            await tx.securityKey.create({
-              data: {
-                userId: user.id,
-                name: ctx.body.name,
-                credentialId: credential.id,
-                publicKey: Buffer.from(credential.publicKey),
-                counter: BigInt(credential.counter),
-                transports: credential.transports ?? [],
-              },
-            });
-            if (!hasFactor) {
-              if (existing)
-                await tx.twoFactor.update({
-                  where: { userId: user.id },
-                  data: {
-                    secret,
-                    backupCodes: encryptedCodes,
-                    verified: false,
-                  },
+          const first = await db
+            .$transaction(async (tx) => {
+              await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR UPDATE`;
+              const existing = await tx.twoFactor.findUnique({
+                where: { userId: user.id },
+              });
+              const count = await tx.securityKey.count({
+                where: { userId: user.id },
+              });
+              const hasFactor = existing?.verified === true || count > 0;
+              await tx.securityKey.create({
+                data: {
+                  userId: user.id,
+                  name: ctx.body.name,
+                  credentialId: credential.id,
+                  publicKey: Buffer.from(credential.publicKey),
+                  counter: BigInt(credential.counter),
+                  transports: credential.transports ?? [],
+                },
+              });
+              if (!hasFactor) {
+                if (!existing)
+                  await tx.twoFactor.create({
+                    data: {
+                      id: randomUUID(),
+                      userId: user.id,
+                      secret,
+                      backupCodes: encryptedCodes,
+                      verified: false,
+                    },
+                  });
+              }
+              await tx.user.update({
+                where: { id: user.id },
+                data: { twoFactorEnabled: true },
+              });
+              return {
+                first: !hasFactor,
+                existingCodes: !hasFactor ? existing?.backupCodes : undefined,
+              };
+            })
+            .catch((error: unknown) => {
+              if (
+                typeof error === "object" &&
+                error !== null &&
+                "code" in error &&
+                error.code === "P2002"
+              )
+                throw new APIError("BAD_REQUEST", {
+                  message: "Security key is already registered",
                 });
-              else
-                await tx.twoFactor.create({
-                  data: {
-                    id: randomUUID(),
-                    userId: user.id,
-                    secret,
-                    backupCodes: encryptedCodes,
-                    verified: false,
-                  },
-                });
-            }
-            await tx.user.update({
-              where: { id: user.id },
-              data: { twoFactorEnabled: true },
+              throw error;
             });
-            return !hasFactor;
-          });
-          return ctx.json({ backupCodes: first ? backupCodes : [] });
+          const issued = first.existingCodes
+            ? z.array(z.string()).parse(
+                JSON.parse(
+                  await symmetricDecrypt({
+                    key: ctx.context.secretConfig,
+                    data: first.existingCodes,
+                  }),
+                ),
+              )
+            : backupCodes;
+          return ctx.json({ backupCodes: first.first ? issued : [] });
         },
       ),
       removeKey: createAuthEndpoint(
@@ -366,6 +397,31 @@ export function securityKeys(db: PrismaClient, origin: string) {
           });
         },
       ),
+      cancelChallenge: createAuthEndpoint(
+        "/two-factor/cancel",
+        { method: "POST", body: z.object({}) },
+        async (ctx) => {
+          const cookie = ctx.context.createAuthCookie("two_factor");
+          const token = await ctx.getSignedCookie(
+            cookie.name,
+            ctx.context.secret,
+          );
+          if (token)
+            await db.verification.deleteMany({
+              where: {
+                identifier: {
+                  in: [
+                    token,
+                    `2fa-attempts-${token}`,
+                    `key-auth-${tokenKey(token)}`,
+                  ],
+                },
+              },
+            });
+          expireCookie(ctx, cookie);
+          return ctx.json({ success: true });
+        },
+      ),
       verifySecurityKey: createAuthEndpoint(
         "/two-factor/verify-security-key",
         { method: "POST", body: input },
@@ -380,10 +436,10 @@ export function securityKeys(db: PrismaClient, origin: string) {
             await ctx.context.internalAdapter.findVerificationValue(token);
           if (!pending || pending.expiresAt <= new Date()) throw invalid();
           const challenge =
-            await ctx.context.internalAdapter.consumeVerificationValue(
+            await ctx.context.internalAdapter.findVerificationValue(
               `key-auth-${tokenKey(token)}`,
             );
-          if (!challenge) throw invalid();
+          if (!challenge || challenge.expiresAt <= new Date()) throw invalid();
           const user = await ctx.context.internalAdapter.findUserById(
             pending.value,
           );
@@ -407,10 +463,10 @@ export function securityKeys(db: PrismaClient, origin: string) {
               data: { failedVerificationCount: 0, lockedUntil: null },
             });
           const attempts =
-            await ctx.context.internalAdapter.consumeVerificationValue(
+            await ctx.context.internalAdapter.findVerificationValue(
               `2fa-attempts-${token}`,
             );
-          if (!attempts) throw invalid();
+          if (!attempts || attempts.expiresAt <= new Date()) throw invalid();
           const count = Number(attempts.value);
           if (!Number.isInteger(count) || count < 0 || count >= 5) {
             await ctx.context.internalAdapter.consumeVerificationValue(token);
@@ -418,12 +474,21 @@ export function securityKeys(db: PrismaClient, origin: string) {
             throw invalid();
           }
           const fail = async () => {
-            await ctx.context.internalAdapter.createVerificationValue({
-              identifier: `2fa-attempts-${token}`,
-              value: String(count + 1),
-              expiresAt: pending.expiresAt,
+            await db.$transaction(async (tx) => {
+              const removed = await tx.verification.deleteMany({
+                where: { id: challenge.id, expiresAt: { gt: new Date() } },
+              });
+              const advanced = await tx.verification.updateMany({
+                where: {
+                  id: attempts.id,
+                  value: attempts.value,
+                  expiresAt: { gt: new Date() },
+                },
+                data: { value: String(count + 1) },
+              });
+              if (removed.count !== 1 || advanced.count !== 1) throw invalid();
+              await tx.$executeRaw`UPDATE "TwoFactor" SET "failedVerificationCount" = "failedVerificationCount" + 1, "lockedUntil" = CASE WHEN "failedVerificationCount" + 1 >= 10 THEN NOW() + INTERVAL '15 minutes' ELSE "lockedUntil" END WHERE "userId" = ${user.id}`;
             });
-            await db.$executeRaw`UPDATE "TwoFactor" SET "failedVerificationCount" = "failedVerificationCount" + 1, "lockedUntil" = CASE WHEN "failedVerificationCount" + 1 >= 10 THEN NOW() + INTERVAL '15 minutes' ELSE "lockedUntil" END WHERE "userId" = ${user.id}`;
             throw invalid();
           };
           const key = await db.securityKey.findFirst({
@@ -463,14 +528,19 @@ export function securityKeys(db: PrismaClient, origin: string) {
             ctx.context.authCookies.dontRememberToken.name,
             ctx.context.secret,
           );
+          // Run the same provisioning gate as the Better Auth session hook
+          // before acquiring the transaction's sole database connection.
+          if (!(await mayStartSession(user.id)))
+            throw new APIError("INTERNAL_SERVER_ERROR", {
+              message: "Failed to create session",
+            });
           const session = await db.$transaction(async (tx) => {
-            // Serialize with factor removal without blocking the session FK check.
             await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR NO KEY UPDATE`;
             const current = await tx.user.findUnique({
               where: { id: user.id },
-              select: { twoFactorEnabled: true },
+              select: { twoFactorEnabled: true, disabled: true },
             });
-            if (!current?.twoFactorEnabled) throw invalid();
+            if (!current?.twoFactorEnabled || current.disabled) throw invalid();
             const updated = await tx.securityKey.updateMany({
               where: { id: key.id, userId: user.id, counter: key.counter },
               data: {
@@ -479,24 +549,59 @@ export function securityKeys(db: PrismaClient, origin: string) {
               },
             });
             if (updated.count !== 1) throw invalid();
-            const consumed =
-              await ctx.context.internalAdapter.consumeVerificationValue(token);
-            if (!consumed || consumed.value !== user.id) throw invalid();
+            const consumed = await tx.verification.deleteMany({
+              where: {
+                id: pending.id,
+                value: user.id,
+                expiresAt: { gt: new Date() },
+              },
+            });
+            const usedChallenge = await tx.verification.deleteMany({
+              where: { id: challenge.id, expiresAt: { gt: new Date() } },
+            });
+            const usedAttempts = await tx.verification.deleteMany({
+              where: {
+                id: attempts.id,
+                value: attempts.value,
+                expiresAt: { gt: new Date() },
+              },
+            });
+            if (
+              consumed.count !== 1 ||
+              usedChallenge.count !== 1 ||
+              usedAttempts.count !== 1
+            )
+              throw invalid();
             await tx.twoFactor.updateMany({
               where: { userId: user.id },
               data: { failedVerificationCount: 0, lockedUntil: null },
             });
-            return ctx.context.internalAdapter.createSession(
-              user.id,
-              !!dontRemember,
-            );
-          });
-          // Better Auth's session-create hook can reject issuance despite its non-null type.
-          // oxlint-disable-next-line typescript/no-unnecessary-condition
-          if (!session)
-            throw new APIError("INTERNAL_SERVER_ERROR", {
-              message: "Failed to create session",
+            // Mirrors Better Auth 1.7.13's session defaults. The provisioning
+            // hook above is the only configured session-create hook.
+            const headers = ctx.headers ?? ctx.request?.headers;
+            const now = new Date();
+            return tx.session.create({
+              data: {
+                id:
+                  ctx.context.generateId({ model: "session" }) || generateId(),
+                userId: user.id,
+                token: generateId(32),
+                createdAt: now,
+                updatedAt: now,
+                expiresAt: new Date(
+                  now.getTime() +
+                    (dontRemember
+                      ? 86_400
+                      : ctx.context.sessionConfig.expiresIn) *
+                      1000,
+                ),
+                ipAddress: headers
+                  ? (getIP(headers, ctx.context.options) ?? "")
+                  : "",
+                userAgent: headers?.get("user-agent") ?? "",
+              },
             });
+          });
           await setSessionCookie(ctx, { session, user });
           expireCookie(ctx, cookie);
           return ctx.json({ success: true });
@@ -518,21 +623,111 @@ export function disableAuthenticator(db: PrismaClient) {
     async (ctx) => {
       const userId = ctx.context.session.user.id;
       await ctx.context.password.checkPassword(userId, ctx);
-      await db.$transaction(async (tx) => {
+      const secret = await symmetricEncrypt({
+        key: ctx.context.secretConfig,
+        data: randomBytes(32).toString("base64url"),
+      });
+      const twoFactorEnabled = await db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`;
         const keys = await tx.securityKey.count({ where: { userId } });
         if (keys)
           await tx.twoFactor.updateMany({
             where: { userId },
-            data: { verified: false },
+            data: { verified: false, secret },
           });
         else await tx.twoFactor.deleteMany({ where: { userId } });
         await tx.user.update({
           where: { id: userId },
           data: { twoFactorEnabled: keys > 0 },
         });
+        return keys > 0;
       });
-      return ctx.json({ status: true });
+      return ctx.json({ status: true, twoFactorEnabled });
+    },
+  );
+}
+
+export function enableAuthenticator(db: PrismaClient) {
+  return createAuthEndpoint(
+    "/two-factor/enable",
+    {
+      method: "POST",
+      use: [sessionMiddleware],
+      body: z.object({
+        password: z.string(),
+        issuer: z.string().optional(),
+        method: z.literal("totp").default("totp"),
+      }),
+    },
+    async (ctx) => {
+      const { user } = ctx.context.session;
+      await ctx.context.password.checkPassword(user.id, ctx);
+      const secret = randomBytes(32).toString("base64url");
+      const encrypted = await symmetricEncrypt({
+        key: ctx.context.secretConfig,
+        data: secret,
+      });
+      const codes = codeList();
+      const encryptedCodes = await symmetricEncrypt({
+        key: ctx.context.secretConfig,
+        data: JSON.stringify(codes),
+      });
+      const stored = await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR UPDATE`;
+        const existing = await tx.twoFactor.findUnique({
+          where: { userId: user.id },
+        });
+        if (existing?.verified)
+          throw new APIError("BAD_REQUEST", {
+            message: "Authenticator already enabled",
+          });
+        const hasKeys = await tx.securityKey.count({
+          where: { userId: user.id },
+        });
+        if (existing) {
+          await tx.twoFactor.update({
+            where: { userId: user.id },
+            data: {
+              secret: hasKeys ? existing.secret : encrypted,
+              backupCodes: hasKeys ? existing.backupCodes : encryptedCodes,
+              verified: false,
+            },
+          });
+          return {
+            secret: hasKeys ? existing.secret : encrypted,
+            backupCodes: hasKeys ? existing.backupCodes : encryptedCodes,
+          };
+        }
+        await tx.twoFactor.create({
+          data: {
+            id: randomUUID(),
+            userId: user.id,
+            secret: encrypted,
+            backupCodes: encryptedCodes,
+            verified: false,
+          },
+        });
+        return { secret: encrypted, backupCodes: encryptedCodes };
+      });
+      const setupSecret = await symmetricDecrypt({
+        key: ctx.context.secretConfig,
+        data: stored.secret,
+      });
+      return ctx.json({
+        method: "totp",
+        totpURI: createOTP(setupSecret, { digits: 6 }).url(
+          ctx.body.issuer ?? "Esuno",
+          user.email,
+        ),
+        backupCodes: z.array(z.string()).parse(
+          JSON.parse(
+            await symmetricDecrypt({
+              key: ctx.context.secretConfig,
+              data: stored.backupCodes,
+            }),
+          ),
+        ),
+      });
     },
   );
 }

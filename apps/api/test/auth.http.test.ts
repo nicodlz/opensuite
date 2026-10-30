@@ -37,13 +37,28 @@ let directSignUp: (account: {
   name: string;
   password: string;
 }) => Promise<unknown>;
+let directHandler: (request: Request) => Promise<Response>;
 let disconnect = () => Promise.resolve();
 const provisioned = new Set<string>();
 const resolved = () => Promise.resolve();
 const monotonicMs = () => performance.now();
 const waitForDatabase = async (attempt: number): Promise<void> => {
   try {
-    await run("docker", ["exec", container, "pg_isready", "-U", "postgres"]);
+    await run("docker", [
+      "exec",
+      "-e",
+      "PGPASSWORD=test-password",
+      container,
+      "psql",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-c",
+      "SELECT 1",
+    ]);
   } catch {
     if (attempt === 0) throw new Error("PostgreSQL did not start");
     await new Promise<void>((resolve) => {
@@ -99,6 +114,7 @@ beforeAll(async () => {
       mayStartSession: (userId) => Promise.resolve(provisioned.has(userId)),
     });
     directSignUp = (account) => identity.api.signUpEmail({ body: account });
+    directHandler = identity.handler;
     const direct = await identity.handler(
       new Request(`${origin}/api/auth/sign-up/email`, {
         method: "POST",
@@ -210,6 +226,14 @@ const post = (
     body: JSON.stringify(body),
   });
 
+const directPost = (path: string, body: object, cookie: string) =>
+  directHandler(
+    new Request(`${origin}/api/auth/${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin, cookie },
+      body: JSON.stringify(body),
+    }),
+  );
 const cookieOf = (response: Response) =>
   response.headers
     .getSetCookie()
@@ -299,12 +323,28 @@ function softwareKey() {
         clientExtensionResults: {},
       };
     },
-    assertion(challenge: string, counter: number) {
-      const clientData = client("webauthn.get", challenge);
+    assertion(
+      challenge: string,
+      counter: number,
+      options: {
+        origin?: string;
+        rp?: string;
+        type?: string;
+        forged?: boolean;
+      } = {},
+    ) {
+      const clientData = Buffer.from(
+        JSON.stringify({
+          type: options.type ?? "webauthn.get",
+          challenge,
+          origin: options.origin ?? origin,
+          crossOrigin: false,
+        }),
+      );
       const count = Buffer.alloc(4);
       count.writeUInt32BE(counter);
       const authData = Buffer.concat([
-        hash(new URL(origin).hostname),
+        hash(options.rp ?? new URL(origin).hostname),
         Buffer.from([1]),
         count,
       ]);
@@ -313,6 +353,8 @@ function softwareKey() {
         Buffer.concat([authData, hash(clientData)]),
         pair.privateKey,
       );
+      if (options.forged)
+        signature[signature.length - 1] = (signature.at(-1) ?? 0) ^ 1;
       return {
         id: id.toString("base64url"),
         rawId: id.toString("base64url"),
@@ -966,6 +1008,67 @@ describe("identity over HTTP", () => {
     }
   });
 
+  it("rejects a valid legacy trusted-device cookie with whitespace before equals", async () => {
+    const account = {
+      email: "legacy-trust@example.test",
+      name: "Legacy trust",
+      password: "legacy-trust-password",
+    };
+    await directSignUp(account);
+    const session = cookieOf(await post("sign-in/email", account));
+    const enrollment = z
+      .object({ totpURI: z.string() })
+      .parse(
+        await (
+          await post(
+            "two-factor/enable",
+            { password: account.password },
+            session,
+          )
+        ).json(),
+      );
+    const enabled = await post(
+      "two-factor/verify-totp",
+      { code: totp(enrollment.totpURI) },
+      session,
+    );
+    expect(enabled.status).toBe(200);
+    await post("sign-out", {}, cookieOf(enabled));
+    const pending = cookieOf(await post("sign-in/email", account));
+    // Older versions could issue this cookie; use the real plugin to mint it.
+    const trusted = await directPost(
+      "two-factor/verify-totp",
+      { code: totp(enrollment.totpURI), trustDevice: true },
+      pending,
+    );
+    expect(trusted.status).toBe(200);
+    const trust = trusted.headers
+      .getSetCookie()
+      .find((value) => value.startsWith("__Host-opensuite.trust_device="))
+      ?.split(";")[0];
+    if (!trust) throw new Error("Missing trusted-device cookie");
+    const trustedSession = cookieOf(trusted)
+      .split("; ")
+      .find((value) => value.startsWith("__Host-opensuite.session_token="));
+    if (!trustedSession) throw new Error("Missing trusted session");
+    await directPost("sign-out", {}, trustedSession);
+    const blocked = await post(
+      "sign-in/email",
+      account,
+      trust.replace("=", " \t="),
+    );
+    expect(blocked.status).toBe(400);
+    expect(blocked.headers.getSetCookie().join(";")).toContain(
+      "__Host-opensuite.trust_device=; Max-Age=0",
+    );
+    expect(blocked.headers.getSetCookie().join(";")).not.toContain(
+      "__Host-opensuite.session_token=",
+    );
+    const normal = await post("sign-in/email", account);
+    expect(await normal.json()).toMatchObject({ twoFactorRedirect: true });
+    expect(await sessionOf(cookieOf(normal))).toBeNull();
+  });
+
   it("audits operator MFA reset and revokes sessions and pending challenges", async () => {
     const data = {
       email: "reset@example.test",
@@ -1015,10 +1118,20 @@ describe("identity over HTTP", () => {
           expiresAt: new Date(Date.now() + 60_000),
         },
       });
-      await run("node", ["scripts/reset-mfa.mjs", data.email], {
-        cwd: process.cwd(),
-        env: { ...process.env, DATABASE_URL: databaseUrl },
-      });
+      await expect(
+        run("node", ["scripts/reset-mfa.mjs", data.email], {
+          cwd: process.cwd(),
+          env: { ...process.env, DATABASE_URL: databaseUrl },
+        }),
+      ).rejects.toThrow("Command failed");
+      await run(
+        "node",
+        ["scripts/reset-mfa.mjs", data.email, "--confirm", user.id],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, DATABASE_URL: databaseUrl },
+        },
+      );
       expect(
         await db.twoFactor.findUnique({ where: { userId: user.id } }),
       ).toBeNull();
@@ -1026,6 +1139,32 @@ describe("identity over HTTP", () => {
         (await db.user.findUniqueOrThrow({ where: { id: user.id } }))
           .twoFactorEnabled,
       ).toBe(false);
+      await db.user.update({
+        where: { id: user.id },
+        data: { twoFactorEnabled: true },
+      });
+      expect(
+        (await db.user.findUniqueOrThrow({ where: { id: user.id } }))
+          .twoFactorEnabled,
+      ).toBe(false);
+      // Simulate an already-inconsistent row, then a no-op flag update by the
+      // identity plugin. The guard must also run when OLD and NEW are equal.
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`ALTER TABLE "User" DISABLE TRIGGER "User_guardTwoFactorEnabled"`;
+        await tx.user.update({
+          where: { id: user.id },
+          data: { twoFactorEnabled: true },
+        });
+        await tx.$executeRaw`ALTER TABLE "User" ENABLE TRIGGER "User_guardTwoFactorEnabled"`;
+        await tx.user.update({
+          where: { id: user.id },
+          data: { twoFactorEnabled: true },
+        });
+        expect(
+          (await tx.user.findUniqueOrThrow({ where: { id: user.id } }))
+            .twoFactorEnabled,
+        ).toBe(false);
+      });
       expect(await db.session.count({ where: { userId: user.id } })).toBe(0);
       expect(await db.verification.count({ where: { value: user.id } })).toBe(
         0,
@@ -1126,6 +1265,15 @@ describe("identity over HTTP", () => {
       return codes;
     }
     await register(data, key);
+    const rejectedTrust = await post(
+      "sign-in/email",
+      { email: data.email, password: data.password },
+      "__Host-opensuite.trust_device \t=forged",
+    );
+    expect(rejectedTrust.status).toBe(400);
+    expect(rejectedTrust.headers.getSetCookie().join(";")).toContain(
+      "__Host-opensuite.trust_device=; Max-Age=0",
+    );
     const otherCodes = await register(other, otherKey);
     const otherLogin = await post("sign-in/email", {
       email: other.email,
@@ -1202,6 +1350,21 @@ describe("identity over HTTP", () => {
       pending,
     );
     expect(verified.status).toBe(200);
+    const foreignKeyDb = createDatabase(databaseUrl);
+    if (foreignKeyDb.isErr()) throw new Error("database unavailable");
+    const foreignKey = await foreignKeyDb.value.securityKey.findUniqueOrThrow({
+      where: { credentialId: otherKey.id },
+    });
+    expect(
+      (
+        await post(
+          "security-keys/remove",
+          { id: foreignKey.id, password: data.password },
+          cookieOf(verified),
+        )
+      ).status,
+    ).toBe(404);
+    await foreignKeyDb.value.$disconnect();
     expect((await handoff(cookieOf(verified))).status).toBe(200);
     expect(
       (await post("two-factor/verify-security-key", assertion, pending)).ok,
@@ -1240,13 +1403,39 @@ describe("identity over HTTP", () => {
       );
     expect(
       (
-        await post(
+        await directPost(
           "two-factor/verify-security-key",
           key.assertion(nextOptions.challenge, 1),
           nextPending,
         )
-      ).ok,
-    ).toBe(false);
+      ).status,
+    ).toBe(401);
+    const counterDb = createDatabase(databaseUrl);
+    if (counterDb.isErr()) throw new Error("database unavailable");
+    expect(
+      (
+        await counterDb.value.securityKey.findUniqueOrThrow({
+          where: { credentialId: key.id },
+        })
+      ).counter,
+    ).toBe(1n);
+    await counterDb.value.$disconnect();
+    const retryOptions = z
+      .object({ challenge: z.string() })
+      .parse(
+        await (
+          await directPost("two-factor/security-key-options", {}, nextPending)
+        ).json(),
+      );
+    expect(
+      (
+        await directPost(
+          "two-factor/verify-security-key",
+          key.assertion(retryOptions.challenge, 2),
+          nextPending,
+        )
+      ).status,
+    ).toBe(200);
     expect(
       (
         await post(
@@ -1282,14 +1471,19 @@ describe("identity over HTTP", () => {
       expect(actions).toEqual(
         expect.arrayContaining([
           "mfa.key.add.success",
+          "mfa.key.enrol_options.failure",
           "mfa.verify.success",
           "mfa.verify.failure",
         ]),
       );
-      await run("node", ["scripts/reset-mfa.mjs", data.email], {
-        cwd: process.cwd(),
-        env: { ...process.env, DATABASE_URL: databaseUrl },
-      });
+      await run(
+        "node",
+        ["scripts/reset-mfa.mjs", data.email, "--confirm", user.id],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, DATABASE_URL: databaseUrl },
+        },
+      );
       expect(await db.securityKey.count({ where: { userId: user.id } })).toBe(
         0,
       );
@@ -1317,6 +1511,7 @@ describe("identity over HTTP", () => {
         password: account.password,
       }),
     );
+    let firstCodes: string[] = [];
     async function addDevice(
       device: ReturnType<typeof softwareKey>,
       index: number,
@@ -1350,6 +1545,18 @@ describe("identity over HTTP", () => {
           .object({ backupCodes: z.array(z.string()) })
           .parse(await result.json()).backupCodes,
       ).toHaveLength(index === 0 ? 10 : 0);
+      if (index === 0) {
+        const values: unknown = await (
+          await post(
+            "two-factor/generate-backup-codes",
+            { password: account.password },
+            cookie,
+          )
+        ).json();
+        firstCodes = z
+          .object({ backupCodes: z.array(z.string()) })
+          .parse(values).backupCodes;
+      }
     }
     await addDevice(softwareKey(), 0);
     await addDevice(softwareKey(), 1);
@@ -1392,9 +1599,23 @@ describe("identity over HTTP", () => {
       { password: account.password },
       cookie,
     );
-    const uri = z
-      .object({ totpURI: z.string() })
-      .parse(await enrollment.json()).totpURI;
+    const enrollmentData = z
+      .object({ totpURI: z.string(), backupCodes: z.array(z.string()) })
+      .parse(await enrollment.json());
+    expect(enrollmentData.backupCodes).toEqual(firstCodes);
+    const uri = enrollmentData.totpURI;
+    const pendingBeforeConfirmation = cookieOf(
+      await post("sign-in/email", account),
+    );
+    const savedBackup = firstCodes[0];
+    if (!savedBackup) throw new Error("Missing backup code");
+    const restored = await post(
+      "two-factor/verify-backup-code",
+      { code: savedBackup },
+      pendingBeforeConfirmation,
+    );
+    expect(restored.status).toBe(200);
+    await post("sign-out", {}, cookieOf(restored));
     expect(
       (await post("two-factor/verify-totp", { code: totp(uri) }, cookie))
         .status,
@@ -1403,6 +1624,9 @@ describe("identity over HTTP", () => {
       (await post("two-factor/disable", { password: account.password }, cookie))
         .status,
     ).toBe(200);
+    expect(
+      (await post("two-factor/verify-totp", { code: totp(uri) }, cookie)).ok,
+    ).toBe(false);
     status = z
       .object({
         totp: z.boolean(),
@@ -1421,6 +1645,14 @@ describe("identity over HTTP", () => {
     if (database.isErr()) throw new Error("database unavailable");
     try {
       const db = database.value;
+      const target = await db.user.findUniqueOrThrow({
+        where: { email: account.email },
+      });
+      const beforeFinalRemoval = (
+        await db.auditEvent.findMany({ where: { userId: target.id } })
+      ).map((event) => event.action);
+      expect(beforeFinalRemoval).toContain("mfa.totp.remove.success");
+      expect(beforeFinalRemoval).not.toContain("mfa.disable.success");
       expect(
         (await db.user.findUniqueOrThrow({ where: { email: account.email } }))
           .twoFactorEnabled,
@@ -1465,5 +1697,435 @@ describe("identity over HTTP", () => {
     } finally {
       await database.value.$disconnect();
     }
+  });
+  it("preserves pending authenticator setup when the first key is added", async () => {
+    const account = {
+      email: "pending-totp@example.test",
+      name: "Pending",
+      password: "pending-strong-password",
+    };
+    await directSignUp(account);
+    const cookie = cookieOf(await post("sign-in/email", account));
+    const enrollment = z
+      .object({ totpURI: z.string(), backupCodes: z.array(z.string()) })
+      .parse(
+        await (
+          await post(
+            "two-factor/enable",
+            { password: account.password },
+            cookie,
+          )
+        ).json(),
+      );
+    const device = softwareKey();
+    const secondSession = cookieOf(await post("sign-in/email", account));
+    const bound = z
+      .object({ id: z.string(), options: z.object({ challenge: z.string() }) })
+      .parse(
+        await (
+          await post(
+            "security-keys/register-options",
+            { password: account.password },
+            cookie,
+          )
+        ).json(),
+      );
+    expect(
+      (
+        await post(
+          "security-keys/register",
+          {
+            id: bound.id,
+            name: "Wrong session",
+            response: device.registration(bound.options.challenge),
+          },
+          secondSession,
+        )
+      ).ok,
+    ).toBe(false);
+    const options = z
+      .object({ id: z.string(), options: z.object({ challenge: z.string() }) })
+      .parse(
+        await (
+          await post(
+            "security-keys/register-options",
+            { password: account.password },
+            cookie,
+          )
+        ).json(),
+      );
+    const added = await post(
+      "security-keys/register",
+      {
+        id: options.id,
+        name: "Key",
+        response: device.registration(options.options.challenge),
+      },
+      cookie,
+    );
+    expect(added.status).toBe(200);
+    expect(
+      z.object({ backupCodes: z.array(z.string()) }).parse(await added.json())
+        .backupCodes,
+    ).toEqual(enrollment.backupCodes);
+    const reopened = z
+      .object({ totpURI: z.string(), backupCodes: z.array(z.string()) })
+      .parse(
+        await (
+          await post(
+            "two-factor/enable",
+            { password: account.password },
+            cookie,
+          )
+        ).json(),
+      );
+    expect(new URL(reopened.totpURI).searchParams.get("secret")).toBe(
+      new URL(enrollment.totpURI).searchParams.get("secret"),
+    );
+    expect(reopened.backupCodes).toEqual(enrollment.backupCodes);
+    const duplicateOptions = z
+      .object({ id: z.string(), options: z.object({ challenge: z.string() }) })
+      .parse(
+        await (
+          await post(
+            "security-keys/register-options",
+            { password: account.password },
+            cookie,
+          )
+        ).json(),
+      );
+    expect(
+      (
+        await post(
+          "security-keys/register",
+          {
+            id: duplicateOptions.id,
+            name: "Duplicate",
+            response: device.registration(duplicateOptions.options.challenge),
+          },
+          cookie,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await post(
+          "two-factor/verify-totp",
+          { code: totp(enrollment.totpURI) },
+          cookie,
+        )
+      ).status,
+    ).toBe(200);
+    await post("sign-out", {}, cookie);
+    expect((await directPost("two-factor/methods", {}, "")).status).toBe(401);
+    expect(
+      (await directPost("two-factor/security-key-options", {}, "")).status,
+    ).toBe(401);
+    const challenge = cookieOf(await post("sign-in/email", account));
+    const invalidAssertions = [
+      { origin: "https://evil.example.test" },
+      { origin: calendarOrigin },
+      { rp: "wrong.example.test" },
+      { forged: true },
+      { type: "webauthn.create" },
+    ];
+    await invalidAssertions.reduce(async (previous, overrides) => {
+      await previous;
+      const request = z
+        .object({ challenge: z.string() })
+        .parse(
+          await (
+            await directPost("two-factor/security-key-options", {}, challenge)
+          ).json(),
+        );
+      expect(
+        (
+          await directPost(
+            "two-factor/verify-security-key",
+            device.assertion(request.challenge, 1, overrides),
+            challenge,
+          )
+        ).status,
+      ).toBe(401);
+    }, Promise.resolve());
+    const exhausted = z
+      .object({ challenge: z.string() })
+      .parse(
+        await (
+          await directPost("two-factor/security-key-options", {}, challenge)
+        ).json(),
+      );
+    expect(
+      (
+        await directPost(
+          "two-factor/verify-security-key",
+          device.assertion(exhausted.challenge, 1),
+          challenge,
+        )
+      ).status,
+    ).toBe(401);
+    const secondChallenge = cookieOf(await post("sign-in/email", account));
+    await invalidAssertions.reduce(async (previous, overrides) => {
+      await previous;
+      const request = z
+        .object({ challenge: z.string() })
+        .parse(
+          await (
+            await directPost(
+              "two-factor/security-key-options",
+              {},
+              secondChallenge,
+            )
+          ).json(),
+        );
+      expect(
+        (
+          await directPost(
+            "two-factor/verify-security-key",
+            device.assertion(request.challenge, 1, overrides),
+            secondChallenge,
+          )
+        ).status,
+      ).toBe(401);
+    }, Promise.resolve());
+    const lockDb = createDatabase(databaseUrl);
+    if (lockDb.isErr()) throw new Error("database unavailable");
+    const lockedUser = await lockDb.value.user.findUniqueOrThrow({
+      where: { email: account.email },
+    });
+    const locked = await lockDb.value.twoFactor.findUniqueOrThrow({
+      where: { userId: lockedUser.id },
+    });
+    expect(locked.failedVerificationCount).toBe(10);
+    expect(locked.lockedUntil?.getTime()).toBeGreaterThan(Date.now());
+    const lockedChallenge = cookieOf(await post("sign-in/email", account));
+    const lockedOptions = z
+      .object({ challenge: z.string() })
+      .parse(
+        await (
+          await directPost(
+            "two-factor/security-key-options",
+            {},
+            lockedChallenge,
+          )
+        ).json(),
+      );
+    expect(
+      (
+        await directPost(
+          "two-factor/verify-security-key",
+          device.assertion(lockedOptions.challenge, 1),
+          lockedChallenge,
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      await lockDb.value.verification.count({
+        where: { value: lockedOptions.challenge },
+      }),
+    ).toBe(1);
+    expect((await post("sign-out", {}, lockedChallenge)).status).toBe(200);
+    expect(
+      await lockDb.value.verification.count({
+        where: { value: lockedOptions.challenge },
+      }),
+    ).toBe(0);
+    expect(
+      (await directPost("two-factor/methods", {}, lockedChallenge)).status,
+    ).toBe(401);
+    await lockDb.value.$disconnect();
+    expect((await post("sign-out", {}, secondChallenge)).status).toBe(200);
+    expect(
+      (await directPost("two-factor/methods", {}, secondChallenge)).status,
+    ).toBe(401);
+  }, 180_000);
+  it("completes concurrent key sign-ins with a one-connection pool", async () => {
+    const url = new URL(databaseUrl);
+    url.searchParams.set("connection_limit", "1");
+    const result = createDatabase(url.toString());
+    if (result.isErr()) throw new Error("database unavailable");
+    const db = result.value;
+    let allowSession = true;
+    const identity = createIdentity({
+      database: db,
+      publicOrigin: origin,
+      secret: "single-pool-secret-at-least-32-characters",
+      provision: () => Promise.resolve(),
+      mayStartSession: () => Promise.resolve(allowSession),
+    });
+    const call = (path: string, body: object, cookie = "") =>
+      identity.handler(
+        new Request(`${origin}/api/auth/${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin, cookie },
+          body: JSON.stringify(body),
+        }),
+      );
+    try {
+      const requests = await [0, 1, 2].reduce(async (previous, index) => {
+        const list = await previous;
+        const account = {
+          name: "Pool",
+          email: `pool-${index}@example.test`,
+          password: "pool-strong-password",
+        };
+        await identity.api.signUpEmail({ body: account });
+        const cookie = cookieOf(await call("sign-in/email", account));
+        const key = softwareKey();
+        const registration = z
+          .object({
+            id: z.string(),
+            options: z.object({ challenge: z.string() }),
+          })
+          .parse(
+            await (
+              await call(
+                "security-keys/register-options",
+                { password: account.password },
+                cookie,
+              )
+            ).json(),
+          );
+        expect(
+          (
+            await call(
+              "security-keys/register",
+              {
+                id: registration.id,
+                name: "Key",
+                response: key.registration(registration.options.challenge),
+              },
+              cookie,
+            )
+          ).status,
+        ).toBe(200);
+        await call("sign-out", {}, cookie);
+        const pending = cookieOf(
+          await call("sign-in/email", { ...account, rememberMe: index !== 0 }),
+        );
+        const options = z
+          .object({ challenge: z.string() })
+          .parse(
+            await (
+              await call("two-factor/security-key-options", {}, pending)
+            ).json(),
+          );
+        return [
+          ...list,
+          { pending, assertion: key.assertion(options.challenge, 1) },
+        ];
+      }, Promise.resolve<Array<{ pending: string; assertion: ReturnType<ReturnType<typeof softwareKey>["assertion"]> }>>([]));
+      const first = requests[0];
+      if (!first) throw new Error("Missing key assertion");
+      const attemptsBefore = await db.verification.count({
+        where: { identifier: { startsWith: "2fa-attempts-" }, value: "0" },
+      });
+      const challengesBefore = await db.verification.count({
+        where: { identifier: { startsWith: "key-auth-" } },
+      });
+      const sessionsBefore = await db.session.count();
+      await db.user.update({
+        where: { email: "pool-0@example.test" },
+        data: { disabled: true },
+      });
+      expect(
+        (
+          await call(
+            "two-factor/verify-security-key",
+            first.assertion,
+            first.pending,
+          )
+        ).status,
+      ).toBe(401);
+      await db.user.update({
+        where: { email: "pool-0@example.test" },
+        data: { disabled: false },
+      });
+      allowSession = false;
+      expect(
+        (
+          await call(
+            "two-factor/verify-security-key",
+            first.assertion,
+            first.pending,
+          )
+        ).status,
+      ).toBe(500);
+      allowSession = true;
+      await db.$executeRaw`CREATE FUNCTION "testFailSessionCreate"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated database failure'; END $$`;
+      await db.$executeRaw`CREATE TRIGGER "testFailSessionCreate" BEFORE INSERT ON "Session" FOR EACH ROW EXECUTE FUNCTION "testFailSessionCreate"()`;
+      try {
+        expect(
+          (
+            await call(
+              "two-factor/verify-security-key",
+              first.assertion,
+              first.pending,
+            )
+          ).status,
+        ).toBe(500);
+      } finally {
+        await db.$executeRaw`DROP TRIGGER "testFailSessionCreate" ON "Session"`;
+        await db.$executeRaw`DROP FUNCTION "testFailSessionCreate"()`;
+      }
+      expect(
+        await db.verification.count({
+          where: { identifier: { startsWith: "2fa-attempts-" }, value: "0" },
+        }),
+      ).toBe(attemptsBefore);
+      expect(
+        await db.verification.count({
+          where: { identifier: { startsWith: "key-auth-" } },
+        }),
+      ).toBe(challengesBefore);
+      expect(await db.session.count()).toBe(sessionsBefore);
+      const responses = await Promise.all(
+        requests.map(({ pending, assertion }) =>
+          call("two-factor/verify-security-key", assertion, pending),
+        ),
+      );
+      expect(responses.map((response) => response.status)).toEqual([
+        200, 200, 200,
+      ]);
+      const shortSession = await db.session.findFirstOrThrow({
+        where: { user: { email: "pool-0@example.test" } },
+      });
+      const regularSession = await db.session.findFirstOrThrow({
+        where: { user: { email: "pool-1@example.test" } },
+      });
+      expect(shortSession.expiresAt.getTime() - Date.now()).toBeLessThan(
+        26 * 60 * 60 * 1000,
+      );
+      expect(regularSession.expiresAt.getTime() - Date.now()).toBeGreaterThan(
+        6 * 24 * 60 * 60 * 1000,
+      );
+    } finally {
+      await db.$disconnect();
+    }
+  }, 180_000);
+  it("limits key enrollment and removal password attempts per user", async () => {
+    const account = {
+      email: "key-limit@example.test",
+      name: "Limit",
+      password: "limit-strong-password",
+    };
+    await directSignUp(account);
+    const cookie = cookieOf(await post("sign-in/email", account));
+    const statuses = await [0, 1, 2, 3, 4, 5].reduce(
+      async (previous, index) => {
+        const list = await previous;
+        const path =
+          index % 2 ? "security-keys/remove" : "security-keys/register-options";
+        const response = await post(
+          path,
+          { password: "wrong", id: "missing" },
+          cookie,
+        );
+        return [...list, response.status];
+      },
+      Promise.resolve<number[]>([]),
+    );
+    expect(statuses.slice(0, 5).every((status) => status === 400)).toBe(true);
+    expect(statuses[5]).toBe(429);
   });
 });

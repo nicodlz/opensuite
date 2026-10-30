@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Harden MFA recovery and factor changes, reject legacy trusted-device cookies, and route security-key enrollment to the sign-in origin.
+
 - Add optional FIDO2 security keys as a password-following second factor, with multiple keys and audited recovery.
 
 - Show a locally generated authenticator setup QR code and manual secret, and allow password-confirmed backup-code regeneration.

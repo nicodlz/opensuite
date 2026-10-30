@@ -8,7 +8,7 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { activeLayout } from "../origins.ts";
+import { activeLayout, hubHref } from "../origins.ts";
 import { auth, AuthError, hasWebAuthn } from "./client.ts";
 import { returnKey, startHandoff } from "./handoff.tsx";
 import { Button } from "../ui/button.tsx";
@@ -21,7 +21,11 @@ import {
 } from "../ui/dropdown-menu.tsx";
 import { TextField } from "../ui/text-field.tsx";
 import { QRCodeSVG } from "qrcode.react";
-import { ChallengeInputs, FactorSummary } from "./security-controls.tsx";
+import {
+  ChallengeInputs,
+  FactorSummary,
+  errorMessage,
+} from "./security-controls.tsx";
 
 const sessionKey = ["auth", "session"];
 const sessionQuery = {
@@ -71,9 +75,6 @@ export function Protected({ children }: { children: ReactNode }) {
   if (session.data === null) return null;
   return <>{children}</>;
 }
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Please try again.";
-}
 export function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -81,10 +82,21 @@ export function LoginPage() {
   const [challenge, setChallenge] = useState(false);
   const [backup, setBackup] = useState(false);
   const [methods, setMethods] = useState({
-    totp: true,
+    totp: false,
     securityKey: false,
-    backup: true,
+    backup: false,
   });
+  const [methodsError, setMethodsError] = useState(false);
+  async function loadMethods() {
+    setMethodsError(false);
+    try {
+      const available = await auth.methods();
+      setMethods(available);
+      setBackup(!available.totp && available.backup);
+    } catch {
+      setMethodsError(true);
+    }
+  }
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [expired] = useState(() => {
@@ -136,9 +148,7 @@ export function LoginPage() {
         if (result.twoFactorRedirect) {
           setPassword("");
           setChallenge(true);
-          const available = await auth.methods();
-          setMethods(available);
-          setBackup(!available.totp && available.backup);
+          await loadMethods();
           return;
         }
       }
@@ -219,6 +229,17 @@ export function LoginPage() {
               {error}
             </p>
           )}
+          {challenge && methodsError && (
+            <button
+              type="button"
+              className="auth-link"
+              onClick={() => {
+                void loadMethods();
+              }}
+            >
+              Retry loading verification methods
+            </button>
+          )}
           {(challenge || error) && (
             <button
               type="button"
@@ -231,6 +252,12 @@ export function LoginPage() {
                     setPassword("");
                     setCode("");
                     setError("");
+                    setMethods({
+                      totp: false,
+                      securityKey: false,
+                      backup: false,
+                    });
+                    setMethodsError(false);
                     return undefined;
                   })
                   .catch((failure: unknown) => setError(errorMessage(failure)));
@@ -250,7 +277,10 @@ export function LoginPage() {
   );
 }
 export function AccountMenu({ children }: { children?: ReactNode }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(
+    () => new URLSearchParams(window.location.search).get("security") === "1",
+  );
+  const generation = useRef(0);
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [enrollment, setEnrollment] = useState<{
@@ -278,15 +308,18 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
     ]);
   }
   async function manageKey(id?: string) {
+    const requestGeneration = generation.current;
     setBusy(true);
     setError("");
     setNotice("");
     try {
       if (id) {
         await auth.removeKey(id, password);
+        if (generation.current !== requestGeneration) return;
         setNotice("Security key removed.");
       } else {
         const codes = await auth.addKey(password, keyName);
+        if (generation.current !== requestGeneration) return;
         if (codes.length) setNewBackupCodes(codes);
         setKeyName("");
         setNotice("Security key added.");
@@ -294,9 +327,10 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
       setPassword("");
       await refreshFactors();
     } catch (failure) {
-      setError(errorMessage(failure));
+      if (generation.current === requestGeneration)
+        setError(errorMessage(failure));
     } finally {
-      setBusy(false);
+      if (generation.current === requestGeneration) setBusy(false);
     }
   }
   async function signOut() {
@@ -318,16 +352,20 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
   async function security(
     action: "enable" | "verify" | "disable" | "regenerate",
   ) {
+    const requestGeneration = generation.current;
     setBusy(true);
     setError("");
     setNotice("");
     try {
       if (action === "enable") {
-        setEnrollment(await auth.enable(password));
+        const result = await auth.enable(password);
+        if (generation.current !== requestGeneration) return;
+        setEnrollment(result);
         setPassword("");
       }
       if (action === "verify") {
         await auth.verify(code, false);
+        if (generation.current !== requestGeneration) return;
         setCode("");
         setNotice(
           "Two-factor authentication enabled. Save your backup codes before closing.",
@@ -336,19 +374,23 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
       }
       if (action === "disable") {
         await auth.disable(password);
+        if (generation.current !== requestGeneration) return;
         setPassword("");
         setEnrollment(null);
         setNotice("Authenticator app disabled.");
         await refreshFactors();
       }
       if (action === "regenerate") {
-        setNewBackupCodes(await auth.regenerateBackupCodes(password));
+        const codes = await auth.regenerateBackupCodes(password);
+        if (generation.current !== requestGeneration) return;
+        setNewBackupCodes(codes);
         setPassword("");
       }
     } catch (failure) {
-      setError(errorMessage(failure));
+      if (generation.current === requestGeneration)
+        setError(errorMessage(failure));
     } finally {
-      setBusy(false);
+      if (generation.current === requestGeneration) setBusy(false);
     }
   }
   return (
@@ -373,6 +415,10 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
           <DropdownItem
             className="menu-item"
             onSelect={() => {
+              generation.current++;
+              setEnrollment(null);
+              setNewBackupCodes(null);
+              setBusy(false);
               setOpen(true);
               setError("");
               setNotice("");
@@ -400,7 +446,11 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
       <Dialog
         open={open}
         onOpenChange={(value) => {
+          generation.current++;
           setOpen(value);
+          setEnrollment(null);
+          setNewBackupCodes(null);
+          setBusy(false);
           if (!value) {
             setPassword("");
             setCode("");
@@ -427,6 +477,10 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                 <QRCodeSVG
                   value={enrollment.totpURI}
                   size={192}
+                  marginSize={4}
+                  bgColor="#FFFFFF"
+                  // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role
+                  role="img"
                   aria-label="Authenticator setup QR code"
                 />
                 <p>Or enter this secret manually:</p>
@@ -461,8 +515,9 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
             ) : newBackupCodes ? (
               <>
                 <p>
-                  Save these new backup codes somewhere safe. Your previous
-                  codes no longer work.
+                  Save these new backup codes somewhere safe.{" "}
+                  {notice !== "Security key added." &&
+                    "Your previous codes no longer work."}
                 </p>
                 <code className="auth-secret">{newBackupCodes.join("\n")}</code>
                 <Button onClick={() => setNewBackupCodes(null)}>Done</Button>
@@ -515,25 +570,33 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                 {!hasWebAuthn() && (
                   <p>Security keys are not supported by this browser.</p>
                 )}
-                <TextField
-                  label="Security key name"
-                  value={keyName}
-                  onChange={(event) => setKeyName(event.target.value)}
-                />
-                <Button
-                  disabled={
-                    busy ||
-                    !password ||
-                    !keyName.trim() ||
-                    !hasWebAuthn() ||
-                    !factors.data
-                  }
-                  onClick={() => {
-                    void manageKey();
-                  }}
-                >
-                  Add security key
-                </Button>
+                {activeLayout().split && activeLayout().host !== "mail" ? (
+                  <a href={hubHref(activeLayout(), "/mail?security=1")}>
+                    Add security key on the sign-in address
+                  </a>
+                ) : (
+                  <>
+                    <TextField
+                      label="Security key name"
+                      value={keyName}
+                      onChange={(event) => setKeyName(event.target.value)}
+                    />
+                    <Button
+                      disabled={
+                        busy ||
+                        !password ||
+                        !keyName.trim() ||
+                        !hasWebAuthn() ||
+                        !factors.data
+                      }
+                      onClick={() => {
+                        void manageKey();
+                      }}
+                    >
+                      Add security key
+                    </Button>
+                  </>
+                )}
                 {session.data?.user.twoFactorEnabled && (
                   <Button
                     disabled={busy || !password || !factors.data}

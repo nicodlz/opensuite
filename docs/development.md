@@ -5,12 +5,14 @@
 An operator with database access can reset Esuno TOTP and backup codes after
 verifying the account owner's identity through a separate channel. Stop every
 API instance first so no sign-in or MFA operation can race the reset. Back up
-the database, then run from the repository root with `DATABASE_URL` set to a
-connection for a role allowed to update authentication records and append
-audit events:
+the database, then run from the repository root using the API image and its
+configured database credentials. The first invocation prints the user ID and
+does not change the account; verify it and repeat with the ID. The API image
+must include the recovery script (rebuild it after upgrading):
 
 ```sh
-node scripts/reset-mfa.mjs user@example.org
+docker compose --profile recovery run --rm --no-deps mfa-recovery user@example.org
+docker compose --profile recovery run --rm --no-deps mfa-recovery user@example.org --confirm USER_ID
 ```
 
 The transaction deletes the account's MFA record and security keys, pending challenges and

@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { createAuthLimiter } from "../src/auth/limits.ts";
+import {
+  createAuthLimiter,
+  hasDuplicateAuthCookie,
+  hasPendingFactor,
+  hasTrustDevice,
+  withoutSessionCookie,
+} from "../src/auth/limits.ts";
 
 describe("account-wide authentication limits", () => {
+  it("parses cookie names like Better Auth, including whitespace and duplicates", () => {
+    expect(hasTrustDevice("__Host-opensuite.trust_device \t=value")).toBe(true);
+    expect(hasPendingFactor("__Host-opensuite.two_factor \t=value")).toBe(true);
+    expect(
+      hasDuplicateAuthCookie(
+        "__Host-opensuite.session_token=a; __Host-opensuite.session_token \t=b",
+      ),
+    ).toBe(true);
+    expect(
+      withoutSessionCookie(
+        "__Host-opensuite.session_token \t=a; other=b",
+      ).trim(),
+    ).toBe("other=b");
+  });
   it("limits distributed login attempts, resets with the window, and retains the IP limit", () => {
     let time = 0;
     const limiter = createAuthLimiter(() => time);
@@ -79,7 +99,9 @@ describe("account-wide authentication limits", () => {
     for (let i = 0; i < 5; i++)
       expect(
         limiter.check(
-          "/auth/two-factor/verify-security-key",
+          i % 2 === 0
+            ? "/auth/two-factor/verify-totp"
+            : "/auth/two-factor/verify-security-key",
           `ip${i}`,
           {},
           cookie,
@@ -93,5 +115,23 @@ describe("account-wide authentication limits", () => {
         cookie,
       ),
     ).toMatchObject({ first: true });
+  });
+  it("limits key password checks per authenticated user across both actions", () => {
+    const limiter = createAuthLimiter(() => 0);
+    for (let i = 0; i < 5; i++)
+      expect(
+        limiter.reauthenticate(
+          i % 2
+            ? "/auth/security-keys/remove"
+            : "/auth/security-keys/register-options",
+          "user-a",
+        ),
+      ).toBeUndefined();
+    expect(
+      limiter.reauthenticate("/auth/security-keys/remove", "user-a"),
+    ).toMatchObject({ first: true });
+    expect(
+      limiter.reauthenticate("/auth/security-keys/remove", "user-b"),
+    ).toBeUndefined();
   });
 });

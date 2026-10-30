@@ -1,6 +1,19 @@
 import * as React from "react";
 import { TextField } from "../ui/text-field.tsx";
 
+export function errorMessage(error: unknown) {
+  if (
+    error instanceof Error &&
+    ["NotAllowedError", "AbortError", "TimeoutError"].includes(error.name)
+  )
+    return "Security key request cancelled or timed out. Please try again.";
+  if (error instanceof Error && error.name === "InvalidStateError")
+    return "This security key is already registered or unavailable.";
+  if (error instanceof Error && error.name === "SecurityError")
+    return "Security keys must be used on the sign-in address.";
+  return error instanceof Error ? error.message : "Please try again.";
+}
+
 export function ChallengeInputs({
   methods,
   backup,

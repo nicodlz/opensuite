@@ -13,10 +13,10 @@ WebAuthn; an operator can optionally configure Yubico API credentials for the
 distinct YubiKey OTP provider. Client compatibility and WebAuthn 2FA still
 require verification on the deployment.
 
-For YubiKey OTP, operators may set `VAULT_YUBICO_CLIENT_ID` and
-`VAULT_YUBICO_SECRET_KEY` in their deployment environment; both default to
-empty. These are unnecessary for FIDO2 or TOTP. Protect the environment file
-and Compose configuration output because the Yubico secret is included there.
+For YubiKey OTP, operators may set `VAULT_YUBICO_CLIENT_ID` and either
+`VAULT_YUBICO_SECRET_KEY` or `VAULT_YUBICO_SECRET_FILE`; these are unnecessary
+for FIDO2 or TOTP. Protect the secret file and, if using the environment
+variable, the environment file and Compose configuration output.
 
 The Esuno theme applies to the bundled web vault only. Official mobile and
 desktop applications and browser extensions ship their own interface and
