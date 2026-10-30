@@ -520,6 +520,8 @@ export const buildServer = async (
           "/auth/two-factor/verify-totp": "mfa.verify",
           "/auth/two-factor/verify-backup-code": "mfa.verify",
           "/auth/two-factor/disable": "mfa.disable",
+          "/auth/two-factor/generate-backup-codes":
+            "mfa.backup_codes.regenerate",
           "/auth/revoke-session": "session.revoke",
           "/auth/revoke-sessions": "session.revoke_all",
           "/auth/revoke-other-sessions": "session.revoke_others",

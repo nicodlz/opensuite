@@ -398,6 +398,8 @@ services:
     entrypoint: ["/bin/sh", "/opt/opensuite/start.sh"]
     environment:
       DOMAIN: https://${VAULT_PUBLIC_HOST:-vault.localhost}
+      YUBICO_CLIENT_ID: ${VAULT_YUBICO_CLIENT_ID:-}
+      YUBICO_SECRET_KEY: ${VAULT_YUBICO_SECRET_KEY:-}
       VAULT_PUBLIC_HOST: ${VAULT_PUBLIC_HOST:-vault.localhost}
       VAULT_MAIN_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
       VAULT_HTTPS_PORT: ${HTTPS_PORT:-443}

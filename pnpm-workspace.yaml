@@ -35,6 +35,7 @@ catalog:
   oxlint-tsgolint: 7.0.2005
   "@playwright/test": 1.56.1
   prettier: 3.9.10
+  qrcode.react: 4.2.0
   prisma: 6.19.3
   "@prisma/client": 6.19.3
   "@radix-ui/react-dialog": 1.1.15

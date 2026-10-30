@@ -34,6 +34,8 @@ The ingestion queue and archive preserve different evidence; neither acceptance 
 
 Better Auth uses email/password sessions with secure, HTTP-only, SameSite=Lax cookies and optional TOTP and backup codes. Public registration is disabled; an authenticated administrator creates users. The API rechecks the session, enabled user and active mailbox for protected operations. Mail credentials are scoped to the owning user and kept server-side. Administrators can manage domains and disable other accounts subject to safeguards; normal users cannot use administrative procedures. Drive verifies the session with the API and enforces item ownership and shares independently. A public Drive link is a bearer token, stored hashed and checked on each public download.
 
+Web MFA does not protect direct IMAP or SMTP authentication. Keep these protocol ports bound to loopback until managed app passwords are implemented and mail TLS is verified. Vault uses its own account and separately configured two-step login; it does not use the Esuno session.
+
 API requests other than GET and HEAD must carry the configured public `Origin`; the API also trusts only the configured Caddy proxy address. Drive rejects requests to its authenticated command handler marked `Sec-Fetch-Site: cross-site`; its public download and preview routes have separate checks. Do not treat this as a universal Origin check on Drive. Keep the API and Drive behind the intended proxy and validate the boundary for the deployment.
 
 ## Mail management isolation and secrets

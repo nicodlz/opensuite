@@ -61,6 +61,12 @@ export function createAuthClient(fetcher: typeof fetch = fetch) {
     async disable(password: string) {
       await request("two-factor/disable", { password });
     },
+    async regenerateBackupCodes(password: string) {
+      return z
+        .object({ backupCodes: z.array(z.string()) })
+        .parse(await request("two-factor/generate-backup-codes", { password }))
+        .backupCodes;
+    },
     /** Asks the sign-in origin for a token valid on one sibling origin. */
     async handoff(target: string) {
       const response = await fetcher("/api/session/handoff", {

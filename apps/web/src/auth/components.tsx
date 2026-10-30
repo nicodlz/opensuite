@@ -20,6 +20,7 @@ import {
   DropdownItem,
 } from "../ui/dropdown-menu.tsx";
 import { TextField } from "../ui/text-field.tsx";
+import { QRCodeSVG } from "qrcode.react";
 
 const sessionKey = ["auth", "session"];
 const sessionQuery = {
@@ -216,6 +217,7 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
   } | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [newBackupCodes, setNewBackupCodes] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
   const client = useQueryClient();
   const navigate = useNavigate();
@@ -236,7 +238,9 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
     client.clear();
     void navigate({ to: "/login" });
   }
-  async function security(action: "enable" | "verify" | "disable") {
+  async function security(
+    action: "enable" | "verify" | "disable" | "regenerate",
+  ) {
     setBusy(true);
     setError("");
     setNotice("");
@@ -259,6 +263,10 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
         setEnrollment(null);
         setNotice("Two-factor authentication disabled.");
         await client.invalidateQueries({ queryKey: sessionKey });
+      }
+      if (action === "regenerate") {
+        setNewBackupCodes(await auth.regenerateBackupCodes(password));
+        setPassword("");
       }
     } catch (failure) {
       setError(errorMessage(failure));
@@ -320,24 +328,33 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
             setPassword("");
             setCode("");
             setEnrollment(null);
+            setNewBackupCodes(null);
             setError("");
           }
         }}
       >
         <DialogContent
           title="Account security"
-          description="Manage two-factor authentication for your account."
+          description="Two-factor authentication is optional. Manage your authenticator and backup codes."
         >
           <div className="auth-form">
             {enrollment ? (
               <>
-                <p>Add this setup URI to your authenticator:</p>
-                <code className="auth-secret">{enrollment.totpURI}</code>
+                <p>Scan this QR code with your authenticator app:</p>
+                <QRCodeSVG
+                  value={enrollment.totpURI}
+                  size={192}
+                  aria-label="Authenticator setup QR code"
+                />
+                <p>Or enter this secret manually:</p>
+                <code className="auth-secret">
+                  {new URL(enrollment.totpURI).searchParams.get("secret")}
+                </code>
                 <p>Save these backup codes somewhere safe:</p>
                 <code className="auth-secret">
                   {enrollment.backupCodes.join("\n")}
                 </code>
-                {!session.data?.user.twoFactorEnabled && (
+                {!session.data?.user.twoFactorEnabled ? (
                   <>
                     <TextField
                       label="Authenticator code"
@@ -354,14 +371,25 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                       Confirm setup
                     </Button>
                   </>
+                ) : (
+                  <Button onClick={() => setEnrollment(null)}>Done</Button>
                 )}
+              </>
+            ) : newBackupCodes ? (
+              <>
+                <p>
+                  Save these new backup codes somewhere safe. Your previous
+                  codes no longer work.
+                </p>
+                <code className="auth-secret">{newBackupCodes.join("\n")}</code>
+                <Button onClick={() => setNewBackupCodes(null)}>Done</Button>
               </>
             ) : (
               <>
                 <p>
                   {session.data?.user.twoFactorEnabled
-                    ? "Two-factor authentication is enabled."
-                    : "Two-factor authentication is not enabled."}
+                    ? "Authenticator app: on"
+                    : "Authenticator app: off"}
                 </p>
                 <TextField
                   label="Current password"
@@ -384,6 +412,16 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                     ? "Disable two-factor authentication"
                     : "Set up two-factor authentication"}
                 </Button>
+                {session.data?.user.twoFactorEnabled && (
+                  <Button
+                    disabled={busy || !password}
+                    onClick={() => {
+                      void security("regenerate");
+                    }}
+                  >
+                    Regenerate backup codes
+                  </Button>
+                )}
               </>
             )}
             {error && (

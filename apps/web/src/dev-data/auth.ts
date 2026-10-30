@@ -19,8 +19,12 @@ export const fakeAuth: AuthClient = {
     return Promise.resolve({});
   },
   verify(code, backup) {
-    if (code !== (backup ? "backup-code" : "123456"))
+    if (
+      code !==
+      (backup ? sessionStorage.getItem("auth-fixture-backup-code") : "123456")
+    )
       return Promise.reject(new Error("Invalid verification code."));
+    if (backup) sessionStorage.removeItem("auth-fixture-backup-code");
     if (sessionStorage.getItem("auth-fixture-enrolling") === "1") {
       sessionStorage.setItem("auth-fixture-mfa", "1");
       sessionStorage.removeItem("auth-fixture-enrolling");
@@ -36,6 +40,7 @@ export const fakeAuth: AuthClient = {
     if (password !== "synthetic-password")
       return Promise.reject(new Error("Incorrect password."));
     sessionStorage.setItem("auth-fixture-enrolling", "1");
+    sessionStorage.setItem("auth-fixture-backup-code", "backup-code");
     return Promise.resolve({
       totpURI:
         "otpauth://totp/Esuno:you@example.test?secret=JBSWY3DPEHPK3PXP&issuer=Esuno",
@@ -46,7 +51,18 @@ export const fakeAuth: AuthClient = {
     if (password !== "synthetic-password")
       return Promise.reject(new Error("Incorrect password."));
     sessionStorage.removeItem("auth-fixture-mfa");
+    sessionStorage.removeItem("auth-fixture-backup-code");
     return Promise.resolve();
+  },
+  regenerateBackupCodes(password) {
+    if (password !== "synthetic-password")
+      return Promise.reject(new Error("Incorrect password."));
+    if (!mfa())
+      return Promise.reject(
+        new Error("Two-factor authentication is not enabled."),
+      );
+    sessionStorage.setItem("auth-fixture-backup-code", "new-backup-code");
+    return Promise.resolve(["new-backup-code"]);
   },
   handoff: () =>
     signedOut()

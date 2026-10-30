@@ -5,6 +5,19 @@ to each client version and deployment; it is not a security audit. Vault account
 are independent of Esuno accounts. Use your dedicated HTTPS Vault origin (for
 example `https://vault.example.org`) and an invited account.
 
+Vault two-step login is configured separately from Esuno account security. In
+the web vault's security settings, enable an authenticator app such as Authy
+(TOTP), or register a FIDO2/WebAuthn security key such as a YubiKey. Save the
+Vault recovery code separately. Vaultwarden uses its own HTTPS origin for
+WebAuthn; an operator can optionally configure Yubico API credentials for the
+distinct YubiKey OTP provider. Client compatibility and WebAuthn 2FA still
+require verification on the deployment.
+
+For YubiKey OTP, operators may set `VAULT_YUBICO_CLIENT_ID` and
+`VAULT_YUBICO_SECRET_KEY` in their deployment environment; both default to
+empty. These are unnecessary for FIDO2 or TOTP. Protect the environment file
+and Compose configuration output because the Yubico secret is included there.
+
 ## Server selection and evidence
 
 On the login or registration screen, choose the self-hosted server and save the

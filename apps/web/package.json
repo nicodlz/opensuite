@@ -44,6 +44,7 @@
     "@orpc/contract": "catalog:",
     "@fontsource-variable/space-grotesk": "catalog:",
     "@fontsource-variable/dm-sans": "catalog:",
-    "dompurify": "catalog:"
+    "dompurify": "catalog:",
+    "qrcode.react": "catalog:"
   }
 }

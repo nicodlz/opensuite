@@ -202,6 +202,28 @@ const cookieOf = (response: Response) =>
     .getSetCookie()
     .map((item) => item.split(";")[0])
     .join("; ");
+const totp = (uri: string) => {
+  const secret = new URL(uri).searchParams.get("secret");
+  if (secret === null) throw new Error("TOTP secret missing");
+  let bits = "";
+  for (const character of secret.toUpperCase().replaceAll("=", "")) {
+    const index = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(character);
+    if (index < 0) throw new Error("Invalid TOTP secret");
+    bits += index.toString(2).padStart(5, "0");
+  }
+  const bytes: number[] = [];
+  for (let index = 0; index + 8 <= bits.length; index += 8)
+    bytes.push(Number.parseInt(bits.slice(index, index + 8), 2));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000)));
+  const digest = createHmac("sha1", Buffer.from(bytes))
+    .update(counter)
+    .digest();
+  const offset = (digest.at(-1) ?? 0) & 15;
+  return String(
+    (digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000,
+  ).padStart(6, "0");
+};
 const sessionOf = async (cookie: string) =>
   (await fetch(`${base}/auth/get-session`, { headers: { cookie } })).json();
 const handoff = (
@@ -681,26 +703,7 @@ describe("identity over HTTP", () => {
     const parsed = z
       .object({ totpURI: z.string(), backupCodes: z.array(z.string()).min(1) })
       .parse(enrollment);
-    const secret = new URL(parsed.totpURI).searchParams.get("secret");
-    if (secret === null) throw new Error("TOTP secret missing");
-    let bits = "";
-    for (const character of secret.toUpperCase().replaceAll("=", "")) {
-      const index = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(character);
-      if (index < 0) throw new Error("Invalid TOTP secret");
-      bits += index.toString(2).padStart(5, "0");
-    }
-    const bytes: number[] = [];
-    for (let index = 0; index + 8 <= bits.length; index += 8)
-      bytes.push(Number.parseInt(bits.slice(index, index + 8), 2));
-    const counter = Buffer.alloc(8);
-    counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000)));
-    const digest = createHmac("sha1", Buffer.from(bytes))
-      .update(counter)
-      .digest();
-    const offset = (digest.at(-1) ?? 0) & 15;
-    const code = String(
-      (digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000,
-    ).padStart(6, "0");
+    const code = totp(parsed.totpURI);
     const verification = await post(
       "two-factor/verify-totp",
       { code },
@@ -733,6 +736,57 @@ describe("identity over HTTP", () => {
     );
     expect(verified.status).toBe(200);
     expect((await handoff(cookieOf(verified))).status).toBe(200);
+    const verifiedCookie = cookieOf(verified);
+    expect(
+      (
+        await post(
+          "two-factor/generate-backup-codes",
+          { password: "wrong" },
+          verifiedCookie,
+        )
+      ).ok,
+    ).toBe(false);
+    const regenerated = await post(
+      "two-factor/generate-backup-codes",
+      { password: data.password },
+      verifiedCookie,
+    );
+    expect(regenerated.status).toBe(200);
+    const newCodes = z
+      .object({ backupCodes: z.array(z.string()).min(1) })
+      .parse(await regenerated.json()).backupCodes;
+    await post("sign-out", {}, verifiedCookie);
+    const nextChallenge = await post("sign-in/email", {
+      email: data.email,
+      password: data.password,
+    });
+    const nextCookie = cookieOf(nextChallenge);
+    const oldCode = parsed.backupCodes[1];
+    const newCode = newCodes[0];
+    if (!oldCode || !newCode) throw new Error("Backup code missing");
+    expect(
+      (
+        await post(
+          "two-factor/verify-backup-code",
+          { code: oldCode },
+          nextCookie,
+        )
+      ).ok,
+    ).toBe(false);
+    const newVerification = await post(
+      "two-factor/verify-backup-code",
+      { code: newCode },
+      nextCookie,
+    );
+    expect(newVerification.status).toBe(200);
+    const newCookie = cookieOf(newVerification);
+    expect(
+      (await post("two-factor/disable", { password: "wrong" }, newCookie)).ok,
+    ).toBe(false);
+    expect(
+      (await post("two-factor/disable", { password: data.password }, newCookie))
+        .status,
+    ).toBe(200);
     const result = createDatabase(databaseUrl);
     if (result.isErr()) throw new Error("database unavailable");
     try {
@@ -749,8 +803,95 @@ describe("identity over HTTP", () => {
           "mfa.verify.success",
           "sign_in.challenge",
           "session.revoke.success",
+          "mfa.backup_codes.regenerate.success",
+          "mfa.disable.success",
         ]),
       );
+    } finally {
+      await result.value.$disconnect();
+    }
+  });
+
+  it("audits operator MFA reset and revokes sessions and pending challenges", async () => {
+    const data = {
+      email: "reset@example.test",
+      name: "Reset",
+      password: "reset-strong-password",
+    };
+    expect((await post("sign-up/email", data)).status).toBe(200);
+    const login = await post("sign-in/email", {
+      email: data.email,
+      password: data.password,
+    });
+    const sessionCookie = cookieOf(login);
+    const enrollment = await post(
+      "two-factor/enable",
+      { password: data.password },
+      sessionCookie,
+    );
+    expect(enrollment.status).toBe(200);
+    const uri = z
+      .object({ totpURI: z.string() })
+      .parse(await enrollment.json()).totpURI;
+    const activation = await post(
+      "two-factor/verify-totp",
+      { code: totp(uri) },
+      sessionCookie,
+    );
+    expect(activation.status).toBe(200);
+    const activeCookie = cookieOf(activation);
+    const challenge = await post("sign-in/email", {
+      email: data.email,
+      password: data.password,
+    });
+    expect(await challenge.json()).toMatchObject({ twoFactorRedirect: true });
+    const pendingCookie = cookieOf(challenge);
+    const result = createDatabase(databaseUrl);
+    if (result.isErr()) throw new Error("database unavailable");
+    try {
+      const db = result.value;
+      const user = await db.user.findUniqueOrThrow({
+        where: { email: data.email },
+      });
+      await db.verification.create({
+        data: {
+          id: randomUUID(),
+          identifier: "test-pending",
+          value: user.id,
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      });
+      await run("node", ["scripts/reset-mfa.mjs", data.email], {
+        cwd: process.cwd(),
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+      });
+      expect(
+        await db.twoFactor.findUnique({ where: { userId: user.id } }),
+      ).toBeNull();
+      expect(
+        (await db.user.findUniqueOrThrow({ where: { id: user.id } }))
+          .twoFactorEnabled,
+      ).toBe(false);
+      expect(await db.session.count({ where: { userId: user.id } })).toBe(0);
+      expect(await db.verification.count({ where: { value: user.id } })).toBe(
+        0,
+      );
+      expect(await sessionOf(sessionCookie)).toBeNull();
+      expect(await sessionOf(activeCookie)).toBeNull();
+      expect(
+        (
+          await post(
+            "two-factor/verify-totp",
+            { code: totp(uri) },
+            pendingCookie,
+          )
+        ).ok,
+      ).toBe(false);
+      expect(
+        await db.auditEvent.count({
+          where: { userId: user.id, action: "mfa.operator_reset.success" },
+        }),
+      ).toBe(1);
     } finally {
       await result.value.$disconnect();
     }
