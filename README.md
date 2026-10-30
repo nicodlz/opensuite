@@ -1,106 +1,31 @@
 # OpenSuite
 
-A self-hostable suite for mail, calendar, contacts and file storage.
+OpenSuite is a self-hosted mail and file suite, intended as an alternative to hosted mail, calendar and Drive services. It combines a web workspace and application API with the Stalwart mail server, PostgreSQL and S3-compatible storage.
 
-> **Status: early development.** Only the pieces listed below exist. Mail
-> application-level mail provisioning, the production mail API, calendar and contacts features and
-> the setup wizard are planned and not implemented yet.
+## Release status
 
-## What works today
+This first release is an early, single-server baseline. The repository contains:
 
-- **Docker Compose stack** (`compose.yaml`): Caddy (automatic HTTPS), the API,
-  the Stalwart mail server (SMTP, IMAP, JMAP, CalDAV, CardDAV on embedded
-  RocksDB), PostgreSQL, and an optional `dev` profile with LocalStack S3/SQS
-  substitutes. Passwords are generated on first start and never stored in
-  `.env` or Git. See [docs/development.md](docs/development.md), including its
-  known limitations (no mail TLS certificate yet).
-- **Database** (`packages/db`): PostgreSQL schema and versioned migrations, applied by a Compose startup job. See [the database package](packages/db/README.md) for encryption, isolation, and testing details.
-- **Web client** (`apps/web`): a mail workspace and live API status page. Mail uses
-  synthetic in-browser data in development; the production mail API is not
-  implemented yet. Calendar, contacts and drive are placeholders. See [apps/web/README.md](apps/web/README.md).
-- **JMAP client** (`packages/jmap`): validated mailbox, email, blob and submission operations, plus a separate server-only Stalwart provisioning client. See [verified behaviour](docs/architecture/jmap-behaviour.md).
-- **Mail blob storage:** local by default, with an optional S3-compatible
-  backend for new or migrated installations. The
-  [object storage guide](docs/operations/object-storage.md) covers restart,
-  migration, backup and recovery requirements.
-- **Outbound mail:** server-only Stalwart relay configuration and DKIM DNS records; see [outbound operations](docs/operations/outbound.md) for SES, queue limits and deployment steps.
-- **Inbound worker** (`apps/ingest`): SES notification processing, durable ledger and archived-envelope replay. See [ingestion](docs/architecture/ingestion.md) for configuration and production limitations.
-- **Drive** (`apps/drive`): independent file metadata and S3-compatible object storage, with direct uploads, sharing and guarded previews. Authentication integration is pending; see [development](docs/development.md#drive).
-- **API** (`apps/api`): a Fastify server hosting typed procedures (oRPC, Zod
-  contracts in `packages/contracts`) with structured JSON logs (pino).
-  - `GET /health`: liveness; answers `200` while the process runs.
-  - `GET /ready`: readiness over the declared backing services; `200` when all
-    are up, `503` with per-dependency status otherwise. The standard API
-    checks its application database.
-  - `GET /openapi.json`: OpenAPI 3.1 document generated from the contracts.
-  - Behind Caddy, these are served under `/api/`.
+- A mail workspace and authenticated mail API for conversations, drafts, attachments, folders and search, backed by Stalwart JMAP.
+- A separate Drive service and workspace for uploads, files, item sharing and expiring public links.
+- Authentication, TOTP and backup-code support, account provisioning and suspension, and an administrator domain/DNS workflow.
+- A Compose stack, optional inbound worker, SES relay and domain adapters, backups and monitoring tools. Provider integrations and production recovery need the validation described in the operator guides.
 
-Authentication components are under development and are not wired into the
-standard startup. They must not be used as a production login yet; mailbox
-provisioning and lifecycle reconciliation, audit coverage, account-based
-rate limits and authorization procedures remain to be integrated.
+The **calendar and contacts web pages are placeholders**; authenticated DAV interoperability is not established. The current web client has no sign-in, MFA, user administration, setup-wizard or client app-password screens. Authentication APIs exist, but the standard Compose provisioning configuration and outbound management procedure need the fixes described in [development](docs/development.md#authentication-and-mailbox-provisioning) and [outbound operations](docs/operations/outbound.md#apply). Follow the [user guide](docs/user/index.md) for the resulting limits. The Vite development server uses synthetic mail and Drive data, not a real account. No zero-access or end-to-end encryption is claimed.
 
-## Installation
+## Start here
 
-```sh
-git clone <repository> opensuite && cd opensuite
-cp deploy/env.example .env
-pnpm install && pnpm build   # build the static web client mounted by Caddy
-docker compose up -d
-curl -k https://localhost/api/health   # `localhost` uses a certificate from Caddy's local CA
-```
+- [Documentation map](docs/index.md)
+- [User guide](docs/user/index.md) and [administrator guide](docs/admin/index.md)
+- [Local development and installation](docs/development.md); [production deployment runbook](docs/deployment/production.md) (being prepared separately)
+- [Architecture and security](docs/architecture/overview.md)
+- [Operations](docs/index.md#operations-and-deployment), [contributing](CONTRIBUTING.md), and [changelog](CHANGELOG.md)
 
-For the candidate AWS mail infrastructure, see [docs/deployment/aws.md](docs/deployment/aws.md). It is validated offline and has not been applied or tested with AWS. Drive storage is planned for Backblaze B2.
+The production runbook is being developed in parallel and may not exist in this checkout yet. For development, Node.js 22.18 or later, pnpm 12, Docker and Compose are required. Follow the local guide rather than assuming a bare `docker compose up` completes mail bootstrap.
 
-## Development
+## Repository
 
-Requirements: Node.js 22.18 or later, pnpm 12.
-
-```sh
-pnpm install
-cp deploy/env.example .env   # optional; defaults match the template
-# Set DATABASE_URL to a PostgreSQL application-role connection for local API development.
-pnpm --filter @opensuite/api dev
-# In another terminal: pnpm --filter @opensuite/web dev
-curl http://127.0.0.1:3000/health
-```
-
-Checks:
-
-```sh
-pnpm typecheck
-pnpm lint          # oxlint, type-aware
-pnpm format:check  # Prettier
-pnpm knip          # unused files, exports and dependencies
-node scripts/iac-validate.mjs # offline AWS module checks (Docker required)
-pnpm test          # Vitest unit project
-pnpm build         # static web client
-pnpm test:e2e      # Vite preview and a local API; install Chromium first
-pnpm exec vitest run --project stalwart  # real server; Docker required
-pnpm exec vitest run --project drive     # disposable PostgreSQL and LocalStack
-OPENSUITE_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
-```
-
-Vitest projects are selected by file suffix: `*.test.ts` runs in `unit`;
-`*.db.test.ts`, `*.http.test.ts`, `*.stalwart.test.ts`, `*.ingest.test.ts`
-and `*.drive.test.ts` run in the projects of the same name, which need the
-corresponding infrastructure.
-
-## Repository layout
-
-| Path                         | Contents                                               |
-| ---------------------------- | ------------------------------------------------------ |
-| `apps/api`                   | HTTP API server                                        |
-| `apps/web`                   | Mail workspace and API status page                     |
-| `apps/ingest`                | Inbound mail ingestion worker                          |
-| `apps/drive`                 | Independent file storage service                       |
-| `packages/contracts`         | Shared API schemas and procedure contracts             |
-| `packages/core`              | Domain, services and provider adapters                 |
-| `packages/jmap`              | JMAP and server-side provisioning clients              |
-| `packages/db`                | PostgreSQL schema, migration job, and provider storage |
-| `packages/design-tokens`     | Shared light and dark theme tokens                     |
-| `packages/typescript-config` | Shared strict TypeScript configuration                 |
-| `packages/oxlint-config`     | Shared oxlint configuration                            |
+`apps/api`, `apps/web`, `apps/drive`, `apps/ingest` and `apps/observe` contain the services and client. Shared contracts, domain services, database code, JMAP adapters and configuration live under `packages/`. Compose configuration is in `compose.yaml`; operator assets are in `deploy/`.
 
 ## License
 

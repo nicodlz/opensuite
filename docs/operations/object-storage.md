@@ -85,12 +85,11 @@ restricted to those prefixes; verify the provider actually enforces those
 restrictions. Backups must use a separate credential and failure domain where
 possible, with versioning or immutable retention to protect against deletion.
 Drive is a separate service and mail must not depend on its availability or
-credentials. Drive is not implemented yet.
+credentials. Drive is implemented as a separate service; see [Drive configuration](../development.md#drive).
 
 The optional SES inbound S3 buffer is a separate temporary transit store with
 its own AWS account policy, bucket, prefix, lifecycle and credentials. It is
-not the permanent B2 mail store, Drive store, or backup. SES ingestion is not
-implemented and no real provider behaviour is claimed.
+not the permanent B2 mail store, Drive store, or backup. See [ingestion](../architecture/ingestion.md) for the worker and its current production limits; no real provider behaviour is claimed.
 
 If B2 or the network is unavailable, mailbox metadata may remain available but
 reading message bodies and attachments fails; writes and incoming delivery can
@@ -128,8 +127,8 @@ the restored instance in isolation and verify a known message and attachment,
 mailbox metadata, and application health before any cutover. Never overwrite a
 live bucket with an older backup while writers are active. Keep independent
 copies and test recovery regularly, including encryption keys and permissions.
-The automated encrypted backup and new-host restore procedure is documented in
-[Backup and recovery](backup.md). Its local S3 substitute test is not a B2
+The encrypted backup and new-host restore procedure, including its current
+Compose preflight limitation, is documented in [Backup and recovery](backup.md). Its local S3 substitute test is not a B2
 compatibility test.
 
 ## Migrating local blobs to S3

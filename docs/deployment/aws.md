@@ -4,14 +4,14 @@
 mail in the selected region (default `eu-north-1`), writes MIME to an encrypted
 S3 buffer, and publishes the receipt notification to SNS. SNS delivers it to an
 SQS ingestion queue and separately to Firehose for a metadata archive in the
-same bucket. The planned worker imports into Stalwart on the VPS. Sending uses
+same bucket. The optional worker imports into Stalwart on the VPS; see [ingestion](../architecture/ingestion.md). Sending uses
 SES SMTP with STARTTLS on port 2587. Drive and its permanent object storage use
 Backblaze B2 and are not provisioned here.
 
 This configuration has only been checked offline: **no real AWS plan or apply,
 provider integration, delivery, IAM policy, DNS, recovery, or cost has been
-verified**. The worker, SMTP relay configuration, and end-to-end idempotency and
-backup procedures do not exist yet. Treat this as infrastructure to evaluate,
+verified**. Worker, relay and backup components exist, but end-to-end provider behavior,
+idempotency and recovery remain subject to the linked proof and operating procedures. Treat this as infrastructure to evaluate,
 not a production-ready mail service. See the [ingestion design](../architecture/ingestion.md).
 
 ## Prerequisites and configuration
@@ -104,7 +104,7 @@ policies (each is managed as a whole), rule set activation and IAM permissions.
 Preserve required existing statements, rules and data or use an isolated set of
 resources. Avoid replacing a bucket containing unimported mail.
 
-For an operator performing a deliberate adoption, substitute shell variables
+For an operator performing a deliberate adoption, run the following from `deploy/aws` and substitute shell variables
 with existing values and use the same private variables file for each import.
 For example, with `DOMAIN`, `BUCKET`, `RULE_SET`, `RULE`, and `VARS` supplied by
 the operator:

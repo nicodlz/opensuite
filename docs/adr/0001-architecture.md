@@ -22,7 +22,7 @@ Alternatives considered:
 - **Stalwart OIDC directory:** [Stalwart's OIDC documentation](https://stalw.art/docs/auth/backend/oidc/) describes access-token validation and mapping; accounts must be provisioned before first sign-in to receive mail. OIDC could avoid storing an application mail password, but requires a compatible issuer, audiences, scopes, token lifecycle and clients, plus separate address provisioning and deletion reconciliation. Better Auth interoperability and mail-client support are unverified. Reconsider after an end-to-end spike.
 - **Derived or shared user password:** deriving a mail credential from a login password couples rotation and exposes password-derived material to more systems; a reset or MFA change would not automatically revoke all direct protocol access. A random, encrypted credential has a clearer rotation boundary, at the cost of key management and server-side plaintext at use time.
 
-All identity sources above were accessed 2026-10-29. The choice is architectural, not proof that any provisioning or authentication flow already works.
+All identity sources above were accessed 2026-10-29. The choice is architectural; see the [current overview](../architecture/overview.md) and [development guide](../development.md#authentication-and-mailbox-provisioning) for implemented flows and their integration limits.
 
 ### Encryption and license
 

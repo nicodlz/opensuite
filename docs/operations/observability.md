@@ -24,10 +24,11 @@ queue. Docker stores at most three 10 MB log files per container. View with
    the container's unprivileged `node` user. The default is
    `deploy/backup-status`.
 3. Have the backup system atomically update `last-success` in that directory
-   **only after** a complete backup and its manifest have succeeded, for
+   **only after** a complete backup has succeeded, for
    example write a temporary file and rename it to `last-success`. Its mtime
-   is the marker; clocks must be synchronized. No backup automation or restore
-   verification is provided here. Missing, future-dated or stale markers alert.
+   is the marker; clocks must be synchronized. The observer does not create
+   this marker or verify restores. See [backup and recovery](backup.md) for the
+   backup procedure. Missing, future-dated or stale markers alert.
 4. If ingestion is configured, create `deploy/ingest.env` (0600) with the
    variables and secrets described in [ingestion](../architecture/ingestion.md),
    then start with `docker compose --profile ingest up -d --build`. The worker

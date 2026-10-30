@@ -1,6 +1,6 @@
 # Development and local installation
 
-This page describes what runs today. Planned components are listed at the end.
+This page describes the current checkout. The [production runbook](deployment/production.md) is being prepared in parallel and may not yet be present here.
 
 ## Docker Compose stack
 
@@ -8,8 +8,7 @@ This page describes what runs today. Planned components are listed at the end.
 cp deploy/env.example .env
 pnpm install && pnpm build   # produces apps/web/dist, mounted by Caddy
 # First bootstrap the mail management account as described below.
-docker compose up -d
-docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
+docker compose --profile dev up -d   # starts the stack with local S3/SQS substitutes
 ```
 
 | Service          | Image (pinned by digest)                | Role                                                                                                      |
@@ -23,9 +22,11 @@ docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
 | `migrate`        | built from `deploy/postgres/Dockerfile` | One-shot job: verifies and applies application migrations before the API starts.                          |
 | `secrets`        | `alpine:3.24.3`                         | One-shot job: generates local passwords on first start.                                                   |
 | `stalwart-setup` | `stalwartlabs/stalwart:v1.0.1`          | One-shot job: applies mail server settings (see below).                                                   |
+| `observe`        | built from `apps/observe/Dockerfile`    | Health and operational checks; webhook configuration is optional.                                         |
+| `ingest`         | built from `apps/ingest/Dockerfile`     | Optional `ingest` profile; requires separately configured resources and credentials.                      |
 | `localstack`     | `localstack/localstack:4.14.0`          | `dev` profile only: local S3 bucket and SQS queues for inbound mail.                                      |
 
-Rebuild the client with `pnpm build` after changes; Caddy mounts `apps/web/dist` read-only. The web client shows live API status and a mail interface. The mail backend is not implemented; synthetic data is available only in the development server. Other product pages are placeholders. For the development server and browser tests, see [the web client guide](../apps/web/README.md).
+Rebuild the client with `pnpm build` after changes; Caddy mounts `apps/web/dist` read-only. The web client shows API status, Mail, Drive and Domains. The Vite development server uses synthetic Mail, Drive and domain data; production builds use the APIs. Calendar and Contacts are placeholders, and there are no sign-in or MFA screens in this checkout. See the [user guide](user/index.md) for current access limitations. For the development server and browser tests, see [the web client guide](../apps/web/README.md).
 
 Every long-running service has a Compose health check and a restart policy.
 Data lives in named volumes: `postgres-data`, `stalwart-data`, `caddy-data`,
@@ -69,8 +70,7 @@ authenticates. To recover later, stop Caddy and deliberately use the temporary
 override again; remove it and recreate Stalwart afterwards.
 
 `stalwart-setup` connects to `http://stalwart:8080` on the management network
-using that account. Future server-side provisioning should use the same
-internal origin and credential with `StalwartAdmin`; its API is unchanged.
+using that account. The current API provisioning runtime instead uses the `admin` recovery identity and the recovery password. Normal Stalwart startup does not activate that identity, so stock Compose provisioning and bootstrap cannot be assumed to work. See [authentication and provisioning](#authentication-and-mailbox-provisioning) and the [production runbook](deployment/production.md) for the parallel fix.
 Never use the public HTTPS origin for management. `Http.clientIpSource` trusts
 one X-Forwarded-For hop, and Caddy replaces client-supplied values and refuses
 connections originating from the management subnet. Do not put another
@@ -155,7 +155,7 @@ To use a newer image, set `LOCALSTACK_IMAGE` and `LOCALSTACK_AUTH_TOKEN` in
 node scripts/compose-smoke.mjs --report smoke.xml
 ```
 
-The smoke test starts a separate Compose project with a generated run ID.
+The smoke test requires `--report PATH` as shown. It starts a separate Compose project with a generated run ID.
 `compose.test.yaml` publishes its ports on random loopback ports. The test then
 checks the following through the proxy, over TLS verified with Caddy's local
 certificate authority:
@@ -220,8 +220,7 @@ and backup codes. Caddy must be the only proxy trusted by the API: Compose uses
 a dedicated network and fixed Caddy address and replaces X-Forwarded-For.
 Do not publish the API directly or add untrusted containers to that network.
 
-There is no automatic first administrator. To create or promote an enabled,
-provisioned account, prepare a password file outside Git and `.env`, then run:
+There is no automatic first administrator. The following bootstrap command exists, but the normal Compose credential mismatch described below must be fixed before it can provision an account. Once the management integration is corrected, prepare a password file outside Git and `.env`, then run:
 
 ```sh
 docker compose exec -T api node apps/api/src/bootstrap.ts admin@example.com /dev/stdin < /secure/path/initial-password
@@ -237,7 +236,13 @@ disable themselves or the last enabled administrator.
 Signup provisions a Stalwart account and address, with a random inaccessible
 primary password and an application credential encrypted in the database.
 The API mounts the generated Better Auth secret, mailbox encryption key, and
-Stalwart recovery administrator secret read-only; back up the secrets volume
+Stalwart recovery administrator secret read-only. Its runtime authenticates as
+`admin`, but normal Stalwart startup does not activate that recovery identity.
+The separate management account is created by bootstrap and used by setup, not
+by this API runtime. Thus stock Compose account provisioning is blocked until
+the integration is corrected. Do not leave the recovery override active to
+work around it; see the [production runbook](deployment/production.md) being
+prepared in parallel. Back up the secrets volume
 alongside the database and mail data. Loss of the mailbox key prevents
 recovering stored credentials. Do not place secrets in `.env` or Git.
 
@@ -261,10 +266,9 @@ database and active mailbox before protected procedures or Drive sessions.
 - **Outbound access:** the mail server downloads public network data
   (ASN/geolocation) from GitHub at startup.
 
-## Planned, not implemented
+## Remaining work
 
-The production mail API, calendar, contacts and drive interfaces, production SES provider proof, the setup wizard and
-backups.
+Calendar and contacts web interfaces are placeholders. Sign-in, MFA, user administration, setup wizard and client app-password screens are not present in this checkout. Production SES and storage-provider behavior and recovery need independent validation. See the [user guide](user/index.md) and [administrator guide](admin/index.md).
 
 ## Ingestion
 
@@ -358,15 +362,13 @@ smoke test also stops Drive and LocalStack and verifies mail remains available.
 
 ## Mail API composition
 
-The mail routes use the authenticated actor supplied by the API identity adapter.
-Configure `JMAP_ORIGIN` with the Stalwart JMAP origin and
-`PROVIDER_ENCRYPTION_KEY` with the same 64-character hexadecimal key used to
-protect mailbox credentials. Both belong on the API server; the browser only
-receives the application session cookie. The JMAP session's advertised URLs
-must use that same origin. The auth startup composition must pass its identity
-adapter to `buildServer` so requests can resolve the current session; it may
-also supply the mail service through the `mail` dependency. The web app uses
-its synthetic mailbox in the Vite dev server and the API in production builds.
+The standard API startup composes authentication and the mail service using
+`STALWART_INTERNAL_ORIGIN` and the mailbox key loaded from `MAILBOX_KEY_FILE`.
+The authenticated actor and active mailbox link scope requests; the browser
+receives the application session cookie, not the mail credential. The Vite
+development server uses synthetic mail, while production builds use the API.
+The current Compose provisioning mismatch above must be resolved before relying
+on a newly provisioned mailbox.
 
 Attachment links are scoped to the signed-in user and expire after one minute.
 They are held in process memory, so deployments with multiple API instances

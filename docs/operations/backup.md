@@ -1,5 +1,15 @@
 # Backup and recovery on one VPS
 
+**Current Compose limitation:** `deploy/backup/backup.sh` reads the recovery
+administrator password from the normal Stalwart container and authenticates as
+`admin` for its blob-store preflight. Normal Compose neither mounts that file
+in Stalwart nor activates the recovery identity, so the backup cannot pass this
+preflight on the stock stack. Do not rely on the schedule until the management
+integration is corrected; see the [production runbook](../deployment/production.md)
+being prepared in parallel. Do not leave the recovery override active as a
+workaround. The procedure below describes the existing backup implementation
+and its intended operation after that integration is fixed.
+
 This is a **downtime** backup. At 01:00 UTC the systemd timer invokes the
 Compose helper services. The controller stops running Caddy, API, Drive and
 Stalwart containers; takes `pg_dump` custom-format snapshots of both databases,
@@ -34,8 +44,7 @@ other S3 writers/deleters during every capture, including cleanup/lifecycle
 jobs. The controller cannot stop external writers. Arrange an operational
 maintenance window that enforces this, and do not run migrations, setup jobs,
 or `docker compose up` concurrently. Object lifecycle rules must not remove
-needed objects during capture. The current Compose file does not run the
-planned ingestion worker. An independent inbound archive and replay are
+needed objects during capture. The Compose ingestion worker is an optional `ingest` profile; the backup controller does not stop it. An independent inbound archive and replay are
 separate recovery requirements, not supplied by this backup.
 
 ## Provision and schedule
@@ -113,8 +122,8 @@ policies must not interfere with restic's repository operations.
    ensure the exact Git revision matches `config/git-revision` in the snapshot.
    Confirm the provider credentials and endpoints are correct. Run
    `docker compose up -d`, inspect health, and sign in to an account. Verify a
-   known message and attachment, mailbox, calendar, Drive file and both app
-   databases. Test search, SMTP and outgoing queue behavior in isolation;
+   known message and attachment, mailbox, Drive file and both app
+   databases. Calendar UI is a placeholder; verify any DAV data separately if used. Test search, SMTP and outgoing queue behavior in isolation;
    restored queue entries may be delivered again. Reconcile the inbound
    archive and ingestion ledger before replay or cutover. Only then enable
    external traffic, scheduled workers, backups and DNS on the new host.
