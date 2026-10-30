@@ -42,6 +42,8 @@ export type JmapResult<T> = Result<T, JmapError>;
 export interface TransportOptions {
   readonly authorization: string;
   readonly fetch?: typeof fetch;
+  readonly timeoutMs?: number;
+  readonly rewriteSessionUrlsToOrigin?: string;
 }
 
 export const SessionSchema = z.object({
@@ -73,10 +75,12 @@ export class Transport {
   readonly #authorization: string;
   readonly #fetch: typeof fetch;
   readonly #origin: string;
+  readonly #timeoutMs: number;
   constructor(origin: string, options: TransportOptions) {
     this.#origin = new URL(origin).origin;
     this.#authorization = options.authorization;
     this.#fetch = options.fetch ?? fetch;
+    this.#timeoutMs = options.timeoutMs ?? 120_000;
   }
 
   async request(
@@ -96,11 +100,17 @@ export class Transport {
       });
     try {
       const headers = new Headers(init.headers);
+      const timeout = AbortSignal.timeout(this.#timeoutMs);
+      const signal =
+        init.signal === null || init.signal === undefined
+          ? timeout
+          : AbortSignal.any([init.signal, timeout]);
       headers.set("Authorization", this.#authorization);
       // Discovery may redirect on the same origin; never forward credentials to another origin.
       let response = await this.#fetch(target, {
         ...init,
         headers,
+        signal,
         redirect: "manual",
       });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -119,6 +129,7 @@ export class Transport {
         response = await this.#fetch(next, {
           ...init,
           headers,
+          signal,
           redirect: "manual",
         });
       }
