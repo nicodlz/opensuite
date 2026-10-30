@@ -30,8 +30,9 @@ search of the database dump, data volume and available logs, and failed-login
 rate limiting with forged IP headers. File Send creation and receipt also
 passed with byte-for-byte comparison. The test uses disposable local data; it
 does not prove security for every deployment.
-Pass container logging is disabled in the tested Compose configuration, so the
-log search checks the available Caddy output and the empty Pass log stream.
+The merged configuration uses warning-level Pass logs; the rerun found no test
+marker in Pass or Caddy logs. Repeat the test after configuration changes and
+avoid debug or trace logging.
 
 The second user could not list or fetch the first user's item or attachment
 through the CLI. The raw API returned 400 for both the other user's item and
