@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenSuite encrypted backup
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/opensuite
+ExecStart=/opt/opensuite/deploy/backup/backup.sh
+TimeoutStartSec=infinity
