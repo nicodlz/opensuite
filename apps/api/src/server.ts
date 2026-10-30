@@ -591,7 +591,7 @@ export const buildServer = async (
           const lookupLimit = signInLookupLimit.consume(
             networkBucket(request.ip),
             50,
-            10_000,
+            60_000,
           );
           if (lookupLimit) {
             if (lookupLimit.first)
@@ -630,6 +630,9 @@ export const buildServer = async (
             }
           }
         }
+        const accountEmail = limiter.account(authBody, request.headers.cookie);
+        const accountUserId =
+          (await identity.userIdForEmail?.(accountEmail ?? "")) ?? null;
         const limit = limiter.check(
           path,
           request.ip,
@@ -640,12 +643,9 @@ export const buildServer = async (
           if (limit.first)
             await identity.audit?.({
               userId:
-                resolvedUserId ??
-                (identity.resolveAddress
-                  ? ((await identity.userIdForEmail?.(
-                      limiter.account(authBody, request.headers.cookie) ?? "",
-                    )) ?? null)
-                  : null),
+                limit.bucket === "account"
+                  ? (resolvedUserId ?? accountUserId)
+                  : null,
               action: "authentication.rate_limited",
             });
           return reply
@@ -741,12 +741,7 @@ export const buildServer = async (
         }
         if (path === "/auth/get-session" && actor === null)
           return reply.send(null);
-        const accountEmail = limiter.account(authBody, request.headers.cookie);
-        const auditUserId =
-          actor?.id ??
-          (accountEmail === undefined
-            ? null
-            : ((await identity.userIdForEmail?.(accountEmail)) ?? null));
+        const auditUserId = actor?.id ?? resolvedUserId ?? accountUserId;
         const body =
           request.method === "GET" || request.method === "HEAD"
             ? undefined
@@ -842,11 +837,7 @@ export const buildServer = async (
             "twoFactorRedirect" in responseBody &&
             responseBody.twoFactorRedirect === true;
           await identity.audit?.({
-            userId:
-              auditUserId ??
-              (accountEmail === undefined
-                ? null
-                : ((await identity.userIdForEmail?.(accountEmail)) ?? null)),
+            userId: auditUserId,
             // Better Auth applies its own per-IP limit (3 sign-ins per 10 s
             // in production); a refusal there is not a wrong password.
             action: `${action}.${response.ok ? (challenge ? "challenge" : "success") : response.status === 429 ? "rate_limited" : "failure"}`,

@@ -70,7 +70,7 @@ it("trusts only the configured proxy, limits before lookups and bounds audit eve
     ),
   );
   expect(blocked.every((response) => response.statusCode === 429)).toBe(true);
-  expect(lookups).toBe(limitedLookups);
+  expect(lookups).toBe(limitedLookups + 10);
   expect(audits).toBe(1);
   expect(
     (await request("198.51.100.2", "victim@example.test")).statusCode,
@@ -289,4 +289,66 @@ it("labels a refusal by Better Auth's own rate limit as rate limited", async () 
   });
   expect(response.statusCode).toBe(429);
   expect(actions).toEqual(["sign_in.rate_limited"]);
+});
+
+it("attributes account lockouts to the resolved owner but not IP lockouts", async () => {
+  const audit: { userId: string | null; action: string }[] = [];
+  app = await buildServer({
+    config: { logLevel: "silent", trustProxy: "127.0.0.1" },
+    monotonicMs,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs,
+    }),
+    identity: {
+      publicOrigin: "https://suite.example.test",
+      handler: () => Promise.resolve(Response.json({}, { status: 401 })),
+      resolveAddress: (email) =>
+        Promise.resolve(
+          email === "extra@example.test"
+            ? { id: "owner", email: "primary@example.test" }
+            : null,
+        ),
+      userIdForEmail: (email) =>
+        Promise.resolve(email === "primary@example.test" ? "owner" : null),
+      audit: (event) => {
+        audit.push(event);
+        return Promise.resolve();
+      },
+    },
+  });
+  const server = app;
+  const attempt = (ip: string, email: string) =>
+    server.inject({
+      method: "POST",
+      url: "/auth/sign-in/email",
+      remoteAddress: "127.0.0.1",
+      headers: { origin: "https://suite.example.test", "x-forwarded-for": ip },
+      payload: { email, password: "wrong" },
+    });
+  /* oxlint-disable eslint/no-await-in-loop */
+  for (let index = 0; index < 5; index++)
+    await attempt(
+      `203.0.113.${index + 1}`,
+      index % 2 ? "primary@example.test" : "extra@example.test",
+    );
+  expect((await attempt("203.0.113.8", "extra@example.test")).statusCode).toBe(
+    429,
+  );
+  expect(audit).toContainEqual({
+    userId: "owner",
+    action: "authentication.rate_limited",
+  });
+  for (let index = 0; index < 50; index++)
+    await attempt("198.51.100.5", `unknown${index}@example.test`);
+  /* oxlint-enable eslint/no-await-in-loop */
+  expect((await attempt("198.51.100.5", "extra@example.test")).statusCode).toBe(
+    429,
+  );
+  expect(audit).toContainEqual({
+    userId: null,
+    action: "authentication.rate_limited",
+  });
 });

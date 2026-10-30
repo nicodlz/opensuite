@@ -3,14 +3,28 @@ import { JmapCapability, JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
 import type { AliasMail, AliasService } from "@opensuite/core/services/aliases";
 import type { MailCredentialStore } from "@opensuite/core/services/jmap-access";
-import { err, ok } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { createAliasLimiter } from "../auth/alias-limits.ts";
 
-export function createAliasSendGuard(service: AliasService) {
+export function createAliasSendGuard(
+  service: Pick<AliasService, "auditSubmission">,
+  auditAddress?: (
+    userId: string,
+    id: string,
+  ) => PromiseLike<Result<void, { kind: string }>>,
+) {
   const limits = createAliasLimiter();
   return async (userId: string, aliasId: string) => {
     if (!limits.send(userId)) return false;
-    const audited = await service.auditSubmission(userId, aliasId);
+    const audited =
+      aliasId.startsWith("address:") && auditAddress
+        ? await auditAddress(userId, aliasId.slice("address:".length))
+        : await service.auditSubmission(
+            userId,
+            aliasId.startsWith("alias:")
+              ? aliasId.slice("alias:".length)
+              : aliasId,
+          );
     if (audited.isErr()) throw new Error("alias audit unavailable");
     return true;
   };

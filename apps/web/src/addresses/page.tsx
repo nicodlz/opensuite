@@ -29,6 +29,10 @@ export function AddressesPage() {
   const list = useQuery({
     queryKey: ["addresses"],
     queryFn: () => addressesClient.list({}),
+    refetchInterval: (query) =>
+      query.state.data?.addresses.some((row) => row.pending || row.removing)
+        ? 5000
+        : false,
   });
   const domains = useQuery({
     queryKey: ["addresses", "domains"],
@@ -49,13 +53,13 @@ export function AddressesPage() {
     setNotice("");
     try {
       await action();
-      await cache.invalidateQueries({ queryKey: ["addresses"] });
       setNotice(message);
       return true;
     } catch (cause) {
       setError(errorText(cause));
       return false;
     } finally {
+      await cache.invalidateQueries({ queryKey: ["addresses"] });
       setBusy(false);
     }
   }
@@ -144,7 +148,9 @@ export function AddressesPage() {
                             ? "Removing"
                             : item.ready
                               ? "Ready"
-                              : "Pending"}
+                              : item.pending
+                                ? "Pending"
+                                : "Unavailable"}
                         </span>
                       </div>
                     </div>

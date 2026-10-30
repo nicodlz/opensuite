@@ -8,6 +8,7 @@ export function startDomainJob(
   service: DomainService,
   seconds: unknown,
   warn: () => void,
+  configured: readonly string[] = [],
 ) {
   const interval = z.coerce
     .number()
@@ -20,7 +21,7 @@ export function startDomainJob(
   const timer = setInterval(() => {
     if (running !== undefined) return;
     running = (async () => {
-      const targets = await store.verificationTargets();
+      const targets = await store.verificationTargets(configured);
       if (targets.isErr()) {
         warn();
         return;

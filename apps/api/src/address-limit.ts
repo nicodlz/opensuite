@@ -2,7 +2,7 @@ import type { AddressLimit } from "@opensuite/core/services/addresses";
 
 /**
  * The plan's address allowance, capped by the operator's anti-abuse limit.
- * Self-hosted, operator and unlimited accounts have no plan limit (null).
+ * Accounts without a plan limit still use the operator cap.
  */
 export const entitledAddressLimit =
   (

@@ -13,6 +13,7 @@ import { err, ok } from "neverthrow";
 import {
   createDatabase,
   createAddressStore,
+  createDomainStore as createAddressDomainStore,
   createDatabaseProbe,
   createPushStore,
   createMailPushStore,
@@ -260,7 +261,7 @@ describe("PostgreSQL schema and adapters", () => {
       domainId: domain.id,
       localPart: "retry",
     });
-    expect(created.isErr()).toBe(true);
+    expect(created.isOk() && created.value.pending).toBe(true);
     const pending = await service.list(actor);
     if (pending.isErr()) throw new Error("missing address");
     const row = pending.value.addresses.find((address) => !address.primary);
@@ -275,7 +276,226 @@ describe("PostgreSQL schema and adapters", () => {
     expect((await store.reserve(id, domain.id, "retry", 3)).isErr()).toBe(true);
     unavailable = false;
     expect((await service.reconcile()).isOk()).toBe(true);
+    const other = `${id}-other`;
+    await db.user.create({
+      data: { id: other, name: "Other", email: `${other}@example.test` },
+    });
+    await db.mailboxLink.create({
+      data: {
+        userId: other,
+        accountId: `account-${other}`,
+        address: `${other}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const stolen = await store.reserve(other, domain.id, "retry", 3);
+    expect(stolen.isErr() && stolen.error.kind).toBe("conflict");
     expect((await store.reserve(id, domain.id, "retry", 3)).isOk()).toBe(true);
+  });
+
+  it("uses exact login names and settles deactivated addresses", async () => {
+    const id = `exact-${randomUUID()}`;
+    const other = `${id}-other`;
+    const domainName = `${id}.test`;
+    await db.user.createMany({
+      data: [
+        { id, email: `owner@${domainName}`, name: "Owner", role: "admin" },
+        { id: other, email: `extra_login_alt@${domainName}`, name: "Other" },
+      ],
+    });
+    await db.mailboxLink.createMany({
+      data: [id, other].map((userId) => ({
+        userId,
+        accountId: `account-${userId}`,
+        address: `${userId}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      })),
+    });
+    const domain = await db.domain.create({
+      data: {
+        userId: id,
+        name: domainName,
+        status: "verified",
+        stalwartId: "domain",
+      },
+    });
+    const store = createAddressStore(db, []);
+    const row = await db.address.create({
+      data: {
+        userId: id,
+        domainId: domain.id,
+        localPart: "extra-login-alt",
+        mailboxManaged: true,
+        ready: true,
+        active: true,
+      },
+    });
+    expect(
+      await store.resolveLogin(`extra_login_alt@${domainName}`),
+    ).toBeNull();
+    expect(await store.resolveLogin(`_____@${domainName}`)).toBeNull();
+    const wildcardSend = await store.canSendAs(
+      id,
+      `extra_login_alt@${domainName}`,
+    );
+    expect(wildcardSend.isOk() && wildcardSend.value).toBeNull();
+    expect(
+      (await store.reserve(id, domain.id, "extra_login_alt", 10)).isErr(),
+    ).toBe(true);
+    expect(
+      await store.withPrimaryReservation(`extra_login_alt@${domainName}`, () =>
+        Promise.resolve("created"),
+      ),
+    ).toBeNull();
+    expect(
+      (await store.resolveLogin(`extra-login-alt@${domainName}`))?.id,
+    ).toBe(id);
+    expect(
+      (await store.canSendAs(other, `extra-login-alt@${domainName}`)).isOk(),
+    ).toBe(true);
+    const wrongOwner = await store.canSendAs(
+      other,
+      `extra-login-alt@${domainName}`,
+    );
+    expect(wrongOwner.isOk() && wrongOwner.value).toBeNull();
+    expect(
+      (await store.reserve(id, domain.id, "extra.login.alt", 10)).isOk(),
+    ).toBe(true);
+    await db.user.create({
+      data: {
+        id: `${id}-primary`,
+        email: `extra-login-alt@${domainName}`,
+        name: "Primary",
+      },
+    });
+    expect(
+      await store.resolveLogin(`extra-login-alt@${domainName}`),
+    ).toBeNull();
+    await db.user.update({ where: { id }, data: { disabled: true } });
+    const service = createAddressService(
+      store,
+      { set: () => Promise.resolve(ok(undefined)) },
+      () => Promise.resolve(10),
+      () => Promise.resolve(ok(undefined)),
+      [],
+    );
+    expect((await service.reconcile()).isOk()).toBe(true);
+    const settled = await store.pending();
+    expect(
+      settled.isOk() && settled.value.some((item) => item.id === row.id),
+    ).toBe(false);
+    expect(
+      (await db.address.findUniqueOrThrow({ where: { id: row.id } })).active,
+    ).toBe(false);
+    await db.user.update({
+      where: { id },
+      data: { disabled: false, role: "admin" },
+    });
+    await service.reconcile();
+    expect(
+      (await db.address.findUniqueOrThrow({ where: { id: row.id } })).active,
+    ).toBe(true);
+    await db.user.update({ where: { id }, data: { role: "user" } });
+    await service.reconcile();
+    expect(
+      (await db.address.findUniqueOrThrow({ where: { id: row.id } })).active,
+    ).toBe(false);
+    const demoted = await store.pending();
+    expect(
+      demoted.isOk() && demoted.value.some((item) => item.id === row.id),
+    ).toBe(false);
+    await db.user.update({ where: { id }, data: { role: "admin" } });
+    await db.domain.update({
+      where: { id: domain.id },
+      data: { status: "failing" },
+    });
+    await db.address.update({ where: { id: row.id }, data: { ready: false } });
+    await service.reconcile();
+    const failing = await store.pending();
+    expect(
+      failing.isOk() && failing.value.some((item) => item.id === row.id),
+    ).toBe(false);
+    expect(
+      (await db.address.findUniqueOrThrow({ where: { id: row.id } })).active,
+    ).toBe(false);
+  });
+
+  it("isolates configured-domain failures and rechecks stale active state", async () => {
+    const id = `configured-${randomUUID()}`;
+    await db.user.create({
+      data: { id, email: `${id}@example.test`, name: "Admin", role: "admin" },
+    });
+    const failed = `${id}-bad.test`;
+    const good = `${id}-good.test`;
+    const store = createAddressStore(db, [failed, good]);
+    const provisioned = await store.ensureConfigured((name) =>
+      name === failed
+        ? Promise.reject(new Error("down"))
+        : Promise.resolve("remote"),
+    );
+    expect(provisioned.isOk() && provisioned.value).toBe(1);
+    const domains = await store.domains();
+    expect(
+      domains.isOk() && domains.value.some((domain) => domain.name === good),
+    ).toBe(true);
+    const domain = await db.domain.findUniqueOrThrow({ where: { name: good } });
+    const targets = await createAddressDomainStore(db).verificationTargets([
+      good,
+    ]);
+    expect(
+      targets.isOk() && targets.value.some((target) => target.id === domain.id),
+    ).toBe(false);
+    await db.mailboxLink.create({
+      data: {
+        userId: id,
+        accountId: `account-${id}`,
+        address: `${id}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      },
+    });
+    const row = await db.address.create({
+      data: {
+        userId: id,
+        domainId: domain.id,
+        localPart: "extra",
+        mailboxManaged: true,
+        ready: true,
+        active: true,
+        lastAccountId: `account-${id}`,
+      },
+    });
+    const changed = createAddressStore(db, []);
+    expect((await changed.markChanged()).isOk()).toBe(true);
+    const dirty = await changed.pending();
+    expect(dirty.isOk() && dirty.value.some((item) => item.id === row.id)).toBe(
+      true,
+    );
+    const service = createAddressService(
+      changed,
+      { set: () => Promise.resolve(ok(undefined)) },
+      () => Promise.reject(new Error("entitlements unavailable")),
+      () => Promise.resolve(ok(undefined)),
+      [],
+    );
+    const actor = { id, email: `${id}@example.test`, role: "admin" as const };
+    const listing = await service.list(actor);
+    const creating = await service.create(actor, {
+      domainId: domain.id,
+      localPart: "blocked",
+    });
+    expect(listing.isErr() && listing.error.kind).toBe("unavailable");
+    expect(creating.isErr() && creating.error.kind).toBe("unavailable");
+    const reconciliation = await service.reconcile();
+    expect(reconciliation.isOk()).toBe(true);
+    const settled = await changed.pending();
+    expect(
+      settled.isOk() && settled.value.some((item) => item.id === row.id),
+    ).toBe(false);
+    const routes = await createAddressDomainStore(db).routes([`extra@${good}`]);
+    expect(routes.isOk() && routes.value).toEqual([]);
   });
 
   it("isolates push subscriptions and deduplicates tags atomically", async () => {
