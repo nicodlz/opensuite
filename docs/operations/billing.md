@@ -75,7 +75,7 @@ duration, and Caddy skips access logs for the welcome and Checkout status
 paths. Do not enable downstream logging of those URLs.
 
 A paid public session can be claimed once within 30 days of its creation, on
-`MAIL_DOMAIN`, after its webhook has been processed. The user signs in normally
+`BILLING_ACCOUNT_DOMAIN` (default `MAIL_DOMAIN`; the API refuses to start in Cloud mode if it is not an account domain), after its webhook has been processed. The user signs in normally
 and MFA remains unchanged. If provisioning or network interruption leaves a
 paid session unclaimed, the operator must verify the payment and purchaser
 through a separate channel, then arrange a refund or a controlled manual

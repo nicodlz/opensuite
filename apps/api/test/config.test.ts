@@ -250,3 +250,38 @@ it("defaults to self-hosted billing and rejects incomplete Cloud configuration",
     (await loadBillingConfig({ ESUNO_DEPLOYMENT_MODE: "invalid" })).isErr(),
   ).toBe(true);
 });
+
+it("reads the Cloud account domain and rejects an invalid one", async () => {
+  const { loadBillingConfig } = await import("../src/config.ts");
+  const directory = await mkdtemp(join(tmpdir(), "billing-config-"));
+  const files = {
+    STRIPE_SECRET_KEY_FILE: join(directory, "key"),
+    STRIPE_WEBHOOK_SECRET_FILE: join(directory, "webhook"),
+    BILLING_INTERNAL_TOKEN_FILE: join(directory, "token"),
+  };
+  await writeFile(files.STRIPE_SECRET_KEY_FILE, "sk_test_abcdefghijklmnop");
+  await writeFile(files.STRIPE_WEBHOOK_SECRET_FILE, "whsec_abcdefghijklmnop");
+  await writeFile(files.BILLING_INTERNAL_TOKEN_FILE, "t".repeat(40));
+  const cloud = { ESUNO_DEPLOYMENT_MODE: "cloud", ...files };
+  const withDomain = await loadBillingConfig({
+    ...cloud,
+    BILLING_ACCOUNT_DOMAIN: "esuno.net",
+  });
+  expect(withDomain.isOk() && withDomain.value).toMatchObject({
+    mode: "cloud",
+    accountDomain: "esuno.net",
+  });
+  const fallback = await loadBillingConfig({
+    ...cloud,
+    BILLING_ACCOUNT_DOMAIN: "",
+  });
+  expect(fallback.isOk() && "accountDomain" in fallback.value).toBe(false);
+  expect(
+    (
+      await loadBillingConfig({
+        ...cloud,
+        BILLING_ACCOUNT_DOMAIN: "Esuno.NET.",
+      })
+    ).isErr(),
+  ).toBe(true);
+});

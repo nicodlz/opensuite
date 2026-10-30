@@ -169,13 +169,27 @@ const stripeBilling =
         entitlements,
       )
     : undefined;
+const accountDomain =
+  billing.value.mode === "cloud"
+    ? (billing.value.accountDomain ?? authConfig.value.mailDomain)
+    : authConfig.value.mailDomain;
+// A purchase must never create an address on a domain accounts cannot use.
+if (
+  billing.value.mode === "cloud" &&
+  !(await auth.identity.isMailDomain(accountDomain))
+) {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "invalid billing configuration", issues: ["BILLING_ACCOUNT_DOMAIN is not an account domain"] })}\n`,
+  );
+  process.exit(1);
+}
 const claims =
   stripeBilling === undefined
     ? undefined
     : createClaimService(
         database.value,
         stripeBilling.client,
-        authConfig.value.mailDomain,
+        accountDomain,
         auth.claimSignUp,
         storageMeter.refresh,
       );

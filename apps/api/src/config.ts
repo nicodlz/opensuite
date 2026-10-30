@@ -340,6 +340,13 @@ const BillingEnvironment = z.object({
     .url()
     .refine((value) => new URL(value).protocol === "https:")
     .optional(),
+  // Domain of the accounts created by a paid public checkout; MAIL_DOMAIN by default.
+  BILLING_ACCOUNT_DOMAIN: z
+    .string()
+    .regex(
+      /^(?=.{1,253}$)[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?)+$/,
+    )
+    .optional(),
 });
 export type BillingConfig =
   | { readonly mode: "self-hosted" }
@@ -350,6 +357,7 @@ export type BillingConfig =
       readonly internalToken: string;
       readonly automaticTax: boolean;
       readonly cancelUrl?: string;
+      readonly accountDomain?: string;
     };
 /**
  * The deployment mode comes from trusted server configuration only. Cloud
@@ -365,6 +373,7 @@ export async function loadBillingConfig(
     BILLING_INTERNAL_TOKEN_FILE:
       env["BILLING_INTERNAL_TOKEN_FILE"] || undefined,
     BILLING_CANCEL_URL: env["BILLING_CANCEL_URL"] || undefined,
+    BILLING_ACCOUNT_DOMAIN: env["BILLING_ACCOUNT_DOMAIN"] || undefined,
   });
   if (!parsed.success)
     return err({
@@ -411,6 +420,9 @@ export async function loadBillingConfig(
       ...(value.BILLING_CANCEL_URL === undefined
         ? {}
         : { cancelUrl: value.BILLING_CANCEL_URL }),
+      ...(value.BILLING_ACCOUNT_DOMAIN === undefined
+        ? {}
+        : { accountDomain: value.BILLING_ACCOUNT_DOMAIN }),
     });
   } catch {
     return err({
