@@ -1,0 +1,5 @@
+# Emergency direct SMTP bypasses SES filtering and archival. Use only deliberately.
+services:
+  stalwart:
+    ports:
+      - "${DIRECT_SMTP_BIND:-127.0.0.1}:${SMTP_PORT:-25}:25"

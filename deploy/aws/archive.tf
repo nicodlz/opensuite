@@ -60,6 +60,16 @@ data "aws_iam_policy_document" "sns_firehose_trust" {
       type        = "Service"
       identifiers = ["sns.amazonaws.com"]
     }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_sns_topic.inbound.arn]
+    }
   }
 }
 resource "aws_iam_role" "sns_firehose" {

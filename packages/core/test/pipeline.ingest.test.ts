@@ -21,7 +21,9 @@ import type { JmapError, Session } from "@opensuite/jmap";
 
 const exec = promisify(execFile);
 const root = new URL("../../../", import.meta.url);
-const runId = (process.env["CLEITO_RUN_ID"] ?? randomBytes(5).toString("hex"))
+const runId = (
+  process.env["OPENSUITE_RUN_ID"] ?? randomBytes(5).toString("hex")
+)
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-");
 const project = `opensuite-ingest-${runId}-${randomBytes(3).toString("hex")}`;

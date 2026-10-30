@@ -1,6 +1,6 @@
 # Public entry point. TLS is automatic: Let's Encrypt for a real domain,
-# Caddy's local CA for `localhost`. The admin API stays on the container's
-# loopback interface (health check only); it is not published.
+# Caddy's local CA for `localhost`. Stalwart management uses a separate
+# credential and an internal network; its JMAP endpoint is shared with mail.
 
 {$OPENSUITE_SITE_ADDRESS:localhost} {
 	encode zstd gzip
@@ -12,33 +12,44 @@
 		-Server
 	}
 
-	# Drive is independently routed and is not a startup dependency.
-	handle_path /drive/api/* {
-		reverse_proxy drive:3001
-	}
-
-	# Application API.
-	handle_path /api/* {
-		reverse_proxy api-proxy:3000 {
-			header_up X-Forwarded-For {remote_host}
+	route {
+		# Never forward a client address from the management network as a trusted
+		# internal management identity. Caddy replaces untrusted X-Forwarded-For.
+		@management_source remote_ip {$MAIL_MANAGEMENT_SUBNET:172.30.248.0/24}
+		handle @management_source {
+			respond 403
 		}
-	}
 
-	# Mail server protocols carried over HTTPS: JMAP, CalDAV, CardDAV.
-	@stalwart path /.well-known/jmap /.well-known/caldav /.well-known/carddav /jmap /jmap/* /dav /dav/*
-	handle @stalwart {
-		reverse_proxy stalwart:8080
-	}
+		# Drive is independently routed and is not a startup dependency.
+		handle_path /drive/api/* {
+			reverse_proxy drive:3001
+		}
 
-	# Never expose an administrative interface through the SPA fallback.
-	@admin path /admin /admin/*
-	handle @admin {
-		respond 404
-	}
+		# Application API.
+		handle_path /api/* {
+			reverse_proxy api-proxy:3000 {
+				header_up X-Forwarded-For {remote_host}
+			}
+		}
 
-	handle {
-		root * /srv
-		try_files {path} /index.html
-		file_server
+		# Mail server protocols carried over HTTPS: JMAP, CalDAV, CardDAV.
+		@stalwart path /.well-known/jmap /.well-known/caldav /.well-known/carddav /jmap /jmap/* /dav /dav/*
+		handle @stalwart {
+			reverse_proxy stalwart:8080 {
+				header_up X-Forwarded-For {remote_host}
+			}
+		}
+
+		# Never expose an administrative interface through the SPA fallback.
+		@admin path /admin /admin/*
+		handle @admin {
+			respond 404
+		}
+
+		handle {
+			root * /srv
+			try_files {path} /index.html
+			file_server
+		}
 	}
 }

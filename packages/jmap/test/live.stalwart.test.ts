@@ -12,7 +12,9 @@ import { StalwartAdmin } from "../src/admin.ts";
 import type { Result } from "neverthrow";
 
 const run = promisify(execFile);
-const runId = (process.env["CLEITO_RUN_ID"] ?? randomBytes(6).toString("hex"))
+const runId = (
+  process.env["OPENSUITE_RUN_ID"] ?? randomBytes(6).toString("hex")
+)
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-");
 const project = `opensuite-jmap-${runId}-${randomBytes(4).toString("hex")}`;

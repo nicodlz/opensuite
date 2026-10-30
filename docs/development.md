@@ -7,6 +7,7 @@ This page describes what runs today. Planned components are listed at the end.
 ```sh
 cp deploy/env.example .env
 pnpm install && pnpm build   # produces apps/web/dist, mounted by Caddy
+# First bootstrap the mail management account as described below.
 docker compose up -d
 docker compose --profile dev up -d   # adds LocalStack (S3/SQS substitutes)
 ```
@@ -32,23 +33,55 @@ Data lives in named volumes: `postgres-data`, `stalwart-data`, `caddy-data`,
 
 ### Secrets
 
-On first start, the `secrets` job generates the PostgreSQL password and the
-mail server administrator password into the `secrets` volume. Each service
-mounts only its own sub-directory, read-only. Neither `.env` nor Git ever
-contains these passwords. To read the mail administrator password:
+On first start, the `secrets` job generates separate PostgreSQL, Stalwart
+recovery and management passwords in the `secrets` volume. Normal Stalwart
+startup does not mount or activate the recovery password. Back up the secrets
+with the data volumes; losing the management password requires deliberate
+recovery. Docker administrators and processes with access to the internal
+mail listener and management credential are trusted.
+
+### Mail bootstrap and upgrades
+
+`deploy/stalwart/config.json` locates RocksDB; settings live in the store.
+For a fresh install **or an upgrade from the old recovery-only setup**, stop
+public access before starting the temporary recovery administrator. Choose a
+non-overlapping `MAIL_MANAGEMENT_SUBNET` first; do not change it later without
+updating the account's allowed IPs. Run from the repository root:
 
 ```sh
-docker compose exec stalwart cat /run/opensuite/stalwart-admin/password
+docker compose run --rm secrets
+docker compose stop caddy
+docker compose -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml up -d --wait stalwart
+docker compose -f compose.yaml -f deploy/stalwart/compose.bootstrap.yaml --profile bootstrap run --rm stalwart-bootstrap
+docker compose up -d --force-recreate --wait stalwart
+docker compose up -d
 ```
 
-Removing the `secrets` volume while the data volumes remain makes the stored
-passwords stale. Back it up together with the data volumes.
+The job creates `management@opensuite.internal` with a separately generated
+password and an allowed-IP restriction to the management network; it verifies
+the credential before exiting. It refuses to take over an existing domain if
+that credential does not work. Resolve that collision or an interrupted
+bootstrap manually using the temporary recovery override. The account is an
+administrator: protecting its secret and every container with access to the
+mail listener is essential. The recovery override must be removed and Stalwart
+recreated before Caddy is restarted. Verify the recovery credential no longer
+authenticates. To recover later, stop Caddy and deliberately use the temporary
+override again; remove it and recreate Stalwart afterwards.
 
-### Mail server configuration
+`stalwart-setup` connects to `http://stalwart:8080` on the management network
+using that account. Future server-side provisioning should use the same
+internal origin and credential with `StalwartAdmin`; its API is unchanged.
+Never use the public HTTPS origin for management. `Http.clientIpSource` trusts
+one X-Forwarded-For hop, and Caddy replaces client-supplied values and refuses
+connections originating from the management subnet. Do not put another
+untrusted proxy in front of Caddy or attach Caddy to the management network.
+Containers that can directly contact Stalwart can forge that header, so the
+allowed-IP rule is a boundary against public clients, not against compromised
+containers or Docker administrators. The stock Caddy image cannot inspect JSON
+request bodies; it does not filter `urn:stalwart:jmap` itself.
 
-`deploy/stalwart/config.json` only locates the data store. Stalwart keeps all
-other settings in that store. The `stalwart-setup` job runs after the server is
-healthy and applies idempotent settings through the Stalwart management API:
+Setup enables stdout logging and proxy trust before checking blob storage;
+S3-compatible blobs require the separate [object storage procedure](operations/object-storage.md).
 
 - logs go to standard output (`docker compose logs stalwart`);
 - the client address is taken from `X-Forwarded-For`, which Caddy sets
@@ -58,9 +91,42 @@ healthy and applies idempotent settings through the Stalwart management API:
   [object storage operations](operations/object-storage.md), including the
   explicit switch guard, restart, probe and migration precautions.
 
-Published mail ports: 25 (SMTP), 465 (submission, implicit TLS), 993 (IMAP,
-implicit TLS) and 4190 (ManageSieve). STARTTLS ports 587 and 143 are not
-enabled: RFC 8314 recommends implicit TLS for submission and IMAP.
+### Mail TLS and ports
+
+Ports 465, 993 and 4190 bind to `127.0.0.1` by default. Caddy's HTTPS
+certificate does not automatically configure Stalwart. To share it with mail,
+set `MAIL_HOSTNAME` and `OPENSUITE_SITE_ADDRESS` to the same real hostname,
+obtain Caddy's certificate, and export its full chain and private key to
+operator-managed host files outside the repository. For Caddy's usual ACME
+storage, the files are under `/data/caddy/certificates/` in the Caddy container;
+choose the actual issuer and hostname directory. Copy both files securely,
+restrict access, and make them readable to uid 2000. Do not expose the key in
+`.env`, logs or shell arguments. Configure their absolute paths in
+`MAIL_TLS_CERT_FILE` and `MAIL_TLS_KEY_FILE`, set `MAIL_TLS_ENABLED=1`, and
+recreate Stalwart and rerun setup:
+
+```sh
+docker compose up -d --force-recreate --wait stalwart
+docker compose run --rm stalwart-setup
+docker compose restart stalwart
+```
+
+Setup validates the hostname, expiry and matching key and registers file
+references. Before setting `MAIL_PROTOCOL_BIND=0.0.0.0`, use an independent
+TLS client on each loopback port to verify the served chain and hostname,
+including a STARTTLS handshake for ManageSieve. Then recreate Stalwart and
+verify externally. Caddy renewals are **not automatically copied**: arrange a
+secure renewal hook or operator procedure to refresh both exported files,
+recreate Stalwart (file bind mounts can retain old inodes), rerun setup and
+verify the new certificate before expiry. Monitor certificate expiry. The
+loopback default is the safe state until this is done.
+
+No host port 25 is published in the normal stack: inbound mail must pass through
+SES. For a deliberate emergency direct-SMTP fallback, use
+`docker compose -f compose.yaml -f deploy/stalwart/compose.direct-smtp.yaml up -d stalwart`;
+it defaults to loopback and `DIRECT_SMTP_BIND=0.0.0.0` explicitly exposes it.
+Direct mail bypasses SES filtering and archival. Remove the override and
+recreate Stalwart after the fallback. STARTTLS ports 587 and 143 remain disabled.
 
 ### Migrations
 
@@ -95,8 +161,8 @@ checks the following through the proxy, over TLS verified with Caddy's local
 certificate authority:
 
 - API liveness and readiness;
-- JMAP discovery, the anonymous and authenticated sessions, and rejection of a
-  wrong password;
+- JMAP discovery, the anonymous session, rejection of the internal management
+  account through Caddy, and rejection of a wrong password;
 - CalDAV and CardDAV discovery;
 - the SMTP greeting;
 - that a client cannot spoof `X-Forwarded-For`;
@@ -188,10 +254,10 @@ database and active mailbox before protected procedures or Drive sessions.
 
 ## Known limitations
 
-- **TLS for mail protocols:** the mail server has no certificate yet, so TLS
-  handshakes on 465 and 993 do not succeed. Certificate provisioning for mail
-  is planned with domain onboarding. HTTPS through Caddy works.
-- **Mail delivery:** no domain or mailbox is provisioned by default. Local JMAP submission and delivery and a fake SMTP relay are tested; real SES delivery is not.
+- **Mail certificate renewal:** exporting Caddy certificates and verifying mail
+  TLS is an operator responsibility; there is no automated renewal hook.
+- **Mail delivery:** no domain or mailbox is provisioned by default. Local
+  JMAP submission and delivery are tested; a fake SMTP relay is tested; real SES delivery is not.
 - **Outbound access:** the mail server downloads public network data
   (ASN/geolocation) from GitHub at startup.
 

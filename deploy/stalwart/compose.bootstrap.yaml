@@ -1,0 +1,39 @@
+# Temporary bootstrap/recovery override. Never use for normal operation.
+services:
+  stalwart:
+    entrypoint:
+      - /bin/sh
+      - -c
+      - STALWART_RECOVERY_ADMIN="admin:$$(cat /run/opensuite/stalwart-admin/password)" exec /usr/local/bin/stalwart --config /etc/stalwart/config.json
+    volumes:
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-admin
+        read_only: true
+        volume:
+          subpath: stalwart-admin
+  stalwart-bootstrap:
+    profiles: [bootstrap]
+    image: stalwartlabs/stalwart:v1.0.1@sha256:b9da4df8b4efc06bc926dd6e990bdeb0ad7b9261a7c3893d74b0461a00bb389b
+    entrypoint: ["/bin/sh", "/opt/opensuite/bootstrap.sh"]
+    environment:
+      MAIL_MANAGEMENT_SUBNET: ${MAIL_MANAGEMENT_SUBNET:-172.30.248.0/24}
+    networks:
+      - mail-management
+    volumes:
+      - ./deploy/stalwart/bootstrap.sh:/opt/opensuite/bootstrap.sh:ro
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-admin
+        read_only: true
+        volume:
+          subpath: stalwart-admin
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-management
+        read_only: true
+        volume:
+          subpath: stalwart-management
+    depends_on:
+      stalwart:
+        condition: service_healthy
