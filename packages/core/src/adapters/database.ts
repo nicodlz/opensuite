@@ -97,6 +97,9 @@ export function databaseLedger(db: Client): Ledger {
             state: state.parse(row.state),
             attempts: row.attempts,
             destination: row.destination,
+            permanent: row.permanent,
+            legacy: row.legacy,
+            importStartedAt: row.importStartedAt,
             known:
               row.idempotencyKey ===
               recipientKey(row.messageId, row.destination, true),
@@ -112,12 +115,14 @@ export function databaseLedger(db: Client): Ledger {
             where: {
               idempotencyKey: key,
               state: { in: ["received", "failed"] },
+              permanent: false,
             },
             data: {
               state: "importing",
               claimedAt: new Date(),
               claimOwner: owner,
               error: null,
+              importStartedAt: null,
             },
           })
           .then((result) => result.count === 1),
@@ -139,16 +144,43 @@ export function databaseLedger(db: Client): Ledger {
         failure,
       );
     },
-    expireClaims() {
+    startImport(key, owner) {
       return ResultAsync.fromPromise(
         db.inboundRecipient
           .updateMany({
             where: {
+              idempotencyKey: key,
               state: "importing",
-              OR: [
-                { claimedAt: null },
-                { claimedAt: { lt: new Date(Date.now() - 600_000) } },
-              ],
+              claimOwner: owner,
+            },
+            data: { importStartedAt: new Date() },
+          })
+          .then((result) => result.count === 1),
+        failure,
+      );
+    },
+    expireClaims() {
+      return ResultAsync.fromPromise(
+        db.$transaction(async (tx) => {
+          const stale = {
+            state: "importing",
+            OR: [
+              { claimedAt: null },
+              { claimedAt: { lt: new Date(Date.now() - 600_000) } },
+            ],
+          };
+          await tx.inboundRecipient.updateMany({
+            where: { ...stale, importStartedAt: null, legacy: false },
+            data: {
+              state: "failed",
+              claimOwner: null,
+              claimedAt: null,
+              error: "Import lease expired before import",
+            },
+          });
+          await tx.inboundRecipient.updateMany({
+            where: {
+              ...stale,
             },
             data: {
               state: "uncertain",
@@ -156,8 +188,27 @@ export function databaseLedger(db: Client): Ledger {
               claimedAt: null,
               error: "Import lease expired",
             },
+          });
+        }),
+        failure,
+      );
+    },
+    retryUncertain(key, before) {
+      return ResultAsync.fromPromise(
+        db.inboundRecipient
+          .updateMany({
+            where: {
+              idempotencyKey: key,
+              state: "uncertain",
+              legacy: false,
+              importStartedAt: { lte: before },
+            },
+            data: {
+              state: "failed",
+              error: "No keyword match after grace period",
+            },
           })
-          .then(() => undefined),
+          .then((result) => result.count === 1),
         failure,
       );
     },
@@ -184,6 +235,7 @@ export function databaseLedger(db: Client): Ledger {
               error: error ?? null,
               claimedAt: null,
               claimOwner: null,
+              permanent: chargeAttempt,
               ...(chargeAttempt ? { attempts: { increment: 1 } } : {}),
             },
           })
@@ -198,7 +250,10 @@ export function databaseLedger(db: Client): Ledger {
     resetFailures() {
       return ResultAsync.fromPromise(
         db.inboundRecipient
-          .updateMany({ where: { state: "failed" }, data: { attempts: 0 } })
+          .updateMany({
+            where: { state: "failed", permanent: false },
+            data: { attempts: 0 },
+          })
           .then(() => undefined),
         failure,
       );
@@ -208,6 +263,17 @@ export function databaseLedger(db: Client): Ledger {
         db.inboundMessage
           .update({ where: { id }, data: { state: status } })
           .then(() => undefined),
+        failure,
+      );
+    },
+    importedMessages(ids) {
+      return ResultAsync.fromPromise(
+        db.inboundMessage
+          .findMany({
+            where: { id: { in: ids }, state: "imported" },
+            select: { id: true },
+          })
+          .then((rows) => rows.map((row) => row.id)),
         failure,
       );
     },

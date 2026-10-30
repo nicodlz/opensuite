@@ -197,8 +197,24 @@ model InboundRecipient {
   remoteId       String?
   claimedAt      DateTime?
   claimOwner     String?
+  importStartedAt DateTime?
+  legacy         Boolean        @default(false)
+  permanent      Boolean        @default(false)
   error          String?
   updatedAt      DateTime       @updatedAt
 
   @@index([messageId])
+}
+
+model InboundResolutionAudit {
+  id             String   @id @default(cuid())
+  recipientKey   String
+  operator       String
+  reason         String
+  action         String
+  previousState  String
+  remoteId       String?
+  createdAt      DateTime @default(now())
+
+  @@index([recipientKey])
 }

@@ -12,6 +12,7 @@ import { JmapCapability, JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, type Result } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { operatorCommand } from "../../../apps/ingest/src/operator.ts";
 import { awsQueue, awsStorage } from "../src/adapters/aws.ts";
 import { databaseLedger } from "../src/adapters/database.ts";
 import { jmapDelivery } from "../src/adapters/jmap.ts";
@@ -436,7 +437,7 @@ describe("local ingestion pipeline", () => {
       notification(["alice@example.test"], "PASS", "ses-reconcile"),
     );
     expect((await recovering.process(body)).isErr()).toBe(true);
-    expect((await recovering.process(body)).isErr()).toBe(true);
+    expect((await recovering.process(body)).isOk()).toBe(true);
     const stored = await db.value.inboundMessage.findUniqueOrThrow({
       where: { id: "ses-reconcile" },
     });
@@ -487,6 +488,7 @@ describe("local ingestion pipeline", () => {
     const key = rows[0]?.key;
     if (key === undefined) throw new Error("Missing row");
     expect(unwrap(await ledger.claim(key, "old-owner"))).toBe(true);
+    expect(unwrap(await ledger.startImport(key, "old-owner"))).toBe(true);
     await db.value.inboundRecipient.update({
       where: { idempotencyKey: key },
       data: { claimedAt: new Date(Date.now() - 700_000) },
@@ -509,5 +511,183 @@ describe("local ingestion pipeline", () => {
         })
       ).state,
     ).toBe("uncertain");
+  }, 90_000);
+  it("retries expired claims that never reached import and preserves legacy claims", async () => {
+    if (db === undefined || db.isErr()) throw new Error("Missing database");
+    const ledger = databaseLedger(db.value);
+    const body = JSON.stringify(
+      notification(["alice@example.test"], "PASS", "ses-prestart"),
+    );
+    const parsed = parseNotification(body);
+    if (parsed.isErr()) throw new Error(parsed.error);
+    const rows = unwrap(
+      await ledger.prepare(
+        parsed.value,
+        resolveRecipients(
+          ["alice@example.test"],
+          [{ address: "alice@example.test", destination: "alice" }],
+        ),
+      ),
+    );
+    const key = rows[0]?.key;
+    if (key === undefined) throw new Error("Missing recipient");
+    expect(unwrap(await ledger.claim(key, "old"))).toBe(true);
+    await db.value.inboundRecipient.update({
+      where: { idempotencyKey: key },
+      data: { claimedAt: new Date(Date.now() - 700_000) },
+    });
+    unwrap(await ledger.expireClaims());
+    expect(
+      (
+        await db.value.inboundRecipient.findUniqueOrThrow({
+          where: { idempotencyKey: key },
+        })
+      ).state,
+    ).toBe("failed");
+    expect(unwrap(await ledger.startImport(key, "old"))).toBe(false);
+    expect(unwrap(await ledger.claim(key, "legacy"))).toBe(true);
+    await db.value.inboundRecipient.update({
+      where: { idempotencyKey: key },
+      data: { claimedAt: null, legacy: true },
+    });
+    unwrap(await ledger.expireClaims());
+    expect(
+      (
+        await db.value.inboundRecipient.findUniqueOrThrow({
+          where: { idempotencyKey: key },
+        })
+      ).state,
+    ).toBe("uncertain");
+    await db.value.inboundRecipient.update({
+      where: { idempotencyKey: key },
+      data: { state: "failed", legacy: false },
+    });
+    expect(unwrap(await ledger.claim(key, "permanent-owner"))).toBe(true);
+    unwrap(
+      await ledger.finish(
+        key,
+        "failed",
+        undefined,
+        "invalidEmail",
+        "permanent-owner",
+        true,
+      ),
+    );
+    unwrap(await ledger.resetFailures());
+    const rejected = await db.value.inboundRecipient.findUniqueOrThrow({
+      where: { idempotencyKey: key },
+    });
+    expect(rejected).toMatchObject({
+      state: "failed",
+      permanent: true,
+      attempts: 1,
+    });
+    expect(unwrap(await ledger.claim(key, "retry-owner"))).toBe(false);
+  });
+
+  it("finds an unmarked legacy import by Message-ID and hash and audits its resolution", async () => {
+    if (db === undefined || db.isErr() || s3 === undefined)
+      throw new Error("Missing clients");
+    const alice = clients.get("alice");
+    if (alice === undefined) throw new Error("Missing mailbox");
+    const raw = Buffer.from(
+      "Message-ID: <legacy-recovery@example.test>\r\nFrom: sender@example.test\r\nSubject: Legacy Recovery\r\n\r\noriginal\r\n",
+    );
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-legacy-recovery",
+        Body: raw,
+      }),
+    );
+    const ledger = databaseLedger(db.value);
+    const body = JSON.stringify(
+      notification(["alice@example.test"], "PASS", "ses-legacy-recovery"),
+    );
+    const parsed = parseNotification(body);
+    if (parsed.isErr()) throw new Error(parsed.error);
+    const rows = unwrap(
+      await ledger.prepare(
+        parsed.value,
+        resolveRecipients(
+          ["alice@example.test"],
+          [{ address: "alice@example.test", destination: "alice" }],
+        ),
+      ),
+    );
+    const key = rows[0]?.key;
+    if (key === undefined) throw new Error("Missing recipient");
+    const uploaded = getValue(
+      await alice.client.upload(alice.session, alice.account, raw),
+    );
+    const imported = getValue(
+      await alice.client.importEmail(alice.session, alice.account, {
+        blobId: uploaded.blobId,
+        mailboxIds: { [alice.inbox]: true },
+      }),
+    );
+    await db.value.inboundRecipient.update({
+      where: { idempotencyKey: key },
+      data: { state: "importing", claimedAt: null, legacy: true },
+    });
+    const delivery = jmapDelivery([
+      {
+        id: "alice",
+        origin,
+        authorization: `Basic ${Buffer.from(`alice@example.test:${password}`).toString("base64")}`,
+        quarantineMailbox: alice.quarantine,
+        rewriteSessionUrls: true,
+      },
+    ]);
+    const dependencies = {
+      db: db.value,
+      ledger,
+      delivery,
+      storage: awsStorage(s3, s3, "inbound", "archive", "notifications/", ""),
+    };
+    expect(
+      JSON.stringify(await operatorCommand(dependencies, ["inspect", key])),
+    ).toBe(
+      JSON.stringify({
+        key,
+        legacy: true,
+        matches: [imported.id],
+      }),
+    );
+    await expect(
+      operatorCommand(dependencies, [
+        "resolve",
+        key,
+        "imported",
+        "wrong",
+        "operator",
+        "Verified legacy copy",
+      ]),
+    ).rejects.toThrow("Remote ID must be a verified candidate");
+    await operatorCommand(dependencies, [
+      "resolve",
+      key,
+      "imported",
+      imported.id,
+      "operator",
+      "Verified legacy copy",
+    ]);
+    const row = await db.value.inboundRecipient.findUniqueOrThrow({
+      where: { idempotencyKey: key },
+    });
+    expect(row.state).toBe("imported");
+    expect(row.remoteId).toBe(imported.id);
+    const audit = await db.value.inboundResolutionAudit.findFirstOrThrow({
+      where: { recipientKey: key },
+    });
+    expect(audit).toMatchObject({
+      operator: "operator",
+      action: "imported",
+      previousState: "uncertain",
+      remoteId: imported.id,
+    });
+    await expect(
+      db.value.inboundResolutionAudit.delete({ where: { id: audit.id } }),
+    ).rejects.toThrow(/append-only/);
   }, 90_000);
 });

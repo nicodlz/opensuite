@@ -25,5 +25,6 @@ export const configureApplicationRole = async (
     await tx.$executeRaw`REVOKE ALL PRIVILEGES ON TABLE "AuditEvent", "_prisma_migrations" FROM opensuite_app`;
     await tx.$executeRaw`REVOKE ALL PRIVILEGES ON TABLE "AuditEvent" FROM PUBLIC`;
     await tx.$executeRaw`GRANT SELECT, INSERT ON TABLE "AuditEvent" TO opensuite_app`;
+    await tx.$executeRaw`REVOKE UPDATE, DELETE ON TABLE "InboundResolutionAudit" FROM PUBLIC, opensuite_app`;
   });
 };

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ok } from "neverthrow";
 import { z } from "zod";
 import { jmapDelivery } from "../src/adapters/jmap.ts";
 
@@ -135,10 +136,18 @@ describe("JMAP ingestion adapter", () => {
       const cache = new Map<string, string>();
       const date = "2026-01-02T03:04:05.000Z";
       expect(
-        (await delivery.import("one", bytes, false, date, "key", cache)).isOk(),
+        (
+          await delivery.import("one", bytes, false, date, "key", cache, () =>
+            Promise.resolve(ok(undefined)),
+          )
+        ).isOk(),
       ).toBe(true);
       expect(
-        (await delivery.import("two", bytes, false, date, "key", cache)).isOk(),
+        (
+          await delivery.import("two", bytes, false, date, "key", cache, () =>
+            Promise.resolve(ok(undefined)),
+          )
+        ).isOk(),
       ).toBe(true);
       expect(uploads).toBe(1);
       expect(importedDate).toBe(date);
@@ -164,4 +173,79 @@ describe("JMAP ingestion adapter", () => {
       vi.unstubAllGlobals();
     }
   });
+});
+
+it("classifies a refused connection as retryable and a proxy response as uncertain", async () => {
+  let mode: "refused" | "proxy" = "refused";
+  const fake: typeof fetch = (url, init) => {
+    const target =
+      typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    if (target.endsWith("/.well-known/jmap"))
+      return Promise.resolve(response(session));
+    if (target.includes("/upload/"))
+      return Promise.resolve(
+        response({
+          accountId: "account",
+          blobId: "blob",
+          type: "message/rfc822",
+          size: 1,
+        }),
+      );
+    if (typeof init?.body !== "string") throw new Error("Missing request body");
+    const call = calls.parse(JSON.parse(init.body)).methodCalls[0];
+    if (call?.[0] === "Mailbox/get")
+      return Promise.resolve(
+        response({
+          methodResponses: [
+            [
+              "Mailbox/get",
+              {
+                accountId: "account",
+                state: "s",
+                list: [
+                  { id: "inbox", name: "Inbox", role: "inbox", parentId: null },
+                ],
+                notFound: [],
+              },
+              "0",
+            ],
+          ],
+          sessionState: "s",
+        }),
+      );
+    if (mode === "refused")
+      return Promise.reject(
+        new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } }),
+      );
+    return Promise.resolve(new Response("proxy unavailable", { status: 503 }));
+  };
+  vi.stubGlobal("fetch", fake);
+  try {
+    const delivery = jmapDelivery([
+      {
+        id: "one",
+        origin: "http://internal.test",
+        authorization: "Bearer secret",
+        quarantineMailbox: "junk",
+        rewriteSessionUrls: true,
+      },
+    ]);
+    const run = () =>
+      delivery.import(
+        "one",
+        new Uint8Array([1]),
+        false,
+        "2026-01-02T03:04:05Z",
+        "key",
+        new Map(),
+        () => Promise.resolve(ok(undefined)),
+      );
+    const refused = await run();
+    expect(refused.isErr() && refused.error.ambiguous).toBe(false);
+    mode = "proxy";
+    const proxy = await run();
+    expect(proxy.isErr() && proxy.error.ambiguous).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

@@ -18,6 +18,8 @@ import {
 } from "@opensuite/db";
 import { z } from "zod";
 import { createHealthServer } from "./health.ts";
+import { runWorker } from "./worker.ts";
+import { operatorCommand } from "./operator.ts";
 
 const route = z.object({ address: z.email(), destination: z.string().min(1) });
 const destination = z.object({
@@ -156,17 +158,19 @@ const archive = new S3Client({
 });
 const counters = new Map<string, number>();
 const ledger = databaseLedger(db.value);
+const storage = awsStorage(
+  s3,
+  archive,
+  c.INBOUND_BUCKET,
+  c.ARCHIVE_BUCKET,
+  c.ARCHIVE_PREFIX,
+  c.INBOUND_BUFFER_PREFIX,
+);
+const delivery = jmapDelivery(c.INGEST_DESTINATIONS);
 const service = new IngestService({
-  storage: awsStorage(
-    s3,
-    archive,
-    c.INBOUND_BUCKET,
-    c.ARCHIVE_BUCKET,
-    c.ARCHIVE_PREFIX,
-    c.INBOUND_BUFFER_PREFIX,
-  ),
+  storage,
   ledger,
-  delivery: jmapDelivery(c.INGEST_DESTINATIONS),
+  delivery,
   routes: c.INGEST_ROUTES,
   resolveRoutes: async (addresses) => {
     const result = await createDomainStore(db.value).routes(addresses);
@@ -184,9 +188,11 @@ const service = new IngestService({
         stage: fields["stage"],
         attempts: fields["attempts"],
         delaySeconds: fields["delaySeconds"],
+        matches: fields["matches"],
+        recipientKey: fields["recipientKey"],
       };
       process.stdout.write(
-        `${JSON.stringify({ level: "info", event, count, ...safe })}\n`,
+        `${JSON.stringify({ level: event === "ingest_duplicate" ? "error" : "info", event, count, ...safe })}\n`,
       );
     },
   },
@@ -222,37 +228,39 @@ try {
       );
       process.exitCode = 1;
     }
+  } else if (command === "operator") {
+    const result = await operatorCommand(
+      { db: db.value, ledger, delivery, storage },
+      process.argv.slice(3),
+    );
+    process.stdout.write(`${JSON.stringify(result)}\n`);
   } else if (command === "worker") {
     const state = { stopping: false };
     healthServer = createHealthServer(readiness, () => state.stopping);
     await new Promise<void>((resolve) =>
       healthServer?.listen(c.INGEST_HEALTH_PORT, "0.0.0.0", resolve),
     );
-    process.on("SIGTERM", () => {
+    const stop = new AbortController();
+    const shutdown = () => {
       state.stopping = true;
-    });
-    process.on("SIGINT", () => {
-      state.stopping = true;
-    });
-    const pollOnce = async (): Promise<boolean> => {
-      const received = await queue.receive();
-      if (received.isErr()) {
-        process.stderr.write(
-          `${JSON.stringify({ level: "error", event: "ingest_failure", stage: "queue" })}\n`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-        return false;
-      }
-      await Promise.all(
-        received.value.map((item) => service.handle(queue, item)),
-      );
-      return true;
+      stop.abort();
     };
-    async function* polls(): AsyncGenerator<boolean> {
-      while (!state.stopping) yield pollOnce();
-    }
-    for await (const result of polls()) {
-      if (!result) continue;
+    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", shutdown);
+    try {
+      await runWorker(
+        queue,
+        (item) => service.handle(queue, item),
+        stop.signal,
+        () => {
+          process.stderr.write(
+            `${JSON.stringify({ level: "error", event: "ingest_failure", stage: "queue" })}\n`,
+          );
+        },
+      );
+    } finally {
+      process.off("SIGTERM", shutdown);
+      process.off("SIGINT", shutdown);
     }
   } else {
     process.stderr.write(

@@ -163,6 +163,7 @@ services:
   ingest:
     profiles: [ingest]
     <<: *restart
+    stop_grace_period: 2h
     build:
       context: .
       dockerfile: apps/ingest/Dockerfile
