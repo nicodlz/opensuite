@@ -1,5 +1,28 @@
 # Development and local installation
 
+## Locked-out account recovery
+
+An operator with database access can reset Esuno TOTP and backup codes after
+verifying the account owner's identity through a separate channel. Stop every
+API instance first so no sign-in or MFA operation can race the reset. Back up
+the database, then run from the repository root using the API image and its
+configured database credentials. The first invocation prints the user ID and
+does not change the account; verify it and repeat with the ID. The API image
+must include the recovery script (rebuild it after upgrading):
+
+```sh
+docker compose --profile recovery run --rm --no-deps mfa-recovery user@example.org
+docker compose --profile recovery run --rm --no-deps mfa-recovery user@example.org --confirm USER_ID
+```
+
+The transaction deletes the account's MFA record and security keys, pending challenges and
+trusted-device records, revokes its sessions, and appends
+`mfa.operator_reset.success` to the audit log. Restart the API and have the
+user sign in and enrol a new factor. The user's password is unchanged. Protect
+the database credential and audit operator access independently: the event
+identifies the target, not the human operator. This procedure does not reset
+the separate Vault account.
+
 This page describes what runs today. Planned components are listed at the end.
 
 ## Docker Compose stack

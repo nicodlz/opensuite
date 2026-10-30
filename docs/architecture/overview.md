@@ -32,7 +32,11 @@ The ingestion queue and archive preserve different evidence; neither acceptance 
 
 ## Identity and authorization
 
-Better Auth uses email/password sessions with secure, HTTP-only, SameSite=Lax cookies and optional TOTP and backup codes. Public registration is disabled; an authenticated administrator creates users. The API rechecks the session, enabled user and active mailbox for protected operations. Mail credentials are scoped to the owning user and kept server-side. Administrators can manage domains and disable other accounts subject to safeguards; normal users cannot use administrative procedures. Drive verifies the session with the API and enforces item ownership and shares independently. A public Drive link is a bearer token, stored hashed and checked on each public download.
+Better Auth uses email/password sessions with secure, HTTP-only, SameSite=Lax cookies and optional TOTP, FIDO2 security keys and backup codes. Security-key assertions are bound to the pending password challenge and the configured sign-in origin; passwordless sign-in is not offered. Public registration is disabled; an authenticated administrator creates users. The API rechecks the session, enabled user and active mailbox for protected operations. Mail credentials are scoped to the owning user and kept server-side. Administrators can manage domains and disable other accounts subject to safeguards; normal users cannot use administrative procedures. Drive verifies the session with the API and enforces item ownership and shares independently. A public Drive link is a bearer token, stored hashed and checked on each public download.
+
+Web MFA does not protect direct IMAP or SMTP authentication. Keep these protocol ports bound to loopback until managed app passwords are implemented and mail TLS is verified. Vault uses its own account and separately configured two-step login; it does not use the Esuno session.
+
+Web MFA also does not cover Stalwart JMAP/DAV proxied by Caddy, ManageSieve, or alias API keys. These use separate credentials and authorization boundaries.
 
 API requests other than GET and HEAD must carry the configured public `Origin`; the API also trusts only the configured Caddy proxy address. Drive rejects requests to its authenticated command handler marked `Sec-Fetch-Site: cross-site`; its public download and preview routes have separate checks. Do not treat this as a universal Origin check on Drive. Keep the API and Drive behind the intended proxy and validate the boundary for the deployment.
 

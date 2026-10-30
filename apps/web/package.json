@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@zxcvbn-ts/core": "catalog:",
+    "@simplewebauthn/browser": "catalog:",
     "@zxcvbn-ts/language-common": "catalog:",
     "@zxcvbn-ts/language-en": "catalog:",
     "@orpc/client": "catalog:",
@@ -44,6 +45,7 @@
     "@orpc/contract": "catalog:",
     "@fontsource-variable/space-grotesk": "catalog:",
     "@fontsource-variable/dm-sans": "catalog:",
-    "dompurify": "catalog:"
+    "dompurify": "catalog:",
+    "qrcode.react": "catalog:"
   }
 }
