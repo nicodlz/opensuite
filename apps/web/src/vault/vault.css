@@ -19,7 +19,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  background: var(--accent-soft);
+  background: var(--night-card);
+  color: var(--ivory);
 }
 .vault-hero img {
   width: 100px;
@@ -35,6 +36,12 @@
   color: var(--muted);
   margin-top: 8px;
   line-height: 1.5;
+}
+.vault-hero p:not(.eyebrow) {
+  color: var(--muted-light);
+}
+.vault-hero .eyebrow {
+  color: var(--green);
 }
 .vault-hero .button {
   margin-top: 22px;
