@@ -50,16 +50,33 @@ export function synthetic() {
     },
   };
   const ledger: Ledger = {
-    prepare(n, recipients) {
+    prepare(n, recipients, options) {
       const existingKeys = [...recordMessages.entries()]
         .filter(([, id]) => id === n.mail.messageId)
         .map(([key]) => key);
+      // Addresses held as unknown may now be known: move them to the mailbox.
+      const heldKeys = new Set(
+        options?.rerouteUntil !== undefined &&
+          Date.now() >= options.rerouteUntil
+          ? []
+          : existingKeys.filter(
+              (key) =>
+                records.get(key)?.state === "held" &&
+                records.get(key)?.known !== true,
+            ),
+      );
       const recorded = new Set(
-        existingKeys.flatMap((key) => recordAddresses.get(key) ?? []),
+        existingKeys
+          .filter((key) => !heldKeys.has(key))
+          .flatMap((key) => recordAddresses.get(key) ?? []),
+      );
+      const held = new Set(
+        [...heldKeys].flatMap((key) => recordAddresses.get(key) ?? []),
       );
       for (const recipient of recipients) {
         const addresses = recipient.addresses.filter(
-          (address) => !recorded.has(address),
+          (address) =>
+            !recorded.has(address) && (recipient.known || !held.has(address)),
         );
         if (addresses.length === 0) continue;
         const key = recipientKey(
@@ -69,9 +86,9 @@ export function synthetic() {
         );
         recordMessages.set(key, n.mail.messageId);
         recordAddresses.set(key, [
-          ...(recordAddresses.get(key) ?? []),
-          ...addresses,
+          ...new Set([...(recordAddresses.get(key) ?? []), ...addresses]),
         ]);
+        for (const address of addresses) recorded.add(address);
         if (!records.has(key))
           records.set(key, {
             key,
@@ -83,6 +100,16 @@ export function synthetic() {
             legacy: false,
             importStartedAt: null,
           });
+        if (!recipient.known) continue;
+        for (const heldKey of heldKeys) {
+          const remaining = (recordAddresses.get(heldKey) ?? []).filter(
+            (address) => !addresses.includes(address),
+          );
+          recordAddresses.set(heldKey, remaining);
+          const record = records.get(heldKey);
+          if (remaining.length === 0 && record !== undefined)
+            record.state = "rerouted";
+        }
       }
       return Promise.resolve(
         ok(
@@ -133,6 +160,12 @@ export function synthetic() {
       r.permanent = chargeAttempt === true;
       return Promise.resolve(ok(undefined));
     },
+    expireHeld(key) {
+      const record = records.get(key);
+      if (record?.state !== "held") return Promise.resolve(ok(false));
+      record.state = "rejected";
+      return Promise.resolve(ok(true));
+    },
     resetFailures() {
       for (const record of records.values())
         if (record.state === "failed" && !record.permanent) record.attempts = 0;
@@ -182,5 +215,6 @@ export function synthetic() {
     records,
     imports,
     events,
+    messageStates,
   };
 }

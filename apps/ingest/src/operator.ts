@@ -15,7 +15,13 @@ type Dependencies = {
   storage: Storage;
 };
 const keySchema = z.string().regex(/^[a-f0-9]{64}$/);
-const identitySchema = z.string().trim().min(1).max(200);
+// `system:` identities are reserved for automatic actions such as expiry.
+const identitySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .refine((value) => !value.toLowerCase().startsWith("system:"));
 const reasonSchema = z.string().trim().min(8).max(1000);
 
 export async function operatorCommand(
@@ -25,16 +31,28 @@ export async function operatorCommand(
   const expired = await deps.ledger.expireClaims();
   if (expired.isErr()) throw new Error("Could not expire claims");
   const [command, rawKey, action, remote, actor, explanation] = args;
-  if (command === "list" && args.length <= 2) {
-    const after = rawKey === undefined ? undefined : keySchema.parse(rawKey);
+  if (command === "list" && args.length <= 3) {
+    // `list held [cursor]` shows held recipients; `list [cursor]` the rows
+    // that need an operator decision, without the held backlog.
+    const onlyHeld = rawKey === "held";
+    const cursor = onlyHeld ? action : rawKey;
+    if (!onlyHeld && args.length === 3)
+      throw new Error("Invalid operator command");
+    const after = cursor === undefined ? undefined : keySchema.parse(cursor);
+    // Key-ordered paging that stays correct when the cursor row has left
+    // the filter (for example a held row expired by replay).
+    const page = after === undefined ? {} : { idempotencyKey: { gt: after } };
     const rows = await deps.db.inboundRecipient.findMany({
-      where: {
-        OR: [
-          { state: "uncertain" },
-          { state: "importing" },
-          { state: "failed", permanent: true },
-        ],
-      },
+      where: onlyHeld
+        ? { state: "held", ...page }
+        : {
+            ...page,
+            OR: [
+              { state: "uncertain" },
+              { state: "importing" },
+              { state: "failed", permanent: true },
+            ],
+          },
       select: {
         idempotencyKey: true,
         messageId: true,
@@ -47,9 +65,6 @@ export async function operatorCommand(
         error: true,
       },
       orderBy: { idempotencyKey: "asc" },
-      ...(after === undefined
-        ? {}
-        : { cursor: { idempotencyKey: after }, skip: 1 }),
       take: 200,
     });
     return {
@@ -58,6 +73,45 @@ export async function operatorCommand(
     };
   }
   const key = keySchema.parse(rawKey);
+  // An unknown recipient is held with its message until its address is
+  // provisioned (a replay then routes it) or an operator rejects it here.
+  // Rejecting lets the next replay delete the stored message object.
+  if (command === "reject") {
+    if (args.length !== 4) throw new Error("Invalid operator command");
+    const operator = identitySchema.parse(action);
+    const reason = reasonSchema.parse(remote);
+    return deps.db.$transaction(async (tx) => {
+      const found = await tx.inboundRecipient.findUnique({
+        where: { idempotencyKey: key },
+      });
+      if (found === null)
+        throw new Error("Only a held recipient can be rejected");
+      // Take the message lock that routing holds, then read the row again.
+      await tx.$queryRaw`SELECT "id" FROM "InboundMessage" WHERE "id" = ${found.messageId} FOR UPDATE`;
+      const row = await tx.inboundRecipient.findUnique({
+        where: { idempotencyKey: key },
+      });
+      if (row === null || row.state !== "held")
+        throw new Error("Only a held recipient can be rejected");
+      const updated = await tx.inboundRecipient.updateMany({
+        where: { idempotencyKey: key, state: "held", updatedAt: row.updatedAt },
+        data: { state: "rejected", error: "Rejected by operator" },
+      });
+      if (updated.count !== 1)
+        throw new Error("Recipient changed; inspect it again");
+      await tx.inboundResolutionAudit.create({
+        data: {
+          recipientKey: key,
+          operator,
+          reason,
+          action: "reject",
+          previousState: "held",
+          remoteId: null,
+        },
+      });
+      return { key, action: "reject" };
+    });
+  }
   if (
     (command !== "inspect" || args.length !== 2) &&
     (command !== "resolve" || args.length !== 6)

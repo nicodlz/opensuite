@@ -328,7 +328,10 @@ Confirm the success event and `deploy/backup-status/last-success`, inspect
 `systemctl list-timers`, and perform a complete isolated restore drill. The
 persistent backup timer runs daily at 01:00 UTC; the replay timer runs hourly.
 Replay and TLS renewal share the backup lock and report an error if it is held;
-alert on those systemd failures and investigate. Protect TLS, SMTP, Drive, ingestion,
+alert on those systemd failures and investigate. A replay still running at
+01:00 makes that night's backup exit with `overlap` (the next attempt is the
+following day): replay reads every archived notification and reprocesses held
+mail, so alert on replay duration as archive and held volume grow. Protect TLS, SMTP, Drive, ingestion,
 observer and backup secrets included in the encrypted snapshot. Object histories,
 provider policies and external infrastructure need separate protection.
 
@@ -358,9 +361,15 @@ for the receiving MX (`10 inbound-smtp.eu-north-1.amazonaws.com` for the
 chosen mailbox domain), any wildcard change and rule-set activation. At the
 agreed window, apply only the approved changes, confirm propagation and monitor
 both old and new routes through the TTL and queue drain. Unknown recipients are
-recorded as rejected _after_ SES acceptance, so the routes must be complete.
+held _after_ SES acceptance (see the hold window in
+[ingestion](../architecture/ingestion.md)), so the routes should be complete.
 
 ## Rollback
+
+Before running a worker release that predates held recipients, finish every
+held recipient: older code does not know the `held` and `rerouted` states and
+fails on messages that contain them. List them with `operator list held`, then
+provision the addresses and run replay, or reject them, until the list is empty.
 
 Pause new submissions and preserve the Stalwart outbound queue, SES buffer,
 notifications, DLQs and ingestion ledger. Restore the recorded DNS MX and any

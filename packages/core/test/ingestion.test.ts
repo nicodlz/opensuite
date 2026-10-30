@@ -106,7 +106,7 @@ describe("SES ingestion", () => {
     expect(memory.archives.size).toBe(1);
     expect(memory.buffers.size).toBe(0);
   });
-  it("quarantines failures and treats unknown recipients as terminal", async () => {
+  it("quarantines failures and holds unknown recipients with their message", async () => {
     const { memory, service } = create();
     memory.buffers.set("ses-1", new Uint8Array([1]));
     expect(
@@ -122,11 +122,15 @@ describe("SES ingestion", () => {
       ).isOk(),
     ).toBe(true);
     expect(memory.imports[0]?.quarantine).toBe(true);
-    expect(memory.buffers.has("ses-1")).toBe(false);
+    // The unknown recipient keeps the message: nothing is deleted.
+    expect(memory.buffers.has("ses-1")).toBe(true);
     expect([...memory.records.values()].map((r) => r.state)).toEqual([
       "quarantined",
-      "rejected",
+      "held",
     ]);
+    expect(memory.messageStates.get("ses-1")).toBe("held");
+    expect(memory.events).toContain("ingest_held");
+    expect(memory.events).not.toContain("ingest_rejected");
   });
   it("replays archived notifications and reports orphan objects", async () => {
     const { memory, service } = create();
@@ -489,4 +493,150 @@ it("skips completed archives and never rewrites archives during replay", async (
   expect((await service.reconcile(1)).isOk()).toBe(true);
   expect(writes).toBe(0);
   expect(preparations).toBe(0);
+});
+
+// Held mail is routed only within the hold window, so these tests use the
+// current time; the fixture date is older than the default 14 days.
+const fresh = (recipients: string[], messageId = "ses-1") => {
+  const body = notification(recipients, "PASS", messageId);
+  const now = new Date().toISOString();
+  return JSON.stringify({
+    ...body,
+    mail: { ...body.mail, timestamp: now },
+    receipt: { ...body.receipt, timestamp: now },
+  });
+};
+const routed = (extra: { address: string; destination: string }[]) => {
+  const memory = synthetic();
+  const known = [...routes];
+  const service = new IngestService({
+    storage: memory.storage,
+    ledger: memory.ledger,
+    delivery: memory.delivery,
+    events: memory.sink,
+    routes: [],
+    resolveRoutes: () => Promise.resolve(ok([...known])),
+    bucket: "inbound",
+    bufferPrefix: "",
+    topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+    maxAttempts: 3,
+  });
+  return { memory, service, provision: () => known.push(...extra) };
+};
+
+describe("held unknown recipients", () => {
+  it("imports a held recipient once its address is provisioned, then deletes the object", async () => {
+    const { memory, service, provision } = routed([
+      { address: "late@example.test", destination: "carol" },
+    ]);
+    const bytes = new Uint8Array([7, 8, 9]);
+    memory.buffers.set("ses-1", bytes);
+    const body = fresh(["late@example.test"]);
+    expect((await service.process(body)).isOk()).toBe(true);
+    expect(memory.imports).toHaveLength(0);
+    expect(memory.buffers.get("ses-1")).toEqual(bytes);
+    // A replay before provisioning changes nothing.
+    expect((await service.reconcile(86_400)).isOk()).toBe(true);
+    expect(memory.imports).toHaveLength(0);
+    provision();
+    expect((await service.reconcile(86_400)).isOk()).toBe(true);
+    expect(memory.imports.map((item) => item.destination)).toEqual(["carol"]);
+    expect(memory.imports[0]?.bytes).toEqual(bytes);
+    expect([...memory.records.values()].map((r) => r.state)).toEqual([
+      "rerouted",
+      "imported",
+    ]);
+    expect(memory.buffers.has("ses-1")).toBe(false);
+    expect(memory.messageStates.get("ses-1")).toBe("imported");
+    // Later replays never import it again.
+    expect((await service.reconcile(86_400)).isOk()).toBe(true);
+    expect(memory.imports).toHaveLength(1);
+  });
+
+  it("delivers Bcc and aliases once per mailbox and never twice when a held address joins one", async () => {
+    const { memory, service, provision } = routed([
+      { address: "late@example.test", destination: "alice" },
+    ]);
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    // alice@ and alias@ reach alice; hidden@ is a Bcc to bob; late@ is unknown.
+    const body = fresh([
+      "alice@example.test",
+      "alias@other.test",
+      "hidden@example.test",
+      "late@example.test",
+    ]);
+    expect((await service.process(body)).isOk()).toBe(true);
+    expect(memory.imports.map((item) => item.destination).toSorted()).toEqual([
+      "alice",
+      "bob",
+    ]);
+    expect(memory.buffers.has("ses-1")).toBe(true);
+    provision();
+    expect((await service.reconcile(86_400)).isOk()).toBe(true);
+    // late@ now routes to alice, who already has the message.
+    expect(memory.imports).toHaveLength(2);
+    expect(
+      [...memory.records.values()].map((r) => [r.destination, r.state]),
+    ).toEqual([
+      ["alice", "imported"],
+      ["bob", "imported"],
+      ["late@example.test", "rerouted"],
+    ]);
+    expect(memory.buffers.has("ses-1")).toBe(false);
+  });
+
+  it("rejects held mail after the hold window and never routes it late", async () => {
+    const { memory, service, provision } = routed([
+      { address: "late@example.test", destination: "carol" },
+    ]);
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    // The fixture is dated January 2026, beyond the 14-day window.
+    const body = JSON.stringify(notification(["late@example.test"]));
+    expect((await service.process(body)).isOk()).toBe(true);
+    expect([...memory.records.values()].map((r) => r.state)).toEqual(["held"]);
+    provision();
+    expect((await service.reconcile(86_400)).isOk()).toBe(true);
+    expect(memory.imports).toHaveLength(0);
+    expect([...memory.records.values()].map((r) => r.state)).toEqual([
+      "rejected",
+    ]);
+    expect(memory.events).toContain("ingest_held_expired");
+    expect(memory.buffers.has("ses-1")).toBe(false);
+    expect(memory.messageStates.get("ses-1")).toBe("imported");
+  });
+
+  it("keeps a completed message for replay when deleting its object fails", async () => {
+    const memory = synthetic();
+    let failures = 1;
+    const service = new IngestService({
+      storage: {
+        ...memory.storage,
+        deleteBuffer: (bucket, key) => {
+          // Completion must not be recorded before the object is gone.
+          expect(memory.messageStates.get("ses-1")).not.toBe("imported");
+          return failures-- > 0
+            ? Promise.resolve(err({ message: "storage unavailable" }))
+            : memory.storage.deleteBuffer(bucket, key);
+        },
+      },
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: memory.sink,
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    memory.buffers.set("ses-1", new Uint8Array([1]));
+    const body = JSON.stringify(notification(["alice@example.test"]));
+    // process() archives the notification; replay finds it there.
+    expect((await service.process(body)).isErr()).toBe(true);
+    expect(memory.messageStates.get("ses-1")).toBe("failed");
+    expect(memory.buffers.has("ses-1")).toBe(true);
+    expect((await service.reconcile(86_400)).isOk()).toBe(true);
+    expect(memory.buffers.has("ses-1")).toBe(false);
+    expect(memory.messageStates.get("ses-1")).toBe("imported");
+    expect(memory.imports).toHaveLength(1);
+  });
 });
