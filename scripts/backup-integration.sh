@@ -8,16 +8,27 @@ name="osbackup$$"
 old="$name-old"
 new="$name-new"
 minio="$name-minio"
+octet=$(( ($$ % 190) + 20 ))
+test_subnet="10.238.$octet.0/24"
+test_ip="10.238.$octet.10"
+fixture_port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()})')
 rclone='rclone/rclone:1.71.2@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51'
+pass_drill=${PASS_BACKUP_DRILL:-0}
+case_done() { [ "$pass_drill" = 0 ] || printf '%s\n' "$1" >> "$PASS_DRILL_CASES"; }
 cleanup() {
   rc=$?
   trap - EXIT HUP INT TERM
   for project in "$old" "$new"; do
     if [ "$rc" -ne 0 ]; then docker compose --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" logs --no-color postgres stalwart >&2 || :; fi
-    docker compose --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" down --volumes --remove-orphans --timeout 5 >/dev/null 2>&1 || :
-    docker volume rm "${project}_secrets" "${project}_stalwart-data" "${project}_postgres-data" >/dev/null 2>&1 || :
+    docker compose --profile '*' --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" down --volumes --remove-orphans --timeout 5 >/dev/null 2>&1 || :
+    docker volume rm "${project}_secrets" "${project}_stalwart-data" "${project}_postgres-data" "${project}_vaultwarden-data" "${project}_caddy-data" "${project}_caddy-config" "${project}_setup-status" >/dev/null 2>&1 || :
+    if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ] || [ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" ]; then
+      echo "cleanup: disposable project $project still has containers or volumes" >&2
+      rc=1
+    fi
   done
-  docker rm -f "$minio" >/dev/null 2>&1 || :
+  docker rm -fv "$minio" >/dev/null 2>&1 || :
+  if [ -n "$(docker ps -aq --filter "name=^/$minio$")" ]; then echo 'cleanup: disposable object store remains' >&2; rc=1; fi
   rm -rf "$work"
   exit "$rc"
 }
@@ -27,7 +38,7 @@ mkdir -p "$work/source/deploy" "$work/target/deploy" "$work/scratch" "$work/secr
 chmod 755 "$work" "$work/secrets"
 for folder in source target; do
   cp "$root/compose.yaml" "$work/$folder/compose.yaml"
-  cp -R "$root/deploy/backup" "$root/deploy/stalwart" "$root/deploy/postgres" "$root/deploy/caddy" "$work/$folder/deploy/"
+  cp -R "$root/deploy/backup" "$root/deploy/stalwart" "$root/deploy/postgres" "$root/deploy/caddy" "$root/deploy/vaultwarden" "$work/$folder/deploy/"
   chmod -R a+rX "$work/$folder/deploy"
 done
 git -C "$work/source" init -q
@@ -63,7 +74,7 @@ BACKUP_SECRET_ACCESS_KEY='fixture-secret'
 BACKUP_PASSWORD_FILE='$work/secrets/restic'
 BACKUP_SCRATCH='$work/scratch'
 CONFIG
-cat > "$work/overlay.yaml" <<'YAML'
+cat > "$work/overlay.yaml" <<YAML
 services:
   postgres:
     command: ["postgres", "-c", "fsync=off"]
@@ -85,13 +96,44 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
   backup-objects:
     extra_hosts: ["host.docker.internal:host-gateway"]
+  pass:
+    environment:
+      SIGNUPS_ALLOWED: "true"
+    ports: !override ["127.0.0.1::80"]
+    networks:
+      api-proxy:
+        ipv4_address: 10.240.$octet.3
+  caddy:
+    entrypoint: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    volumes: !override
+      - $work/caddy-test:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports: !override ["127.0.0.1:$fixture_port:443"]
+    networks:
+      api-proxy:
+        ipv4_address: 10.240.$octet.2
+networks:
+  api-proxy:
+    ipam:
+      config: !override
+        - subnet: 10.240.$octet.0/24
 YAML
+cat > "$work/caddy-test" <<'CADDY'
+{
+  default_sni 127.0.0.1
+}
+https://127.0.0.1 {
+  tls internal
+  reverse_proxy pass-vault:80
+}
+CADDY
 cat > "$work/source/.env" <<CONFIG
 POSTGRES_USER=opensuite
 POSTGRES_DB=opensuite
 POSTGRES_DRIVE_DB=opensuite_drive
-MAIL_MANAGEMENT_SUBNET=10.237.253.0/24
-MAIL_MANAGEMENT_API_IP=10.237.253.10
+MAIL_MANAGEMENT_SUBNET=$test_subnet
+MAIL_MANAGEMENT_API_IP=$test_ip
 MAIL_BLOB_STORE=s3
 MAIL_S3_ENDPOINT=http://host.docker.internal:$port
 MAIL_S3_REGION=us-east-1
@@ -112,6 +154,14 @@ DRIVE_S3_ACCESS_KEY=fixture-access
 DRIVE_S3_SECRET_FILE=$work/secrets/drive
 OBSERVE_BACKUP_DIR=$work/source/deploy/backup-status
 CONFIG
+if [ "$pass_drill" = 1 ]; then
+  printf '%s\n' '$argon2id$v=19$m=65536,t=3,p=4$ZGlzcG9zYWJsZS1zYWx0IQ$RsDLAAOjuY6ic36ncF+H4SzvxmYg8tdhdel1GSA9GTo' > "$work/secrets/pass-admin"
+  cat >> "$work/source/.env" <<CONFIG
+PASS_ADMIN_TOKEN_FILE=$work/secrets/pass-admin
+PASS_SIGNUPS_ALLOWED=true
+PASS_DOMAIN=https://127.0.0.1:$fixture_port
+CONFIG
+fi
 export BACKUP_CONFIG="$work/backup.conf" BACKUP_COMPOSE_OVERRIDE="$work/overlay.yaml" COMPOSE_PROJECT_NAME="$old" BACKUP_STAGE="$work/scratch"
 set -a
 . "$BACKUP_CONFIG"
@@ -135,7 +185,7 @@ printf 'drive-content-fixture' | rclone_local rcat store:drive-fixture/drive/obj
 mailport=$(compose port stalwart 8080 | sed 's/.*://')
 password=$(compose run --rm --no-deps -T backup-management 'cat /run/opensuite/stalwart-management/password')
 base="http://127.0.0.1:$mailport"
-request() { curl -fsS -u "management@opensuite.internal:$password" -H 'X-Forwarded-For: 10.237.253.10' "$@"; }
+request() { curl -fsS -u "management@opensuite.internal:$password" -H "X-Forwarded-For: $test_ip" "$@"; }
 account=$(request "$base/jmap/session" | jq -er '.primaryAccounts["urn:ietf:params:jmap:mail"]')
 jmap() { request -H 'Content-Type: application/json' -d "$1" "$base/jmap/"; }
 inbox=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Mailbox/get\",{\"accountId\":\"$account\"},\"a\"]]}" | jq -er '.methodResponses[0][1].list[] | select(.role == "inbox") | .id')
@@ -143,17 +193,78 @@ printf 'From: sender@example.invalid\r\nTo: recipient@example.invalid\r\nSubject
 blob=$(request -H 'Content-Type: message/rfc822' --data-binary "@$work/message" "$base/jmap/upload/$account/" | jq -er .blobId)
 response=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Email/import\",{\"accountId\":\"$account\",\"emails\":{\"fixture\":{\"blobId\":\"$blob\",\"mailboxIds\":{\"$inbox\":true}}}},\"a\"]]}")
 email=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].created.fixture.id')
+if [ "$pass_drill" = 1 ]; then
+  compose --profile pass up -d --wait --wait-timeout 180 pass caddy
+  passport=$(compose port caddy 443 | sed 's/.*://')
+  compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$work/caddy-ca"
+  NODE_EXTRA_CA_CERTS="$work/caddy-ca" node "$root/test-support/pass-drill-client.mjs" create "https://127.0.0.1:$passport" "$work"
+  rsa=$(compose exec -T pass sha256sum /data/rsa_key.pem | awk '{print $1}')
+  case_done 'create user, encrypted item and attachment'
+fi
 ./deploy/backup/init.sh
+if [ "$pass_drill" = 1 ]; then
+  # Simulate an enabled but unreadable data set; a failed capture must restart Pass
+  # and publish a Pass-specific failure without refreshing the success marker.
+  cp "$work/secrets/pass-admin" "$work/secrets/pass-admin.hidden"
+  : > "$work/secrets/pass-admin"
+  if ./deploy/backup/backup.sh; then echo 'expected Pass capture failure' >&2; exit 1; fi
+  [ "$(cat "$work/source/deploy/backup-status/last-failure")" = pass ]
+  [ "$(stat -c %a "$work/source/deploy/backup-status/last-failure")" = 644 ]
+  [ ! -e "$work/source/deploy/backup-status/last-success" ]
+  [ "$(compose ps --services --filter status=running | awk '$0 == "pass" {print}')" = pass ]
+  cp "$work/secrets/pass-admin.hidden" "$work/secrets/pass-admin"
+  rm "$work/secrets/pass-admin.hidden"
+  compose restart pass
+  case_done 'Pass capture failure alerts and restarts service'
+  compose stop pass
+  compose run --rm --no-deps -T backup-volumes 'mv /pass-data/rsa_key.pem /pass-data/rsa_key.hidden'
+  if ./deploy/backup/backup.sh; then echo 'expected missing Pass key failure' >&2; exit 1; fi
+  [ "$(cat "$work/source/deploy/backup-status/last-failure")" = pass ]
+  [ "$(stat -c %a "$work/source/deploy/backup-status/last-failure")" = 644 ]
+  [ -z "$(compose ps --services --filter status=running | awk '$0 == "pass" {print}')" ]
+  compose run --rm --no-deps -T backup-volumes 'mv /pass-data/rsa_key.hidden /pass-data/rsa_key.pem'
+  compose start pass
+  case_done 'stopped Pass and missing RSA key fail capture'
+fi
 ./deploy/backup/backup.sh
 [ -s "$work/source/deploy/backup-status/last-success" ]
+[ "$(stat -c %a "$work/source/deploy/backup-status/last-success")" = 644 ]
+if [ "$pass_drill" = 1 ]; then
+  [ ! -e "$work/source/deploy/backup-status/last-failure" ]
+  case_done 'real encrypted backup and success marker'
+fi
 # Delete live application state and object copies while retaining the backup bucket.
-compose down --volumes --remove-orphans --timeout 10
+compose --profile '*' down --volumes --remove-orphans --timeout 10
 rclone_local purge store:mail-fixture/mail
 rclone_local purge store:drive-fixture/drive
 rm "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$work/secrets/tls-cert" "$work/secrets/tls-key"
+if [ "$pass_drill" = 1 ]; then rm "$work/secrets/pass-admin"; rm -rf "$work/cli-create"; fi
 export COMPOSE_PROJECT_NAME="$new"
 cd "$work/target"
 ./deploy/backup/restore.sh
+if [ "$pass_drill" = 1 ]; then
+  if ./deploy/backup/restore.sh; then echo 'restore unexpectedly accepted a nonempty target' >&2; exit 1; fi
+  case_done 'nonempty target refused'
+  [ "$(docker run --rm --network none --mount "type=bind,src=$work/secrets/pass-admin,dst=/secret,readonly" alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a cat /secret)" = '$argon2id$v=19$m=65536,t=3,p=4$ZGlzcG9zYWJsZS1zYWx0IQ$RsDLAAOjuY6ic36ncF+H4SzvxmYg8tdhdel1GSA9GTo' ]
+  [ "$(compose exec -T postgres psql -U opensuite -d postgres -Atc "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='opensuite_pass'")" = opensuite_pass ]
+  compose --profile pass up -d --no-deps --wait --wait-timeout 180 pass
+  compose up -d --no-deps --wait --wait-timeout 180 caddy
+  [ "$(compose exec -T pass sha256sum /data/rsa_key.pem | awk '{print $1}')" = "$rsa" ]
+  case_done 'fresh database, secrets and identical RSA key'
+  passport=$(compose port caddy 443 | sed 's/.*://')
+  compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$work/caddy-ca"
+  NODE_EXTRA_CA_CERTS="$work/caddy-ca" node "$root/test-support/pass-drill-client.mjs" verify "https://127.0.0.1:$passport" "$work"
+  case_done 'login, decrypt item and download attachment'
+  compose stop caddy pass postgres
+  ./deploy/backup/restore.sh --force
+  compose --profile pass up -d --no-deps --wait --wait-timeout 180 pass
+  compose up -d --no-deps --wait --wait-timeout 180 caddy
+  passport=$(compose port caddy 443 | sed 's/.*://')
+  compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$work/caddy-ca"
+  rm -rf "$work/cli-verify"
+  NODE_EXTRA_CA_CERTS="$work/caddy-ca" node "$root/test-support/pass-drill-client.mjs" verify "https://127.0.0.1:$passport" "$work"
+  case_done 'explicit isolated restore retry'
+fi
 [ "$(cat deploy/ingest.env)" = INGEST_FIXTURE=present ]
 [ "$(cat deploy/observe.env)" = OBSERVE_FIXTURE=present ]
 for fixture in relay tls-cert tls-key; do

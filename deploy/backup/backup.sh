@@ -3,6 +3,7 @@ set -eu
 trap 'printf "{\"component\":\"backup\",\"event\":\"failure\"}\n"' EXIT
 . "$(dirname "$0")/common.sh"
 running=''
+phase=backup
 cleanup() {
   result=$?
   trap - EXIT HUP INT TERM
@@ -14,10 +15,15 @@ cleanup() {
   if [ "$result" -eq 0 ]; then
     marker_dir=${OBSERVE_BACKUP_DIR:-./deploy/backup-status}
     if ! (umask 022; mkdir -p "$marker_dir" && marker=$(mktemp "$marker_dir/.last-success.XXXXXXXX") &&
-      printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker" && mv -f "$marker" "$marker_dir/last-success"); then
+      printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker" && chmod 0644 "$marker" && mv -f "$marker" "$marker_dir/last-success" && rm -f "$marker_dir/last-failure"); then
       result=1
       log marker_failed
     fi
+  fi
+  if [ "$result" -ne 0 ]; then
+    marker_dir=${OBSERVE_BACKUP_DIR:-./deploy/backup-status}
+    (umask 022; mkdir -p "$marker_dir" && marker=$(mktemp "$marker_dir/.last-failure.XXXXXXXX") &&
+      printf '%s\n' "$phase" > "$marker" && chmod 0644 "$marker" && mv -f "$marker" "$marker_dir/last-failure") || log marker_failed
   fi
   if [ "$result" -eq 0 ]; then log success; else log failure; fi
   exit "$result"
@@ -39,6 +45,19 @@ for ident in "$POSTGRES_USER" "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do
 done
 [ "$POSTGRES_DB" != "$POSTGRES_DRIVE_DB" ] || exit 1
 compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >&2
+# A stopped Pass container or a provisioned database still needs protection.
+phase=pass
+case "${BACKUP_PASS_ENABLED:-0}" in 0|1) ;; *) echo 'backup: BACKUP_PASS_ENABLED must be 0 or 1' >&2; exit 1;; esac
+pass_db=$(compose exec -T postgres psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname='opensuite_pass'")
+pass_container=$(compose ps -a --services | awk '$0 == "pass" {print}')
+pass_enabled=${BACKUP_PASS_ENABLED:-0}
+[ "$pass_db" = 0 ] || pass_enabled=1
+[ -z "$pass_container" ] || pass_enabled=1
+case ",${COMPOSE_PROFILES:-}," in *,pass,*|*,\*,*) pass_enabled=1;; esac
+if [ "$pass_enabled" = 1 ] && [ "$pass_db" != 1 ]; then
+  echo 'backup: Pass is enabled but its database is missing' >&2; exit 1
+fi
+phase=backup
 # The saved registry, not .env, is authoritative for the active blob store.
 # Refuse to omit a mail bucket when the two configurations disagree.
 blob=$(compose run --rm --no-deps -T backup-management '
@@ -58,7 +77,7 @@ case "${MAIL_BLOB_STORE:-local}" in
     ;;
   *) echo 'backup: unknown mail blob store' >&2; exit 1 ;;
 esac
-running=$(compose ps --services --filter status=running | awk '/^(caddy|api|drive|stalwart|ingest|observe)$/ {print}')
+running=$(compose ps --services --filter status=running | awk '/^(caddy|api|drive|stalwart|ingest|observe|pass)$/ {print}')
 # Stop clients and workers before any snapshot; operators must stop external writers.
 [ -z "$running" ] || compose stop $running >&2
 log quiesced
@@ -89,6 +108,29 @@ compose exec -T -e PGPASSWORD="$(compose exec -T postgres cat /run/opensuite/pos
 for db in "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do
   compose exec -T -e PGPASSWORD="$(compose exec -T postgres cat /run/opensuite/postgres/password)" postgres pg_dump -h localhost -U "$POSTGRES_USER" -Fc -d "$db" > "$BACKUP_STAGE/data/postgres/$db.dump"
 done
+if [ "$pass_enabled" = 1 ]; then
+  phase=pass
+  log pass_capture_start
+  compose exec -T -e PGPASSWORD="$(compose exec -T postgres cat /run/opensuite/postgres/password)" postgres pg_dump -h localhost -U "$POSTGRES_USER" -Fc -d opensuite_pass > "$BACKUP_STAGE/data/postgres/opensuite_pass.dump"
+  # Capture the entire stopped volume, not PostgreSQL's live data files.
+  compose run --rm --no-deps -T backup-volumes '
+    [ -s /secrets/pass-database/password ] && [ -r /secrets/pass-database/password ] &&
+    [ -s /pass-data/rsa_key.pem ] && [ -r /pass-data/rsa_key.pem ] &&
+    tar --exclude="pass-data/db.sqlite3*" -cpf /stage/data/pass-volume.tar -C / pass-data
+  ' >&2 || { echo 'backup: Pass data or database credential is missing or unreadable' >&2; exit 1; }
+  for item in "pass-admin:${PASS_ADMIN_TOKEN_FILE:-/dev/null}" "pass-smtp:${PASS_SMTP_SECRET_FILE:-/dev/null}" "pass-push:${PASS_PUSH_KEY_FILE:-/dev/null}"; do
+    name=${item%%:*}; path=${item#*:}
+    if [ "$path" != /dev/null ]; then
+      [ -f "$path" ] && [ -s "$path" ] && [ -r "$path" ] || { echo "backup: $name file missing or unreadable" >&2; exit 1; }
+      cp "$path" "$BACKUP_STAGE/data/config/$name"
+    fi
+  done
+  [ -z "${PASS_SMTP_USERNAME:-}" ] || [ -s "$BACKUP_STAGE/data/config/pass-smtp" ] || { echo 'backup: Pass SMTP secret missing' >&2; exit 1; }
+  [ "${PASS_PUSH_ENABLED:-false}" != true ] || [ -s "$BACKUP_STAGE/data/config/pass-push" ] || { echo 'backup: Pass push key missing' >&2; exit 1; }
+  printf '1\n' > "$BACKUP_STAGE/data/config/pass-enabled"
+  log pass_captured
+  phase=backup
+fi
 compose run --rm --no-deps -T backup-volumes 'tar -cpf /stage/data/volumes.tar -C / secrets stalwart caddy-data caddy-config' >&2
 objects save mail
 objects save drive

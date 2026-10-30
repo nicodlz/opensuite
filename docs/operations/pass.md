@@ -97,36 +97,14 @@ operator-side checks for availability; this reduces diagnostic visibility.
 
 ## Backups and recovery
 
-**The existing scheduled OpenSuite backup does not capture the Pass database or
-volume and does not quiesce Pass.** Set up and test a separate encrypted backup
-before storing real vaults. Back up the Pass database, the complete
-`vaultwarden-data` volume (including attachments, RSA keys and config), the
-Pass database secret, the admin hash and any SMTP/push files together with the
-image pin and configuration. Keep recovery keys independently protected and a
-second backup location. Restrict access: even encrypted-vault metadata, server
-keys, configuration and backup files are sensitive.
-
-For a consistent manual capture, stop Pass to quiesce writes, dump PostgreSQL
-with `pg_dump -Fc` and archive the data volume while it is stopped, using
-private encrypted scratch and an encrypted backup repository. For example,
-with a protected, encrypted `$PASS_BACKUP_DIR` and the default database user:
-
-```sh
-docker compose --profile pass stop pass
-docker compose exec -T postgres pg_dump -U opensuite -Fc opensuite_pass > "$PASS_BACKUP_DIR/pass.dump"
-docker compose --profile pass run --rm --no-deps --entrypoint tar pass -C /data -cf - . > "$PASS_BACKUP_DIR/pass-data.tar"
-docker compose --profile pass start pass
-```
-
-Ensure Pass is restarted even if a capture command fails. Securely capture the
-secret files separately, encrypt and upload the complete set with the chosen
-backup tool, check the result, and remove scratch according to its policy. A
-restore requires an isolated empty environment: restore the matching secrets,
-provision the dedicated database, restore its dump with correct ownership,
-restore the volume, then start the same pinned image and verify vault access,
-attachments and keys before considering an upgrade. Fence the original writer.
-Automated Pass backup, restore and a complete disaster recovery drill remain
-open work; the commands above have not established a tested recovery procedure.
+The scheduled OpenSuite restic backup captures the Pass database, stopped data
+volume, generated database credential, and configured admin, SMTP and push
+files with the rest of the suite. Set `BACKUP_PASS_ENABLED=1` in the protected
+backup configuration and test the schedule. The vault container does not receive
+backup credentials. See [backup operations](backup.md) and the [Pass recovery
+runbook](pass-recovery.md) for off-server escrow, complete server loss,
+limitations and independent testing. Recovery has not been verified against a
+real B2 account.
 
 ## Upgrade and rollback
 

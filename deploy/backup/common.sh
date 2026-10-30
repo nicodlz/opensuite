@@ -64,7 +64,14 @@ objects() { # direction, mail|drive
   else
     # Never overwrite a live prefix; a recovery bucket must be empty.
     listing=$(compose run --rm --no-deps -T backup-objects 'exec rclone lsf "$1" --recursive' sh "$remote")
-    [ -z "$listing" ] || { echo "backup: $kind restore prefix is not empty" >&2; return 1; }
+    if [ -n "$listing" ]; then
+      if [ "${force:-0}" = 1 ]; then
+        # An exact match is an idempotent retry; never overwrite changed objects.
+        compose run --rm --no-deps -T backup-objects 'exec rclone check "$1" "$2" --download' sh "/stage/data/objects/$kind" "$remote" >&2 || { echo "backup: $kind restore prefix differs from snapshot" >&2; return 1; }
+        return 0
+      fi
+      echo "backup: $kind restore prefix is not empty" >&2; return 1
+    fi
     compose run --rm --no-deps -T backup-objects 'exec rclone copy "$1" "$2" --s3-no-check-bucket' sh "/stage/data/objects/$kind" "$remote" >&2
     compose run --rm --no-deps -T backup-objects 'exec rclone check "$1" "$2" --download' sh "/stage/data/objects/$kind" "$remote" >&2
   fi
