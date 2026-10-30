@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { err, ok, type Result } from "neverthrow";
+import { z } from "zod";
 import {
   parseNotification,
   type Notification,
@@ -13,21 +14,6 @@ const inTurn = <T>(items: T[], work: (item: T) => Promise<void>) =>
     (previous, item) => previous.then(() => work(item)),
     Promise.resolve(),
   );
-
-// SES publishes one such notice when an SNS topic is attached to a rule.
-const isSetupNotice = (line: string) => {
-  try {
-    const value: unknown = JSON.parse(line);
-    return (
-      typeof value === "object" &&
-      value !== null &&
-      "notificationType" in value &&
-      value.notificationType === "AMAZON_SES_SETUP_NOTIFICATION"
-    );
-  } catch {
-    return false;
-  }
-};
 
 /** Archive entries are named after the exact notification text. */
 export const archiveKey = (body: string) =>
@@ -43,6 +29,46 @@ export interface RecoveryScope {
    * the buffer prefix; the buffer prefix alone by default.
    */
   objectPrefixes?: string[] | undefined;
+}
+/** The message ID SES gives the test message it writes when a rule is set up. */
+export const SETUP_MARKER = "AMAZON_SES_SETUP_NOTIFICATION";
+const SetupShape = z.object({
+  notificationType: z.literal("Received"),
+  mail: z.object({ messageId: z.literal(SETUP_MARKER) }),
+  receipt: z.object({
+    action: z.object({
+      bucketName: z.string(),
+      topicArn: z.string(),
+      objectKey: z.string(),
+    }),
+  }),
+});
+/**
+ * Whether a record is SES's setup test for one of this installation's rules:
+ * a `Received` notification with the marker as message ID, naming this
+ * bucket and topic and an object key that is an accepted prefix followed by
+ * the marker. It carries no mail and lacks verdicts, so it is neither
+ * delivered nor counted as an invalid notification. Anything else with the
+ * marker remains invalid.
+ */
+export function isSetupNotice(text: string, scope: RecoveryScope): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const parsed = SetupShape.safeParse(value);
+  if (!parsed.success) return false;
+  const action = parsed.data.receipt.action;
+  return (
+    action.bucketName === scope.bucket &&
+    action.topicArn === scope.topic &&
+    (scope.objectPrefixes?.length
+      ? scope.objectPrefixes
+      : [scope.bufferPrefix]
+    ).some((prefix) => action.objectKey === prefix + SETUP_MARKER)
+  );
 }
 /**
  * Whether a notification is this installation's, and names its own message:
@@ -226,11 +252,13 @@ export async function recoverFirehose(
     for (const line of text.split("\n")) {
       if (line === "") continue;
       report.records++;
+      if (isSetupNotice(line, scope)) {
+        report.setup++;
+        continue;
+      }
       const parsed = parseNotification(line);
-      if (parsed.isErr()) {
-        if (isSetupNotice(line)) report.setup++;
-        else report.invalid++;
-      } else if (!belongs(parsed.value, scope)) report.foreign++;
+      if (parsed.isErr()) report.invalid++;
+      else if (!belongs(parsed.value, scope)) report.foreign++;
       else if (!inWindow(parsed.value)) report.outsideWindow++;
       else bodies.set(archiveKey(line), { body: line, n: parsed.value });
     }

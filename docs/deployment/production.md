@@ -729,7 +729,8 @@ ingestion and subscription DLQs before their 14 days run out.
    or backup time minus 24 hours (Firehose retries delivery for up to a
    day); `SINCE` and `UNTIL` (ISO 8601) select notifications by their
    receipt time. Read the report: notifications found, already archived,
-   missing, unreadable, invalid, SES setup notices (no mail, ignored),
+   missing, unreadable, invalid, SES rule setup tests (`setup`: the
+   `AMAZON_SES_SETUP_NOTIFICATION` marker, no mail, ignored),
    foreign and outside the window, and
    divergent message IDs (`mergeable: false` ones are skipped by replay and
    need an operator). The topic is this installation's, so `foreign`

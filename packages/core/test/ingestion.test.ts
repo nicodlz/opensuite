@@ -594,6 +594,47 @@ const atObject = (id: string, object: string) => {
     },
   });
 };
+describe("SES setup tests", () => {
+  it("acknowledges SES's setup test without archiving or delivering it", async () => {
+    const memory = synthetic();
+    const seen: string[] = [];
+    const service = new IngestService({
+      storage: memory.storage,
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: {
+        emit(event) {
+          seen.push(event);
+        },
+      },
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    const n = notification(
+      ["alice@example.test"],
+      "PASS",
+      "AMAZON_SES_SETUP_NOTIFICATION",
+    );
+    const { dmarcVerdict: _dmarc, ...receipt } = n.receipt;
+    const setup = JSON.stringify({ ...n, receipt });
+    expect((await service.process(setup)).isOk()).toBe(true);
+    expect(seen).toEqual(["ingest_setup_notice"]);
+    expect(memory.archives.size).toBe(0);
+    expect(memory.imports).toHaveLength(0);
+    // Ordinary mail missing a verdict is still refused.
+    const broken = notification(["alice@example.test"], "PASS", "ses-9");
+    const { dmarcVerdict: _missing, ...partial } = broken.receipt;
+    expect(
+      (
+        await service.process(JSON.stringify({ ...broken, receipt: partial }))
+      ).isErr(),
+    ).toBe(true);
+  });
+});
+
 describe("receipt rule prefixes", () => {
   it("replays notifications of the current and an earlier rule prefix", async () => {
     const memory = synthetic();

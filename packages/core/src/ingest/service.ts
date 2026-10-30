@@ -5,7 +5,13 @@ import {
   resolveRecipients,
   quarantineReason,
 } from "../domain/notification.ts";
-import { archiveKey, belongs, covered, mergeVariants } from "./recovery.ts";
+import {
+  archiveKey,
+  belongs,
+  covered,
+  isSetupNotice,
+  mergeVariants,
+} from "./recovery.ts";
 import type {
   Failure,
   IngestDependencies,
@@ -40,6 +46,11 @@ export class IngestService {
     body: string,
     reconcile = false,
   ): Promise<Result<void, Failure>> {
+    // SES's setup test for a rule carries no mail: acknowledge it.
+    if (isSetupNotice(body, this.deps)) {
+      this.deps.events.emit("ingest_setup_notice", {});
+      return ok(undefined);
+    }
     const parsed = parseNotification(body);
     if (parsed.isErr())
       return err({ message: `Invalid notification: ${parsed.error}` });

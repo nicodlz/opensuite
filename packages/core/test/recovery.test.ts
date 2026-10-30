@@ -43,6 +43,28 @@ const body = (
     },
   });
 };
+// SES's setup test as observed in production: a Received notification
+// whose message ID is the marker, its object under the rule's prefix, and
+// without a DMARC verdict.
+const setupNotice = (options: { object?: string; bucket?: string } = {}) => {
+  const n = notification(
+    ["alice@example.test"],
+    "PASS",
+    "AMAZON_SES_SETUP_NOTIFICATION",
+  );
+  const { dmarcVerdict: _dmarc, ...receipt } = n.receipt;
+  return JSON.stringify({
+    ...n,
+    receipt: {
+      ...receipt,
+      action: {
+        ...receipt.action,
+        bucketName: options.bucket ?? "inbound",
+        objectKey: options.object ?? "AMAZON_SES_SETUP_NOTIFICATION",
+      },
+    },
+  });
+};
 const firehose = (...records: string[]) =>
   gzipSync(records.map((record) => `${record}\n`).join(""));
 
@@ -133,11 +155,7 @@ describe("recovery from the Firehose archive", () => {
         "not json",
         foreign,
         misdirected,
-        // SES publishes this when a topic is attached to a rule: no mail.
-        JSON.stringify({
-          notificationType: "AMAZON_SES_SETUP_NOTIFICATION",
-          receipt: {},
-        }),
+        setupNotice(),
       ),
       at: new Date("2026-10-30T10:00:00Z"),
     },
@@ -226,6 +244,38 @@ describe("recovery from the Firehose archive", () => {
       outsideWindow: 5,
       setup: 1,
       missing: 1,
+    });
+  });
+
+  it("counts SES's setup tests apart and every other invalid record as invalid", async () => {
+    const real = notification(["alice@example.test"], "PASS", "ses-z");
+    const { dmarcVerdict: _missing, ...partial } = real.receipt;
+    const broken = { ...real, receipt: partial };
+    const fake = fakeStore({
+      "metadata/s.gz": {
+        bytes: firehose(
+          setupNotice(),
+          // Under a nested rule prefix that is configured.
+          setupNotice({ object: "esuno/AMAZON_SES_SETUP_NOTIFICATION" }),
+          // The marker under an unknown prefix or bucket is not trusted.
+          setupNotice({ object: "other/AMAZON_SES_SETUP_NOTIFICATION" }),
+          setupNotice({ bucket: "elsewhere" }),
+          // Real mail missing a verdict stays an error to examine.
+          JSON.stringify(broken),
+        ),
+        at: new Date("2026-10-30T10:00:00Z"),
+      },
+    });
+    const report = await recoverFirehose(
+      fake.store,
+      { ...scope, objectPrefixes: ["", "esuno/"] },
+      { prefix: "metadata/", apply: false },
+    );
+    expect(report.isOk() && report.value).toMatchObject({
+      records: 5,
+      setup: 2,
+      invalid: 3,
+      notifications: 0,
     });
   });
 
