@@ -25,6 +25,7 @@ export const MailboxSchema = z.object({
 export const AttachmentSchema = z.object({
   id: IdSchema,
   blobId: IdSchema,
+  cid: z.string().optional(),
   name: z.string(),
   type: z.string(),
   size: z.number().int().nonnegative(),
@@ -34,6 +35,7 @@ export const MessageSchema = z.object({
   threadId: IdSchema,
   mailboxIds: z.array(IdSchema),
   from: AddressSchema,
+  replyTo: z.array(AddressSchema).optional(),
   to: z.array(AddressSchema),
   cc: z.array(AddressSchema),
   bcc: z.array(AddressSchema),

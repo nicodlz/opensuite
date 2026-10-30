@@ -93,8 +93,9 @@ const address = (item: { name: string | null; email: string }) => ({
   ...(item.name ? { name: item.name } : {}),
 });
 const addresses = (items: Email["from"]) => (items ?? []).map(address);
-const body = (email: Email, parts: Email["textBody"]) =>
+const body = (email: Email, parts: Email["textBody"], type: string) =>
   parts
+    .filter((part) => part.type.toLowerCase() === type)
     .map((part) =>
       part.partId === null ? "" : (email.bodyValues[part.partId]?.value ?? ""),
     )
@@ -109,6 +110,7 @@ const attachments = (email: Email) =>
           {
             id: part.partId ?? part.blobId,
             blobId: part.blobId,
+            ...(part.cid ? { cid: part.cid } : {}),
             name: part.name ?? "attachment",
             type: part.type,
             size: part.size,
@@ -127,6 +129,7 @@ function message(email: Email, boxes: Mailbox[], fallback: string): Message {
     threadId: email.threadId,
     mailboxIds,
     from,
+    replyTo: addresses(email.replyTo),
     to: addresses(email.to),
     cc: addresses(email.cc),
     bcc: addresses(email.bcc),
@@ -136,8 +139,8 @@ function message(email: Email, boxes: Mailbox[], fallback: string): Message {
     ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
     references: email.references ?? [],
     headers: email.headers,
-    htmlBody: body(email, email.htmlBody),
-    textBody: body(email, email.textBody),
+    htmlBody: body(email, email.htmlBody, "text/html"),
+    textBody: body(email, email.textBody, "text/plain"),
     attachments: attachments(email),
     unread: !email.keywords["$seen"],
     starred: Boolean(email.keywords["$flagged"]),
@@ -151,8 +154,8 @@ function draft(email: Email): Draft {
     cc: addresses(email.cc),
     bcc: addresses(email.bcc),
     subject: email.subject ?? "",
-    htmlBody: body(email, email.htmlBody),
-    textBody: body(email, email.textBody),
+    htmlBody: body(email, email.htmlBody, "text/html"),
+    textBody: body(email, email.textBody, "text/plain"),
     attachmentBlobIds: attachments(email).map((part) => part.blobId),
     ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
     references: email.references ?? [],

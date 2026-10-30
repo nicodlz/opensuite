@@ -2,6 +2,12 @@
 
 The production build serves Mail, Drive, Domains and API status through Caddy. Calendar and Contacts are placeholders. This checkout has no sign-in or MFA screens; see the [user guide](../../docs/user/index.md) for session and access limitations and [development](../../docs/development.md) for Compose provisioning status.
 
-From the repository root, `pnpm install && pnpm build` creates `apps/web/dist`. The Vite development server (`pnpm --filter @opensuite/web dev`) uses synthetic in-memory Mail and Drive data; changes disappear on reload. Production builds call the application and Drive APIs. Do not use synthetic data for real mail or files. Email HTML is sanitized and displayed in a sandboxed iframe; remote images require a per-message opt-in.
+The mail workspace at `/mail` uses the account-scoped oRPC contract in `packages/contracts/src/mail.ts`. The development server (`pnpm --filter @opensuite/web dev`) uses a synthetic in-memory mail router; its changes disappear on reload. The production build excludes that router and calls `/api/mail/*`. The production client uses the authenticated user’s `default` account. Never use the synthetic implementation for real mail.
 
-Run `pnpm exec playwright install chromium` once if needed, then `pnpm test:e2e`. Playwright starts the development server and a local API. Appearance and workspace label preferences are stored in the browser. See [contributing](../../CONTRIBUTING.md) for other checks.
+The development server starts with a synthetic signed-in session. After signing out, use `you@example.test` and `synthetic-password` to sign in. Its synthetic authenticator code is `123456` and its backup code is `backup-code`; these fixtures are excluded from production builds. Production sign-in uses Better Auth at `/api/auth/*`; account creation remains administrator-only.
+
+Email HTML is sanitized and displayed in a sandboxed iframe. Remote images require a per-message opt-in. Inline CID images use authenticated attachment downloads; other attachments can be saved as downloads. Drafts, actions and searches use the same typed contract as the future backend. Keyboard shortcuts are listed in the mail help menu.
+
+Run browser tests with `pnpm build && pnpm test:e2e`. Playwright starts the development server for synthetic mail and a local API on port 3199 for status tests. It checks the built production assets for fixture exclusion. Install Chromium with `pnpm exec playwright install chromium` if needed. The appearance preference and workspace label are stored in this browser.
+
+Drive uploads use presigned object-storage URLs, so the SPA CSP permits HTTP(S) connections in addition to same-origin API requests. Configure the object store’s CORS policy for the application origin.

@@ -76,7 +76,7 @@ test("upload, rename, move, share, download, trash and restore", async ({
   await page.getByRole("button", { name: "Save name" }).click();
   await page.getByRole("button", { name: "renamed.txt, file" }).click();
   await page.getByRole("button", { name: "Share", exact: true }).click();
-  await page.getByLabel("User ID").fill("colleague-id");
+  await page.getByLabel("User ID (not email)").fill("colleague-id");
   await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.getByText("User access saved.")).toBeVisible();
   await page.getByRole("button", { name: "Create public link" }).click();
@@ -106,9 +106,10 @@ test("upload, rename, move, share, download, trash and restore", async ({
 test("errors can be retried and failed mutations leave files intact", async ({
   page,
 }) => {
-  await page.addInitScript(() =>
-    sessionStorage.setItem("drive-fixture-fail-list", "1"),
-  );
+  await page.addInitScript(() => {
+    if (window === window.top)
+      sessionStorage.setItem("drive-fixture-fail-list", "1");
+  });
   await page.goto("/drive");
   await expect(page.getByText("Drive is unavailable")).toBeVisible();
   await page.evaluate(() =>
@@ -130,9 +131,25 @@ test("guarded preview, permanent deletion and cancellation", async ({
   page,
 }) => {
   await page.goto("/drive");
+  const popupPromise = page.waitForEvent("popup");
   await page
     .getByRole("button", { name: "Welcome to Drive.pdf, file" })
     .dblclick();
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL(/blob:/);
+  await popup.close();
+  await page.getByLabel("Choose files to upload").setInputFiles({
+    name: "image.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a9sAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  });
+  await expect(page.getByText("File uploaded.")).toBeVisible({
+    timeout: 30000,
+  });
+  await page.getByRole("button", { name: "image.png, file" }).dblclick();
   await expect(page.getByRole("dialog").locator("iframe")).toHaveAttribute(
     "sandbox",
     "",

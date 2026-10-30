@@ -1,3 +1,4 @@
+import { AccountMenu, expireSession } from "../auth/components.tsx";
 import * as React from "react";
 import { themeChoices, type ThemeChoice } from "@opensuite/design-tokens";
 import type {
@@ -412,6 +413,7 @@ export function MailPage() {
             </button>
           </div>
           <div className="mail-top-actions">
+            <AccountMenu />
             <Button
               variant="ghost"
               size="small"
@@ -1046,6 +1048,7 @@ async function download(blobId: string, name: string) {
   try {
     const { url } = await mailClient.download({ accountId, blobId });
     const response = await fetch(url);
+    if (response.status === 401) expireSession();
     if (!response.ok) throw new Error("Download failed");
     const objectUrl = URL.createObjectURL(
       new Blob([await response.blob()], { type: "application/octet-stream" }),
@@ -1066,10 +1069,65 @@ async function download(blobId: string, name: string) {
 function MessageView({ message }: { message: Message }) {
   const [images, setImages] = useState(false);
   const [attachmentError, setAttachmentError] = useState(false);
+  const [inlineImages, setInlineImages] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let cancelled = false;
+    const urls: string[] = [];
+    async function loadInline() {
+      const entries = await Promise.all(
+        message.attachments
+          .filter(
+            (part) =>
+              part.cid && /^image\/(png|jpeg|gif|webp)$/i.test(part.type),
+          )
+          .map(async (part) => {
+            try {
+              const { url } = await mailClient.download({
+                accountId,
+                blobId: part.blobId,
+              });
+              const target = new URL(url, window.location.origin);
+              if (
+                target.origin !== window.location.origin &&
+                target.protocol !== "blob:"
+              )
+                return null;
+              const response = await fetch(target);
+              if (response.status === 401) expireSession();
+              if (!response.ok) return null;
+              const objectUrl = URL.createObjectURL(
+                new Blob([await response.blob()], { type: part.type }),
+              );
+              if (cancelled) {
+                URL.revokeObjectURL(objectUrl);
+                return null;
+              }
+              urls.push(objectUrl);
+              return [
+                part.cid?.replace(/^<|>$/g, "") ?? "",
+                objectUrl,
+              ] satisfies [string, string];
+            } catch {
+              return null;
+            }
+          }),
+      );
+      if (!cancelled)
+        setInlineImages(
+          Object.fromEntries(entries.filter((entry) => entry !== null)),
+        );
+    }
+    void loadInline();
+    return () => {
+      cancelled = true;
+      for (const url of urls) URL.revokeObjectURL(url);
+    };
+  }, [message.attachments]);
   const sanitized = sanitizeEmail(
     message.htmlBody ||
       `<p>${escapeHtml(message.textBody).replaceAll("\n", "<br>")}</p>`,
     images,
+    inlineImages,
   );
   return (
     <article className="message">
@@ -1099,7 +1157,7 @@ function MessageView({ message }: { message: Message }) {
       )}
       <iframe
         title={`Message from ${message.from.name ?? message.from.email}`}
-        sandbox="allow-popups allow-popups-to-escape-sandbox"
+        sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
         referrerPolicy="no-referrer"
         srcDoc={sanitized.srcDoc}
         className="message-frame"

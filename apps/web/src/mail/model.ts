@@ -1,3 +1,4 @@
+import DOMPurify from "dompurify";
 import type {
   DraftContent,
   Message,
@@ -36,16 +37,20 @@ export function replyDraft(
   mode: "reply" | "all" | "forward",
   ownEmail = "",
 ): DraftContent {
+  const recipients = message.replyTo?.length ? message.replyTo : [message.from];
   const prefix = mode === "forward" ? "Fwd: " : "Re: ";
   return {
     ...emptyDraft(),
-    to: mode === "forward" ? [] : [message.from],
+    to: mode === "forward" ? [] : recipients,
     cc:
       mode === "all"
         ? [...message.to, ...message.cc].filter(
             (address) =>
               address.email.toLowerCase() !== ownEmail.toLowerCase() &&
-              address.email.toLowerCase() !== message.from.email.toLowerCase(),
+              !recipients.some(
+                (recipient) =>
+                  recipient.email.toLowerCase() === address.email.toLowerCase(),
+              ),
           )
         : [],
     subject: message.subject.startsWith(prefix)
@@ -53,7 +58,7 @@ export function replyDraft(
       : prefix + message.subject,
     ...(mode === "forward"
       ? {
-          textBody: `\n\n---------- Forwarded message ----------\nFrom: ${message.from.email}\nSubject: ${message.subject}\n\n${message.textBody}`,
+          textBody: `\n\n---------- Forwarded message ----------\nFrom: ${message.from.email}\nSubject: ${message.subject}\n\n${message.textBody || htmlToText(message.htmlBody)}`,
           attachmentBlobIds: message.attachments.map(
             (attachment) => attachment.blobId,
           ),
@@ -83,4 +88,20 @@ export function selectionReducer(
       ? Math.min(index + 1, action.threads.length - 1)
       : Math.max(index < 0 ? 0 : index - 1, 0);
   return action.threads[next]?.id ?? null;
+}
+
+function htmlToText(html: string) {
+  const doc = DOMPurify.sanitize(html, {
+    RETURN_DOM: true,
+    FORBID_TAGS: ["script", "style", "template", "img", "iframe"],
+  });
+  if (!(doc instanceof Element)) return "";
+  for (const element of doc.querySelectorAll("script, style, template"))
+    element.remove();
+  for (const element of doc.querySelectorAll("br")) element.replaceWith("\n");
+  for (const element of doc.querySelectorAll(
+    "p, div, li, tr, h1, h2, h3, h4, h5, h6",
+  ))
+    element.append("\n");
+  return doc.textContent.trim();
 }

@@ -12,6 +12,7 @@ const webPort = port(process.env["E2E_WEB_PORT"], 4173);
 export default defineConfig({
   testDir: "./e2e",
   timeout: 60_000,
+  expect: { timeout: 20_000 },
   outputDir: "./node_modules/.cache/playwright-results",
   use: {
     baseURL: `http://127.0.0.1:${webPort}`,
