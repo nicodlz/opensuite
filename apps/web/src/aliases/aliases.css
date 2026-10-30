@@ -1,0 +1,122 @@
+.alias-heading,
+.alias-section-heading,
+.alias-toolbar,
+.alias-row,
+.alias-actions,
+.alias-badges {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+.alias-section-heading {
+  align-items: flex-start;
+}
+.alias-toolbar {
+  align-items: end;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.alias-toolbar label,
+.alias-domain,
+.alias-form > label {
+  display: grid;
+  gap: 7px;
+  font-weight: 700;
+}
+.alias-toolbar input,
+.alias-toolbar select,
+.alias-domain select,
+.alias-form select,
+.alias-form textarea {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+  color: var(--foreground);
+  font: inherit;
+}
+.alias-toolbar label:first-child {
+  flex: 1 1 220px;
+}
+.alias-list {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+}
+.alias-row {
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+  align-items: flex-start;
+}
+.alias-details {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.alias-details p {
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+.alias-badges {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.alias-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.alias-domain {
+  max-width: 320px;
+  margin-top: 16px;
+}
+.alias-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 20px;
+}
+.alias-form fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.alias-form legend {
+  font-weight: 700;
+}
+.alias-form textarea {
+  width: 100%;
+  resize: vertical;
+  overflow-wrap: anywhere;
+}
+.alias-notice,
+.alias-error {
+  display: block;
+  margin: 12px 0;
+}
+.alias-error {
+  color: var(--foreground);
+}
+.alias-instructions {
+  padding-left: 22px;
+  margin: 16px 0 0;
+  line-height: 1.6;
+}
+.alias-instructions li + li {
+  margin-top: 8px;
+}
+.alias-instructions code,
+.alias-confirm-address {
+  overflow-wrap: anywhere;
+}
+.alias-confirm-address {
+  margin-top: 16px;
+}
+@media (max-width: 600px) {
+  .alias-heading,
+  .alias-section-heading,
+  .alias-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

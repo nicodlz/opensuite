@@ -524,6 +524,17 @@ const passClientsRoute = createRoute({
     </Protected>
   ),
 });
+const passAliasesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/pass/aliases",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <PassPage page="aliases" />
+      </Lazy>
+    </Protected>
+  ),
+});
 const domainsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/domains",
@@ -566,6 +577,7 @@ const router = createRouter({
     passRoute,
     passGeneratorRoute,
     passClientsRoute,
+    passAliasesRoute,
     domainsRoute,
     setupRoute,
   ]),
