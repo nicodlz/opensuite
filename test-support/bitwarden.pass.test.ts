@@ -207,11 +207,18 @@ async function register(
     {
       channel: "chromium",
       headless: true,
+      // The web vault is localized; the selectors below use English labels.
+      locale: "en-US",
       args: [
         `--ignore-certificate-errors-spki-list=${pin}`,
         "--host-resolver-rules=MAP pass.localhost 127.0.0.1",
       ],
-      env: { ...process.env, TMPDIR: temp },
+      env: {
+        ...process.env,
+        LANG: "en_US.UTF-8",
+        LANGUAGE: "en",
+        TMPDIR: temp,
+      },
     },
   );
   context.setDefaultTimeout(90_000);
