@@ -188,8 +188,33 @@ describe("PostgreSQL schema and adapters", () => {
     const owned = await store.getForOwner(owner, accountId);
     expect(owned.isOk() ? owned.value.secret : undefined).toBe(secret);
     expect((await store.getForOwner(other, accountId)).isErr()).toBe(true);
+    // Server-side delivery reads it by account, only while it is usable.
+    const delivered = await store.getForAccount(accountId);
+    expect(delivered.isOk() && delivered.value).toEqual({
+      address: `${owner}@example.test`,
+      secret,
+    });
+    const kind = async (id: string, using = store) => {
+      const result = await using.getForAccount(id);
+      return result.isErr() ? result.error.kind : "ok";
+    };
+    expect(await kind("")).toBe("invalid_input");
+    expect(await kind(`missing-${randomUUID()}`)).toBe("not_found");
+    const wrongKey = createMailboxStore(db, "cd".repeat(32));
+    if (wrongKey.isErr()) throw new Error(wrongKey.error.message);
+    expect(await kind(accountId, wrongKey.value)).toBe("crypto_error");
+    await db.mailboxLink.update({
+      where: { userId: owner },
+      data: { status: "disabling" },
+    });
+    expect(await kind(accountId)).toBe("not_found");
+    await db.mailboxLink.update({
+      where: { userId: owner },
+      data: { status: "active" },
+    });
     await db.user.update({ where: { id: owner }, data: { disabled: true } });
     expect((await store.getForOwner(owner, accountId)).isErr()).toBe(true);
+    expect(await kind(accountId)).toBe("not_found");
   });
   it("applies migrations from an empty database and records their checksums", async () => {
     const rows = z
@@ -580,6 +605,17 @@ describe("alias reservations", () => {
     });
     const inactive = await store.routes([full]);
     expect(inactive.isOk() && inactive.value).toEqual([]);
+    // A mailbox's primary address routes without an address record, until
+    // its user is disabled.
+    const primary = `${owner}@example.test`.toLowerCase();
+    const routed = await store.routes([primary.toUpperCase()]);
+    expect(routed.isOk() && routed.value).toEqual([
+      { address: primary, destination: suffix },
+    ]);
+    await db.user.update({ where: { id: owner }, data: { disabled: true } });
+    const disabled = await store.routes([primary]);
+    expect(disabled.isOk() && disabled.value).toEqual([]);
+    await db.user.update({ where: { id: owner }, data: { disabled: false } });
     const tombstoneBlocked = await store.beginRemoval(domain.id);
     expect(tombstoneBlocked.isOk() && tombstoneBlocked.value).toBe(false);
     await expect(

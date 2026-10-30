@@ -262,42 +262,80 @@ export const createDomainStore = (db: PrismaClient) => ({
       failure,
     );
   },
+  /**
+   * Routes for active mailboxes: their primary address, which exists for
+   * every provisioned mailbox, and their enabled address records. An address
+   * claimed by two mailboxes gets no route, so its mail is held.
+   */
   routes(addresses: string[]) {
-    return ResultAsync.fromPromise(
-      db.address
-        .findMany({
-          where: {
-            user: { disabled: false, mailbox: { status: "active" } },
-            OR: [
-              { emailAlias: null },
-              {
-                emailAlias: {
-                  is: {
-                    enabled: true,
-                    ready: true,
-                    deletedAt: null,
-                    domain: { status: "verified" },
-                  },
+    const wanted = new Set(addresses.map((value) => value.toLowerCase()));
+    const primary = db.mailboxLink
+      .findMany({
+        where: {
+          address: { in: [...wanted], mode: "insensitive" },
+          status: "active",
+          user: { disabled: false },
+        },
+        select: { address: true, accountId: true },
+      })
+      .then((rows) =>
+        rows.map((row) => ({
+          address: row.address.toLowerCase(),
+          destination: row.accountId,
+        })),
+      );
+    const recorded = db.address
+      .findMany({
+        where: {
+          user: { disabled: false, mailbox: { status: "active" } },
+          OR: [
+            { emailAlias: null },
+            {
+              emailAlias: {
+                is: {
+                  enabled: true,
+                  ready: true,
+                  deletedAt: null,
+                  domain: { status: "verified" },
                 },
               },
-            ],
-          },
-          select: {
-            localPart: true,
-            domain: { select: { name: true } },
-            user: { select: { mailbox: { select: { accountId: true } } } },
-          },
-        })
-        .then((rows) => {
-          const wanted = new Set(addresses.map((value) => value.toLowerCase()));
-          return rows.flatMap((row) => {
-            const address = `${row.localPart}@${row.domain.name}`.toLowerCase();
-            const destination = row.user.mailbox?.accountId;
-            return wanted.has(address) && destination !== undefined
-              ? [{ address, destination }]
-              : [];
-          });
+            },
+          ],
+        },
+        select: {
+          localPart: true,
+          domain: { select: { name: true } },
+          user: { select: { mailbox: { select: { accountId: true } } } },
+        },
+      })
+      .then((rows) =>
+        rows.flatMap((row) => {
+          const address = `${row.localPart}@${row.domain.name}`.toLowerCase();
+          const destination = row.user.mailbox?.accountId;
+          return wanted.has(address) && destination !== undefined
+            ? [{ address, destination }]
+            : [];
         }),
+      );
+    return ResultAsync.fromPromise(
+      Promise.all([primary, recorded]).then(([links, rows]) => {
+        const found = [...links, ...rows].reduce(
+          (map, route) =>
+            map.set(
+              route.address,
+              (map.get(route.address) ?? new Set<string>()).add(
+                route.destination,
+              ),
+            ),
+          new Map<string, Set<string>>(),
+        );
+        return [...found].flatMap(([address, destinations]) => {
+          const [destination, ...others] = destinations;
+          return destination !== undefined && others.length === 0
+            ? [{ address, destination }]
+            : [];
+        });
+      }),
       failure,
     );
   },

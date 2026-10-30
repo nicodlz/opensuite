@@ -325,8 +325,9 @@ successful imports, and its own archive does not protect events never received.
 The regional [SES endpoint list](https://docs.aws.amazon.com/general/latest/gr/ses.html)
 includes `eu-north-1` receiving. Do not change the MX yet.
 
-For each provisioned mailbox, obtain its account ID without exposing its
-application credential. The query below assumes the default PostgreSQL user
+Linked mailboxes need no destination (see below). To deliver a mailbox
+instead with a separate inbound app password, obtain its account ID without
+exposing its application credential. The query below assumes the default PostgreSQL user
 and database names; substitute the values in `.env` if changed:
 
 ```sh
@@ -373,20 +374,45 @@ INGEST_ROUTES='[{"address":"user@example.com","destination":"ACCOUNT_ID"}]'
 INGEST_DESTINATIONS='[{"id":"ACCOUNT_ID","origin":"http://stalwart:8080","authorization":"Basic <encoded-credential>","quarantineMailbox":"JUNK_ID","rewriteSessionUrls":true}]'
 ```
 
-Add a static route for each independently configured mailbox address and one
+Mailboxes created in the admin console, with their addresses, aliases and
+domain addresses, need no entry: Compose gives the worker the mailbox key
+(`MAILBOX_KEY_FILE`) and the internal Stalwart origin
+(`INGEST_MAILBOX_ORIGIN`), and it delivers with each mailbox's stored
+credential, read at every connection. Each mailbox's primary address is
+routed, as well as its addresses and aliases. Held mail for a new mailbox is
+delivered by the next replay, and the first deployment with linked delivery
+may at once deliver older mail that waited with `Destination is not
+configured` or was held for a primary address within `INGEST_HOLD_DAYS`. That credential is the one the API
+uses, not a separate inbound app password: the key opens every mailbox with
+full access, so the worker must stay on the private network, without a
+published port, and its logs and environment remain restricted. Compose's
+`environment` overrides `deploy/ingest.env`; to turn linked delivery off, set
+`INGEST_MAILBOX_KEY_FILE=` and `INGEST_MAILBOX_ORIGIN=` (both empty) in
+`.env` and recreate the worker. Alert on repeated
+`Destination lookup failed` or JMAP 401 errors, and if Stalwart rate-limits
+or bans failed authentication, exempt the worker's network: every delivery
+comes from its address, so one stale credential must not block the others.
+`INGEST_ROUTES` and `INGEST_DESTINATIONS` are optional, for mailboxes
+delivered with a separate inbound app password; a static destination takes
+precedence over a linked mailbox with the same account ID and keeps
+receiving if that mailbox is disabled, until it is removed. For them, add a
+static route for each independently configured mailbox address and one
 destination per mailbox. Managed aliases resolve from the database; do not add
-them to `INGEST_ROUTES`, because static routes can bypass alias disablement.
-Every static route's `destination` must match a destination's `id`; each alias
-owner's mailbox must also have an `INGEST_DESTINATIONS` entry. See
-[alias inbound behavior](../architecture/aliases.md#inbound-behavior-and-limits). Protect and
-back up these files; safely delete the intermediate destination file after use.
-The exact schema, permission requirements, ambiguity handling and replay
-procedure are in [ingestion](../architecture/ingestion.md). Maintain routes
-and credentials whenever accounts change; signup does not update them. After
-adding a destination, recreate the worker with
+them to `INGEST_ROUTES`, because static routes can bypass alias disablement
+(see [alias inbound behavior](../architecture/aliases.md#inbound-behavior-and-limits)).
+Every static route's `destination` must match a destination's `id`, which is
+the Stalwart account ID. Changing them requires recreating the worker with
 `docker compose --profile ingest up -d ingest` (a plain restart keeps the old
-environment); held mail for the new mailbox is then delivered by the next
-replay. Start and check `docker compose --profile ingest up -d --build ingest`. Install the replay timer after configuring backups below. Alert on replay
+environment). Before upgrading to linked delivery, compare each static entry
+with `SELECT address, "accountId" FROM "MailboxLink";`: a static route must
+name the same account as the database for that address, or the message fails
+with `Conflicting recipient routes`, and a static destination's `id` must be
+the account its credential opens, or delivery fails with `Destination
+credential is for another account`. Neither loses mail; both block it until
+corrected. Protect and back up these files; safely delete the intermediate
+destination file after use. The exact schema, permission requirements,
+ambiguity handling and replay procedure are in
+[ingestion](../architecture/ingestion.md). Start and check `docker compose --profile ingest up -d --build ingest`. Install the replay timer after configuring backups below. Alert on replay
 failures. Verify destination credentials
 and quarantine mailboxes before allowing production traffic.
 
@@ -469,6 +495,13 @@ archive retention exceeds `INGEST_HOLD_DAYS`.
 
 ## Rollback
 
+To return to a worker release that has held recipients but not linked
+delivery, no ledger conversion is needed: roll back the image together with
+`compose.yaml` and keep a static route and destination for every mailbox
+that must keep receiving. Recipients of other mailboxes then wait with
+`Destination is not configured`, and mail for primary addresses without an
+address record is held again, until linked delivery returns.
+
 Before running a worker release that predates held recipients, convert the
 ledger to states that release knows (procedure checked against the previous
 release's ledger on PostgreSQL). Older code fails on any message that has a
@@ -481,7 +514,8 @@ dead-letter queue after its retries:
 
    ```sh
    systemctl stop opensuite-replay.timer        # no new scheduled replay
-   while systemctl is-active --quiet opensuite-replay.service; do sleep 30; done
+   # A running oneshot replay is "activating", not "active".
+   while [ "$(systemctl is-active opensuite-replay.service)" = activating ]; do sleep 30; done
    docker compose --profile ingest stop ingest  # SIGTERM; the worker drains
    docker ps --filter label=com.docker.compose.service=ingest   # must list none
    ```
@@ -490,10 +524,9 @@ dead-letter queue after its retries:
    operator commands; wait for them too. Leave the queues in place.
 
 2. With the current release, finish every held recipient: list them with
-   `operator list held`, then provision the address (a new mailbox also needs
-   its `INGEST_DESTINATIONS` entry) and run `deploy/ingest/replay.sh` once by
-   hand, or reject them, until the list is empty. Wait for that replay to
-   exit and repeat the checks of step 1.
+   `operator list held`, then provision the address and run
+   `deploy/ingest/replay.sh` once by hand, or reject them, until the list is
+   empty. Wait for that replay to exit and repeat the checks of step 1.
 3. Take a backup (`deploy/backup/backup.sh`, or at least a `pg_dump` of the
    ledger tables). Then relabel routed rows in one transaction that records
    each change in the append-only `InboundResolutionAudit` table, while holding
@@ -501,11 +534,12 @@ dead-letter queue after its retries:
    (`flock -n` fails instead of waiting if one is running):
 
    ```sh
-   set -a; . ./.env; . /etc/opensuite/backup.conf; set +a
-   docker ps -q --filter label=com.docker.compose.service=ingest   # must print nothing
-   flock -n "$BACKUP_SCRATCH/opensuite-backup.lock" \
-     docker compose exec -T -e PGPASSWORD="$(docker compose exec -T postgres cat /run/opensuite/postgres/password)" \
-     postgres psql -h localhost -U "${POSTGRES_USER:-opensuite}" -d "${POSTGRES_DB:-opensuite}" -v ON_ERROR_STOP=1 < rollback-relabel.sql
+   . /etc/opensuite/backup.conf
+   { [ -z "$(docker ps -q --filter label=com.docker.compose.service=ingest)" ] &&
+     flock -n "${BACKUP_SCRATCH:?}/opensuite-backup.lock" \
+       docker compose exec -T postgres \
+       sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' < rollback-relabel.sql; } ||
+     echo 'ingest running, lock held or SQL failed: relabel NOT applied' >&2
    ```
 
    with `rollback-relabel.sql` containing:
@@ -529,10 +563,18 @@ dead-letter queue after its retries:
    says nothing about delivery: that destination recipient keeps its own
    state (`received`, `failed`, `importing`, `uncertain`, `imported` or
    `quarantined`), which this statement leaves unchanged and which the older
-   release processes as usual. Check those destination recipients before and
+   release processes as usual if it has a static destination for it (step
+   4). Check those destination recipients before and
    after, for example with `operator list` and the rows of the same messages.
 
-4. Start the older worker and re-enable the replay timer. The worker then
+4. The older release delivers only to static destinations and requires at
+   least one. Before starting it, make sure `deploy/ingest.env` has a
+   non-empty `INGEST_DESTINATIONS` with a route and destination for every
+   mailbox that must keep receiving (see the `management ingest` helper
+   above); recipients for other mailboxes, including rerouted ones, stay
+   failed with their buffer kept until a release with linked delivery
+   returns. Roll back `compose.yaml` with the image.
+5. Start the older worker and re-enable the replay timer. The worker then
    processes the queue backlog, any redrive and unfinished destination
    recipients; mail for unknown recipients is again rejected and its object
    deleted once the other recipients finish.

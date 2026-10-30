@@ -80,5 +80,30 @@ export const createMailboxStore = (client: PrismaClient, key: unknown) => {
           }));
       });
     },
+    /** Credential of an active mailbox for server-side delivery into it. */
+    getForAccount(accountId: string) {
+      const parsed = Lookup.shape.accountId.safeParse(accountId);
+      if (!parsed.success)
+        return errAsync<never, DatabaseError>({
+          kind: "invalid_input",
+          message: "invalid mailbox lookup",
+        });
+      return ResultAsync.fromPromise(
+        client.mailboxLink.findFirst({
+          where: {
+            accountId: parsed.data,
+            status: "active",
+            user: { disabled: false },
+          },
+        }),
+        databaseFailure,
+      ).andThen((row) => {
+        if (row === null)
+          return err({ kind: "not_found", message: "mailbox not found" });
+        return box.value
+          .decrypt(row.secret, { userId: row.userId, id: row.accountId })
+          .map((secret) => ({ address: row.address, secret }));
+      });
+    },
   });
 };

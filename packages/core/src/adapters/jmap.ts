@@ -3,12 +3,25 @@ import { JmapCapability, JmapClient } from "@opensuite/jmap";
 import { err, ok, type Result } from "neverthrow";
 import type { Delivery, Failure } from "../ingest/contracts.ts";
 
+/** `id` is the Stalwart account ID; a credential for another account is refused. */
 export interface Destination {
   id: string;
   origin: string;
   authorization: string;
-  quarantineMailbox: string;
+  /** Without one, quarantine goes to the account's junk mailbox. */
+  quarantineMailbox?: string;
   rewriteSessionUrls?: boolean;
+}
+/**
+ * Mailboxes added after start-up. The credential is looked up for every
+ * connection, so a disabled mailbox stops receiving at once; it is used only
+ * if it authenticates as exactly the requested account.
+ */
+export interface LinkedMailboxes {
+  origin: string;
+  credential(
+    accountId: string,
+  ): PromiseLike<Result<{ address: string; secret: string }, { kind: string }>>;
 }
 const keyword = (key: string) => `opensuite-${key}`;
 const receivedDate = (value: string) =>
@@ -27,11 +40,36 @@ const messageId = (bytes: Uint8Array) => {
   const match = /(?:^|\r?\n)message-id:\s*<([^<>\r\n]+)>/i.exec(head);
   return match?.[1];
 };
-export function jmapDelivery(destinations: Destination[]): Delivery {
-  const connect = async (destination: string, quarantine = false) => {
+export function jmapDelivery(
+  destinations: Destination[],
+  linked?: LinkedMailboxes,
+): Delivery {
+  const resolve = async (
+    destination: string,
+  ): Promise<Result<Destination, Failure>> => {
     const config = destinations.find((item) => item.id === destination);
-    if (config === undefined)
+    if (config !== undefined) return ok(config);
+    if (linked === undefined)
       return err({ message: "Destination is not configured" });
+    const credential = await linked.credential(destination);
+    if (credential.isErr())
+      return err({
+        message:
+          credential.error.kind === "not_found"
+            ? "Destination is not configured"
+            : `Destination lookup failed: ${credential.error.kind}`,
+      });
+    return ok({
+      id: destination,
+      origin: linked.origin,
+      authorization: `Basic ${Buffer.from(`${credential.value.address}:${credential.value.secret}`).toString("base64")}`,
+      rewriteSessionUrls: true,
+    });
+  };
+  const connect = async (destination: string, quarantine = false) => {
+    const resolved = await resolve(destination);
+    if (resolved.isErr()) return err(resolved.error);
+    const config = resolved.value;
     const client = new JmapClient(config.origin, {
       authorization: config.authorization,
       ...(config.rewriteSessionUrls === true
@@ -46,14 +84,24 @@ export function jmapDelivery(destinations: Destination[]): Delivery {
     const account = session.value.primaryAccounts[JmapCapability.mail];
     if (account === undefined)
       return err({ message: "No primary mail account" });
+    if (account !== destination)
+      return err({ message: "Destination credential is for another account" });
     const boxes = await client.mailboxes(session.value, account);
     if (boxes.isErr())
       return err({ message: `JMAP mailboxes: ${JSON.stringify(boxes.error)}` });
     const mailbox = boxes.value.list.find((box) =>
-      quarantine ? box.id === config.quarantineMailbox : box.role === "inbox",
+      quarantine
+        ? config.quarantineMailbox === undefined
+          ? box.role === "junk"
+          : box.id === config.quarantineMailbox
+        : box.role === "inbox",
     );
     if (mailbox === undefined)
-      return err({ message: "Destination mailbox missing" });
+      return err({
+        message: quarantine
+          ? "Quarantine mailbox missing"
+          : "Destination mailbox missing",
+      });
     return ok({
       client,
       session: session.value,
