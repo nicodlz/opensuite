@@ -29,7 +29,6 @@ beforeAll(async () => {
     await run("docker", [
       "run",
       "-d",
-      "--rm",
       "--name",
       container,
       "-e",
@@ -70,14 +69,14 @@ beforeAll(async () => {
     if (client.isErr()) throw new Error("database unavailable");
     db = client.value;
   } catch (error) {
-    await run("docker", ["rm", "-f", container]).catch(() => undefined);
+    await run("docker", ["rm", "-fv", container]).catch(() => undefined);
     throw error;
   }
 }, 180_000);
 afterAll(async () => {
   // oxlint-disable-next-line typescript/no-unnecessary-condition
   await db?.$disconnect();
-  await run("docker", ["rm", "-f", container]).catch(() => undefined);
+  await run("docker", ["rm", "-fv", container]).catch(() => undefined);
 }, 60_000);
 
 it("uses current Stripe state for duplicate and out-of-order subscription events", async () => {

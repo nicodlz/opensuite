@@ -17,6 +17,14 @@ describe("reserved mailbox names", () => {
       "support",
       "legal",
       "mailer-daemon",
+      "noc",
+      "marketing",
+      "usenet",
+      "news",
+      "uucp",
+      "autoconfig",
+      "autodiscover",
+      `os-${"a".repeat(32)}`,
     ])
       expect(isReservedMailLocalPart(name)).toBe(true);
     expect(isReservedMailLocalPart("member")).toBe(false);

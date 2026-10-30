@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { ok } from "neverthrow";
+import { createAliasSendGuard } from "../src/adapters/alias-mail.ts";
 import { createAliasLimiter, networkBucket } from "../src/auth/alias-limits.ts";
 
 describe("alias limits", () => {
@@ -42,4 +44,30 @@ describe("alias limits", () => {
     expect(limits.mutate("user")).toBe(false);
     expect(limits.mutate("another")).toBe(true);
   });
+});
+
+it("uses one send budget and the appropriate audit for aliases and mailbox addresses", async () => {
+  const audit: string[] = [];
+  const guard = createAliasSendGuard(
+    {
+      auditSubmission: (userId, id) => {
+        audit.push(`alias:${userId}:${id}`);
+        return Promise.resolve(ok(undefined));
+      },
+    },
+    (userId, id) => {
+      audit.push(`address:${userId}:${id}`);
+      return Promise.resolve(ok(undefined));
+    },
+  );
+  /* oxlint-disable eslint/no-await-in-loop */
+  for (let i = 0; i < 30; i++)
+    expect(await guard("owner", i % 2 ? "alias:hide" : "address:extra")).toBe(
+      true,
+    );
+  /* oxlint-enable eslint/no-await-in-loop */
+  expect(await guard("owner", "address:extra")).toBe(false);
+  expect(audit).toHaveLength(30);
+  expect(audit).toContain("alias:owner:hide");
+  expect(audit).toContain("address:owner:extra");
 });

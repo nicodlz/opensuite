@@ -752,12 +752,103 @@ it("resolves a ready mailbox address for sign-in while excluding hide-my-email a
           isAlias: false,
           mailboxManaged: true,
           ready: true,
+          active: true,
         },
         {
           userId: id,
           domainId: domain.id,
           localPart: "extra-login-hidden",
           isAlias: true,
+        },
+        {
+          userId: id,
+          domainId: domain.id,
+          localPart: "extra-pending",
+          mailboxManaged: true,
+          ready: false,
+          active: false,
+        },
+        {
+          userId: id,
+          domainId: domain.id,
+          localPart: "extra-removing",
+          mailboxManaged: true,
+          ready: true,
+          active: true,
+          removalPending: true,
+        },
+      ],
+    });
+    const disabledId = `${id}-disabled`;
+    const otherId = `${id}-other`;
+    const primaryId = `${id}-primary`;
+    await owner.value.user.createMany({
+      data: [
+        {
+          id: disabledId,
+          name: "Disabled",
+          email: "disabled-owner@example.test",
+          disabled: true,
+        },
+        { id: otherId, name: "Other", email: "other-owner@example.test" },
+        {
+          id: primaryId,
+          name: "Primary",
+          email: "extra-precedence@example.test",
+        },
+      ],
+    });
+    await owner.value.mailboxLink.createMany({
+      data: [disabledId, otherId].map((targetId) => ({
+        userId: targetId,
+        accountId: `account-${targetId}`,
+        address: `${targetId}@example.test`,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+      })),
+    });
+    const blockedDomain = await owner.value.domain.create({
+      data: {
+        userId: id,
+        name: "removing-domain.test",
+        status: "verified",
+        stalwartId: "blocked-domain",
+        removalPending: true,
+      },
+    });
+    await owner.value.address.createMany({
+      data: [
+        {
+          userId: disabledId,
+          domainId: domain.id,
+          localPart: "disabled-extra",
+          mailboxManaged: true,
+          ready: true,
+          active: true,
+        },
+        {
+          userId: otherId,
+          domainId: domain.id,
+          localPart: "other-extra",
+          mailboxManaged: true,
+          ready: true,
+          active: true,
+        },
+        {
+          userId: id,
+          domainId: domain.id,
+          localPart: "extra-precedence",
+          mailboxManaged: true,
+          ready: true,
+          active: true,
+        },
+        {
+          userId: id,
+          domainId: blockedDomain.id,
+          localPart: "domain-extra",
+          mailboxManaged: true,
+          ready: true,
+          active: true,
         },
       ],
     });
@@ -771,19 +862,67 @@ it("resolves a ready mailbox address for sign-in while excluding hide-my-email a
       email: "extra-login-hidden@example.test",
       password: extraAccount.password,
     });
+    const unknownStarted = performance.now();
     const unknown = await post("/auth/sign-in/email", {
       email: "unknown-extra@example.test",
       password: extraAccount.password,
     });
+    const unknownMs = performance.now() - unknownStarted;
+    const wrongStarted = performance.now();
     const wrong = await post("/auth/sign-in/email", {
       email: extraAccount.email,
       password: "wrong-password-123",
     });
+    const wrongMs = performance.now() - wrongStarted;
+    // Both paths perform password work; this is a class check, not a timing guarantee.
+    expect(unknownMs).toBeGreaterThan(5);
+    expect(wrongMs).toBeGreaterThan(5);
     expect([rejectedAlias.status, unknown.status, wrong.status]).toEqual([
       401, 401, 401,
     ]);
     expect(await rejectedAlias.json()).toEqual(await unknown.clone().json());
-    expect(await unknown.json()).toEqual(await wrong.json());
+    expect(await unknown.clone().json()).toEqual(await wrong.clone().json());
+    const baselineBody = await unknown.json();
+    // Exercise real authentication serially to keep the rate limit deterministic.
+    /* oxlint-disable eslint/no-await-in-loop */
+    for (const email of [
+      "extra_login_alt@example.test",
+      "_____@example.test",
+      "extra-pending@example.test",
+      "extra-removing@example.test",
+      "disabled-extra@example.test",
+      "other-extra@example.test",
+      "extra-precedence@example.test",
+      "domain-extra@removing-domain.test",
+    ]) {
+      const rejected = await post("/auth/sign-in/email", {
+        email,
+        password: extraAccount.password,
+      });
+      expect(rejected.status).toBe(401);
+      for (const header of [
+        "content-type",
+        "cache-control",
+        "www-authenticate",
+        "set-cookie",
+      ])
+        expect(rejected.headers.get(header)).toBe(wrong.headers.get(header));
+      expect(await rejected.json()).toEqual(baselineBody);
+    }
+    /* oxlint-enable eslint/no-await-in-loop */
+    const wrongResolved = await post("/auth/sign-in/email", {
+      email: "extra-login-alt@example.test",
+      password: "wrong-password-123",
+    });
+    expect(wrongResolved.status).toBe(401);
+    for (const header of [
+      "content-type",
+      "cache-control",
+      "www-authenticate",
+      "set-cookie",
+    ])
+      expect(wrongResolved.headers.get(header)).toBe(wrong.headers.get(header));
+    expect(await wrongResolved.json()).toEqual(baselineBody);
     const enabled = await post(
       "/auth/two-factor/enable",
       { password: extraAccount.password },

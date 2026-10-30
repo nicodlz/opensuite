@@ -13,6 +13,7 @@ async function mockAddresses(page: Page) {
       primary: true,
       ready: true,
       removing: false,
+      pending: false,
     },
   ];
   await page.route("**/api/addresses**", async (route) => {
@@ -35,6 +36,7 @@ async function mockAddresses(page: Page) {
         primary: false,
         ready: true,
         removing: false,
+        pending: false,
       });
       return route.fulfill({ json: rows.at(-1) });
     }
@@ -92,4 +94,67 @@ test("mobile settings and sign in with an extra address", async ({ page }) => {
   await page.getByLabel("Password", { exact: true }).fill("synthetic-password");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).toHaveURL(/\/mail/);
+});
+
+test("refreshes pending addresses after a provisioning delay", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    sessionStorage.setItem("addresses-fixture", "live"),
+  );
+  let created = false;
+  let polls = 0;
+  await page.route("**/api/addresses**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/domains"))
+      return route.fulfill({ json: [{ id: "d1", name: "esuno.net" }] });
+    if (route.request().method() === "POST") {
+      created = true;
+      return route.fulfill({
+        json: {
+          id: "extra",
+          address: "slow@esuno.net",
+          primary: false,
+          ready: false,
+          pending: true,
+          removing: false,
+        },
+      });
+    }
+    if (created) polls++;
+    return route.fulfill({
+      json: {
+        addresses: [
+          {
+            id: "primary",
+            address: "you@esuno.net",
+            primary: true,
+            ready: true,
+            pending: false,
+            removing: false,
+          },
+          ...(created
+            ? [
+                {
+                  id: "extra",
+                  address: "slow@esuno.net",
+                  primary: false,
+                  ready: polls > 1,
+                  pending: polls <= 1,
+                  removing: false,
+                },
+              ]
+            : []),
+        ],
+        limit: 5,
+        remaining: created ? 3 : 4,
+      },
+    });
+  });
+  await page.goto("/settings/addresses");
+  await page.getByLabel("Address name").fill("slow");
+  await page.getByRole("button", { name: "Add address" }).click();
+  const row = page.getByRole("listitem").filter({ hasText: "slow@esuno.net" });
+  await expect(row).toContainText("Pending");
+  await expect(row).toContainText("Ready", { timeout: 15_000 });
 });

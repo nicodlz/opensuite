@@ -34,8 +34,14 @@ const reservedMailLocalParts = new Set([
   "help",
   "operator",
   "staff",
+  "marketing",
+  "uucp",
 ]);
 
 export function isReservedMailLocalPart(localPart: string): boolean {
-  return reservedMailLocalParts.has(localPart.trim().toLowerCase());
+  const normalized = localPart.trim().toLowerCase();
+  return (
+    reservedMailLocalParts.has(normalized) ||
+    /^os-[0-9a-f]{32}$/.test(normalized)
+  );
 }

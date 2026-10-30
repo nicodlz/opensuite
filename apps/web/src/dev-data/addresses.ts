@@ -27,12 +27,14 @@ export const fakeAddresses: ContractRouterClient<typeof addressesContract> = {
           primary: true,
           ready: true,
           removing: false,
+          pending: false,
         },
         ...rows.map((row) => ({
           ...row,
           primary: false,
           ready: true,
           removing: false,
+          pending: false,
         })),
       ],
       limit: 5,
@@ -54,7 +56,13 @@ export const fakeAddresses: ContractRouterClient<typeof addressesContract> = {
     if (rows.length >= 4) throw new ORPCError("ADDRESS_LIMIT_REACHED");
     const row = { id: crypto.randomUUID(), address };
     save([...rows, row]);
-    return { ...row, primary: false, ready: true, removing: false };
+    return {
+      ...row,
+      primary: false,
+      ready: true,
+      removing: false,
+      pending: false,
+    };
   },
   remove({ id }) {
     const rows = entries();

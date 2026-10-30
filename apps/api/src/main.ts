@@ -226,6 +226,8 @@ const addressStore = createAddressStore(
   database.value,
   authConfig.value.mailDomains,
 );
+const addressState = await addressStore.markChanged();
+if (addressState.isErr()) throw new Error("address state unavailable");
 const addressAdmin = new StalwartAdmin(
   authConfig.value.stalwartOrigin,
   {
@@ -250,11 +252,16 @@ const addresses = createAddressService(
       if (domain.isErr()) throw new Error("domain provisioning failed");
       return domain.value.id;
     });
-    return result.isErr() ? err(result.error) : ok(undefined);
+    return result.isErr() || result.value > 0
+      ? err({ kind: "unavailable" })
+      : ok(undefined);
   },
   authConfig.value.mailDomains,
 );
-const createAliasGuard = createAliasSendGuard(aliases);
+const createAliasGuard = createAliasSendGuard(
+  aliases,
+  addresses.auditSubmission,
+);
 const mail = createMailService({
   store: {
     getForOwner: async (userId, accountId) =>
@@ -267,10 +274,7 @@ const mail = createMailService({
     const found = await addresses.canSendAs(userId, address);
     return found.isOk() && found.value ? `address:${found.value}` : null;
   },
-  beforeAliasSend: async (userId, id) =>
-    id.startsWith("address:")
-      ? true
-      : createAliasGuard(userId, id.slice("alias:".length)),
+  beforeAliasSend: createAliasGuard,
 });
 const calendar = createCalendarService({
   store: {
@@ -403,6 +407,7 @@ const stopDomainJob =
         domains,
         process.env["DOMAINS_CHECK_INTERVAL_SECONDS"],
         () => app.log.warn("domain verification failed"),
+        authConfig.value.mailDomains,
       );
 const stopCalendarReminders =
   push === undefined
@@ -421,6 +426,9 @@ const stopCalendarReminders =
 let running: Promise<void> | undefined;
 const work = async () => {
   try {
+    const configuredResult = await addresses.ensureDomains();
+    if (configuredResult.isErr())
+      app.log.warn("configured address domains incomplete");
     const addressResult = await addresses.reconcile();
     if (addressResult.isErr() || addressResult.value > 0)
       app.log.warn("address reconciliation incomplete");

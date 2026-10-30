@@ -73,7 +73,6 @@ beforeAll(async () => {
     await run("docker", [
       "run",
       "-d",
-      "--rm",
       "--name",
       container,
       "-e",
@@ -193,7 +192,7 @@ beforeAll(async () => {
       .map((item) => item.split(";")[0])
       .join("; ");
   } catch (error) {
-    await run("docker", ["rm", "-f", container]).catch(() => undefined);
+    await run("docker", ["rm", "-fv", container]).catch(() => undefined);
     throw error;
   }
 }, 240_000);
@@ -203,7 +202,7 @@ afterAll(async () => {
     await app?.close();
     await disconnect();
   } finally {
-    await run("docker", ["rm", "-f", container]).catch(() => undefined);
+    await run("docker", ["rm", "-fv", container]).catch(() => undefined);
   }
 }, 240_000);
 
@@ -585,7 +584,7 @@ describe("identity over HTTP", () => {
       ).toBe(5);
       expect(
         await db.auditEvent.count({
-          where: { userId: null, action: "authentication.rate_limited" },
+          where: { userId: user.id, action: "authentication.rate_limited" },
         }),
       ).toBe(1);
     } finally {
