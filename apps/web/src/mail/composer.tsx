@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { DraftContent } from "@opensuite/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Alias } from "../aliases/client.ts";
 import { Button } from "../ui/button.tsx";
 import { Icon } from "../ui/icons.tsx";
 import { accountId, mailClient } from "./client.ts";
@@ -13,6 +14,7 @@ export type ComposerState = {
 };
 type Attachment = { blobId: string; name: string; size?: number };
 type Fields = {
+  from: string;
   to: string;
   cc: string;
   bcc: string;
@@ -33,6 +35,7 @@ const joinAddresses = (list: { email: string }[]) =>
 function toContent(base: DraftContent, fields: Fields): DraftContent {
   return {
     ...base,
+    from: fields.from || undefined,
     to: parseAddresses(fields.to).addresses,
     cc: parseAddresses(fields.cc).addresses,
     bcc: parseAddresses(fields.bcc).addresses,
@@ -76,6 +79,7 @@ function formatSize(bytes: number) {
 export function Composer({
   state,
   from,
+  aliases,
   minimized,
   onMinimize,
   onClose,
@@ -85,6 +89,7 @@ export function Composer({
 }: {
   state: ComposerState;
   from: string | undefined;
+  aliases: Alias[];
   minimized: boolean;
   onMinimize: (value: boolean) => void;
   onClose: () => void;
@@ -94,6 +99,7 @@ export function Composer({
   onDraftId?: (id: string) => void;
 }) {
   const [initial] = useState<Fields>(() => ({
+    from: state.content.from ?? "",
     to: joinAddresses(state.content.to),
     cc: joinAddresses(state.content.cc),
     bcc: joinAddresses(state.content.bcc),
@@ -419,10 +425,34 @@ export function Composer({
         </div>
         <div className="compose-fields">
           {from && (
-            <div className="compose-row compose-from">
+            <label className="compose-row compose-from">
               <span>From</span>
-              <span>{from}</span>
-            </div>
+              <select
+                value={fields.from || from}
+                onChange={(event) =>
+                  setFields({
+                    ...fields,
+                    from: event.target.value === from ? "" : event.target.value,
+                  })
+                }
+              >
+                <option value={from}>{from}</option>
+                {fields.from &&
+                  fields.from !== from &&
+                  !aliases.some((alias) => alias.address === fields.from) && (
+                    <option value={fields.from}>
+                      {fields.from} (unavailable)
+                    </option>
+                  )}
+                {aliases
+                  .filter((alias) => alias.address !== from)
+                  .map((alias) => (
+                    <option key={alias.id} value={alias.address}>
+                      {alias.address}
+                    </option>
+                  ))}
+              </select>
+            </label>
           )}
           <div className="compose-row">
             <label htmlFor={`to-${state.key}`}>To</label>

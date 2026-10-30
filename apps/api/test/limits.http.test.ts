@@ -252,6 +252,7 @@ it("keeps sign-in available after anonymous IP buckets fill", async () => {
   );
   expect(sameSubnet.filter((item) => item.statusCode === 429)).toHaveLength(1);
 }, 120_000);
+
 it("labels a refusal by Better Auth's own rate limit as rate limited", async () => {
   const actions: string[] = [];
   app = await buildServer({

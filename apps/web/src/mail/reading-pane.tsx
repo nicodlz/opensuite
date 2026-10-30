@@ -1,6 +1,8 @@
 import * as React from "react";
 import type { Mailbox, Message } from "@opensuite/contracts";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { Alias } from "../aliases/client.ts";
+import { aliasState } from "../aliases/model.ts";
 import { expireSession } from "../auth/components.tsx";
 import { Button } from "../ui/button.tsx";
 import {
@@ -149,8 +151,10 @@ function MessageView({
   message,
   expanded,
   onToggle,
+  aliases,
 }: {
   message: Message;
+  aliases: Alias[];
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -205,6 +209,21 @@ function MessageView({
             </span>
           </p>
           <p className="message-recipients">To {recipients || "—"}</p>
+          {aliases.map((alias) => (
+            <p
+              className="message-alias"
+              key={alias.id}
+              title="Matched from message headers; the actual envelope recipient may be different."
+            >
+              Matched recipient alias: {alias.address} (
+              {alias.enabled ? aliasState(alias) : "Disabled"})
+            </p>
+          ))}
+          {aliases.length > 0 && (
+            <p className="message-recipients">
+              Matched from message headers; the actual recipient may differ.
+            </p>
+          )}
         </div>
         <time dateTime={message.sentAt} title={formatFullDate(message.sentAt)}>
           {formatFullDate(message.sentAt)}
@@ -256,6 +275,7 @@ function MessageView({
 
 export function ReadingPane({
   messages,
+  aliasesByMessage,
   folder,
   mailboxes,
   labels,
@@ -267,6 +287,7 @@ export function ReadingPane({
   onStep,
 }: {
   messages: Message[];
+  aliasesByMessage: Record<string, Alias[]>;
   folder: Mailbox | undefined;
   mailboxes: Mailbox[];
   labels: string[];
@@ -481,6 +502,7 @@ export function ReadingPane({
             <MessageView
               key={message.id}
               message={message}
+              aliases={aliasesByMessage[message.id] ?? []}
               expanded={open.has(message.id) || message.id === last?.id}
               onToggle={() => setOpen(new Set([...open, message.id]))}
             />

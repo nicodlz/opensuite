@@ -9,10 +9,13 @@ import type {
 import {
   keepPreviousData,
   useMutation,
+  useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { aliasesClient } from "../aliases/client.ts";
+import { canSendFrom, recipientAddresses } from "../aliases/model.ts";
 import { AppShell, SidebarItem } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
@@ -22,6 +25,12 @@ import { Composer, type ComposerState } from "./composer.tsx";
 import { emptyDraft, replyDraft } from "./model.ts";
 import { ReadingPane } from "./reading-pane.tsx";
 import { ThreadRow } from "./thread-list.tsx";
+
+// Alias lookups are optional in Mail. Handle failures before they reach the
+// global query error handler, which otherwise redirects on a 401.
+const listSenders = () => aliasesClient.list({}).catch(() => []);
+const matchRecipients = (addresses: string[]) =>
+  aliasesClient.match({ addresses }).catch(() => []);
 
 const key = ["mail", accountId] as const;
 const threadKey = (id: string) => [...key, "thread", id] as const;
@@ -135,6 +144,28 @@ export function MailPage() {
     enabled: Boolean(selected && reading),
     staleTime: 60_000,
   });
+  const aliasList = useQuery({
+    queryKey: ["aliases", "list"],
+    queryFn: listSenders,
+    retry: false,
+    staleTime: 30_000,
+  });
+  const messages = reading ? (detail.data?.messages ?? []) : [];
+  const matches = useQueries({
+    queries: messages.map((message) => {
+      const addresses = recipientAddresses(message);
+      return {
+        queryKey: ["aliases", "match", addresses],
+        queryFn: () => matchRecipients(addresses),
+        enabled: addresses.length > 0,
+        retry: false,
+        staleTime: 30_000,
+      };
+    }),
+  });
+  const matchedByMessage = Object.fromEntries(
+    messages.map((message, index) => [message.id, matches[index]?.data ?? []]),
+  );
   const prefetch = useCallback(
     (threadId: string) => {
       void queryClient.prefetchQuery({
@@ -294,7 +325,41 @@ export function MailPage() {
     setComposers((items) => [...items, state]);
   }
   function reply(message: Message, mode: "reply" | "all" | "forward") {
-    compose(replyDraft(message, mode, identity.data?.address.email));
+    const addresses = recipientAddresses(message);
+    const open = (matched: Awaited<ReturnType<typeof aliasesClient.match>>) => {
+      const alias = mode === "forward" ? undefined : matched.find(canSendFrom);
+      const draft = replyDraft(
+        message,
+        mode,
+        alias?.address ?? identity.data?.address.email,
+      );
+      compose(alias ? { ...draft, from: alias.address } : draft);
+    };
+    if (mode === "forward" || addresses.length === 0) {
+      open([]);
+      return;
+    }
+    const cached = queryClient.getQueryData<
+      Awaited<ReturnType<typeof aliasesClient.match>>
+    >(["aliases", "match", addresses]);
+    if (cached) {
+      open(cached);
+      return;
+    }
+    // Matching must not prevent a reply when the alias service is unavailable.
+    void Promise.race([
+      queryClient
+        .fetchQuery({
+          queryKey: ["aliases", "match", addresses],
+          queryFn: () => matchRecipients(addresses),
+          retry: false,
+          staleTime: 30_000,
+        })
+        .catch(() => []),
+      new Promise<Awaited<ReturnType<typeof aliasesClient.match>>>((resolve) =>
+        setTimeout(() => resolve([]), 2000),
+      ),
+    ]).then(open);
   }
   function selectFolder(id: string) {
     setFolder(id);
@@ -908,6 +973,7 @@ export function MailPage() {
               <ReadingPane
                 key={selected}
                 messages={detail.data.messages}
+                aliasesByMessage={matchedByMessage}
                 folder={current}
                 mailboxes={boxes}
                 labels={
@@ -991,6 +1057,7 @@ export function MailPage() {
             key={state.key}
             state={state}
             from={identity.data?.address.email}
+            aliases={(aliasList.data ?? []).filter(canSendFrom)}
             minimized={minimized.has(state.key)}
             onMinimize={(value) =>
               setMinimized((previous) => {

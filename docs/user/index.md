@@ -38,15 +38,14 @@ Quota is enforced per owner, including trashed files and unexpired upload reserv
 
 The mail server supports IMAP and submission, but the application currently has **no user-facing way to issue, list or revoke client app passwords**. The server-generated credential used by the application is private and must not be reused or extracted for a mail client. Do not assume your web password or MFA protects direct protocol access. Ask your administrator whether a separately managed client credential and externally reachable TLS endpoints are available; client-password management is pending. The standard ports are IMAPS 993 and implicit-TLS submission 465, but Compose binds them to loopback until the operator configures and verifies mail TLS. See [mail TLS](../development.md#mail-tls-and-ports).
 
-## Email aliases
-
-The mail alias API can create addresses that deliver into your existing mailbox. Each address can be disabled or deleted, and deleted addresses remain reserved. To use Bitwarden's forwarded email generator, create an alias API key and select a default domain, then follow the [alias setup guide](../architecture/aliases.md#api-and-bitwarden). The web interface for managing aliases is planned; currently these operations require an API client.
-
 ## Pass
 
-Open **Pass** to launch your vault in a new tab, check its connection, or generate
-a password or passphrase locally. Your vault master password is separate from
-your Esuno sign-in and is never sent to Esuno. Pass must be enabled by your
-administrator. Connect official Bitwarden clients using the server URL shown in
-**Apps and extensions**; see the [client setup guide](pass-clients.md) for details.
-Alias management in Pass is planned.
+Open **Pass** to launch your vault in a new tab, check its connection, or generate a password or passphrase locally. Your vault master password is separate from your Esuno sign-in and is never sent to Esuno. Pass must be enabled by your administrator. Connect official Bitwarden clients using the server URL shown in **Apps and extensions**; see the [client setup guide](pass-clients.md) for details.
+
+## Email aliases
+
+Open **Pass → Aliases** to create addresses that deliver to your existing mailbox. Choose an available domain and a random address, or provide a prefix to which a random suffix is added. A website hostname and note are optional. Search by address, website or note, and filter the list by state. Pending aliases are being reconciled; suspended aliases cannot currently be used. You can copy, enable or disable an address, or delete it permanently. A deleted address is never reused; existing mail is not deleted. Previously accepted or queued deliveries may still arrive after disable.
+
+Choose a default alias domain and create an alias API key to use the Bitwarden username generator. The key is shown only once: copy and save it securely, and revoke it if compromised. In Bitwarden choose **Generator → Username → Forwarded email alias → SimpleLogin**, set the self-hosted server URL to your Esuno origin (without `/api`), and enter the key. The generator may send the website hostname to Esuno.
+
+Mail displays matching aliases found in the message's recipient headers. This is a best-effort hint, not proof of the envelope recipient; Bcc may be unidentifiable. Replies preselect a matched enabled and ready alias, and the composer offers available aliases in its From selector. Thread headers, quoted content, signatures and other mail metadata can still reveal your primary address. Outbound relay behavior depends on your installation. See the [alias guide](../architecture/aliases.md) for delivery and integration limits.

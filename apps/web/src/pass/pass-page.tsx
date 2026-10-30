@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { z } from "zod";
+import { AliasesPage } from "../aliases/aliases-page.tsx";
 import { activeLayout } from "../origins.ts";
 import { AppShell, SidebarLink } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
@@ -30,7 +31,7 @@ async function getStatus() {
   if (!response.ok) throw new Error("Status unavailable");
   return Status.parse(await response.json());
 }
-type Page = "home" | "generator" | "clients";
+type Page = "home" | "generator" | "clients" | "aliases";
 
 let lastCopied: { value: string; id: number } | undefined;
 let copyId = 0;
@@ -103,10 +104,12 @@ export function PassPage({ page }: { page: Page }) {
             label="Apps and extensions"
             active={page === "clients"}
           />
-          <p className="shell-nav-heading">Coming later</p>
-          <span className="pass-sidebar-placeholder">
-            Hide-my-email aliases
-          </span>
+          <SidebarLink
+            to="/pass/aliases"
+            icon="mail"
+            label="Aliases"
+            active={page === "aliases"}
+          />
         </>
       }
     >
@@ -114,8 +117,10 @@ export function PassPage({ page }: { page: Page }) {
         <Home origin={origin} />
       ) : page === "generator" ? (
         <Generator />
-      ) : (
+      ) : page === "clients" ? (
         <Clients origin={origin} />
+      ) : (
+        <AliasesPage />
       )}
     </AppShell>
   );
@@ -240,7 +245,10 @@ function Home({ origin }: { origin: string | undefined }) {
       </div>
       <section className="pass-card pass-alias">
         <h2>Hide-my-email aliases</h2>
-        <p>Alias management is coming later.</p>
+        <p>Create addresses that forward to your mailbox.</p>
+        <Link className="pass-link" to="/pass/aliases">
+          Manage aliases →
+        </Link>
       </section>
     </div>
   );

@@ -23,7 +23,7 @@ const initial: Message[] = [
     sentAt: "2026-10-28T10:30:00.000Z",
     messageId: "<m1@example.test>",
     references: [],
-    headers: [],
+    headers: [{ name: "X-Original-To", value: "friday@example.test" }],
     htmlBody:
       '<p>Hi there,</p><p>Here’s the latest update. I thought you might like a look before Friday.</p><p>Let me know what you think!</p><p>Maya</p><img src="https://images.example.test/update.png" alt="Project update"><img src="cid:photo@example.test" alt="Inline photo">',
     textBody: "Hi there, Here’s the latest update. Let me know what you think!",
