@@ -1,18 +1,26 @@
 # Administrator guide
 
-The administrator manages users and mail domains; the host operator also controls deployment, credentials, DNS and provider accounts. Start with [local installation](../development.md) or the [production runbook](../deployment/production.md), which is being prepared in parallel and may not yet be present in this checkout.
+The administrator manages users and mail domains; the host operator also controls deployment, credentials, DNS and provider accounts. Start with [local installation](../development.md) or the [production runbook](../deployment/production.md).
 
 ## Setup wizard and first administrator
 
-A setup wizard is being developed separately and is not present in this checkout. See the production runbook for its deployment and setup procedure when available. Until then, the API has a bootstrap command for the first administrator, but **normal Compose currently supplies the recovery administrator credential while normal Stalwart does not activate it**. Consequently mailbox provisioning and bootstrap cannot be assumed to succeed with the stock stack. See [authentication and provisioning](../development.md#authentication-and-mailbox-provisioning) and the production runbook for the corrected integration; do not expose or leave the recovery override running as a workaround.
+First bootstrap the private Stalwart management account and create the first administrator using the [production runbook](../deployment/production.md#first-administrator) or [development guide](../development.md#authentication-and-mailbox-provisioning). There is no automatic first administrator. The bootstrap command creates or promotes an enabled account in `MAIL_DOMAIN`; it does not change an existing password. Protect Docker access and the password file.
 
-Set the public HTTPS host and `MAIL_DOMAIN` before provisioning. New account addresses must use that domain. The bootstrap command in the development guide creates or promotes an account; it does not change an existing password. Restrict access to Docker and the password file.
+With an administrator session, open **Setup wizard** at `/setup`. The wizard offers five steps:
+
+1. **System check** shows API, database, Stalwart, Drive, Drive object storage, relay configuration and backup marker status. A marker does not verify a restore; check mail blob storage separately.
+2. **Mail domain** adds a domain, displays DNS records for manual publication and rechecks them. Register the administrator address for inbound routing when offered.
+3. **Outbound relay** shows stored relay and DKIM status and can submit a test message. Configure the relay with the operator procedure and independently confirm delivery.
+4. **Create users** provides a form for email, display name and initial password. The address must use `MAIL_DOMAIN`, and that managed domain must already be added.
+5. **Finish** summarizes the checks and links to Mail, Drive and operating guides. Unknown and pending checks need investigation; completing the wizard does not prove production readiness.
+
+The wizard requires an existing administrator session. The sign-in and MFA interface is on `om-web-fix` and has not yet been merged into main; see the [user guide](../user/index.md#signing-in-and-mfa). Vite development uses synthetic setup data.
 
 ## Users
 
-There is no user management screen in this checkout. An authenticated administrator can create an account through `POST /api/auth/sign-up/email` with `name`, `email` and `password`, using the administrator's session and the configured Origin. Verify ownership out of band and transmit the initial password securely. Public registration is disabled; passwords require at least 12 characters. Provisioning creates a mailbox and an application-owned credential. A session is issued only after the mailbox link is active. If provisioning fails after user creation, inspect the API logs and reconciliation state before retrying. The API retries pending provisioning at startup and approximately once a minute; run only one API instance because its locks and limits are process-local.
+Public registration is disabled. The wizard includes user creation, but **the current production path calls the public sign-up handler with sign-up disabled**; its route tests use a mock identity handler. Do not assume the form successfully creates users until this integration is corrected and tested. An authenticated administrator can use `POST /api/auth/sign-up/email` with `name`, `email` and `password`, their session and the configured Origin. Verify ownership out of band and transmit the initial password securely. The wizard's form accepts 12–128 characters; the authentication service requires at least 12. The direct sign-up API does not perform the wizard's separate inbound-address registration. After provisioning, use `POST /api/admin/domains/{domainId}/addresses` with the account's `userId`, its `localPart` and `isAlias: false` to register the primary address before relying on inbound routing. See [domain operations](../operations/domains.md) and [ingestion](../architecture/ingestion.md) for destination credentials and routing.
 
-`GET /api/admin/accounts` lists accounts for an authenticated administrator. The current web app has no sign-in or MFA screen; see the [user guide](../user/index.md#signing-in-and-mfa) for the API session flow.
+Provisioning creates a mailbox and an application-owned credential. A session is issued only after the mailbox link is active. If creation fails, inspect the API logs, existing account and reconciliation state before retrying. The API retries pending provisioning at startup and approximately once a minute; run only one API instance because its locks and limits are process-local. `GET /api/admin/accounts` lists accounts for an authenticated administrator.
 
 ## Domains and DNS
 
@@ -20,7 +28,7 @@ The **Domains** page lets an administrator add a domain, copy the displayed reco
 
 ## Outbound and SES status
 
-A submitted message enters Stalwart's queue; SES acceptance is not final delivery. Check the queue, bounces, complaints, sending identity verification, sandbox restrictions and actual SES quotas separately. Follow [outbound operations](../operations/outbound.md) for relay settings and the current management-access limitation. No real SES integration is established by the local tests.
+A submitted message enters Stalwart's queue; SES acceptance is not final delivery. Check the queue, bounces, complaints, sending identity verification, sandbox restrictions and actual SES quotas separately. Follow [outbound operations](../operations/outbound.md) for relay configuration and rollback. No real SES integration is established by the local tests.
 
 ## Suspend a mailbox
 

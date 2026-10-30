@@ -1,6 +1,6 @@
 # Web client
 
-The production build serves Mail, Drive, Domains and API status through Caddy. Calendar and Contacts are placeholders. This checkout has no sign-in or MFA screens; see the [user guide](../../docs/user/index.md) for session and access limitations and [development](../../docs/development.md) for Compose provisioning status.
+The production build serves Mail, Drive, Domains, the setup wizard and API status through Caddy. Calendar and Contacts are placeholders. The sign-in and MFA interface is on `om-web-fix` and has not yet been merged into this checkout; see the [user guide](../../docs/user/index.md) and [administrator guide](../../docs/admin/index.md) for access and wizard limitations.
 
 The mail workspace at `/mail` uses the account-scoped oRPC contract in `packages/contracts/src/mail.ts`. The development server (`pnpm --filter @opensuite/web dev`) uses a synthetic in-memory mail router; its changes disappear on reload. The production build excludes that router and calls `/api/mail/*`. The production client uses the authenticated user’s `default` account. Never use the synthetic implementation for real mail.
 

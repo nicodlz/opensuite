@@ -5,7 +5,12 @@ OpenSuite is a self-hosted mail and file suite, intended as an alternative to ho
 > **Status: early development.** The mail API, mailbox provisioning, Drive,
 > ingestion and backup tools are implemented. Real SES/B2 behavior and the
 > complete production recovery process still require operator verification.
-> Calendar and contacts interfaces and the setup wizard remain planned.
+> Calendar and contacts web interfaces remain placeholders. The setup wizard
+> and administrator account controls are available; see the [admin guide](docs/admin/index.md)
+> for their current limitations. The sign-in and MFA interface is on the
+> `om-web-fix` branch and is not yet in this checkout.
+
+## Release status
 
 This first release is an early, single-server baseline. The repository contains:
 
