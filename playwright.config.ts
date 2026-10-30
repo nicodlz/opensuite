@@ -11,6 +11,8 @@ const apiPort = port(process.env["E2E_API_PORT"], 3199);
 const webPort = port(process.env["E2E_WEB_PORT"], 4173);
 export default defineConfig({
   testDir: "./e2e",
+  // The static site has its own server: apps/landing/playwright.config.ts.
+  testIgnore: "landing.spec.ts",
   timeout: 120_000,
   expect: { timeout: 60_000 },
   outputDir: "./node_modules/.cache/playwright-results",
