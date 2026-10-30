@@ -35,6 +35,17 @@ services:
         generate postgres 999
         generate stalwart-admin 2000
         generate app-database 999
+        generate auth 1000
+        mkdir -p /secrets/mailbox-key
+        if [ ! -s /secrets/mailbox-key/password ]; then
+          od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > /secrets/mailbox-key/password
+        fi
+        chown -R 1000:1000 /secrets/mailbox-key
+        chmod 0500 /secrets/mailbox-key
+        chmod 0400 /secrets/mailbox-key/password
+        chown 2000:1000 /secrets/stalwart-admin /secrets/stalwart-admin/password
+        chmod 0550 /secrets/stalwart-admin
+        chmod 0440 /secrets/stalwart-admin/password
         chown 999:1000 /secrets/app-database /secrets/app-database/password
         chmod 0550 /secrets/app-database
         chmod 0440 /secrets/app-database/password
@@ -44,6 +55,10 @@ services:
 
   caddy:
     <<: *restart
+    networks:
+      default:
+      api-proxy:
+        ipv4_address: 172.28.254.2
     image: caddy:2.11.7@sha256:5e5286cb37d44086d651a5363f05f43a692ce4d649d88fb1bd844579f45fa9e8
     environment:
       OPENSUITE_SITE_ADDRESS: ${OPENSUITE_SITE_ADDRESS:-localhost}
@@ -77,6 +92,10 @@ services:
 
   api:
     <<: *restart
+    networks:
+      default:
+      api-proxy:
+        aliases: [api-proxy]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -89,6 +108,13 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-opensuite}
       APP_DATABASE_PASSWORD_FILE: /run/opensuite/app-database/password
+      TRUSTED_PROXY_IP: 172.28.254.2
+      AUTH_PUBLIC_ORIGIN: https://${OPENSUITE_PUBLIC_HOST:-localhost}
+      MAIL_DOMAIN: ${MAIL_DOMAIN:-localhost.test}
+      STALWART_INTERNAL_ORIGIN: http://stalwart:8080
+      AUTH_SECRET_FILE: /run/opensuite/auth/password
+      MAILBOX_KEY_FILE: /run/opensuite/mailbox-key/password
+      STALWART_ADMIN_PASSWORD_FILE: /run/opensuite/stalwart-admin/password
     volumes:
       - type: volume
         source: secrets
@@ -96,7 +122,27 @@ services:
         read_only: true
         volume:
           subpath: app-database
+      - type: volume
+        source: secrets
+        target: /run/opensuite/auth
+        read_only: true
+        volume:
+          subpath: auth
+      - type: volume
+        source: secrets
+        target: /run/opensuite/mailbox-key
+        read_only: true
+        volume:
+          subpath: mailbox-key
+      - type: volume
+        source: secrets
+        target: /run/opensuite/stalwart-admin
+        read_only: true
+        volume:
+          subpath: stalwart-admin
     depends_on:
+      stalwart-setup:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     healthcheck:
@@ -407,3 +453,10 @@ volumes:
   postgres-data:
   stalwart-data:
   localstack-data:
+
+networks:
+  api-proxy:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.254.0/24

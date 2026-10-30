@@ -6,3 +6,5 @@ export type { DatabaseError } from "./errors.ts";
 export { configureApplicationRole } from "./application-role.ts";
 export { createProvisioningStore } from "./provisioning.ts";
 export { createAccountStore } from "./accounts.ts";
+
+export type { PrismaClient } from "./generated/index.js";

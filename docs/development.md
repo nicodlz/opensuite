@@ -142,20 +142,49 @@ message with an attachment, a storage outage and a stopped-store restore,
 then removes its containers and volumes. The local substitute does not verify
 real object-storage providers. Docker is required.
 
-### Authentication work in progress
+## Authentication and mailbox provisioning
 
-The Better Auth factory and Fastify adapter are exercised in the `http` test
-project with a throwaway PostgreSQL container and synthetic provisioning. They
-are not wired into the standard API startup. Signup's provisioning callback
-runs after the database transaction commits; a failed callback can leave an
-unlinked application account. The session gate rejects an unlinked account,
-but repair and reconciliation are not implemented. An app-password response
-can be lost after Stalwart creates it; do not retry issuance automatically until
-the orphan credential has been identified and revoked.
+The API serves Better Auth at `/api/auth/*` through Caddy, with secure,
+HTTP-only, SameSite=Lax cookies. Set `OPENSUITE_PUBLIC_HOST` to the HTTPS host
+and `MAIL_DOMAIN` to the single domain allowed for new accounts. Registration is
+restricted to authenticated administrators; it does not verify email ownership.
+The administrator must verify the address out of band and send the initial
+password securely. Passwords need at least 12 characters. MFA supports TOTP
+and backup codes. Caddy must be the only proxy trusted by the API: Compose uses
+a dedicated network and fixed Caddy address and replaces X-Forwarded-For.
+Do not publish the API directly or add untrusted containers to that network.
 
-The production provisioning adapter, mailbox disablement workflow, audit events,
-per-IP and per-account rate limiting, roles and protected procedures are still
-required. Do not expose the test adapter as a production authentication service.
+There is no automatic first administrator. To create or promote an enabled,
+provisioned account, prepare a password file outside Git and `.env`, then run:
+
+```sh
+docker compose exec -T api node apps/api/src/bootstrap.ts admin@example.com /dev/stdin < /secure/path/initial-password
+```
+
+The email must belong to `MAIL_DOMAIN`. For an existing account the command
+promotes that account without changing its password; a disabled account cannot be
+promoted. An administrator can then create accounts with
+`POST /api/auth/sign-up/email` using their session and the configured Origin.
+The command is an operator action: restrict Docker access. Administrators cannot
+disable themselves or the last enabled administrator.
+
+Signup provisions a Stalwart account and address, with a random inaccessible
+primary password and an application credential encrypted in the database.
+The API mounts the generated Better Auth secret, mailbox encryption key, and
+Stalwart recovery administrator secret read-only; back up the secrets volume
+alongside the database and mail data. Loss of the mailbox key prevents
+recovering stored credentials. Do not place secrets in `.env` or Git.
+
+Provisioning can fail after the account transaction commits. A startup and
+one-minute reconciliation retries unlinked accounts and interrupted suspensions.
+It suspends the mailbox, revokes application-owned credentials (including a
+credential whose response was lost), then issues a replacement. Disabled users
+lose sessions immediately; a failed Stalwart suspension is retried. Monitor API
+logs for reconciliation failures. Run one API instance: provisioning locks and
+rate limits are in-process and are not shared across replicas. Auth limits are
+per IP and per account plus IP, and reset on restart. Audit events are append-only
+for the application database role. The API's live-session middleware checks the
+database and active mailbox before protected procedures or Drive sessions.
 
 ## Known limitations
 
@@ -168,7 +197,7 @@ required. Do not expose the test adapter as a production authentication service.
 
 ## Planned, not implemented
 
-The production mail API, calendar, contacts and drive interfaces, authentication, production SES provider proof, the setup wizard and
+The production mail API, calendar, contacts and drive interfaces, production SES provider proof, the setup wizard and
 backups.
 
 ## Ingestion
@@ -182,8 +211,7 @@ migrations, bucket and prefix. Caddy and mail do not depend on Drive startup.
 The session adapter forwards only the incoming cookie to the API's
 `GET /api/auth/get-session?disableCookieCache=true`; it accepts Better Auth's
 `{user, session}` response, verifies matching user IDs and expiry, and fails
-closed if the API is unavailable. Authentication is being implemented separately;
-until that endpoint is available, authenticated Drive operations are unavailable.
+closed if the API is unavailable. The API must be running for authenticated Drive operations.
 The endpoint URL is selected with `DRIVE_SESSION_API` (default `http://api:3000`).
 The internal endpoint must be trusted and reachable at the indicated path.
 
