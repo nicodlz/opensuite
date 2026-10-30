@@ -98,17 +98,35 @@ export function resolveRecipients(
   }
   return [...result.values()];
 }
+/**
+ * Inbox or quarantine, from the SES verdicts. See
+ * https://docs.aws.amazon.com/ses/latest/dg/receiving-email-notifications-contents.html
+ *
+ * Content scans must pass: a spam or virus verdict of FAIL, GRAY (scanned
+ * but undecided) or PROCESSING_FAILED (not scanned) quarantines.
+ *
+ * For authentication, GRAY is an absence of proof, not a failure: SPF none,
+ * softfail or neutral; DKIM unsigned or signed by a domain other than the
+ * From domain; DMARC passing SPF or DKIM for a domain without a policy or
+ * with p=none. On its own it does not quarantine, so ordinary mail from
+ * domains without DMARC enforcement reaches the inbox. A failure does: DMARC
+ * FAIL always, whatever the domain's requested policy; SPF or DKIM FAIL
+ * unless DMARC passed, as forwarding and mailing lists break them while the
+ * aligned identifier still holds. PROCESSING_FAILED (for instance a DNS
+ * error) is as unproven as GRAY, never a pass.
+ */
 export function verdictPolicy(
   notification: Notification,
 ): "deliver" | "quarantine" {
   const r = notification.receipt;
-  return [
-    r.spamVerdict,
-    r.virusVerdict,
-    r.spfVerdict,
-    r.dkimVerdict,
-    r.dmarcVerdict,
-  ].every((v) => v.status === "PASS")
-    ? "deliver"
-    : "quarantine";
+  if (r.spamVerdict.status !== "PASS" || r.virusVerdict.status !== "PASS")
+    return "quarantine";
+  const dmarc = r.dmarcVerdict.status;
+  if (dmarc === "FAIL") return "quarantine";
+  if (
+    dmarc !== "PASS" &&
+    (r.spfVerdict.status === "FAIL" || r.dkimVerdict.status === "FAIL")
+  )
+    return "quarantine";
+  return "deliver";
 }

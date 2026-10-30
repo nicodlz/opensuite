@@ -1364,4 +1364,40 @@ describe("local ingestion pipeline", () => {
       db.value.inboundResolutionAudit.delete({ where: { id: audit.id } }),
     ).rejects.toThrow(/append-only/);
   }, 90_000);
+  it("delivers to the inbox mail whose authentication SES reports as unproven", async () => {
+    if (s3 === undefined) throw new Error("Clients not initialized");
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "ses-gray",
+        Body: Buffer.from(
+          "From: someone@gmail.test\r\nTo: alice@example.test\r\nSubject: Unproven\r\n\r\nHello\r\n",
+        ),
+      }),
+    );
+    // The verdicts SES gave the real Gmail messages of 2026-10-30.
+    const base = notification(["alice@example.test"], "PASS", "ses-gray");
+    const now = new Date().toISOString();
+    const gray = { status: "GRAY" };
+    const body = JSON.stringify({
+      ...base,
+      mail: { ...base.mail, timestamp: now },
+      receipt: {
+        ...base.receipt,
+        timestamp: now,
+        spfVerdict: gray,
+        dkimVerdict: gray,
+        dmarcVerdict: gray,
+      },
+    });
+    expect((await service.process(body)).isOk()).toBe(true);
+    const alice = clients.get("alice");
+    if (alice === undefined) throw new Error("Missing client");
+    const ids = await bySubject(alice, "Unproven");
+    expect(ids).toHaveLength(1);
+    const email = getValue(
+      await alice.client.emails(alice.session, alice.account, ids),
+    ).list[0];
+    expect(email?.mailboxIds).toEqual({ [alice.inbox]: true });
+  }, 90_000);
 });
