@@ -40,6 +40,8 @@ export const calendarPalette = [
 const maxRangeMs = 400 * 86_400_000;
 const pageSize = 500;
 const maxPages = 40;
+// Occurrences returned for one range; denser ranges must be narrowed.
+const maxOccurrences = 10_000;
 
 const colorOf = (color: string | null, index: number) => {
   const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(color ?? "");
@@ -163,15 +165,26 @@ export function createCalendarService(dependencies: {
         if (selected?.some((id) => !calendars.includes(id)))
           return fail("not_found");
         if (selected?.length === 0) return { events: [] };
-        // Stalwart's time-range filter ignores recurrence rules, so every
-        // event starting before the range end is a candidate.
-        const filter = {
-          before: new Date(end).toISOString().replace(/\.\d{3}Z$/, "Z"),
-          ...(selected?.length === 1 ? { inCalendar: selected[0] } : {}),
-        };
+        // Stalwart's time-range filter ignores recurrence rules, and an
+        // occurrence can be moved before its series starts, so every event
+        // is a candidate. Expansion stops once the response would be too big.
+        const filter =
+          selected?.length === 1 ? { inCalendar: selected[0] } : {};
         const events: ReturnType<typeof toContract>[] = [];
         const page = async (index: number): Promise<void> => {
-          if (index >= maxPages) return fail("unavailable");
+          if (index >= maxPages) {
+            // A full last page is fine when nothing follows it.
+            const rest = value(
+              await c.client.calendarEventPage(c.session, c.id, {
+                filter,
+                position: index * pageSize,
+                limit: 1,
+              }),
+            );
+            return rest.query.ids.length === 0
+              ? undefined
+              : fail("unavailable");
+          }
           const result = value(
             await c.client.calendarEventPage(c.session, c.id, {
               filter,
@@ -188,6 +201,7 @@ export function createCalendarService(dependencies: {
               continue;
             for (const occurrence of expand(item, start, end))
               events.push(toContract(item, occurrence));
+            if (events.length > maxOccurrences) return fail("validation");
           }
           if (result.query.ids.length >= pageSize) return page(index + 1);
           return undefined;

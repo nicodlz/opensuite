@@ -24,7 +24,18 @@ const project = `opensuite-bw-${id}`;
 const octet = (randomBytes(1).readUInt8() % 200) + 20;
 const env = {
   ...process.env,
+  DRIVE_S3_ENDPOINT: "http://fixture.invalid",
+  DRIVE_S3_PUBLIC_ENDPOINT: "http://fixture.invalid",
+  DRIVE_S3_BUCKET: "fixture",
+  DRIVE_S3_REGION: "fixture",
+  DRIVE_S3_ACCESS_KEY: "fixture",
+  DRIVE_S3_SECRET_FILE: "/dev/null",
+  PASS_PUBLIC_HOST: "pass.localhost",
+  PASS_ALLOW_SAVED_SIGNUPS: "false",
+  PASS_TEST_API_SUBNET: `10.237.${octet}.0/24`,
+  PASS_TEST_API_IP: `10.237.${octet}.2`,
   PASS_TEST_SUBNET: `10.238.${octet}.0/24`,
+  PASS_TEST_DYNAMIC_RANGE: `10.238.${octet}.128/25`,
   PASS_TEST_PROXY_IP: `10.238.${octet}.2`,
   PASS_TEST_DOMAIN: "https://pass.localhost",
   PASS_SIGNUPS_ALLOWED: "false",

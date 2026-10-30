@@ -1,8 +1,12 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { request as httpsRequest } from "node:https";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { z } from "zod";
 
 const run = promisify(execFile);
 const id = randomBytes(5).toString("hex");
@@ -10,7 +14,19 @@ const project = `opensuite-pass-${id}`;
 const octet = (randomBytes(1).readUInt8() % 200) + 20;
 const env = {
   ...process.env,
+  DRIVE_S3_ENDPOINT: "http://fixture.invalid",
+  DRIVE_S3_PUBLIC_ENDPOINT: "http://fixture.invalid",
+  DRIVE_S3_BUCKET: "fixture",
+  DRIVE_S3_REGION: "fixture",
+  DRIVE_S3_ACCESS_KEY: "fixture",
+  DRIVE_S3_SECRET_FILE: "/dev/null",
+  PASS_PUBLIC_HOST: "pass.localhost",
+  PASS_ADMIN_TOKEN_FILE: "/dev/null",
+  PASS_ALLOW_SAVED_SIGNUPS: "false",
+  PASS_TEST_API_SUBNET: `10.240.${String(octet)}.0/24`,
+  PASS_TEST_API_IP: `10.240.${String(octet)}.2`,
   PASS_TEST_SUBNET: `10.239.${String(octet)}.0/24`,
+  PASS_TEST_DYNAMIC_RANGE: `10.239.${String(octet)}.128/25`,
   PASS_TEST_PROXY_IP: `10.239.${String(octet)}.2`,
 };
 const args = [
@@ -66,6 +82,9 @@ let beforeProvision = "";
 let afterFirstProvision = "";
 let afterSecondProvision = "";
 let ca = "";
+let fixtureDirectory = "";
+let passwordRotated = "";
+let conflictMessage = "";
 const request = (
   path: string,
   init: {
@@ -111,12 +130,27 @@ const request = (
     },
   );
 const cleanup = async () => {
-  await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+  try {
+    await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+  } finally {
+    if (fixtureDirectory)
+      await rm(fixtureDirectory, { recursive: true, force: true });
+  }
 };
 
 describe("Pass Compose integration", () => {
   beforeAll(async () => {
     try {
+      fixtureDirectory = await mkdtemp(join(tmpdir(), "opensuite-pass-"));
+      const adminFile = join(fixtureDirectory, "admin-phc");
+      const salt = randomBytes(16).toString("base64").replace(/=+$/, "");
+      const hash = randomBytes(32).toString("base64").replace(/=+$/, "");
+      await writeFile(
+        adminFile,
+        `$argon2id$v=19$m=19456,t=2,p=1$${salt}$${hash}`,
+        { mode: 0o600 },
+      );
+      env.PASS_ADMIN_TOKEN_FILE = adminFile;
       // Initialize the volume without Pass, as on an existing installation.
       await compose("up", "-d", "--wait", "--wait-timeout", "180", "postgres");
       await sql("postgres", "CREATE ROLE opensuite_app LOGIN");
@@ -124,7 +158,23 @@ describe("Pass Compose integration", () => {
         "postgres",
         "SELECT count(*) FROM pg_database WHERE datname='opensuite_pass'",
       );
+      await sql("postgres", "CREATE DATABASE opensuite_pass");
+      try {
+        await compose("run", "--rm", "--no-deps", "pass-provision");
+        throw new Error("Foreign-owned database was accepted");
+      } catch (error) {
+        conflictMessage = error instanceof Error ? error.message : "";
+      }
+      await sql("postgres", "DROP DATABASE opensuite_pass");
+      await sql(
+        "postgres",
+        "DO $$ BEGIN EXECUTE format('CREATE ROLE opensuite_pass LOGIN PASSWORD %L', md5(random()::text)); END $$; CREATE TABLE pass_old_verifier AS SELECT rolpassword FROM pg_authid WHERE rolname='opensuite_pass'",
+      );
       await compose("run", "--rm", "--no-deps", "pass-provision");
+      passwordRotated = await sql(
+        "postgres",
+        "SELECT rolpassword <> (SELECT rolpassword FROM pass_old_verifier) FROM pg_authid WHERE rolname='opensuite_pass'",
+      );
       afterFirstProvision = await sql(
         "postgres",
         "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='opensuite_pass'",
@@ -163,6 +213,8 @@ describe("Pass Compose integration", () => {
     expect(beforeProvision.trim()).toBe("0");
     expect(afterFirstProvision.trim()).toBe("opensuite_pass");
     expect(afterSecondProvision.trim()).toBe("opensuite_pass");
+    expect(passwordRotated.trim()).toBe("t");
+    expect(conflictMessage).toContain("database is owned by another role");
   });
 
   test("starts and answers its health endpoint", async () => {
@@ -239,6 +291,15 @@ describe("Pass Compose integration", () => {
   test("blocks the public admin and supplies the security headers", async () => {
     expect((await request("/admin")).status).toBe(404);
     expect((await request("/admin/users")).status).toBe(404);
+    const variants = await Promise.all(
+      ["/ADMIN", "/%61dmin", "//admin", "/admin/"].map((path) => request(path)),
+    );
+    expect(variants.map((response) => response.status)).toEqual([
+      404, 404, 404, 404,
+    ]);
+    const admin = await fetch(`http://127.0.0.1:${direct}/admin/`);
+    expect(admin.status).toBe(200);
+    expect((await admin.text()).toLowerCase()).toContain("token");
     const response = await request("/");
     expect(response.status).toBe(200);
     expect(response.headers.get("strict-transport-security")).toBe(
@@ -250,7 +311,7 @@ describe("Pass Compose integration", () => {
     expect(response.headers.get("content-security-policy")).toBeTruthy();
   });
 
-  test("retains generated keys and database records after restart", async () => {
+  test("retains generated keys and database records after recreation", async () => {
     await sql(
       "opensuite_pass",
       "SET ROLE opensuite_pass; CREATE TABLE pass_persistence_probe (marker text); INSERT INTO pass_persistence_probe VALUES ('disposable-marker')",
@@ -258,11 +319,11 @@ describe("Pass Compose integration", () => {
     const key = (
       await compose("exec", "-T", "pass", "sha256sum", "/data/rsa_key.pem")
     ).trim();
-    await compose("restart", "pass");
     await compose(
       "up",
       "-d",
       "--no-deps",
+      "--force-recreate",
       "--wait",
       "--wait-timeout",
       "180",
@@ -279,6 +340,85 @@ describe("Pass Compose integration", () => {
       ).trim(),
     ).toBe("disposable-marker");
     expect((await request("/api/config")).status).toBe(200);
+  }, 240_000);
+
+  test("isolates the Pass listener on its own network", async () => {
+    const container = (await compose("ps", "-q", "pass")).trim();
+    const result = await run("docker", [
+      "inspect",
+      "--format",
+      "{{json .NetworkSettings.Networks}}",
+      container,
+    ]);
+    const networks = z
+      .record(z.string(), z.unknown())
+      .parse(JSON.parse(result.stdout));
+    expect(Object.keys(networks)).toEqual([`${project}_pass-network`]);
+  });
+
+  test("guards saved signup settings on startup", async () => {
+    const writeConfig = (config: string) =>
+      compose(
+        "run",
+        "--rm",
+        "--no-deps",
+        "--entrypoint",
+        "/bin/sh",
+        "pass",
+        "-c",
+        `printf '%s' '${config}' > /data/config.json`,
+      );
+    await compose("stop", "pass");
+    await writeConfig('{"signups_allowed":true}');
+    await expect(
+      compose(
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        "--wait",
+        "--wait-timeout",
+        "20",
+        "pass",
+      ),
+    ).rejects.toThrow("Command failed");
+    expect(await compose("logs", "--no-color", "pass")).toContain(
+      "saved configuration may enable signups",
+    );
+    env.PASS_ALLOW_SAVED_SIGNUPS = "true";
+    await compose(
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      "--wait",
+      "--wait-timeout",
+      "180",
+      "pass",
+    );
+    expect((await request("/api/config")).status).toBe(200);
+    await compose("stop", "pass");
+    await compose(
+      "run",
+      "--rm",
+      "--no-deps",
+      "--entrypoint",
+      "/bin/sh",
+      "pass",
+      "-c",
+      "rm /data/config.json",
+    );
+    env.PASS_ALLOW_SAVED_SIGNUPS = "false";
+    await compose(
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      "--wait",
+      "--wait-timeout",
+      "180",
+      "pass",
+    );
   }, 240_000);
 
   test("runs without the application, mail, Drive or ingest services", async () => {

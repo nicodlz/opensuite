@@ -61,43 +61,36 @@ describe("origin layout", () => {
     expect(redirectFor(sibling, "/mail", "")).toBe(`${mail}/`);
     expect(redirectFor(sibling, "/auth/callback", "")).toBeNull();
     expect(redirectFor(sibling, "/", "?folder=abc")).toBeNull();
+    // Doubled slashes stay paths on this origin instead of naming a host.
+    expect(redirectFor(sibling, "/drive//attacker.example", "")).toBe(
+      "/attacker.example",
+    );
+    expect(redirectFor(hub, "//drive//x", "")).toBe(`${drive}/x`);
+    expect(redirectFor(sibling, "//login", "")).toBe(`${mail}/login`);
   });
 });
 
+const answer =
+  (body: unknown, status = 200): typeof fetch =>
+  () =>
+    Promise.resolve(new Response(JSON.stringify(body), { status }));
+const offline: typeof fetch = () => Promise.reject(new TypeError("offline"));
+
 describe("origin map loading", () => {
   beforeEach(() => localStorage.clear());
-  const answer = (body: unknown, status = 200) =>
-    (() =>
-      Promise.resolve(
-        new Response(JSON.stringify(body), { status }),
-      )) as typeof fetch;
-  const offline = (() =>
-    Promise.reject(new TypeError("offline"))) as typeof fetch;
-
-  it("always prefers the current configuration and stores it", async () => {
-    localStorage.setItem("opensuite-origins", JSON.stringify({ mail }));
-    expect(await loadOrigins(calendar, answer(origins))).toEqual(origins);
-    expect(JSON.parse(localStorage.getItem("opensuite-origins") ?? "")).toEqual(
-      origins,
-    );
+  it("uses the current configuration", async () => {
+    expect(await loadOrigins(answer(origins))).toEqual(origins);
   });
-  it("falls back to a cached copy only if it lists this origin", async () => {
+  it("never falls back to a remembered map", async () => {
+    // A map remembered by an older release must not drive redirects.
     localStorage.setItem("opensuite-origins", JSON.stringify(origins));
-    expect(await loadOrigins(drive, offline)).toEqual(origins);
-    expect(await loadOrigins("https://other.example.test", offline)).toEqual(
-      {},
-    );
-    expect(await loadOrigins(drive, answer({ error: true }, 503))).toEqual(
-      origins,
-    );
+    expect(await loadOrigins(offline)).toEqual({});
+    expect(await loadOrigins(answer({ error: true }, 503))).toEqual({});
+    expect(await loadOrigins(answer({ drive: "not a url" }))).toEqual({});
   });
-  it("ignores an invalid cache or response", async () => {
-    localStorage.setItem("opensuite-origins", "{not json");
-    expect(await loadOrigins(drive, offline)).toEqual({});
-    localStorage.setItem("opensuite-origins", JSON.stringify({ mail: 3 }));
-    expect(await loadOrigins(drive, offline)).toEqual({});
-    expect(await loadOrigins(drive, answer({ drive: "not a url" }))).toEqual(
-      {},
-    );
+  it("keeps the app on this origin without a map", () => {
+    const layout = resolveLayout({}, drive);
+    expect(layout.split).toBe(false);
+    expect(redirectFor(layout, "/mail", "")).toBeNull();
   });
 });

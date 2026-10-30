@@ -202,7 +202,7 @@ const cookieOf = (response: Response) =>
     .getSetCookie()
     .map((item) => item.split(";")[0])
     .join("; ");
-const session = async (cookie: string) =>
+const sessionOf = async (cookie: string) =>
   (await fetch(`${base}/auth/get-session`, { headers: { cookie } })).json();
 const handoff = (
   cookie: string,
@@ -282,7 +282,7 @@ describe("sign-in handoff to sibling application origins", () => {
     expect(setCookie).toMatch(/Secure/i);
     expect(setCookie).not.toMatch(/Domain=/i);
     const calendarCookie = cookieOf(redeemed);
-    expect(await session(calendarCookie)).toMatchObject({
+    expect(await sessionOf(calendarCookie)).toMatchObject({
       user: { email: data.email },
     });
     // Replay is refused.
@@ -301,8 +301,8 @@ describe("sign-in handoff to sibling application origins", () => {
     expect(
       (await post("sign-out", {}, calendarCookie, calendarOrigin)).status,
     ).toBe(200);
-    expect(await session(hubCookie)).toBeNull();
-    expect(await session(calendarCookie)).toBeNull();
+    expect(await sessionOf(hubCookie)).toBeNull();
+    expect(await sessionOf(calendarCookie)).toBeNull();
     expect((await handoff(hubCookie)).status).toBe(401);
   });
 
@@ -331,8 +331,10 @@ describe("cookie isolation from sibling subdomains", () => {
       name: "Attacker",
       password: "attacker-strong-password",
     };
-    for (const user of [victim, attacker])
-      expect((await post("sign-up/email", user)).status).toBe(200);
+    const signups = await Promise.all(
+      [victim, attacker].map((account) => post("sign-up/email", account)),
+    );
+    expect(signups.map((response) => response.status)).toEqual([200, 200]);
     const signIn = await post("sign-in/email", {
       email: victim.email,
       password: victim.password,
@@ -357,18 +359,18 @@ describe("cookie isolation from sibling subdomains", () => {
 
     // A parent-domain cookie can only use another name; it is ignored.
     const planted = `__Secure-better-auth.session_token=${attackerValue}`;
-    expect(await session(planted)).toBeNull();
-    expect(await session(`${planted}; ${victimCookie}`)).toMatchObject({
+    expect(await sessionOf(planted)).toBeNull();
+    expect(await sessionOf(`${planted}; ${victimCookie}`)).toMatchObject({
       user: { email: victim.email },
     });
     // Two values for one authentication cookie are refused everywhere.
     const duplicate = `${victimCookie}; __Host-opensuite.session_token=${attackerValue}`;
-    for (const path of ["/auth/get-session", "/account/me"]) {
-      const response = await fetch(`${base}${path}`, {
-        headers: { cookie: duplicate },
-      });
-      expect(response.status).toBe(400);
-    }
+    const refused = await Promise.all(
+      ["/auth/get-session", "/account/me"].map((path) =>
+        fetch(`${base}${path}`, { headers: { cookie: duplicate } }),
+      ),
+    );
+    expect(refused.map((response) => response.status)).toEqual([400, 400]);
     expect((await handoff(duplicate)).status).toBe(400);
     // Legacy cookies on this host are cleared on the next auth response.
     const cleared = await fetch(`${base}/auth/get-session`, {

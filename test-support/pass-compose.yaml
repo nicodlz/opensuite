@@ -12,9 +12,10 @@ services:
       ]
     environment:
       OPENSUITE_SITE_ADDRESS: localhost
-      PASS_SITE_ADDRESS: pass.localhost
     networks:
       api-proxy:
+        ipv4_address: ${PASS_TEST_API_IP}
+      pass-network:
         ipv4_address: ${PASS_TEST_PROXY_IP}
     ports: !override
       - "127.0.0.1::443"
@@ -28,4 +29,9 @@ networks:
   api-proxy:
     ipam:
       config: !override
+        - subnet: ${PASS_TEST_API_SUBNET}
+  pass-network:
+    ipam:
+      config: !override
         - subnet: ${PASS_TEST_SUBNET}
+          ip_range: ${PASS_TEST_DYNAMIC_RANGE}

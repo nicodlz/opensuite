@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily OpenSuite backup
+Description=Daily Esuno backup
 
 [Timer]
 OnCalendar=*-*-* 01:00:00 UTC
