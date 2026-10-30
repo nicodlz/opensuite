@@ -22,6 +22,7 @@ import {
   loadAuthConfig,
   loadConfig,
   loadMailPushConfig,
+  loadBillingConfig,
 } from "./config.ts";
 import { startMailNotifier } from "./adapters/mail-notifier.ts";
 import { createAuthRuntime } from "./auth/runtime.ts";
@@ -37,6 +38,20 @@ const config = loadConfig(process.env);
 if (config.isErr()) {
   process.stderr.write(
     `${JSON.stringify({ level: "fatal", msg: "invalid configuration", issues: config.error.issues })}\n`,
+  );
+  process.exit(1);
+}
+
+const billing = await loadBillingConfig(process.env);
+if (billing.isErr()) {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "invalid billing configuration", issues: billing.error.issues })}\n`,
+  );
+  process.exit(1);
+}
+if (billing.value.mode === "cloud") {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "cloud billing is not yet available" })}\n`,
   );
   process.exit(1);
 }

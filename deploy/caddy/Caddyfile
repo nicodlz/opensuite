@@ -20,6 +20,10 @@
 			respond 403
 		}
 
+		# Internal service endpoints are never proxied to the public Internet.
+		@internal path /api/internal /api/internal/* /drive/api/internal /drive/api/internal/*
+		respond @internal 404
+
 		# Drive is independently routed and is not a startup dependency.
 		handle_path /drive/api/* {
 			reverse_proxy drive:3001

@@ -4,6 +4,7 @@ import { accountRouter, adminRouter } from "./account.ts";
 import { calendarRouter } from "./calendar.ts";
 import { mailRouter } from "./mail.ts";
 import { systemRouter } from "./system.ts";
+import { billingRouter } from "./billing.ts";
 
 export type { ApiContext } from "./context.ts";
 
@@ -15,4 +16,5 @@ export const router = {
   mail: mailRouter,
   calendar: calendarRouter,
   push: pushRouter,
+  billing: billingRouter,
 };

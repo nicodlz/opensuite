@@ -9,6 +9,8 @@ Esuno is a self-hosted mail and file suite, intended as an alternative to hosted
 > and administrator account controls are available; see the [admin guide](docs/admin/index.md)
 > for their current limitations. Vault is not production-ready until security
 > and recovery are verified.
+> Managed Esuno Cloud billing is not available yet; cloud mode intentionally
+> refuses to start. See [billing status](docs/operations/billing.md).
 
 ## Release status
 

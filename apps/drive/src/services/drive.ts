@@ -66,8 +66,26 @@ const lockOwner = async (tx: Prisma.TransactionClient, owner: string) => {
 export const createDrive = (
   db: PrismaClient,
   storage: Storage,
-  quota: number,
+  quota:
+    | number
+    | null
+    | ((owner: string) => Promise<{
+        quotaBytes: number | null;
+        mailBytes: number;
+        uploadsAllowed: boolean;
+      }>),
 ) => {
+  const usage = async (owner: string) => {
+    const totals = z
+      .array(z.object({ total: z.bigint() }))
+      .parse(
+        await db.$queryRaw`SELECT COALESCE(SUM("size"), 0)::bigint AS total FROM "Entry" WHERE "ownerId" = ${owner} AND kind = 'file' AND (state NOT IN ('pending', 'failed') OR "expiresAt" IS NULL OR "expiresAt" > clock_timestamp())`,
+      );
+    const total = totals[0]?.total ?? 0n;
+    if (total > BigInt(Number.MAX_SAFE_INTEGER))
+      throw new Error("usage overflow");
+    return Number(total);
+  };
   const get = async (
     user: string,
     id: string,
@@ -204,12 +222,29 @@ export const createDrive = (
                 .parse(
                   await tx.$queryRaw`SELECT COALESCE(SUM("size"), 0)::bigint AS total FROM "Entry" WHERE "ownerId" = ${owner} AND kind = 'file' AND (state NOT IN ('pending', 'failed') OR "expiresAt" IS NULL OR "expiresAt" > clock_timestamp())`,
                 );
+              let entitlement: {
+                quotaBytes: number | null;
+                mailBytes: number;
+                uploadsAllowed: boolean;
+              };
+              try {
+                entitlement =
+                  typeof quota === "function"
+                    ? await quota(owner)
+                    : { quotaBytes: quota, mailBytes: 0, uploadsAllowed: true };
+              } catch {
+                throw new ORPCError("SERVICE_UNAVAILABLE", {
+                  message: "Entitlements unavailable",
+                });
+              }
               if (
-                reserveQuota(
-                  totals[0]?.total ?? 0n,
-                  BigInt(input.size),
-                  BigInt(quota),
-                ).isErr()
+                !entitlement.uploadsAllowed ||
+                (entitlement.quotaBytes !== null &&
+                  reserveQuota(
+                    (totals[0]?.total ?? 0n) + BigInt(entitlement.mailBytes),
+                    BigInt(input.size),
+                    BigInt(entitlement.quotaBytes),
+                  ).isErr())
               )
                 throw new ORPCError("FORBIDDEN", { message: "Quota exceeded" });
               await tx.entry.create({
@@ -573,6 +608,6 @@ export const createDrive = (
     }, Promise.resolve());
     return expired.length;
   };
-  return { command, file, publicFile, sweepExpired };
+  return { command, file, publicFile, sweepExpired, usage };
 };
 export type DriveService = ReturnType<typeof createDrive>;
