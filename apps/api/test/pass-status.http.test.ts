@@ -17,6 +17,7 @@ let app: FastifyInstance | undefined;
 async function start(
   passOrigin?: string,
   passStatusOptions?: ServerDependencies["passStatusOptions"],
+  identity?: ServerDependencies["identity"],
 ) {
   app = await buildServer({
     config: { logLevel: "silent" },
@@ -27,6 +28,7 @@ async function start(
       monotonicMs: () => performance.now(),
     }),
     monotonicMs: () => performance.now(),
+    ...(identity ? { identity } : {}),
     ...(passOrigin ? { passOrigin } : {}),
     ...(passStatusOptions ? { passStatusOptions } : {}),
   });
@@ -45,8 +47,6 @@ describe("Pass status", () => {
     expect(response.json()).toEqual({
       enabled: false,
       reachable: false,
-      version: null,
-      checkedAt: null,
     });
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -60,8 +60,27 @@ describe("Pass status", () => {
         ),
       ),
     );
-    const server = await start("https://pass.example.test", { fetcher });
-    const response = await server.inject("/pass/status");
+    const identity: NonNullable<ServerDependencies["identity"]> = {
+      publicOrigin: "https://suite.example.test",
+      handler: () => Promise.resolve(new Response()),
+      actor: (headers) =>
+        Promise.resolve(
+          headers.get("cookie") === "session=valid"
+            ? { id: "user", email: "user@example.test", role: "user" }
+            : null,
+        ),
+    };
+    const server = await start(
+      "https://pass.example.test",
+      { fetcher },
+      identity,
+    );
+    const anonymous = await server.inject("/pass/status");
+    expect(anonymous.json()).toEqual({ enabled: true, reachable: true });
+    const response = await server.inject({
+      url: "/pass/status",
+      headers: { cookie: "session=valid" },
+    });
     expect(response.statusCode).toBe(200);
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.json()).toMatchObject({
@@ -69,7 +88,9 @@ describe("Pass status", () => {
       reachable: true,
       version: "1.37.4",
     });
-    await server.inject("/pass/status");
+    expect((await server.inject("/pass/status")).json()).not.toHaveProperty(
+      "version",
+    );
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(fetcher.mock.calls.map(([url]) => urlText(url)).toSorted()).toEqual([
       "https://pass.example.test/alive",
@@ -90,8 +111,19 @@ describe("Pass status", () => {
     expect(response.json()).toMatchObject({
       enabled: true,
       reachable: true,
-      version: null,
     });
+  });
+  it("cancels a failed configuration response body", async () => {
+    const cancel = vi.fn<() => void>();
+    const fetcher: typeof fetch = (url) =>
+      Promise.resolve(
+        urlText(url).endsWith("/alive")
+          ? new Response("ok")
+          : new Response(new ReadableStream({ cancel }), { status: 503 }),
+      );
+    const server = await start("https://pass.example.test", { fetcher });
+    expect((await server.inject("/pass/status")).statusCode).toBe(200);
+    expect(cancel).toHaveBeenCalledOnce();
   });
   it("times out an unreachable vault without affecting readiness", async () => {
     const server = await start("https://pass.example.test", {
@@ -104,7 +136,6 @@ describe("Pass status", () => {
     expect(response.json()).toMatchObject({
       enabled: true,
       reachable: false,
-      version: null,
     });
     expect((await server.inject("/ready")).statusCode).toBe(200);
   });

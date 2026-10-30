@@ -86,6 +86,7 @@ export function createPassStatus(
             version = data.version;
         }
       }
+      if (config && !config.ok) await config.body?.cancel();
       await alive?.body?.cancel();
     } catch {
       // An optional service being down is a normal status, not a readiness failure.

@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { z } from "zod";
-import operationsGuide from "../../../../docs/operations/pass.md?url";
 import { activeLayout } from "../origins.ts";
 import { AppShell, SidebarLink } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
@@ -16,13 +15,11 @@ import {
 // oxlint-disable-next-line import/no-unassigned-import
 import "./pass.css";
 
-const clientsGuide =
-  "https://github.com/nicodlz/opensuite/blob/main/docs/user/pass-clients.md";
 const Status = z.object({
   enabled: z.boolean(),
   reachable: z.boolean(),
-  version: z.string().nullable(),
-  checkedAt: z.iso.datetime().nullable(),
+  version: z.string().nullable().optional(),
+  checkedAt: z.iso.datetime().nullable().optional(),
 });
 async function getStatus() {
   const response = await fetch("/api/pass/status", {
@@ -35,18 +32,18 @@ async function getStatus() {
 }
 type Page = "home" | "generator" | "clients";
 
+let lastCopied: { value: string; id: number } | undefined;
+let copyId = 0;
 async function copy(value: string, clear: boolean) {
   await navigator.clipboard.writeText(value);
+  const id = ++copyId;
+  lastCopied = { value, id };
   if (clear)
     setTimeout(() => {
-      // Only clear if it is still our value and clipboard read permission permits it.
-      void navigator.clipboard
-        .readText()
-        .then((current) => {
-          if (current === value) return navigator.clipboard.writeText("");
-          return undefined;
-        })
-        .catch(() => {});
+      if (lastCopied?.id !== id || lastCopied.value !== value) return;
+      lastCopied = undefined;
+      if (document.hasFocus())
+        void navigator.clipboard.writeText("").catch(() => {});
     }, 30_000);
 }
 function CopyButton({
@@ -151,9 +148,12 @@ function Home({ origin }: { origin: string | undefined }) {
             Ask your administrator to configure the Pass origin and start the
             optional Pass profile. The generator is available on this device.
           </p>
-          <a className="pass-link" href={operationsGuide}>
-            Pass operator instructions ↗
-          </a>
+          <p>
+            Operators: set PASS_PUBLIC_HOST and add the matching HTTPS origin as
+            pass= in AUTH_PRODUCT_ORIGINS, then start the Compose pass profile
+            and recreate the API. See docs/operations/pass.md on the server for
+            setup.
+          </p>
         </section>
       ) : (
         <>
@@ -173,11 +173,11 @@ function Home({ origin }: { origin: string | undefined }) {
             </div>
             <img src="/vault-mark.svg" alt="" />
           </section>
-          <section className="pass-card" aria-live="polite">
+          <section className="pass-card">
             <div className="pass-status-head">
               <div>
                 <p className="eyebrow">CONNECTION STATUS</p>
-                <h2>
+                <h2 aria-live="polite">
                   {status.isPending
                     ? "Checking connection"
                     : status.isError
@@ -236,11 +236,6 @@ function Home({ origin }: { origin: string | undefined }) {
           <Link className="pass-link" to="/pass/clients">
             Set up your clients →
           </Link>
-          <p>
-            <a className="pass-link" href={clientsGuide}>
-              Read the client setup guide ↗
-            </a>
-          </p>
         </section>
       </div>
       <section className="pass-card pass-alias">
@@ -432,7 +427,7 @@ function Generator() {
         )}
         <p className="pass-note">
           Generated values stay in this page. Clipboard clearing after 30
-          seconds is best effort and depends on browser permission.
+          seconds is best effort when this page has focus.
         </p>
       </section>
     </div>
@@ -474,24 +469,47 @@ function Clients({ origin }: { origin: string | undefined }) {
         )}
       </section>
       <div className="checks-grid pass-cards">
-        {["Browser extensions", "Desktop", "Android", "iOS", "CLI"].map(
-          (name) => (
-            <section className="pass-card" key={name}>
-              <h2>{name}</h2>
-              <p>
-                Choose the self-hosted server in the official Bitwarden{" "}
-                {name === "CLI" ? "CLI" : name.toLowerCase() + " client"}, then
-                sign in to your vault.
-              </p>
-            </section>
-          ),
-        )}
+        <section className="pass-card">
+          <h2>Browser extensions</h2>
+          <p>
+            Install the official Bitwarden extension. Before signing in, open
+            the server selector, choose self-hosted, enter the server URL above
+            and save. Then sign in to your vault.
+          </p>
+        </section>
+        <section className="pass-card">
+          <h2>Desktop</h2>
+          <p>
+            Open the official Bitwarden desktop app. Before signing in, open the
+            server settings, choose self-hosted and save the server URL above.
+            Then sign in to your vault.
+          </p>
+        </section>
+        <section className="pass-card">
+          <h2>Android</h2>
+          <p>
+            Install the official Bitwarden app. On the sign-in screen, choose
+            self-hosted in the server settings, enter the server URL above and
+            save, then sign in.
+          </p>
+        </section>
+        <section className="pass-card">
+          <h2>iOS</h2>
+          <p>
+            Install the official Bitwarden app. On the sign-in screen, choose
+            self-hosted in the server settings, enter the server URL above and
+            save, then sign in.
+          </p>
+        </section>
+        <section className="pass-card">
+          <h2>CLI</h2>
+          <p>
+            Install the official Bitwarden CLI. Run{" "}
+            <code>bw config server &lt;server URL&gt;</code> with the URL above,
+            then run <code>bw login</code> and follow its prompts.
+          </p>
+        </section>
       </div>
-      <p className="pass-note">
-        <a className="pass-link" href={clientsGuide}>
-          Read the client setup guide ↗
-        </a>
-      </p>
     </div>
   );
 }

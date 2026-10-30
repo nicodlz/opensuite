@@ -81,6 +81,7 @@ it("requires valid mail configuration and derives readiness from the internal or
       STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
       AUTH_PRODUCT_ORIGINS:
         "drive=https://drive.example.test,pass=https://pass.example.test",
+      PASS_PUBLIC_HOST: "pass.example.test",
     });
     expect(config.isOk() && config.value).toMatchObject({
       passOrigin: "https://pass.example.test",
@@ -92,6 +93,16 @@ it("requires valid mail configuration and derives readiness from the internal or
       mailReadyUrl: "http://mail.internal:8080/healthz/ready",
       mailboxKey: "ab".repeat(32),
     });
+    expect(
+      (
+        await loadAuthConfig({
+          ...env,
+          STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
+          AUTH_PRODUCT_ORIGINS: "pass=https://other.example.test",
+          PASS_PUBLIC_HOST: "pass.example.test",
+        })
+      ).isErr(),
+    ).toBe(true);
     await writeFile(keyFile, "invalid");
     expect(
       (

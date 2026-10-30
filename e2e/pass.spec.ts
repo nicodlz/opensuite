@@ -30,9 +30,7 @@ test("Pass navigation and disabled state", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Pass is not enabled" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("link", { name: /operator instructions/ }),
-  ).toBeVisible();
+  await expect(page.getByText(/Operators: set PASS_PUBLIC_HOST/)).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
 });
 test("launcher, text-only status and generator copy", async ({
@@ -76,3 +74,45 @@ for (const theme of ["light", "dark"] as const)
     await page.getByRole("button", { name: "Generate", exact: true }).click();
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   });
+test("clipboard clear does not read and only runs while focused", async ({
+  page,
+}) => {
+  await origins(page, true);
+  await page.clock.install();
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: (value: string) => {
+          document.documentElement.dataset["clipboard"] = value;
+          return Promise.resolve();
+        },
+        readText: () => {
+          document.documentElement.dataset["clipboardRead"] = "called";
+          return Promise.reject(new Error("read not permitted"));
+        },
+      },
+    });
+    document.hasFocus = () =>
+      document.documentElement.dataset["focused"] !== "no";
+  });
+  await page.goto("/pass/generator");
+  await page.getByRole("button", { name: "Generate", exact: true }).click();
+  await page.getByRole("button", { name: "Copy generated value" }).click();
+  await expect(page.getByRole("status")).toHaveText("Copied");
+  const copied = await page.getByLabel("Generated password").inputValue();
+  await page.evaluate(() => {
+    document.documentElement.dataset["focused"] = "no";
+  });
+  await page.clock.fastForward(30_000);
+  await expect(page.locator("html")).toHaveAttribute("data-clipboard", copied);
+  await page.evaluate(() => {
+    document.documentElement.dataset["focused"] = "yes";
+  });
+  await page.getByRole("button", { name: "Copy generated value" }).click();
+  await page.clock.fastForward(30_000);
+  await expect(page.locator("html")).toHaveAttribute("data-clipboard", "");
+  await expect(page.locator("html")).not.toHaveAttribute(
+    "data-clipboard-read",
+    "called",
+  );
+});

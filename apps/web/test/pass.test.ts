@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { globSync, readFileSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   characterClasses,
@@ -41,16 +42,22 @@ describe("local generator", () => {
     expect(parts.every((word) => words.includes(word))).toBe(true);
     expect(generatePassphrase(3, " ").split(" ")).toHaveLength(3);
   });
-  it("does not use browser storage APIs", () => {
-    const source = readFileSync(
-      new URL("../src/pass/generator.ts", import.meta.url),
-      "utf8",
+  it("does not use storage, console or analytics in Pass source", () => {
+    const files = globSync("**/*", {
+      cwd: fileURLToPath(new URL("../src/pass/", import.meta.url)),
+    }).filter((file) =>
+      statSync(new URL(`../src/pass/${file}`, import.meta.url)).isFile(),
     );
-    expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB/i);
-    const page = readFileSync(
-      new URL("../src/pass/pass-page.tsx", import.meta.url),
-      "utf8",
-    );
-    expect(page).not.toContain("dangerouslySetInnerHTML");
+    expect(files).not.toHaveLength(0);
+    for (const file of files) {
+      const source = readFileSync(
+        new URL(`../src/pass/${file}`, import.meta.url),
+        "utf8",
+      );
+      expect(source).not.toMatch(
+        /localStorage|sessionStorage|indexedDB|\bconsole\s*\.|\b(?:analytics|gtag|trackEvent)\s*[.(]/i,
+      );
+      expect(source).not.toContain("dangerouslySetInnerHTML");
+    }
   });
 });
