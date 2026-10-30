@@ -3,6 +3,8 @@ import type { PrismaClient } from "./generated/index.js";
 import { createLocked, unavailable, wrap } from "./aliases-shared.ts";
 import { ALIAS_DOMAIN_LOCK_SEED, withUserLease } from "./alias-locks.ts";
 
+export const validMailboxLocalPart = (part: string) =>
+  part.length <= 39 && /^[a-z0-9]+(?:[-.][a-z0-9]+)*$/.test(part);
 /** Configured domains are usable even if DNS verification is not configured. */
 export function createAddressStore(
   db: PrismaClient,
@@ -23,7 +25,13 @@ export function createAddressStore(
       work: () => Promise<T>,
     ): Promise<T | null> => {
       const [localPart, name, extra] = email.toLowerCase().split("@");
-      if (!localPart || !name || extra !== undefined) return null;
+      if (
+        !localPart ||
+        !validMailboxLocalPart(localPart) ||
+        !name ||
+        extra !== undefined
+      )
+        return null;
       return db.$transaction(
         async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${name}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
@@ -37,12 +45,11 @@ export function createAddressStore(
             if (
               !currentDomain ||
               currentDomain.removalPending ||
-              (await tx.address.count({
-                where: {
-                  domainId: domain.id,
-                  localPart: { equals: localPart, mode: "insensitive" },
-                },
-              }))
+              (
+                await tx.$queryRaw<
+                  { id: string }[]
+                >`SELECT "id" FROM "Address" WHERE "domainId" = ${domain.id} AND lower("localPart") = ${localPart} LIMIT 1`
+              ).length
             )
               return null;
           }
@@ -63,45 +70,87 @@ export function createAddressStore(
     ensureConfigured: (createDomain: (name: string) => Promise<string>) =>
       ResultAsync.fromPromise(
         (async () => {
-          // Keep management operations bounded and ordered.
+          let failures = 0;
+          // Bound management requests and preserve per-domain failure isolation.
           /* oxlint-disable eslint/no-await-in-loop */
           for (const name of configured) {
-            await db.$transaction(
-              async (tx) => {
+            try {
+              const existing = await db.domain.findUnique({ where: { name } });
+              if (existing?.removalPending || existing?.stalwartId) continue;
+              const owner =
+                existing?.userId ??
+                (
+                  await db.user.findFirst({
+                    where: { role: "admin", disabled: false },
+                    orderBy: { createdAt: "asc" },
+                    select: { id: true },
+                  })
+                )?.id;
+              if (!owner) continue;
+              const remoteId = await createDomain(name);
+              await db.$transaction(async (tx) => {
                 await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${name}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
-                const existing = await tx.domain.findUnique({
-                  where: { name },
-                });
-                if (existing?.removalPending || existing?.stalwartId) return;
-                const owner =
-                  existing?.userId ??
-                  (
-                    await tx.user.findFirst({
-                      where: { role: "admin", disabled: false },
-                      orderBy: { createdAt: "asc" },
-                      select: { id: true },
-                    })
-                  )?.id;
-                if (!owner) return;
-                if (existing)
-                  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${existing.id}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
-                const domainId = await createDomain(name);
-                if (existing)
+                const current = await tx.domain.findUnique({ where: { name } });
+                if (current) {
+                  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${current.id}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
                   await tx.domain.updateMany({
                     where: {
-                      id: existing.id,
+                      id: current.id,
                       removalPending: false,
                       stalwartId: null,
                     },
-                    data: { stalwartId: domainId },
+                    data: { stalwartId: remoteId },
                   });
-                else
+                } else
                   await tx.domain.create({
-                    data: { name, userId: owner, stalwartId: domainId },
+                    data: { name, userId: owner, stalwartId: remoteId },
                   });
+              });
+            } catch {
+              failures++;
+            }
+          }
+          /* oxlint-enable eslint/no-await-in-loop */
+          return failures;
+        })(),
+        unavailable,
+      ),
+    markChanged: () =>
+      ResultAsync.fromPromise(
+        (async () => {
+          const rows = await db.address.findMany({
+            where: { mailboxManaged: true, ready: true, removedAt: null },
+            include: {
+              domain: {
+                include: { user: { select: { role: true, disabled: true } } },
               },
-              { timeout: 20000 },
-            );
+              user: { include: { mailbox: true } },
+            },
+          });
+          // Preserve ordering while marking stale desired states.
+          /* oxlint-disable eslint/no-await-in-loop */
+          for (const row of rows) {
+            const domainUsable =
+              !row.domain.removalPending &&
+              row.domain.stalwartId !== null &&
+              (configured.includes(row.domain.name) ||
+                (row.domain.status === "verified" &&
+                  row.domain.user.role === "admin" &&
+                  !row.domain.user.disabled));
+            const desired =
+              !row.removalPending &&
+              domainUsable &&
+              !row.user.disabled &&
+              row.user.mailbox?.status === "active";
+            if (row.active !== desired)
+              await db.address.updateMany({
+                where: { id: row.id, ready: true, revision: row.revision },
+                data: {
+                  ready: false,
+                  active: false,
+                  revision: { increment: 1 },
+                },
+              });
           }
           /* oxlint-enable eslint/no-await-in-loop */
         })(),
@@ -126,6 +175,7 @@ export function createAddressStore(
               where: {
                 isAlias: false,
                 mailboxManaged: true,
+                removedAt: null,
               },
               include: {
                 domain: {
@@ -146,6 +196,9 @@ export function createAddressStore(
     ) =>
       wrap(
         locked(userId, async (tx) => {
+          localPart = localPart.toLowerCase();
+          if (!validMailboxLocalPart(localPart))
+            return err({ kind: "invalid" });
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
           const user = await tx.user.findFirst({
             where: {
@@ -161,16 +214,26 @@ export function createAddressStore(
           if (!user || !domain || !user.mailbox)
             return err({ kind: "invalid" });
           const full = `${localPart}@${domain.name}`;
+          const primary = await tx.$queryRaw<
+            { id: string }[]
+          >`SELECT "id" FROM "User" WHERE lower("email") = ${full.toLowerCase()} LIMIT 1`;
+          const occupied = await tx.$queryRaw<
+            {
+              id: string;
+              userId: string;
+              removedAt: Date | null;
+              mailboxManaged: boolean;
+              isAlias: boolean;
+            }[]
+          >`SELECT "id", "userId", "removedAt", "mailboxManaged", "isAlias" FROM "Address" WHERE "domainId" = ${domainId} AND lower("localPart") = ${localPart} LIMIT 1`;
+          const prior = occupied[0];
           if (
-            (await tx.user.count({
-              where: { email: { equals: full, mode: "insensitive" } },
-            })) ||
-            (await tx.address.count({
-              where: {
-                domainId,
-                localPart: { equals: localPart, mode: "insensitive" },
-              },
-            }))
+            primary.length ||
+            (prior &&
+              (prior.userId !== userId ||
+                !prior.removedAt ||
+                !prior.mailboxManaged ||
+                prior.isAlias))
           )
             return err({ kind: "conflict" });
           // Pending removals retain their reservation and count until delivery is removed.
@@ -178,32 +241,35 @@ export function createAddressStore(
             where: {
               userId,
               isAlias: false,
-              NOT: {
-                localPart: {
-                  equals: user.email.split("@")[0] ?? "",
-                  mode: "insensitive",
-                },
-                domain: {
-                  name: {
-                    equals: user.email.split("@")[1] ?? "",
-                    mode: "insensitive",
-                  },
-                },
-              },
+              mailboxManaged: true,
+              removedAt: null,
             },
           });
           if (limit !== null && count + 1 >= limit)
             return err({ kind: "limit" });
-          const row = await tx.address.create({
-            data: {
-              userId,
-              domainId,
-              localPart,
-              mailboxManaged: true,
-              lastAccountId: user.mailbox.accountId,
-            },
-            include: { domain: true },
-          });
+          const row = prior
+            ? await tx.address.update({
+                where: { id: prior.id },
+                data: {
+                  removedAt: null,
+                  removalPending: false,
+                  ready: false,
+                  active: false,
+                  lastAccountId: user.mailbox.accountId,
+                  revision: { increment: 1 },
+                },
+                include: { domain: true },
+              })
+            : await tx.address.create({
+                data: {
+                  userId,
+                  domainId,
+                  localPart,
+                  mailboxManaged: true,
+                  lastAccountId: user.mailbox.accountId,
+                },
+                include: { domain: true },
+              });
           await tx.auditEvent.create({
             data: {
               userId,
@@ -218,7 +284,13 @@ export function createAddressStore(
       wrap(
         locked(userId, async (tx) => {
           const row = await tx.address.findFirst({
-            where: { id, userId, isAlias: false, mailboxManaged: true },
+            where: {
+              id,
+              userId,
+              isAlias: false,
+              mailboxManaged: true,
+              removedAt: null,
+            },
           });
           if (!row) return err({ kind: "not_found" });
           await tx.address.update({
@@ -226,6 +298,7 @@ export function createAddressStore(
             data: {
               removalPending: true,
               ready: false,
+              active: false,
               revision: { increment: 1 },
             },
           });
@@ -305,10 +378,16 @@ export function createAddressStore(
           };
           const updated = await tx.address.updateMany({
             where,
-            data: { ready: enabled, lastAccountId: accountId },
+            data: {
+              ready: true,
+              active: enabled,
+              lastAccountId: accountId,
+              ...(row.removalPending
+                ? { removedAt: new Date(), removalPending: false }
+                : {}),
+            },
           });
           if (!updated.count) return false;
-          if (row.removalPending) await tx.address.delete({ where: { id } });
           if (row.removalPending || enabled)
             await tx.auditEvent.create({
               data: {
@@ -336,7 +415,7 @@ export function createAddressStore(
     pending: () =>
       ResultAsync.fromPromise(
         db.address.findMany({
-          where: { mailboxManaged: true, ready: false },
+          where: { mailboxManaged: true, ready: false, removedAt: null },
           select: { id: true, userId: true },
           orderBy: { updatedAt: "asc" },
           take: 100,
@@ -347,14 +426,25 @@ export function createAddressStore(
       ResultAsync.fromPromise(
         (async () => {
           const [localPart, domain, extra] = email.toLowerCase().split("@");
-          if (!localPart || !domain || extra !== undefined) return null;
+          if (
+            !localPart ||
+            !validMailboxLocalPart(localPart) ||
+            !domain ||
+            extra !== undefined
+          )
+            return null;
+          const ids = await db.$queryRaw<
+            { id: string }[]
+          >`SELECT a."id" FROM "Address" a JOIN "Domain" d ON d."id" = a."domainId" WHERE lower(a."localPart") = ${localPart} AND d."name" = ${domain}`;
           return db.address.findFirst({
             where: {
               userId,
-              localPart: { equals: localPart, mode: "insensitive" },
+              id: { in: ids.map((row) => row.id) },
               isAlias: false,
               mailboxManaged: true,
               ready: true,
+              active: true,
+              removedAt: null,
               removalPending: false,
               domain: { name: domain, ...usable },
               user: { disabled: false, mailbox: { status: "active" } },
@@ -365,21 +455,32 @@ export function createAddressStore(
         unavailable,
       ),
     resolveLogin: async (email: string) => {
-      const [localPart, domain, extra] = email.toLowerCase().split("@");
+      const normalized = email.toLowerCase();
+      const primary = await db.$queryRaw<
+        { id: string }[]
+      >`SELECT "id" FROM "User" WHERE lower("email") = ${normalized} LIMIT 1`;
+      const [localPart, domain, extra] = normalized.split("@");
       if (!localPart || !domain || extra !== undefined) return null;
+      const ids = await db.$queryRaw<
+        { id: string }[]
+      >`SELECT a."id" FROM "Address" a JOIN "Domain" d ON d."id" = a."domainId" WHERE lower(a."localPart") = ${localPart} AND d."name" = ${domain}`;
       const row = await db.address.findFirst({
         where: {
-          localPart: { equals: localPart, mode: "insensitive" },
+          id: { in: ids.map((item) => item.id) },
           isAlias: false,
           mailboxManaged: true,
           ready: true,
+          active: true,
+          removedAt: null,
           removalPending: false,
           domain: { name: domain, ...usable },
           user: { disabled: false, mailbox: { status: "active" } },
         },
         select: { user: { select: { id: true, email: true } } },
       });
-      return row?.user ?? null;
+      return primary.length || !validMailboxLocalPart(localPart)
+        ? null
+        : (row?.user ?? null);
     },
   };
 }

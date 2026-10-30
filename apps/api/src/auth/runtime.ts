@@ -11,6 +11,7 @@ import {
 import {
   createAccountStore,
   createAddressStore,
+  validMailboxLocalPart,
   createProvisioningStore,
   type PrismaClient,
 } from "@opensuite/db";
@@ -97,20 +98,17 @@ export const createAuthRuntime = (
       const [local, domain, extra] = user.value.email.toLowerCase().split("@");
       if (
         local === undefined ||
+        !validMailboxLocalPart(local) ||
         domain === undefined ||
         extra !== undefined ||
         !(await isMailDomain(domain))
       )
         return err(failure());
       // The address must not already be another user's address or alias.
-      const taken = await db.address.count({
-        where: {
-          localPart: { equals: local, mode: "insensitive" },
-          domain: { name: domain },
-          userId: { not: userId },
-        },
-      });
-      if (taken > 0) return err(failure());
+      const taken = await db.$queryRaw<
+        { id: string }[]
+      >`SELECT a."id" FROM "Address" a JOIN "Domain" d ON d."id" = a."domainId" WHERE lower(a."localPart") = ${local} AND d."name" = ${domain} AND a."userId" <> ${userId} LIMIT 1`;
+      if (taken.length > 0) return err(failure());
       const domainResult = await admin.createDomain(domain);
       if (domainResult.isErr()) return err(failure());
       const name = `os-${createHash("sha256").update(userId).digest("hex").slice(0, 32)}`;

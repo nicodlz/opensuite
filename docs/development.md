@@ -402,3 +402,10 @@ submission means Stalwart accepted the message for delivery, not that a remote
 recipient received it. If submission times out or its follow-up mailbox update
 fails, delivery may already be underway; inspect the mailbox and delivery queue
 before retrying.
+
+### Sign-in rate limits and extra addresses
+
+All sign-in names for a mailbox share the account rate-limit budget. A caller
+who deliberately exhausts that budget can observe that two names share a
+lockout. This linkage disclosure is accepted to prevent attackers from
+bypassing the account limit by rotating addresses. IP limits also apply.

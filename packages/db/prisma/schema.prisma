@@ -171,6 +171,8 @@ model Address {
   createdAt DateTime @default(now())
   emailAlias EmailAlias?
   mailboxManaged Boolean @default(false)
+  active Boolean @default(false)
+  removedAt DateTime?
   ready Boolean @default(false)
   removalPending Boolean @default(false)
   lastAccountId String?

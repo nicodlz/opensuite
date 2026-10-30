@@ -13,6 +13,7 @@ const view = (
     id: string;
     localPart: string;
     ready: boolean;
+    active: boolean;
     removalPending: boolean;
     domain: {
       name: string;
@@ -28,6 +29,7 @@ const view = (
   primary: false,
   ready:
     row.ready &&
+    row.active &&
     !row.removalPending &&
     !row.domain.removalPending &&
     (configured.includes(row.domain.name) ||
@@ -35,6 +37,7 @@ const view = (
         row.domain.user.role === "admin" &&
         !row.domain.user.disabled)),
   removing: row.removalPending,
+  pending: !row.ready,
 });
 export function createAddressService(
   store: AddressStore,
@@ -114,11 +117,17 @@ export function createAddressService(
   };
   return {
     domains: async () => {
-      const ensured = await ensureDomains();
-      return ensured.isErr() ? err(ensured.error) : store.domains();
+      const result = await store.domains();
+      return result;
     },
+    ensureDomains,
     list: async (actor: Actor) => {
-      const limit = await addressLimit(actor);
+      let limit: number | null;
+      try {
+        limit = await addressLimit(actor);
+      } catch {
+        return failed("unavailable");
+      }
       const rows = await store.list(actor.id);
       if (rows.isErr()) return err(rows.error);
       const addresses = [
@@ -128,6 +137,7 @@ export function createAddressService(
           primary: true,
           ready: true,
           removing: false,
+          pending: false,
         },
         ...rows.value.addresses.map((row) => view(row, configured)),
       ];
@@ -148,7 +158,12 @@ export function createAddressService(
         await store.audit(actor.id, "address.create.failure");
         return failed("reserved");
       }
-      const limit = await addressLimit(actor);
+      let limit: number | null;
+      try {
+        limit = await addressLimit(actor);
+      } catch {
+        return failed("unavailable");
+      }
       const reserved = await store.reserve(
         actor.id,
         input.domainId,
@@ -166,7 +181,6 @@ export function createAddressService(
           "address.create.failure",
           reserved.value.id,
         );
-        return err(result.error);
       }
       const current = await store.snapshot(actor.id, reserved.value.id);
       return current.isOk() && current.value
@@ -186,9 +200,19 @@ export function createAddressService(
       }
       return ok({ removed: true as const });
     },
+    auditSubmission: async (userId: string, id: string) => {
+      const result = await store.audit(
+        userId,
+        "address.submission.attempt",
+        id,
+      );
+      return result;
+    },
     canSendAs: async (userId: string, email: string) =>
       (await store.canSendAs(userId, email)).map((row) => row?.id ?? null),
     reconcile: async () => {
+      const changed = await store.markChanged();
+      if (changed.isErr()) return err(changed.error);
       const pending = await store.pending();
       if (pending.isErr()) return pending;
       let failures = 0;

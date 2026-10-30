@@ -63,7 +63,7 @@ describe("account-wide authentication limits", () => {
         { email: "victim@example.test" },
         undefined,
       ),
-    ).toMatchObject({ first: true });
+    ).toMatchObject({ first: true, bucket: "account" });
     expect(
       limiter.check(
         "/auth/sign-in/email",
@@ -95,7 +95,7 @@ describe("account-wide authentication limits", () => {
         { email: "new@example.test" },
         undefined,
       ),
-    ).toBeDefined();
+    ).toMatchObject({ bucket: "ip" });
   });
   it("limits MFA attempts across IPs for the account associated with a challenge", () => {
     const limiter = createAuthLimiter(() => 0);

@@ -8,7 +8,7 @@ const procedure = oc.errors({
   RESERVED: { status: 400, message: "This address name is reserved" },
   NOT_FOUND: { status: 404, message: "Address not found" },
   CONFLICT: { status: 409, message: "This address is already taken" },
-  ADDRESS_LIMIT_REACHED: { status: 429, message: "Address limit reached" },
+  ADDRESS_LIMIT_REACHED: { status: 403, message: "Address limit reached" },
   TOO_MANY_REQUESTS: { status: 429, message: "Too many requests" },
   SERVICE_UNAVAILABLE: { status: 503, message: "Address service unavailable" },
 });
@@ -18,6 +18,7 @@ const address = z.object({
   primary: z.boolean(),
   ready: z.boolean(),
   removing: z.boolean(),
+  pending: z.boolean(),
 });
 export const addressesContract = {
   list: procedure

@@ -15,6 +15,11 @@ async function value<T>(
 ): Promise<T> {
   const result = await promise;
   if (result.isOk()) return result.value;
+  if (result.error.kind === "limit")
+    throw new ORPCError("ADDRESS_LIMIT_REACHED", {
+      status: 403,
+      defined: true,
+    });
   const code =
     result.error.kind === "invalid"
       ? "BAD_REQUEST"
@@ -24,9 +29,7 @@ async function value<T>(
           ? "NOT_FOUND"
           : result.error.kind === "conflict"
             ? "CONFLICT"
-            : result.error.kind === "limit"
-              ? "ADDRESS_LIMIT_REACHED"
-              : "SERVICE_UNAVAILABLE";
+            : "SERVICE_UNAVAILABLE";
   throw new ORPCError(code, { defined: true });
 }
 export const addressesRouter = addresses.router({

@@ -96,11 +96,12 @@ export const createDomainStore = (db: PrismaClient) => ({
       failure,
     );
   },
-  verificationTargets() {
+  verificationTargets(configured: readonly string[] = []) {
     return ResultAsync.fromPromise(
       db.domain.findMany({
         where: {
           stalwartId: { not: null },
+          name: { notIn: [...configured] },
           user: { role: "admin", disabled: false },
         },
         select: { id: true, user: { select: { id: true, email: true } } },
@@ -398,6 +399,8 @@ export const createDomainStore = (db: PrismaClient) => ({
                 { mailboxManaged: false },
                 {
                   ready: true,
+                  active: true,
+                  removedAt: null,
                   removalPending: false,
                   domain: { removalPending: false },
                 },

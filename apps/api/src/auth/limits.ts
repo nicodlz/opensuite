@@ -134,7 +134,7 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
         `${category}:ip:${normalizedIp}`,
         isSignIn || isMfa ? 50 : category === "signup" ? 10 : 100,
       );
-      if (ipWait !== undefined) return ipWait;
+      if (ipWait !== undefined) return { ...ipWait, bucket: "ip" as const };
       const accountWait =
         account === undefined
           ? undefined
@@ -144,7 +144,9 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
                 : `${category}:account:${normalizedIp}:${account}`,
               isSignIn || isMfa ? 5 : 20,
             );
-      return accountWait;
+      return accountWait === undefined
+        ? undefined
+        : { ...accountWait, bucket: "account" as const };
     },
     remember(body: unknown, cookies: string[]): void {
       const email = emailFromBody(body);
