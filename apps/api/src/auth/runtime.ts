@@ -21,6 +21,8 @@ interface RuntimeConfig {
   readonly publicOrigin: string;
   readonly productOrigins?: Readonly<Record<string, string>>;
   readonly mailDomain: string;
+  /** Every configured account domain, `mailDomain` included. */
+  readonly mailDomains?: readonly string[];
   readonly stalwartOrigin: string;
   readonly secret: string;
   readonly mailboxKey: string;
@@ -67,6 +69,16 @@ export const createAuthRuntime = (
         }),
     },
   );
+  const configured = new Set(config.mailDomains ?? [config.mailDomain]);
+  /** A configured domain or one an administrator manages in the console. */
+  const isMailDomain = async (domain: string | undefined) => {
+    if (domain === undefined) return false;
+    if (configured.has(domain)) return true;
+    const managed = await db.domain.count({
+      where: { name: domain, removalPending: false },
+    });
+    return managed > 0;
+  };
   const audit = async (event: { userId: string | null; action: string }) => {
     const result = await accounts.audit(event);
     if (result.isErr()) throw new Error("audit unavailable");
@@ -78,8 +90,9 @@ export const createAuthRuntime = (
       const [local, domain, extra] = user.value.email.toLowerCase().split("@");
       if (
         local === undefined ||
-        domain !== config.mailDomain ||
-        extra !== undefined
+        domain === undefined ||
+        extra !== undefined ||
+        !(await isMailDomain(domain))
       )
         return err(failure());
       const domainResult = await admin.createDomain(domain);
@@ -165,7 +178,7 @@ export const createAuthRuntime = (
   return {
     reconcile,
     bootstrap: async (email: string, password: string, name: string) => {
-      if (email.toLowerCase().split("@")[1] !== config.mailDomain)
+      if (!(await isMailDomain(email.toLowerCase().split("@")[1])))
         throw new Error("email domain is not configured");
       const existing = await accounts.userIdForEmail(email);
       if (existing.isErr()) throw new Error("account lookup failed");
@@ -192,6 +205,7 @@ export const createAuthRuntime = (
       trustedOrigins,
       productOrigins,
       mailDomain: config.mailDomain,
+      isMailDomain,
       actor: async (headers: Headers) => {
         const session = await identity.api.getSession({
           headers,

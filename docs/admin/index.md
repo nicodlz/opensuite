@@ -4,14 +4,14 @@ The administrator manages users and mail domains; the host operator also control
 
 ## Setup wizard and first administrator
 
-First bootstrap the private Stalwart management account and create the first administrator using the [production runbook](../deployment/production.md#first-administrator) or [development guide](../development.md#authentication-and-mailbox-provisioning). There is no automatic first administrator. The bootstrap command creates or promotes an enabled account in `MAIL_DOMAIN`; it does not change an existing password. Protect Docker access and the password file.
+First bootstrap the private Stalwart management account and create the first administrator using the [production runbook](../deployment/production.md#first-administrator) or [development guide](../development.md#authentication-and-mailbox-provisioning). There is no automatic first administrator. The bootstrap command creates or promotes an enabled account in `MAIL_DOMAIN`, a domain in `MAIL_DOMAINS` or a managed domain; it does not change an existing password. Protect Docker access and the password file.
 
 With an administrator session, open **Setup wizard** at `/setup`. The wizard offers five steps:
 
 1. **System check** shows API, database, Stalwart, Drive, Drive object storage, relay configuration and backup marker status. A marker does not verify a restore; check mail blob storage separately.
 2. **Mail domain** adds a domain, displays DNS records for manual publication and rechecks them. Register the administrator address for inbound routing when offered.
 3. **Outbound relay** shows stored relay and DKIM status and can submit a test message. Configure the relay with the operator procedure and independently confirm delivery.
-4. **Create users** provides a form for email, display name and initial password. The address must use `MAIL_DOMAIN`, and that managed domain must already be added.
+4. **Create users** provides a form for email, display name and initial password. The address must use a managed domain that is already added: `MAIL_DOMAIN` or any other domain added under Domains.
 5. **Finish** summarizes the checks and links to Mail, Drive and operating guides. Unknown and pending checks need investigation; completing the wizard does not prove production readiness.
 
 The wizard requires an existing administrator session. See the [user guide](../user/index.md#signing-in-and-mfa) for sign-in and MFA. Vite development uses synthetic setup data.

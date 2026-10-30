@@ -106,6 +106,32 @@ it("requires valid mail configuration and derives readiness from the internal or
         })
       ).isErr(),
     ).toBe(true);
+    const domains = await loadAuthConfig({
+      ...env,
+      STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
+      MAIL_DOMAINS: " second.test, example.test ,",
+    });
+    expect(domains.isOk() && domains.value.mailDomains).toEqual([
+      "example.test",
+      "second.test",
+    ]);
+    expect(
+      (
+        await loadAuthConfig({
+          ...env,
+          STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
+        })
+      ).map((value) => value.mailDomains),
+    ).toEqual(ok(["example.test"]));
+    expect(
+      (
+        await loadAuthConfig({
+          ...env,
+          STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
+          MAIL_DOMAINS: "second.test,Not a domain",
+        })
+      ).isErr(),
+    ).toBe(true);
     await writeFile(keyFile, "invalid");
     expect(
       (

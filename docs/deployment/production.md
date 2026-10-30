@@ -66,6 +66,8 @@ OPENSUITE_SITE_ADDRESS=mail.example.com
 OPENSUITE_PUBLIC_HOST=mail.example.com
 MAIL_HOSTNAME=mail.example.com
 MAIL_DOMAIN=example.com
+# Optional further account domains, comma separated.
+#MAIL_DOMAINS=example.net
 MAIL_PROTOCOL_BIND=127.0.0.1
 MAIL_MANAGEMENT_SUBNET=172.30.248.0/24
 MAIL_MANAGEMENT_API_IP=172.30.248.10
@@ -271,7 +273,8 @@ following steps:
 ## First administrator
 
 Create a strong initial password in a protected file outside the checkout and
-`.env`, with no trailing newline. Use an address within `MAIL_DOMAIN`:
+`.env`, with no trailing newline. Use an address within `MAIL_DOMAIN`, a
+domain in `MAIL_DOMAINS` or a managed domain:
 
 ```sh
 docker compose exec -T api node apps/api/src/bootstrap.ts admin@example.com /dev/stdin < /secure/path/initial-password
