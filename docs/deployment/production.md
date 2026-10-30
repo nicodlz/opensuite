@@ -30,9 +30,10 @@ these target names do not imply that DNS, hosting or mail routing is configured.
    supplied TXT/CNAME records and publish its Easy DKIM records. Publish or
    merge an SPF policy and DMARC policy appropriate to _all_ current senders;
    add custom MAIL FROM DNS only if configured and it does not alter existing
-   routing. Publish Stalwart's DKIM records after the domain is provisioned as
-   described in [outbound operations](../operations/outbound.md). Check each
-   record resolves, signatures align and SES verification completes. Do not
+   routing. Behind the SES relay, SES signs with Easy DKIM and Stalwart does
+   not sign (see [outbound operations](../operations/outbound.md)); Stalwart's
+   own DKIM records matter only for direct delivery without the relay. Check
+   each record resolves, signatures align and SES verification completes. Do not
    replace the receiving MX or wildcard records at this stage.
 3. Create separate private B2 buckets/credentials for mail blobs, Drive and
    restic backups, and a separate archive for inbound notification copies.
@@ -315,9 +316,9 @@ belong to only one account.
    and recreate the worker with `docker compose --profile ingest up -d ingest`.
 4. Send mail: SES accepts only verified identities, so publish every record
    of the AWS module's `dns_records` output for the domain (identity, SES
-   DKIM, MAIL FROM MX and SPF), Stalwart's DKIM record from
-   `management dns`, and SPF and DMARC, as in
-   [outbound DKIM and DNS](../operations/outbound.md#dkim-and-dns).
+   DKIM, MAIL FROM MX and SPF) and SPF and DMARC, as in
+   [outbound DKIM and DNS](../operations/outbound.md#dkim-and-dns). Before
+   anyone sends from it, check that SES signs for it (see that section).
    Until then SES rejects its messages and the sender receives a bounce.
 
 To retire a domain listed in `MAIL_DOMAINS`, remove it from that list and

@@ -229,7 +229,7 @@ export function Composer({
       // Accepted for delivery only: the outbound relay may still refuse it,
       // and then a delivery report arrives in the inbox.
       onNotice(
-        "Message queued. If it cannot be delivered, you will receive a report.",
+        "Message queued. If it cannot be delivered, you should receive a report.",
       );
       onSaved();
       onClose();

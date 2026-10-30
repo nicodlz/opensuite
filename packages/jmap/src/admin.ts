@@ -96,9 +96,9 @@ type AdminResult<T> = Result<T, JmapError>;
 const using = [JmapCapability.core, JmapCapability.management];
 
 // Stalwart's own DKIM signing. Through the SES relay it is off: SES signs
-// with the domain's Easy DKIM after relaying and rewrites headers that a
-// Stalwart signature covers, so Stalwart's signature would fail at the
-// recipient, and SES refuses a message carrying two DKIM-Signature headers.
+// with each domain's Easy DKIM, it refused messages already carrying
+// Stalwart's signatures (554 Duplicate header 'DKIM-Signature'), and a
+// single Stalwart signature failed at the recipient after relaying.
 const relaySigning = { match: {}, else: "false" };
 const defaultSigning = {
   match: {
@@ -310,6 +310,10 @@ export class StalwartAdmin {
         message: "Invalid relay configuration",
       });
     const config = parsed.data;
+    // Signing goes off before mail is routed to the relay: a failure here
+    // leaves the current route untouched.
+    const signing = await this.#setSigning(relaySigning);
+    if (signing.isErr()) return err(signing.error);
     const route = await this.#ensureNamed("MtaRoute", "osrelay", {
       "@type": "Relay",
       host: config.host,
@@ -402,8 +406,6 @@ export class StalwartAdmin {
         kind: "invalidResponse",
         message: "Outbound strategy did not retain desired settings",
       });
-    const signing = await this.#setSigning(relaySigning);
-    if (signing.isErr()) return err(signing.error);
     // Always reload: a previous attempt may have saved settings but lost its response.
     return this.#reload();
   }

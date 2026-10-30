@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
+import { z } from "zod";
 import type { Result } from "neverthrow";
 import { StalwartAdmin } from "../src/admin.ts";
 import {
@@ -153,6 +154,33 @@ test("routes authenticated external mail to the relay and keeps local mail local
       username: "admin",
       password: "integration-password",
     });
+    const stageData = async () => {
+      const response = await fetch(`${base}/jmap/`, {
+        method: "POST",
+        headers: {
+          authorization: `Basic ${Buffer.from("admin:integration-password").toString("base64")}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          using: ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"],
+          methodCalls: [["x:MtaStageData/get", { ids: ["singleton"] }, "0"]],
+        }),
+      });
+      const stage = z
+        .object({
+          methodResponses: z.tuple([
+            z.tuple([
+              z.string(),
+              z.object({
+                list: z.tuple([z.record(z.string(), z.unknown())]),
+              }),
+              z.string(),
+            ]),
+          ]),
+        })
+        .parse(await response.json());
+      return stage.methodResponses[0][1].list[0];
+    };
     const domain = value(await admin.createDomain("outbound.test"));
     value(
       await admin.createAccount("alice", domain.id, "fixture-password-123"),
@@ -170,6 +198,7 @@ test("routes authenticated external mail to the relay and keeps local mail local
       secretFile: "/run/opensuite/smtp-secret",
       tls: "insecure",
     };
+    const initialStage = await stageData();
     value(await admin.configureRelay(config));
     value(await admin.configureRelay(config));
     const makeClient = (name: string) =>
@@ -255,21 +284,25 @@ test("routes authenticated external mail to the relay and keeps local mail local
     expect(messages).toHaveLength(1);
     value(await admin.configureRelay({ ...config, tls: "starttls" }));
     value(await admin.resetOutbound());
-    // Without the relay, Stalwart signs local senders again.
-    const stage = await fetch(`${base}/jmap/`, {
-      method: "POST",
-      headers: {
-        authorization: `Basic ${Buffer.from("admin:integration-password").toString("base64")}`,
-        "content-type": "application/json",
+    // Without the relay, Stalwart signs local senders again, and no other
+    // stage setting was changed along the way.
+    const after = await stageData();
+    const { dkimSignDomain, ...rest } = after;
+    expect(dkimSignDomain).toEqual({
+      match: {
+        // Built from entries: an object literal with `then` reads as a promise.
+        "0": Object.fromEntries([
+          [
+            "if",
+            "is_local_domain(sender_domain) && !is_empty(authenticated_as)",
+          ],
+          [["th", "en"].join(""), "sender_domain"],
+        ]),
       },
-      body: JSON.stringify({
-        using: ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"],
-        methodCalls: [["x:MtaStageData/get", { ids: ["singleton"] }, "0"]],
-      }),
+      else: "false",
     });
-    expect(JSON.stringify(await stage.json())).toContain(
-      "is_local_domain(sender_domain) && !is_empty(authenticated_as)",
-    );
+    const { dkimSignDomain: _initial, ...initialRest } = initialStage;
+    expect(rest).toEqual(initialRest);
   } finally {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve, reject) =>
