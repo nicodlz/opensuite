@@ -5,22 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0a0710" />
-    <title>Esuno · Your private suite, on your own server</title>
+    <title>Esuno · Your digital life, your way</title>
     <meta
       name="description"
-      content="Esuno brings mail, calendar, files and passwords together in one calm workspace. Free software, self-hosted with Docker Compose, portable down to the last message."
+      content="Mail, files, calendar and passwords in one private ecosystem. Host Esuno yourself or choose managed Esuno Cloud."
     />
     <link rel="canonical" href="https://esuno.net/" />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://esuno.net/" />
     <meta property="og:site_name" content="Esuno" />
-    <meta
-      property="og:title"
-      content="Esuno · Your private suite, on your own server"
-    />
+    <meta property="og:title" content="Esuno · Your digital life, your way" />
     <meta
       property="og:description"
-      content="Mail, calendar, files and passwords in one calm workspace. Free software you run yourself."
+      content="Mail, files, calendar and passwords in one ecosystem. Self-host or choose Esuno Cloud."
     />
     <meta property="og:image" content="https://esuno.net/og.png" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -80,10 +77,9 @@
         </a>
         <nav class="nav__links" aria-label="Sections">
           <a href="#suite">Suite</a>
-          <a href="#principles">Principles</a>
-          <a href="#mail-first">Mail first</a>
+          <a href="#deployment">Deployment</a>
+          <a href="#pricing">Pricing</a>
           <a href="#self-host">Self-host</a>
-          <a href="#scale">Scale</a>
         </nav>
         <a
           class="nav__source"
@@ -93,7 +89,7 @@
           <svg aria-hidden="true"><use href="#github" /></svg>
           <span>GitHub</span>
         </a>
-        <a class="button button--small" href="#self-host">Run Esuno</a>
+        <a class="button button--small" href="#pricing">Get started</a>
       </div>
     </header>
 
@@ -107,26 +103,22 @@
         </div>
 
         <div class="hero__copy">
+          <p class="kicker rise rise--1">Esuno. Your digital life, your way.</p>
           <h1 class="hero__title rise rise--1">
-            Your private suite,
-            <em>on your own server.</em>
+            Everything you need. <em>Nothing you don't.</em>
           </h1>
           <p class="hero__lede rise rise--2">
-            Esuno brings mail, calendar, files and passwords together in one
-            calm workspace. You run it, you own it, and you can take every
-            message with you.
+            One beautiful, private ecosystem for your email, files, calendar and
+            passwords. Host it yourself, or let us handle everything.
           </p>
           <div class="hero__actions rise rise--3">
-            <a class="button" href="#self-host">
-              Run it yourself
+            <a class="button" href="#pricing">
+              Get started
               <svg aria-hidden="true"><use href="#arrow" /></svg>
             </a>
-            <a
-              class="button button--ghost"
-              href="https://github.com/nicodlz/opensuite"
-            >
-              <svg aria-hidden="true"><use href="#github" /></svg>
-              View the source
+            <a class="button button--ghost" href="#self-host">
+              Self-host Esuno
+              <svg aria-hidden="true"><use href="#arrow" /></svg>
             </a>
           </div>
         </div>
@@ -189,10 +181,8 @@
                     <p class="msg__from">
                       Léa Bernard <small>Yesterday</small>
                     </p>
-                    <p class="msg__subject">Comments on the brief</p>
-                    <p class="msg__preview">
-                      I've added two comments on page 4…
-                    </p>
+                    <p class="msg__subject">Notes on the brief</p>
+                    <p class="msg__preview">I've sent over the latest notes…</p>
                   </div>
                 </article>
                 <article class="msg">
@@ -221,7 +211,7 @@
                 </div>
                 <div class="read__file">
                   <img src="../web/public/drive-mark.svg" alt="" />
-                  <p><b>Q4-plan.pdf</b><br />1.8 MB · Save to Drive</p>
+                  <p><b>Q4-plan.pdf</b><br />1.8 MB · PDF attachment</p>
                 </div>
               </div>
             </div>
@@ -261,18 +251,17 @@
           <p class="kicker">The suite</p>
           <h2>Everything you open first thing in the morning.</h2>
           <p class="section__lede">
-            One sign-in, one look, one server. Each app stays independent, so
-            your inbox keeps working whatever happens to the rest.
+            Four apps, one familiar workspace. Keep the essentials together,
+            with a simple experience across your devices.
           </p>
         </header>
 
         <div class="bento">
           <article class="card card--mail" data-reveal>
             <img class="card__mark" src="../web/public/mail-mark.svg" alt="" />
-            <h3>Mail</h3>
+            <h3>Esuno Mail</h3>
             <p>
-              Several custom domains on one server, hide-my-email aliases that
-              forward to your inbox, and a fast web app with IMAP and JMAP
+              An inviting inbox, custom domains and aliases, with IMAP and JMAP
               underneath.
             </p>
             <div class="domains" aria-hidden="true">
@@ -291,7 +280,7 @@
               src="../web/public/calendar-mark.svg"
               alt=""
             />
-            <h3>Calendar</h3>
+            <h3>Esuno Calendar</h3>
             <p>
               Day, week and month views, quick editing, and CalDAV underneath,
               an open standard rather than a silo.
@@ -308,96 +297,255 @@
 
           <article class="card card--drive" data-reveal>
             <img class="card__mark" src="../web/public/drive-mark.svg" alt="" />
-            <h3>Drive</h3>
+            <h3>Esuno Drive</h3>
             <p>
-              Files go straight to the S3-compatible storage you choose, with
-              share links and guarded previews.
+              Keep files close at hand, with share links and guarded previews.
             </p>
           </article>
 
           <article class="card card--vault" data-reveal>
             <img class="card__mark" src="../web/public/vault-mark.svg" alt="" />
-            <h3>Vault <span class="pill pill--preview">Preview</span></h3>
+            <h3>Esuno Vault <span class="pill pill--preview">Preview</span></h3>
             <p>
-              A password vault built on Vaultwarden, on its own origin and its
-              own database.
-            </p>
-          </article>
-
-          <article class="card card--contacts" data-reveal>
-            <img
-              class="card__mark"
-              src="../web/public/contacts-mark.svg"
-              alt=""
-            />
-            <h3>Contacts <span class="pill">Coming</span></h3>
-            <p>
-              CardDAV sync through the mail server today. The web app is on its
-              way.
+              A password manager built on Vaultwarden, with apps for your
+              devices. Vault is not yet production-ready; security and recovery
+              still need verification.
             </p>
           </article>
         </div>
       </section>
 
+      <section class="section" id="deployment">
+        <header class="section__head" data-reveal>
+          <p class="kicker">Two ways to Esuno</p>
+          <h2>Make yourself <em>at home.</em></h2>
+          <p class="section__lede">
+            The same open-source ecosystem, with a choice of who takes care of
+            it.
+          </p>
+        </header>
+        <div class="deployment">
+          <article class="deployment__card" data-reveal>
+            <p class="deployment__number">01 / Your infrastructure</p>
+            <h3>Self-hosted</h3>
+            <p>
+              Your server, your data, your rules. Run Esuno on infrastructure
+              you choose, with no Esuno subscription.
+            </p>
+            <ul class="feature-list">
+              <li>You manage infrastructure and maintenance</li>
+              <li>Control your data and deployment</li>
+              <li>Open source, AGPL-3.0-or-later</li>
+            </ul>
+            <a class="button button--ghost" href="#self-host"
+              >Self-host Esuno
+              <svg aria-hidden="true"><use href="#arrow" /></svg
+            ></a>
+          </article>
+          <article class="deployment__card deployment__card--cloud" data-reveal>
+            <p class="deployment__number">02 / Managed for you</p>
+            <h3>Esuno Cloud</h3>
+            <p>
+              Ready to use without server configuration. We handle the
+              infrastructure so you can get on with your day.
+            </p>
+            <ul class="feature-list">
+              <li>Fully managed hosting</li>
+              <li>Automatic updates and backups</li>
+              <li>Simple monthly pricing</li>
+            </ul>
+            <a class="button button--ghost" href="#pricing"
+              >Get started <svg aria-hidden="true"><use href="#arrow" /></svg
+            ></a>
+          </article>
+        </div>
+        <p class="deployment__note">
+          Want to move later? Esuno Cloud runs the same open-source software.
+          You can export your data and import it into your own installation.
+        </p>
+      </section>
+
+      <section class="section" id="pricing">
+        <header class="section__head" data-reveal>
+          <p class="kicker">Simple pricing</p>
+          <h2>Choose what works <em>for you.</em></h2>
+          <p class="section__lede">
+            Run it yourself, or choose a managed plan for the space and support
+            you need.
+          </p>
+        </header>
+        <fieldset class="billing-toggle" data-billing-toggle hidden>
+          <legend>Billing interval</legend>
+          <label
+            ><input type="radio" name="interval" value="month" checked /><span
+              >Monthly</span
+            ></label
+          >
+          <label
+            ><input type="radio" name="interval" value="year" /><span
+              >Annual</span
+            ></label
+          >
+        </fieldset>
+        <div class="pricing">
+          <article
+            class="price-card price-card--plus"
+            data-plan="plus"
+            data-reveal
+          >
+            <p class="price-card__badge">Recommended for most personal users</p>
+            <p class="price-card__eyebrow">Esuno Cloud</p>
+            <h3>Plus</h3>
+            <p class="price-card__intro">
+              All the essentials, ready when you are.
+            </p>
+            <p class="price-card__price">
+              <strong data-price="month">€3.49</strong
+              ><strong data-price="year" hidden>€2.99</strong
+              ><span> / month</span>
+            </p>
+            <p class="price-card__billing" data-billing="month">
+              Billed monthly
+            </p>
+            <p class="price-card__billing" data-billing="year" hidden>
+              Billed <span data-annual-total>€35.88</span> per year · Save
+              <span data-annual-saving>€6.00</span> per year
+            </p>
+            <a
+              class="button price-card__cta"
+              data-subscribe
+              href="%VITE_ESUNO_APP_ORIGIN%/subscribe?plan=plus&amp;interval=month"
+              >Get started with Plus</a
+            >
+            <ul class="feature-list">
+              <li><strong data-storage>50 GB</strong> shared storage</li>
+              <li>Mail, Drive, Calendar and Vault</li>
+              <li>1 custom email domain<sup>*</sup></li>
+              <li>Up to 50 email aliases</li>
+              <li>Sync across devices: IMAP, CalDAV/CardDAV and Vault apps</li>
+              <li>Automatic backups</li>
+              <li>Fully managed hosting and automatic updates</li>
+            </ul>
+          </article>
+          <article
+            class="price-card price-card--pro"
+            data-plan="pro"
+            data-reveal
+          >
+            <p class="price-card__eyebrow">Esuno Cloud</p>
+            <h3>Pro</h3>
+            <p class="price-card__intro">More room for everything you do.</p>
+            <p class="price-card__price">
+              <strong data-price="month">€9.99</strong
+              ><strong data-price="year" hidden>€7.99</strong
+              ><span> / month</span>
+            </p>
+            <p class="price-card__billing" data-billing="month">
+              Billed monthly
+            </p>
+            <p class="price-card__billing" data-billing="year" hidden>
+              Billed <span data-annual-total>€95.88</span> per year · Save
+              <span data-annual-saving>€24.00</span> per year
+            </p>
+            <a
+              class="button button--ghost price-card__cta"
+              data-subscribe
+              href="%VITE_ESUNO_APP_ORIGIN%/subscribe?plan=pro&amp;interval=month"
+              >Get started with Pro</a
+            >
+            <ul class="feature-list">
+              <li><strong data-storage>500 GB</strong> shared storage</li>
+              <li>Everything in Plus</li>
+              <li>Up to 5 custom email domains<sup>*</sup></li>
+              <li>Unlimited aliases (fair-use anti-abuse limits apply)</li>
+              <li>Priority support</li>
+              <li>Fully managed infrastructure</li>
+            </ul>
+          </article>
+          <article
+            class="price-card price-card--free"
+            data-plan="free"
+            data-reveal
+          >
+            <p class="price-card__eyebrow">Your infrastructure</p>
+            <h3>Self-hosted</h3>
+            <p class="price-card__intro">
+              For those who want to run their own suite.
+            </p>
+            <p class="price-card__price"><strong>Free</strong></p>
+            <p class="price-card__billing">You pay for your own hosting.</p>
+            <a class="button button--ghost price-card__cta" href="#self-host"
+              >Self-host Esuno</a
+            >
+            <ul class="feature-list">
+              <li>Free software on your own infrastructure</li>
+              <li>Mail, Drive, Calendar and Vault</li>
+              <li>No Esuno storage quota</li>
+              <li>You control data and deployment</li>
+              <li>No dependency on Esuno Cloud billing</li>
+            </ul>
+          </article>
+        </div>
+        <div class="pricing__notes">
+          <p>Prices in EUR, VAT included.</p>
+          <p>
+            * Custom email domains are set up with our support in this release.
+          </p>
+          <p>
+            Esuno is in early development. Vault is in preview and is not yet
+            production-ready; security and recovery still need verification.
+          </p>
+        </div>
+      </section>
+
       <section class="section" id="principles">
         <header class="section__head" data-reveal>
-          <p class="kicker">Principles</p>
-          <h2>Own it. <em>Really.</em></h2>
+          <p class="kicker">Our principles</p>
+          <h2>More choice. <em>More yours.</em></h2>
           <p class="section__lede">
-            Esuno is not a service you subscribe to. It is software you install,
-            on a server you control, wired to providers you pick.
+            A thoughtful home for your digital life, on your terms.
           </p>
         </header>
         <ul class="principles">
           <li data-reveal>
             <span class="principles__n">01</span>
-            <h3>No landlord</h3>
+            <h3>Privacy and control</h3>
             <p>
-              No central Esuno service and no account with us. Every
-              installation stands on its own.
+              Choose where your suite runs and who manages the infrastructure.
             </p>
           </li>
           <li data-reveal>
             <span class="principles__n">02</span>
-            <h3>Your providers</h3>
+            <h3>Clear pricing</h3>
             <p>
-              Pick the S3-compatible storage you trust and use your own provider
-              accounts and credentials.
+              Know what your managed plan costs, including VAT. Self-hosted
+              software is free.
             </p>
           </li>
           <li data-reveal>
             <span class="principles__n">03</span>
-            <h3>Standards, not silos</h3>
-            <p>
-              SMTP, IMAP, JMAP, CalDAV and CardDAV, built in. Your data speaks
-              open protocols.
-            </p>
+            <h3>Made convenient</h3>
+            <p>Let Esuno Cloud handle hosting, updates and backups for you.</p>
           </li>
           <li data-reveal>
             <span class="principles__n">04</span>
-            <h3>Encrypted backups</h3>
+            <h3>Freedom to self-host</h3>
             <p>
-              Encrypted, scheduled backups with documented restore procedures
-              you can rehearse.
+              Run the AGPL-3.0-or-later software on infrastructure you control.
             </p>
           </li>
           <li data-reveal>
             <span class="principles__n">05</span>
-            <h3>Leave anytime</h3>
+            <h3>Room to move</h3>
             <p>
-              Your data stays in open formats and standard protocols. Moving out
-              is a procedure, not a negotiation.
+              Export and import your data when moving from Cloud to your own
+              server.
             </p>
           </li>
           <li data-reveal>
             <span class="principles__n">06</span>
-            <h3>Free software</h3>
-            <p>
-              Licensed AGPL-3.0-or-later.
-              <a class="link" href="https://github.com/nicodlz/opensuite"
-                >Read the source</a
-              >, change it, run it, share it.
-            </p>
+            <h3>Open standards</h3>
+            <p>Mail, calendar and contacts support IMAP, CalDAV and CardDAV.</p>
           </li>
         </ul>
       </section>
@@ -407,10 +555,10 @@
           <p class="kicker">Mail first</p>
           <h2>Mail is the one thing that cannot wait.</h2>
           <p class="section__lede">
-            Incoming mail is received by a dedicated relay, kept in durable
-            storage and recorded before it reaches your mailbox. If your server
-            is briefly away, messages wait and are replayed when it returns. The
-            web app and Drive are never in that path.
+            In the documented deployment, incoming mail passes through an SES
+            buffer and a delivery ledger before reaching your mailbox. Replay
+            can recover held messages within the configured retention window;
+            operators should monitor the queues and rehearse recovery.
           </p>
         </header>
         <ol class="flow" data-reveal aria-label="Path of an incoming message">
@@ -424,7 +572,7 @@
           </li>
           <li>
             <b>Durable buffer</b>
-            <span>Keeps a copy until delivery</span>
+            <span>Retains messages within a window</span>
           </li>
           <li>
             <b>Ingest ledger</b>
@@ -432,7 +580,7 @@
           </li>
           <li class="flow__end">
             <b>Your mailbox</b>
-            <span>Stalwart, on your server</span>
+            <span>Delivered to Stalwart</span>
           </li>
         </ol>
       </section>
@@ -441,11 +589,11 @@
         <div class="install">
           <header class="section__head" data-reveal>
             <p class="kicker">Self-host</p>
-            <h2>One small server. One Compose file.</h2>
+            <h2>Your server. <em>Your way.</em></h2>
             <p class="section__lede">
-              Esuno starts on a single small VPS. A step-by-step runbook covers
-              DNS, secrets, storage, backups and verification before you switch
-              your mail over.
+              The production runbook covers a single Ubuntu VPS, DNS, secrets,
+              storage, backups and verification before you switch your mail
+              over. You manage setup, maintenance and hosting costs.
             </p>
             <ul class="needs">
               <li>
@@ -453,12 +601,16 @@
                 with Docker Compose
               </li>
               <li>
+                <svg aria-hidden="true"><use href="#check" /></svg>Git, Node.js
+                and pnpm
+              </li>
+              <li>
                 <svg aria-hidden="true"><use href="#check" /></svg>A domain you
                 control
               </li>
               <li>
-                <svg aria-hidden="true"><use href="#check" /></svg>An
-                S3-compatible bucket
+                <svg aria-hidden="true"><use href="#check" /></svg>A set of
+                storage buckets (the runbook uses B2)
               </li>
               <li>
                 <svg aria-hidden="true"><use href="#check" /></svg>An Amazon SES
@@ -496,22 +648,20 @@
       <section class="section" id="scale">
         <header class="section__head" data-reveal>
           <p class="kicker">Scale</p>
-          <h2>Start on one server. <em>Grow without a ceiling.</em></h2>
+          <h2>Start on one server. <em>Make room to grow.</em></h2>
           <p class="section__lede">
-            The same Esuno that fits on a small VPS is built to grow with you:
-            for a family, a company or many more. Storage, mail and the web
-            workspace each scale on their own, so you add capacity exactly where
-            you need it.
+            Start with the documented single-server deployment and choose
+            storage for your needs. Plan and verify changes as your usage grows.
           </p>
         </header>
         <ol class="scale">
           <li data-reveal>
             <div class="nodes nodes--solo" aria-hidden="true"><i></i></div>
             <p class="scale__step">Day one</p>
-            <h3>One small server</h3>
+            <h3>One server</h3>
             <p>
-              Mail, calendar, files and passwords in a single Compose file, on a
-              modest VPS.
+              The Compose stack brings the suite together on an Ubuntu VPS.
+              Vault is an optional profile.
             </p>
           </li>
           <li data-reveal>
@@ -521,20 +671,19 @@
             <p class="scale__step">Growing</p>
             <h3>Storage that keeps up</h3>
             <p>
-              Files and mail contents can live in S3-compatible object storage,
-              and encrypted backups go there too. Grow it as far as you like.
+              Files and mail blobs can use S3-compatible object storage. The
+              runbook also configures separate encrypted backups.
             </p>
           </li>
           <li data-reveal>
             <div class="nodes nodes--cluster" aria-hidden="true">
               <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
             </div>
-            <p class="scale__step">At scale</p>
-            <h3>As many machines as you need</h3>
+            <p class="scale__step">Operations</p>
+            <h3>Plan for growth</h3>
             <p>
-              Independent services, and a mail engine that supports clustering
-              on shared storage. Add servers when you grow, keep one when you
-              don't.
+              Monitor capacity, backups and mail delivery, and verify any
+              changes to your deployment as your needs evolve.
             </p>
           </li>
         </ol>
@@ -544,13 +693,13 @@
         <svg class="closing__mark" aria-hidden="true">
           <use href="#esuno-mark" />
         </svg>
-        <h2>Take your mail <em>home.</em></h2>
+        <h2>Your digital life, <em>your way.</em></h2>
         <p>
-          Your messages, your calendar, your files. On a server with your name
-          on it.
+          One ecosystem for the essentials. Choose the home that feels right for
+          you.
         </p>
-        <a class="button" href="#self-host">
-          Run Esuno
+        <a class="button" href="#pricing">
+          Explore your options
           <svg aria-hidden="true"><use href="#arrow" /></svg>
         </a>
       </section>
