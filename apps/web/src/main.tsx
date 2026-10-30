@@ -16,6 +16,7 @@ import {
 } from "@tanstack/react-router";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
+import { SetupPage } from "./setup/setup-page.tsx";
 import { DomainsPage } from "./domains/domains-page.tsx";
 import { MailPage } from "./mail/mail-page.tsx";
 import { DrivePage } from "./drive/drive-page.tsx";
@@ -131,6 +132,9 @@ function Shell() {
             <span>No labels yet</span>
           </div>
           <div className="sidebar-bottom">
+            <Link to="/setup" className="nav-link">
+              <span aria-hidden="true">✧</span> Setup wizard
+            </Link>
             <Link to="/domains" className="nav-link">
               <span aria-hidden="true">◎</span> Domains
             </Link>
@@ -464,6 +468,11 @@ const domainsRoute = createRoute({
   path: "/domains",
   component: DomainsPage,
 });
+const setupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/setup",
+  component: SetupPage,
+});
 const router = createRouter({
   routeTree: rootRoute.addChildren([
     indexRoute,
@@ -472,6 +481,7 @@ const router = createRouter({
     contactsRoute,
     driveRoute,
     domainsRoute,
+    setupRoute,
   ]),
 });
 declare module "@tanstack/react-router" {
