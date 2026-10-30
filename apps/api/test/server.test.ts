@@ -1,10 +1,11 @@
 import { createReadinessService, type DependencyProbe } from "@opensuite/core";
 import type { FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { downProbe, upProbe } from "../../../test-support/probes.ts";
 import { buildServer } from "../src/server.ts";
 
 let app: FastifyInstance | undefined;
+const now = () => performance.now();
 
 const start = async (probes: DependencyProbe[] = []) => {
   let clock = 10_000;
@@ -125,4 +126,51 @@ describe("routing and contract", () => {
       Object.keys(document.paths["/ready"]?.["get"]?.responses ?? {}),
     ).toEqual(expect.arrayContaining(["200", "503"]));
   });
+});
+
+it("logs safe error details without disclosing exception secrets", async () => {
+  app = await buildServer({
+    config: { logLevel: "silent" },
+    monotonicMs: now,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: now,
+    }),
+    identity: {
+      publicOrigin: "https://suite.example.test",
+      handler: () => Promise.resolve(new Response()),
+      actor: () =>
+        Promise.resolve({
+          id: "admin",
+          email: "admin@example.test",
+          role: "admin",
+        }),
+    },
+    accounts: {
+      mailbox: () => {
+        throw new Error("unused");
+      },
+      list: () => {
+        throw new TypeError("password=very-secret");
+      },
+      disable: () => {
+        throw new Error("unused");
+      },
+    },
+  });
+  let logged: unknown;
+  app.addHook("onRequest", (request, _reply, done) => {
+    vi.spyOn(request.log, "error").mockImplementation((...args: unknown[]) => {
+      logged = args[0];
+    });
+    done();
+  });
+  expect((await app.inject("/admin/accounts")).statusCode).toBe(500);
+  expect(JSON.stringify(logged)).not.toContain("very-secret");
+  expect(logged).toMatchObject({
+    error: { name: "TypeError", message: "[redacted]" },
+  });
+  expect(JSON.stringify(logged)).toContain("stack");
 });

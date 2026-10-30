@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   Draft,
   DraftContent,
@@ -13,6 +14,7 @@ import {
   type Email,
   type JmapError,
   type JmapResult,
+  type Session,
 } from "@opensuite/jmap";
 import { err, ok, type Result } from "neverthrow";
 import type { Actor } from "./accounts.ts";
@@ -85,13 +87,6 @@ function value<T>(result: JmapResult<T>): T {
   )
     return fail("conflict");
   return fail("unavailable");
-}
-async function run<T>(work: () => Promise<T>): Promise<Result<T, MailFailure>> {
-  try {
-    return ok(await work());
-  } catch (error) {
-    return err({ kind: error instanceof Failure ? error.kind : "unavailable" });
-  }
 }
 const address = (item: { name: string | null; email: string }) => ({
   email: item.email,
@@ -223,10 +218,45 @@ export function createMailService(dependencies: {
   store: MailCredentialStore;
   origin: string;
   client?: (credential: { address: string; secret: string }) => JmapClient;
+  now?: () => number;
 }) {
+  const now = dependencies.now ?? Date.now;
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  const run = async <T>(
+    work: () => Promise<T>,
+  ): Promise<Result<T, MailFailure>> => {
+    if (active >= 8) {
+      if (waiting.length >= 256) return err({ kind: "unavailable" });
+      await new Promise<void>((resolve) => {
+        waiting.push(resolve);
+      });
+    } else active += 1;
+    try {
+      return ok(await work());
+    } catch (error) {
+      return err({
+        kind: error instanceof Failure ? error.kind : "unavailable",
+      });
+    } finally {
+      const next = waiting.shift();
+      if (next === undefined) active -= 1;
+      else next();
+    }
+  };
+  const sessions = new Map<
+    string,
+    {
+      expires: number;
+      connection: Promise<{
+        session: Session;
+        id: string;
+      }>;
+    }
+  >();
   const uploads = new Map<
     string,
-    { name: string; type: string; size: number; owner: string }
+    { name: string; type: string; size: number; expires: number }
   >();
   const connect = async (actor: Actor, accountId: string) => {
     const credential = await dependencies.store.getForOwner(
@@ -242,14 +272,44 @@ export function createMailService(dependencies: {
       );
     if (accountId !== "default" && credential.value.accountId !== accountId)
       return fail("forbidden");
+    const key = createHash("sha256")
+      .update(
+        JSON.stringify([
+          actor.id,
+          credential.value.accountId,
+          credential.value.address,
+          credential.value.secret,
+        ]),
+      )
+      .digest("hex");
+    const current = now();
+    for (const [cachedKey, entry] of sessions)
+      if (entry.expires <= current) sessions.delete(cachedKey);
     const client =
       dependencies.client?.(credential.value) ??
       new JmapClient(dependencies.origin, {
         authorization: `Basic ${Buffer.from(`${credential.value.address}:${credential.value.secret}`).toString("base64")}`,
+        rewriteSessionUrlsToOrigin: dependencies.origin,
       });
-    const session = value(await client.discover());
-    const id = session.primaryAccounts[JmapCapability.mail];
-    if (id === undefined) return fail("unavailable");
+    let entry = sessions.get(key);
+    if (entry === undefined) {
+      const connection = (async () => {
+        const session = value(await client.discover());
+        const id = session.primaryAccounts[JmapCapability.mail];
+        if (id === undefined) return fail("unavailable");
+        return { session, id };
+      })();
+      entry = { expires: current + 30_000, connection };
+      if (sessions.size >= 256) {
+        const oldest = sessions.keys().next().value;
+        if (oldest !== undefined) sessions.delete(oldest);
+      }
+      sessions.set(key, entry);
+      void connection.catch(() => {
+        if (sessions.get(key)?.connection === connection) sessions.delete(key);
+      });
+    }
+    const { session, id } = await entry.connection;
     return {
       client,
       session,
@@ -306,8 +366,15 @@ export function createMailService(dependencies: {
       (prior ? attachments(prior) : []).map((item) => [item.blobId, item]),
     );
     const parts = content.attachmentBlobIds.map((blobId) => {
-      const uploaded = uploads.get(`${c.owner}:${blobId}`);
-      const item = existing.get(blobId) ?? uploaded;
+      const key = `${c.owner}:${blobId}`;
+      const uploaded = uploads.get(key);
+      if (uploaded !== undefined && uploaded.expires <= now())
+        uploads.delete(key);
+      const item =
+        existing.get(blobId) ??
+        (uploaded !== undefined && uploaded.expires > now()
+          ? uploaded
+          : undefined);
       return {
         blobId,
         name: item?.name ?? "attachment",
@@ -373,8 +440,8 @@ export function createMailService(dependencies: {
           return fail("validation");
         const position = Number(options.cursor ?? 0);
         if (!Number.isSafeInteger(position)) return fail("validation");
-        const query = value(
-          await c.client.queryEmails(c.session, c.id, {
+        const pageResult = value(
+          await c.client.threadPage(c.session, c.id, {
             filter: filterFor(options),
             sort: [
               {
@@ -382,23 +449,40 @@ export function createMailService(dependencies: {
                 isAscending: options.sort === "oldest",
               },
             ],
-            collapseThreads: true,
             position,
             limit: options.limit + 1,
           }),
         );
-        const page = query.ids.slice(0, options.limit);
-        if (!page.length) return { threads: [], nextCursor: null };
-        const selected = value(
-          await c.client.emails(c.session, c.id, page),
-        ).list;
-        const groups = await Promise.all(
-          selected.map((email) => getThread(c, email.threadId)),
+        const page = pageResult.query.ids.slice(0, options.limit);
+        if (
+          pageResult.selected.notFound.length ||
+          pageResult.threads.notFound.length ||
+          pageResult.emails.notFound.length
+        )
+          return fail("conflict");
+        const selected = new Map(
+          pageResult.selected.list.map((email) => [email.id, email.threadId]),
         );
+        const threads = new Map(
+          pageResult.threads.list.map((thread) => [thread.id, thread]),
+        );
+        const emails = new Map(
+          pageResult.emails.list.map((email) => [email.id, email]),
+        );
+        const groups = page.map((id) => {
+          const threadId = selected.get(id);
+          const thread =
+            threadId === undefined ? undefined : threads.get(threadId);
+          if (thread === undefined || thread.emailIds.length === 0)
+            return fail("conflict");
+          return thread.emailIds.map(
+            (emailId) => emails.get(emailId) ?? fail("conflict"),
+          );
+        });
         return {
           threads: groups.map((group) => summary(group, list, c.address)),
           nextCursor:
-            query.ids.length > options.limit
+            pageResult.query.ids.length > options.limit
               ? String(position + options.limit)
               : null,
         };
@@ -445,43 +529,51 @@ export function createMailService(dependencies: {
         const targets = messageIds
           ? all.filter((item) => messageIds.includes(item.id))
           : all;
-        await Promise.all(
-          targets.map(async (email) => {
-            if (action.type === "delete") {
-              value(await c.client.destroyEmail(c.session, c.id, email.id));
-              return;
-            }
-            let patch: Record<string, unknown>;
-            if (action.type === "read" || action.type === "star")
-              patch = {
-                [`keywords/${action.type === "read" ? "$seen" : "$flagged"}`]:
-                  action.value ? true : null,
-              };
-            else if (action.type === "labels") {
-              const custom = customIds(list);
-              const ids = [
-                ...memberships(email).filter((id) => !custom.has(id)),
-                ...action.labels,
-              ];
-              patch = {
-                mailboxIds: Object.fromEntries(ids.map((id) => [id, true])),
-              };
-            } else {
-              const dest =
-                action.type === "move"
-                  ? action.mailboxId
-                  : role(list, action.type === "archive" ? "archive" : "trash");
-              const custom = customIds(list);
-              const ids = [
-                ...memberships(email).filter((id) => custom.has(id)),
-                dest,
-              ];
-              patch = {
-                mailboxIds: Object.fromEntries(ids.map((id) => [id, true])),
-              };
-            }
-            value(await c.client.updateEmail(c.session, c.id, email.id, patch));
-          }),
+        await targets.reduce<Promise<void>>(
+          (previous, email) =>
+            previous.then(async () => {
+              if (action.type === "delete") {
+                value(await c.client.destroyEmail(c.session, c.id, email.id));
+                return undefined;
+              }
+              let patch: Record<string, unknown>;
+              if (action.type === "read" || action.type === "star")
+                patch = {
+                  [`keywords/${action.type === "read" ? "$seen" : "$flagged"}`]:
+                    action.value ? true : null,
+                };
+              else if (action.type === "labels") {
+                const custom = customIds(list);
+                const ids = [
+                  ...memberships(email).filter((id) => !custom.has(id)),
+                  ...action.labels,
+                ];
+                patch = {
+                  mailboxIds: Object.fromEntries(ids.map((id) => [id, true])),
+                };
+              } else {
+                const dest =
+                  action.type === "move"
+                    ? action.mailboxId
+                    : role(
+                        list,
+                        action.type === "archive" ? "archive" : "trash",
+                      );
+                const custom = customIds(list);
+                const ids = [
+                  ...memberships(email).filter((id) => custom.has(id)),
+                  dest,
+                ];
+                patch = {
+                  mailboxIds: Object.fromEntries(ids.map((id) => [id, true])),
+                };
+              }
+              value(
+                await c.client.updateEmail(c.session, c.id, email.id, patch),
+              );
+              return undefined;
+            }),
+          Promise.resolve(),
         );
         return { success: true } satisfies { success: true };
       }),
@@ -515,7 +607,7 @@ export function createMailService(dependencies: {
         const list = await boxes(c);
         const previous = await getDraft(c, id, list);
         const created = await create(c, content, list, previous);
-        value(await c.client.destroyEmail(c.session, c.id, id));
+        await c.client.destroyEmail(c.session, c.id, id);
         return { ...content, id: created.id };
       }),
     deleteDraft: (actor: Actor, accountId: string, id: string) =>
@@ -574,11 +666,17 @@ export function createMailService(dependencies: {
             input.type || "application/octet-stream",
           ),
         );
+        for (const [key, entry] of uploads)
+          if (entry.expires <= now()) uploads.delete(key);
+        if (uploads.size >= 1000) {
+          const oldest = uploads.keys().next().value;
+          if (oldest !== undefined) uploads.delete(oldest);
+        }
         uploads.set(`${c.owner}:${uploaded.blobId}`, {
           name: input.name,
           type: uploaded.type,
           size: uploaded.size,
-          owner: c.owner,
+          expires: now() + 3_600_000,
         });
         return {
           id: uploaded.blobId,

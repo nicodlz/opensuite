@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { promisify } from "node:util";
-import { createReadinessService } from "@opensuite/core";
+import { createReadinessService, httpProbe } from "@opensuite/core";
+import { createMailService } from "@opensuite/core/services/mail";
 import {
   configureApplicationRole,
   createDatabase,
@@ -141,10 +143,20 @@ beforeAll(async () => {
     );
     reconcile = runtime.reconcile;
     bootstrap = runtime.bootstrap;
+    const store = createMailboxStore(db.value, "ab".repeat(32));
+    if (store.isErr()) throw new Error("mail store unavailable");
+    const mailboxStore = store.value;
+    const mailService = createMailService({
+      origin: mailUrl,
+      store: {
+        getForOwner: async (userId, accountId) =>
+          mailboxStore.getForOwner(userId, accountId),
+      },
+    });
     app = await buildServer({
       config: { logLevel: "silent" },
       readiness: createReadinessService({
-        probes: [],
+        probes: [httpProbe("mail-server", `${mailUrl}/healthz/ready`)],
         timeoutMs: 500,
         now: () => new Date(),
         monotonicMs,
@@ -152,6 +164,7 @@ beforeAll(async () => {
       monotonicMs,
       identity: runtime.identity,
       accounts: runtime.accounts,
+      mail: mailService,
     });
     base = await app.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
@@ -185,12 +198,57 @@ const userId = async (email: string) => {
   }
 };
 
+const rawPost = (path: string, body: object, cookie?: string) =>
+  new Promise<number>((resolve, reject) => {
+    const target = new URL(base);
+    const payload = JSON.stringify(body);
+    const request = httpRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+          origin,
+          ...(cookie === undefined ? {} : { cookie }),
+        },
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => resolve(response.statusCode ?? 0));
+      },
+    );
+    request.on("error", reject);
+    request.end(payload);
+  });
+
 it("provisions, repairs, authenticates and suspends real local mailboxes", async () => {
   const admin = {
     name: "Admin",
     email: "admin@example.test",
     password: "long-test-password-123",
   };
+  const traversalPaths = [
+    "/api/auth/x/../sign-up/email",
+    "/auth/./sign-in/email",
+    "/api/auth/%2e%2e/auth/sign-up/email",
+    "/api/auth/x/%2e%2e/sign-up/email",
+    "/auth/x/../sign-in/email",
+  ];
+  const traversal = await Promise.all(
+    traversalPaths.map((path) => rawPost(path, admin)),
+  );
+  expect(traversal).toEqual(traversalPaths.map(() => 400));
+  const before = createDatabase(databaseUrl);
+  if (before.isErr()) throw new Error("database unavailable");
+  try {
+    expect(await before.value.user.count()).toBe(0);
+    expect(await before.value.mailboxLink.count()).toBe(0);
+  } finally {
+    await before.value.$disconnect();
+  }
   expect((await post("/api/auth/sign-up/email", admin)).status).toBe(403);
   await bootstrap(admin.email, admin.password, admin.name);
   const adminLogin = await post("/api/auth/sign-in/email", admin);
@@ -237,6 +295,14 @@ it("provisions, repairs, authenticates and suspends real local mailboxes", async
   const login = await post("/api/auth/sign-in/email", user);
   expect(login.status).toBe(200);
   const userCookie = cookieOf(login);
+  expect((await fetch(`${base}/ready`)).status).toBe(200);
+  const boxes = await post(
+    "/mail/mailboxes",
+    { accountId: "default" },
+    userCookie,
+  );
+  expect(boxes.status).toBe(200);
+  expect(await boxes.text()).toContain("mailboxes");
   expect(
     (
       await fetch(`${base}/api/auth/get-session?disableCookieCache=true`, {
@@ -305,5 +371,11 @@ it("provisions, repairs, authenticates and suspends real local mailboxes", async
     );
   } finally {
     await owner.value.$disconnect();
+  }
+  try {
+    await run("docker", ["pause", mail]);
+    expect((await fetch(`${base}/ready`)).status).toBe(503);
+  } finally {
+    await run("docker", ["unpause", mail]);
   }
 }, 120_000);

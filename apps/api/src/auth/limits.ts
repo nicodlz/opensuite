@@ -48,10 +48,9 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
       const token = challengeCookie(cookie);
       const challenge = token === undefined ? undefined : challenges.get(token);
       return (
-        emailFromBody(body) ??
         (challenge !== undefined && challenge.until > now()
           ? challenge.email
-          : undefined)
+          : undefined) ?? emailFromBody(body)
       );
     },
     check(path: string, ip: string, body: unknown, cookie: string | undefined) {
@@ -65,9 +64,11 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
       for (const [key, value] of challenges)
         if (value.until <= current) challenges.delete(key);
       const token = challengeCookie(cookie);
-      const account =
-        emailFromBody(body) ??
-        (token === undefined ? undefined : challenges.get(token)?.email);
+      const account = isMfa
+        ? token === undefined
+          ? undefined
+          : challenges.get(token)?.email
+        : emailFromBody(body);
       const category = isSignIn
         ? "login"
         : isMfa
@@ -84,7 +85,9 @@ export const createAuthLimiter = (now: () => number = Date.now) => {
         account === undefined
           ? undefined
           : consume(
-              `${category}:account:${ip}:${account}`,
+              isSignIn || isMfa
+                ? `${category}:account:${account}`
+                : `${category}:account:${ip}:${account}`,
               isSignIn || isMfa ? 5 : 20,
             );
       return accountWait;

@@ -22,6 +22,8 @@ let app: FastifyInstance | undefined;
 let base: string;
 let databaseUrl: string;
 let adminCookie = "";
+let directSignupStatus = 0;
+let directSignupUsers = -1;
 let disconnect = () => Promise.resolve();
 const provisioned = new Set<string>();
 const resolved = () => Promise.resolve();
@@ -82,6 +84,19 @@ beforeAll(async () => {
       },
       mayStartSession: (userId) => Promise.resolve(provisioned.has(userId)),
     });
+    const direct = await identity.handler(
+      new Request(`${origin}/api/auth/sign-up/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin },
+        body: JSON.stringify({
+          name: "Unauthorized",
+          email: "unauthorized@example.test",
+          password: "long-test-password",
+        }),
+      }),
+    );
+    directSignupStatus = direct.status;
+    directSignupUsers = await db.user.count();
     const seed = await identity.api.signUpEmail({
       body: {
         name: "Operator",
@@ -179,6 +194,10 @@ const post = (
   });
 
 describe("identity over HTTP", () => {
+  it("disables sign-up on the public Better Auth handler", () => {
+    expect(directSignupStatus).toBeGreaterThanOrEqual(400);
+    expect(directSignupUsers).toBe(0);
+  });
   it("limits repeated password attempts per account", async () => {
     const data = {
       email: "limited@example.test",

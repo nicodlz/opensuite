@@ -145,11 +145,6 @@ beforeAll(async () => {
                 }),
               ),
       },
-      client: (credential) =>
-        new JmapClient(base, {
-          authorization: `Basic ${Buffer.from(`${credential.address}:${credential.secret}`).toString("base64")}`,
-          fetch: localFetch,
-        }),
     });
   } catch (error) {
     process.stderr.write(`Mail test setup failed: ${String(error)}\n`);
@@ -171,6 +166,14 @@ describe("mail service with Stalwart", () => {
         throw new Error(JSON.stringify(error));
       },
     ).mailboxes;
+    const inbox = boxes.find((box) => box.role === "inbox");
+    if (!inbox) throw new Error("Missing inbox");
+    const empty = await service.threads(actor, "default", {
+      mailboxId: inbox.id,
+      limit: 10,
+      sort: "newest",
+    });
+    expect(empty.isOk() && empty.value.threads).toEqual([]);
     const sent = boxes.find((box) => box.role === "sent");
     expect(sent).toBeDefined();
     if (!sent) throw new Error("Missing sent mailbox");
@@ -235,6 +238,14 @@ describe("mail service with Stalwart", () => {
         throw new Error(JSON.stringify(error));
       },
     );
+    expect(
+      (await service.drafts(actor, "default")).match(
+        (value) => value.drafts.map((item) => item.id),
+        (error) => {
+          throw new Error(JSON.stringify(error));
+        },
+      ),
+    ).not.toContain(created.id);
     const output = (await service.send(actor, "default", updated.id)).match(
       (value) => value,
       (error) => {

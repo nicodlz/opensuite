@@ -74,7 +74,7 @@ it("trusts only the configured proxy, limits before lookups and bounds audit eve
   expect(audits).toBe(1);
   expect(
     (await request("198.51.100.2", "victim@example.test")).statusCode,
-  ).toBe(401);
+  ).toBe(429);
   await Promise.all(
     Array.from({ length: 5 }, (_, i) =>
       request(`203.0.113.${i + 1}`, "spoof@example.test", "192.0.2.9"),

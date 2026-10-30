@@ -118,6 +118,31 @@ type Email = z.infer<typeof EmailSchema>;
 type Identity = z.infer<typeof IdentitySchema>;
 export type { Mailbox, Email, Identity };
 
+const emailProperties = [
+  "id",
+  "blobId",
+  "threadId",
+  "mailboxIds",
+  "keywords",
+  "receivedAt",
+  "subject",
+  "from",
+  "to",
+  "messageId",
+  "attachments",
+  "cc",
+  "bcc",
+  "sentAt",
+  "inReplyTo",
+  "references",
+  "headers",
+  "preview",
+  "hasAttachment",
+  "textBody",
+  "htmlBody",
+  "bodyValues",
+];
+
 const usingMail = [JmapCapability.core, JmapCapability.mail];
 const expand = (template: string, values: Record<string, string>) =>
   template.replace(/\{([^}]+)\}/g, (_match, key: string) =>
@@ -225,35 +250,167 @@ export class JmapClient {
       {
         accountId,
         ids,
-        properties: [
-          "id",
-          "blobId",
-          "threadId",
-          "mailboxIds",
-          "keywords",
-          "receivedAt",
-          "subject",
-          "from",
-          "to",
-          "messageId",
-          "attachments",
-          "cc",
-          "bcc",
-          "sentAt",
-          "inReplyTo",
-          "references",
-          "headers",
-          "preview",
-          "hasAttachment",
-          "textBody",
-          "htmlBody",
-          "bodyValues",
-        ],
+        properties: emailProperties,
         fetchAllBodyValues: true,
       },
       usingMail,
       GetSchema(EmailSchema),
     );
+  }
+  async threadPage(
+    session: Session,
+    accountId: string,
+    options: {
+      filter: object;
+      sort: readonly object[];
+      position: number;
+      limit: number;
+    },
+  ): Promise<
+    JmapResult<{
+      query: z.infer<typeof QuerySchema>;
+      selected: {
+        accountId: string;
+        state: string;
+        list: { id: string; threadId: string }[];
+        notFound: string[];
+      };
+      threads: {
+        accountId: string;
+        state: string;
+        list: { id: string; emailIds: string[] }[];
+        notFound: string[];
+      };
+      emails: {
+        accountId: string;
+        state: string;
+        list: Email[];
+        notFound: string[];
+      };
+    }>
+  > {
+    const result = await this.#transport.json(
+      session.apiUrl,
+      z.object({
+        methodResponses: z.array(
+          z.tuple([z.string(), z.unknown(), z.string()]),
+        ),
+        sessionState: z.string(),
+      }),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          using: usingMail,
+          methodCalls: [
+            [
+              "Email/query",
+              { accountId, ...options, collapseThreads: true },
+              "query",
+            ],
+            [
+              "Email/get",
+              {
+                accountId,
+                "#ids": {
+                  resultOf: "query",
+                  name: "Email/query",
+                  path: "/ids",
+                },
+                properties: ["id", "threadId"],
+              },
+              "selected",
+            ],
+            [
+              "Thread/get",
+              {
+                accountId,
+                "#ids": {
+                  resultOf: "selected",
+                  name: "Email/get",
+                  path: "/list/*/threadId",
+                },
+              },
+              "threads",
+            ],
+            [
+              "Email/get",
+              {
+                accountId,
+                "#ids": {
+                  resultOf: "threads",
+                  name: "Thread/get",
+                  path: "/list/*/emailIds/*",
+                },
+                properties: emailProperties,
+                fetchAllBodyValues: true,
+              },
+              "emails",
+            ],
+          ],
+        }),
+      },
+    );
+    if (result.isErr()) return err(result.error);
+    const calls = result.value.methodResponses;
+    const expected = [
+      ["Email/query", "query"],
+      ["Email/get", "selected"],
+      ["Thread/get", "threads"],
+      ["Email/get", "emails"],
+    ];
+    if (calls.length !== expected.length)
+      return err({
+        kind: "invalidResponse",
+        message: "Unexpected method response count",
+      });
+    for (const [index, call] of calls.entries()) {
+      const method = expected[index];
+      if (method === undefined || call[2] !== method[1])
+        return err({
+          kind: "invalidResponse",
+          message: "Unexpected method response id",
+        });
+      if (call[0] === "error") {
+        const failure = SetErrorSchema.safeParse(call[1]);
+        return failure.success
+          ? err({
+              kind: "method",
+              method: method[0] ?? "unknown",
+              ...failure.data,
+            })
+          : err({ kind: "invalidResponse", message: "Invalid method error" });
+      }
+      if (call[0] !== method[0])
+        return err({
+          kind: "invalidResponse",
+          message: "Unexpected method response name",
+        });
+    }
+    const query = QuerySchema.safeParse(calls[0]?.[1]);
+    const selected = GetSchema(
+      z.object({ id: z.string(), threadId: z.string() }),
+    ).safeParse(calls[1]?.[1]);
+    const threads = GetSchema(
+      z.object({ id: z.string(), emailIds: z.array(z.string()) }),
+    ).safeParse(calls[2]?.[1]);
+    const emails = GetSchema(EmailSchema).safeParse(calls[3]?.[1]);
+    if (
+      !query.success ||
+      !selected.success ||
+      !threads.success ||
+      !emails.success
+    )
+      return err({
+        kind: "invalidResponse",
+        message: "Invalid thread page response",
+      });
+    return ok({
+      query: query.data,
+      selected: selected.data,
+      threads: threads.data,
+      emails: emails.data,
+    });
   }
   threads(session: Session, accountId: string, ids: readonly string[]) {
     return this.#transport.call(

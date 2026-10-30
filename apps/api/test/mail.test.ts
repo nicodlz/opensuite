@@ -133,6 +133,60 @@ describe("mail API session authorization", () => {
       await app.close();
     }
   });
+  it("limits ordinary bodies and checks upload origin and session before parsing", async () => {
+    const app = await start();
+    try {
+      const big = JSON.stringify({
+        accountId: "default",
+        base64: "A".repeat(1_010_000),
+        name: "file",
+        type: "text/plain",
+      });
+      const content = { "content-type": "application/json" };
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/mail/mailboxes",
+            headers: { ...content, ...headers },
+            payload: big,
+          })
+        ).statusCode,
+      ).toBe(413);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/mail/attachments/upload",
+            headers: { ...content, origin: "https://wrong.test" },
+            payload: "{",
+          })
+        ).statusCode,
+      ).toBe(403);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/mail/attachments/upload",
+            headers: { ...content, origin: headers.origin },
+            payload: "{",
+          })
+        ).statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/mail/attachments/upload",
+            headers: { ...content, ...headers },
+            payload: big,
+          })
+        ).statusCode,
+      ).not.toBe(413);
+    } finally {
+      await app.close();
+    }
+  });
   it("requires the same authenticated user to redeem an expiring download", async () => {
     const app = await start();
     try {
@@ -164,6 +218,36 @@ describe("mail API session authorization", () => {
       });
       expect(download.body).toBe("private attachment");
       expect(download.headers["cache-control"]).toBe("private, no-store");
+      const issued = await app.inject({
+        method: "POST",
+        url: "/mail/attachments/download",
+        headers,
+        payload: { accountId: "default", blobId: "blob" },
+      });
+      const concurrentPath = new URL(
+        issued.json<{ url: string }>().url,
+      ).pathname.replace(/^\/api/, "");
+      const attempts = await Promise.all(
+        [1, 2].map(() =>
+          app.inject({
+            method: "GET",
+            url: concurrentPath,
+            headers: { cookie: "owner" },
+          }),
+        ),
+      );
+      expect(
+        attempts.map((item) => item.statusCode).toSorted((a, b) => a - b),
+      ).toEqual([200, 404]);
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: path,
+            headers: { cookie: "owner" },
+          })
+        ).statusCode,
+      ).toBe(404);
     } finally {
       await app.close();
     }

@@ -1,12 +1,14 @@
 import { ok } from "neverthrow";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../src/config.ts";
+import { loadAuthConfig, loadConfig } from "../src/config.ts";
 
 describe("loadConfig", () => {
   it("applies safe defaults", () => {
     expect(loadConfig({})).toEqual(
       ok({
-        stalwartReadyUrl: "http://stalwart:8080/healthz/ready",
         host: "127.0.0.1",
         port: 3000,
         logLevel: "info",
@@ -24,7 +26,6 @@ describe("loadConfig", () => {
     });
     expect(config).toEqual(
       ok({
-        stalwartReadyUrl: "http://stalwart:8080/healthz/ready",
         host: "0.0.0.0",
         port: 8080,
         logLevel: "debug",
@@ -41,4 +42,55 @@ describe("loadConfig", () => {
     expect(issues.join("\n")).toContain("API_PORT");
     expect(issues.join("\n")).not.toContain("hunter2");
   });
+});
+
+it("requires valid mail configuration and derives readiness from the internal origin", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "opensuite-auth-"));
+  try {
+    const authFile = join(directory, "auth");
+    const keyFile = join(directory, "key");
+    const adminFile = join(directory, "admin");
+    await Promise.all([
+      writeFile(authFile, "a".repeat(32)),
+      writeFile(keyFile, "ab".repeat(32)),
+      writeFile(adminFile, "p".repeat(32)),
+    ]);
+    const env = {
+      TRUSTED_PROXY_IP: "127.0.0.1",
+      AUTH_PUBLIC_ORIGIN: "https://suite.example.test",
+      MAIL_DOMAIN: "example.test",
+      AUTH_SECRET_FILE: authFile,
+      MAILBOX_KEY_FILE: keyFile,
+      STALWART_ADMIN_PASSWORD_FILE: adminFile,
+    };
+    expect((await loadAuthConfig(env)).isErr()).toBe(true);
+    expect(
+      (
+        await loadAuthConfig({
+          ...env,
+          STALWART_INTERNAL_ORIGIN: "https://mail.internal/path",
+        })
+      ).isErr(),
+    ).toBe(true);
+    const config = await loadAuthConfig({
+      ...env,
+      STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
+    });
+    expect(config.isOk() && config.value).toMatchObject({
+      stalwartOrigin: "http://mail.internal:8080",
+      mailReadyUrl: "http://mail.internal:8080/healthz/ready",
+      mailboxKey: "ab".repeat(32),
+    });
+    await writeFile(keyFile, "invalid");
+    expect(
+      (
+        await loadAuthConfig({
+          ...env,
+          STALWART_INTERNAL_ORIGIN: "http://mail.internal:8080",
+        })
+      ).isErr(),
+    ).toBe(true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

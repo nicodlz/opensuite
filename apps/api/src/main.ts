@@ -42,16 +42,6 @@ if (database.isErr()) {
   process.exit(1);
 }
 
-const readiness = createReadinessService({
-  probes: [
-    createDatabaseProbe(database.value),
-    httpProbe("mail-server", config.value.stalwartReadyUrl),
-  ],
-  timeoutMs: config.value.readinessTimeoutMs,
-  now: () => new Date(),
-  monotonicMs,
-});
-
 const authConfig = await loadAuthConfig(process.env);
 if (authConfig.isErr()) {
   process.stderr.write(
@@ -59,27 +49,32 @@ if (authConfig.isErr()) {
   );
   process.exit(1);
 }
+const readiness = createReadinessService({
+  probes: [
+    createDatabaseProbe(database.value),
+    httpProbe("mail-server", authConfig.value.mailReadyUrl),
+  ],
+  timeoutMs: config.value.readinessTimeoutMs,
+  now: () => new Date(),
+  monotonicMs,
+});
+
 const auth = createAuthRuntime(database.value, authConfig.value);
-const mailOrigin = process.env["JMAP_ORIGIN"];
-const encryptionKey = process.env["PROVIDER_ENCRYPTION_KEY"];
-let mail: ReturnType<typeof createMailService> | undefined;
-if (mailOrigin !== undefined && encryptionKey !== undefined) {
-  const store = createMailboxStore(database.value, encryptionKey);
-  if (store.isErr() || !URL.canParse(mailOrigin)) {
-    process.stderr.write(
-      `${JSON.stringify({ level: "fatal", msg: "invalid mail configuration" })}\n`,
-    );
-    process.exit(1);
-  }
-  const mailboxStore = store.value;
-  mail = createMailService({
-    store: {
-      getForOwner: async (userId, accountId) =>
-        mailboxStore.getForOwner(userId, accountId),
-    },
-    origin: mailOrigin,
-  });
+const store = createMailboxStore(database.value, authConfig.value.mailboxKey);
+if (store.isErr()) {
+  process.stderr.write(
+    `${JSON.stringify({ level: "fatal", msg: "invalid mail configuration" })}\n`,
+  );
+  process.exit(1);
 }
+const mailboxStore = store.value;
+const mail = createMailService({
+  store: {
+    getForOwner: async (userId, accountId) =>
+      mailboxStore.getForOwner(userId, accountId),
+  },
+  origin: authConfig.value.stalwartOrigin,
+});
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
 const app = await buildServer({
@@ -89,7 +84,7 @@ const app = await buildServer({
   identity: auth.identity,
   accounts: auth.accounts,
   ...(domains === undefined ? {} : { domains }),
-  ...(mail === undefined ? {} : { mail }),
+  mail,
 });
 const stopDomainJob =
   domains === undefined
