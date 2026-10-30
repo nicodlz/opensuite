@@ -46,6 +46,20 @@ portal configuration, and one webhook. Checkout and card statements can also
 show the Stripe account's public business name, which is shared with the other
 business. Verify the statement appearance before accepting payments.
 
+Setup reads the dedicated portal configuration back with its product groups
+expanded before comparing it. Keep the Esuno webhook disabled while the API is
+still self-hosted (it answers 403). After switching to Cloud mode with the
+stored signing secret, verify everything and re-enable only that existing
+webhook, without recreating it or changing its secret:
+
+```sh
+node scripts/stripe-setup.mjs --live --enable-webhook --dry-run
+node scripts/stripe-setup.mjs --live --enable-webhook
+```
+
+Add `--allow-no-tax-registration` when it was used for the first run.
+`--enable-webhook` fails if no Esuno webhook exists at `STRIPE_WEBHOOK_URL`.
+
 With automatic tax enabled, setup reads Stripe Tax settings and active
 registrations. The account was reported to have an active head office but no
 registrations: **no tax registrations: Stripe Tax will compute 0 VAT**. Setup

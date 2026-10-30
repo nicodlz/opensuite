@@ -12,11 +12,16 @@ const args = new Set(process.argv.slice(2));
 if (
   [...args].some(
     (arg) =>
-      !["--live", "--dry-run", "--allow-no-tax-registration"].includes(arg),
+      ![
+        "--live",
+        "--dry-run",
+        "--allow-no-tax-registration",
+        "--enable-webhook",
+      ].includes(arg),
   )
 )
   throw new Error(
-    "Usage: node scripts/stripe-setup.mjs [--live] [--dry-run] [--allow-no-tax-registration]",
+    "Usage: node scripts/stripe-setup.mjs [--live] [--dry-run] [--allow-no-tax-registration] [--enable-webhook]",
   );
 const file = process.env["STRIPE_SECRET_KEY_FILE"];
 if (!file) throw new Error("STRIPE_SECRET_KEY_FILE is required");
@@ -186,7 +191,12 @@ const features: Stripe.BillingPortal.ConfigurationCreateParams.Features = {
 if (dry && groups.some((group) => group.prices.length !== 2))
   say("configure portal after creating prices");
 else if (matches[0]) {
-  const current = matches[0].features;
+  // Listing omits the product groups; read them back explicitly.
+  const portal = await stripe.billingPortal.configurations.retrieve(
+    matches[0].id,
+    { expand: ["features.subscription_update.products"] },
+  );
+  const current = portal.features;
   const actualProducts = (current.subscription_update.products ?? [])
     .map((group) => ({
       product: group.product,
@@ -238,15 +248,33 @@ if (webhook[0]) {
   if (
     existing.metadata["esuno"] !== "1" ||
     existing.api_version !== STRIPE_API_VERSION ||
-    existing.status !== "enabled" ||
     JSON.stringify([...existing.enabled_events].toSorted()) !==
       JSON.stringify([...events].toSorted())
   )
     throw new Error(
       "Webhook URL is owned by another integration or does not match",
     );
-  say(`verified webhook ${existing.id}`);
+  if (existing.status === "enabled") say(`verified webhook ${existing.id}`);
+  else if (!args.has("--enable-webhook"))
+    throw new Error(
+      `Esuno webhook ${existing.id} is disabled; once the API runs in Cloud mode, rerun with --enable-webhook (its signing secret is unchanged)`,
+    );
+  else {
+    say(`enable webhook ${existing.id}`);
+    if (!dry) {
+      const enabled = await stripe.webhookEndpoints.update(existing.id, {
+        disabled: false,
+      });
+      if (enabled.status !== "enabled")
+        throw new Error("Stripe did not enable the Esuno webhook");
+    }
+  }
 } else {
+  // Re-enabling must never silently replace the stored signing secret.
+  if (args.has("--enable-webhook"))
+    throw new Error(
+      "No Esuno webhook to enable at STRIPE_WEBHOOK_URL; rerun without --enable-webhook to create one",
+    );
   say("create webhook endpoint");
   if (!dry) {
     const created = await stripe.webhookEndpoints.create(
