@@ -137,6 +137,7 @@ services:
       AUTH_PRODUCT_ORIGINS: ${AUTH_PRODUCT_ORIGINS:-}
       VAULT_PUBLIC_HOST: ${VAULT_PUBLIC_HOST:-vault.localhost}
       MAIL_DOMAIN: ${MAIL_DOMAIN:-localhost.test}
+      MAIL_DOMAINS: ${MAIL_DOMAINS:-}
       STALWART_INTERNAL_ORIGIN: http://stalwart-management:8080
       STALWART_MANAGEMENT_CLIENT_IP: ${MAIL_MANAGEMENT_API_IP:-172.30.248.10}
       AUTH_SECRET_FILE: /run/opensuite/auth/password

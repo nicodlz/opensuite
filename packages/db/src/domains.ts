@@ -49,11 +49,20 @@ export const createDomainStore = (db: PrismaClient) => ({
     return ResultAsync.fromPromise(
       db.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
-        const [addresses, defaults] = await Promise.all([
+        const { name } = await tx.domain.findUniqueOrThrow({
+          where: { id: domainId },
+          select: { name: true },
+        });
+        // Accounts created by signup have a primary address but no record,
+        // and may still be waiting for their mailbox.
+        const [addresses, defaults, mailboxes] = await Promise.all([
           tx.address.count({ where: { domainId } }),
           tx.user.count({ where: { defaultAliasDomainId: domainId } }),
+          tx.user.count({
+            where: { email: { endsWith: `@${name}`, mode: "insensitive" } },
+          }),
         ]);
-        if (addresses || defaults) return false;
+        if (addresses || defaults || mailboxes) return false;
         await tx.domain.update({
           where: { id: domainId },
           data: { removalPending: true },
@@ -219,6 +228,20 @@ export const createDomainStore = (db: PrismaClient) => ({
           where: { id: domainId },
         });
         if (domain.removalPending) throw new Error("domain removal pending");
+        // Another account's primary address, provisioned or not, is not an
+        // address record.
+        if (
+          await tx.user.count({
+            where: {
+              email: {
+                equals: `${localPart}@${domain.name}`,
+                mode: "insensitive",
+              },
+              id: { not: userId },
+            },
+          })
+        )
+          throw new Error("address belongs to another mailbox");
         await tx.address.create({
           data: { domainId, userId, localPart, isAlias },
         });

@@ -1,3 +1,4 @@
+import { syntheticDomainNames } from "../domains/client.ts";
 import type { SetupStatus } from "@opensuite/contracts";
 
 const admin = {
@@ -25,7 +26,9 @@ export const syntheticSetup = {
   users: (_input: object) => Promise.resolve(structuredClone(users)),
   createUser: (input: { email: string; name: string; password: string }) => {
     if (
-      input.email.toLowerCase().split("@")[1] !== status.mailDomain ||
+      !syntheticDomainNames().includes(
+        input.email.toLowerCase().split("@")[1] ?? "",
+      ) ||
       users.some((u) => u.email === input.email.toLowerCase())
     )
       return Promise.reject(new Error("Invalid user"));

@@ -66,6 +66,8 @@ OPENSUITE_SITE_ADDRESS=mail.example.com
 OPENSUITE_PUBLIC_HOST=mail.example.com
 MAIL_HOSTNAME=mail.example.com
 MAIL_DOMAIN=example.com
+# Optional further account domains, comma separated.
+#MAIL_DOMAINS=example.net
 MAIL_PROTOCOL_BIND=127.0.0.1
 MAIL_MANAGEMENT_SUBNET=172.30.248.0/24
 MAIL_MANAGEMENT_API_IP=172.30.248.10
@@ -271,7 +273,8 @@ following steps:
 ## First administrator
 
 Create a strong initial password in a protected file outside the checkout and
-`.env`, with no trailing newline. Use an address within `MAIL_DOMAIN`:
+`.env`, with no trailing newline. Use an address within `MAIL_DOMAIN`, a
+domain in `MAIL_DOMAINS` or a managed domain:
 
 ```sh
 docker compose exec -T api node apps/api/src/bootstrap.ts admin@example.com /dev/stdin < /secure/path/initial-password
@@ -282,6 +285,47 @@ command provisions the mailbox and promotes the account. Sign in at the HTTPS
 site, enable MFA, and create any additional accounts through the authenticated
 admin signup API. Check provisioning and reconciliation logs; signup does not
 verify mailbox ownership. See [authentication](../development.md#authentication-and-mailbox-provisioning).
+
+## Additional account domain
+
+Accounts can use other domains than `MAIL_DOMAIN`, for example to give
+`user@example.net` a mailbox on the same installation. Each address must
+belong to only one account.
+
+1. Add the domain, in lowercase, to `MAIL_DOMAINS` in `.env` (comma separated)
+   and recreate the API so it reads the new value: `docker compose up -d api`.
+   A plain restart keeps the old environment, and the bootstrap command,
+   which runs in the API container, refuses the domain until then. Domains
+   managed in the console are accepted without this step.
+2. Create the account. With an administrator session, call
+   `POST /api/auth/sign-up/email` with `name`, `email` and `password` and the
+   configured Origin, as described in the
+   [admin guide](../admin/index.md#users); the bootstrap command also works
+   but promotes the account to administrator. Provisioning creates the domain
+   in Stalwart; mail between local accounts of both domains is then delivered
+   locally.
+3. Receive mail: add the domain to both the `domains` and `recipients`
+   variables of the [AWS module](aws.md) (they are independent; import an
+   SES identity that already exists with `tofu import` first), apply, and
+   after owner approval publish its MX, as in
+   [SES inbound and outbound](#ses-inbound-and-outbound). Check that the
+   worker routes the address: a release that routes primary addresses and
+   delivers to linked mailboxes needs nothing else; otherwise issue a static
+   route and destination for the account with the `management ingest` helper
+   and recreate the worker with `docker compose --profile ingest up -d ingest`.
+4. Send mail: SES accepts only verified identities, so publish every record
+   of the AWS module's `dns_records` output for the domain (identity, SES
+   DKIM, MAIL FROM MX and SPF), Stalwart's DKIM record from
+   `management dns`, and SPF and DMARC, as in
+   [outbound DKIM and DNS](../operations/outbound.md#dkim-and-dns).
+   Until then SES rejects its messages and the sender receives a bounce.
+
+Before deploying a release with this support, list the domain records
+(`SELECT name, status, "removalPending" FROM "Domain";`): every managed
+domain whose removal has not started becomes available for accounts. Before
+rolling back, make sure every account in another domain has its mailbox:
+older releases refuse to provision such an account on every reconciliation,
+including when it is disabled before it was provisioned.
 
 ## Mail TLS
 

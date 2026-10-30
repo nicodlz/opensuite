@@ -49,6 +49,8 @@ export interface ServerDependencies {
     readonly trustedOrigins?: readonly string[];
     readonly productOrigins?: Readonly<Record<string, string>>;
     readonly mailDomain?: string;
+    /** Whether accounts may use this domain; defaults to `mailDomain` only. */
+    readonly isMailDomain?: (domain: string | undefined) => Promise<boolean>;
     readonly actor?: (headers: Headers) => Promise<Actor | null>;
     readonly userIdForEmail?: (email: string) => Promise<string | null>;
     readonly audit?: (event: {
@@ -450,12 +452,18 @@ export const buildServer = async (
         }
         if (
           path === "/auth/sign-up/email" &&
-          identity.mailDomain !== undefined
+          (identity.isMailDomain !== undefined ||
+            identity.mailDomain !== undefined)
         ) {
           const email = z.object({ email: z.email() }).safeParse(request.body);
+          const domain = email.success
+            ? email.data.email.toLowerCase().split("@")[1]
+            : undefined;
           if (
             !email.success ||
-            email.data.email.toLowerCase().split("@")[1] !== identity.mailDomain
+            !(identity.isMailDomain === undefined
+              ? domain === identity.mailDomain
+              : await identity.isMailDomain(domain))
           )
             return reply.code(400).send({
               code: "BAD_REQUEST",
