@@ -106,7 +106,10 @@ const drive = createDrive(
 const app = buildServer(
   drive,
   storage,
-  httpSessionVerifier(config.DRIVE_SESSION_API, token),
+  httpSessionVerifier(
+    config.DRIVE_SESSION_API,
+    configuredToken ?? internalToken,
+  ),
   readiness,
   config.DRIVE_TRUSTED_ORIGINS,
   internalToken,

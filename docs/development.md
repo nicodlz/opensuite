@@ -299,10 +299,14 @@ See [ingestion](architecture/ingestion.md) for configuration, archive and replay
 
 Drive runs separately at `/drive/api/`, with its own `opensuite_drive` database,
 migrations, bucket and prefix. Caddy and mail do not depend on Drive startup.
-The session adapter forwards only the incoming cookie to the API's
-`GET /auth/get-session?disableCookieCache=true`; it accepts Better Auth's
-`{user, session}` response, verifies matching user IDs and expiry, and fails
-closed if the API is unavailable. The API must be running for authenticated Drive operations.
+The session adapter forwards only the incoming cookie, with the service token
+Drive also uses for entitlements, to the API's `GET /internal/session`. That
+route applies the API's own session checks (pending second factor, disabled
+account, expiry, revocation) without cache and outside the per-network sign-in
+limits, which every Drive user would otherwise share from the Drive container's
+address. Without a token, or against an API that answers 401 or 404, it falls
+back to `GET /auth/get-session?disableCookieCache=true`, verifying matching
+user IDs and expiry. It fails closed if the API is unavailable. The API must be running for authenticated Drive operations.
 The endpoint URL is selected with `DRIVE_SESSION_API` (default `http://api:3000`).
 The internal endpoint must be trusted and reachable at the indicated path.
 

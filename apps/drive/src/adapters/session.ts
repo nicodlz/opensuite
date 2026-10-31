@@ -34,8 +34,9 @@ const publicSession = async (baseUrl: string, cookie: string) => {
 /**
  * With the service token, sessions are checked on the API's internal route,
  * outside the per-network sign-in limits that every Drive user would share.
- * Every request is checked again, so a sign-out or revocation applies to the
- * next one.
+ * An API without that route or token falls back to the public one. Every
+ * request is checked again, so a sign-out or revocation applies to the next
+ * one.
  */
 export const httpSessionVerifier = (
   baseUrl: string,
@@ -50,6 +51,10 @@ export const httpSessionVerifier = (
           authorization: `Bearer ${token}`,
           cookie,
         });
+        if (response.status === 401 || response.status === 404)
+          return publicSession(baseUrl, cookie);
+        // The API refuses duplicated or unsupported authentication cookies.
+        if (response.status === 400) return null;
         if (!response.ok) throw new Error("session endpoint failed");
         return InternalSessionSchema.parse(await response.json()).userId;
       })(),

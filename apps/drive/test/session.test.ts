@@ -95,8 +95,52 @@ it("checks sessions on the API's internal route with the service token", async (
   ).toEqual(results.map((_, index) => (index % 2 ? "user" : null)));
   expect(cookies).toHaveLength(150);
   expect(handled).toBe(0);
+  const duplicate = await verifier.verify(
+    "__Host-opensuite.session_token=a; __Host-opensuite.session_token=b",
+  );
+  expect(duplicate.isOk() && duplicate.value).toBeNull();
+  // A token the API does not hold falls back to the public route, here at
+  // its limit.
   const wrong = await httpSessionVerifier(address, "t".repeat(32)).verify(
     "session=abc",
   );
   expect(wrong.isErr()).toBe(true);
+  expect(handled).toBe(1);
+});
+
+it("falls back to the public route on an API without the internal route", async () => {
+  api = await buildServer({
+    config: { logLevel: "silent" },
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 100,
+      now: () => new Date(),
+      monotonicMs: () => 0,
+    }),
+    monotonicMs: () => 0,
+    identity: {
+      publicOrigin: "http://public.example",
+      actor: () =>
+        Promise.resolve({
+          id: "user",
+          email: "user@example.test",
+          role: "user",
+        }),
+      handler: () =>
+        Promise.resolve(
+          Response.json({
+            user: { id: "user" },
+            session: {
+              userId: "user",
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          }),
+        ),
+    },
+  });
+  const address = await api.listen({ host: "127.0.0.1", port: 0 });
+  const result = await httpSessionVerifier(address, "s".repeat(32)).verify(
+    "session=abc",
+  );
+  expect(result.isOk() && result.value).toBe("user");
 });
