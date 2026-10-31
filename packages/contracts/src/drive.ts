@@ -44,7 +44,8 @@ export const DriveCommandSchema = z.discriminatedUnion("action", [
     name,
     parentId,
     size: z.number().int().nonnegative().max(DRIVE_MAX_FILE_SIZE),
-    checksum,
+    // Clients may send the checksum at finish instead, so hashing overlaps the upload.
+    checksum: checksum.optional(),
     contentType: z
       .string()
       .min(1)
@@ -60,6 +61,7 @@ export const DriveCommandSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("finish"),
     id,
+    checksum: checksum.optional(),
     parts: z
       .array(
         z.object({

@@ -29,6 +29,14 @@ type Transport = {
   ) => Promise<string>;
   preview: (id: string) => string;
 };
+// A storage status of 0 means the connection failed before a response.
+class StorageError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
 function put(
   url: string,
   body: Blob,
@@ -47,7 +55,7 @@ function put(
     xhr.upload.addEventListener("progress", (event) => progress(event.loaded));
     xhr.addEventListener("error", () => {
       cleanup();
-      reject(new Error("Upload connection failed"));
+      reject(new StorageError("Upload connection failed", 0));
     });
     xhr.addEventListener("abort", () => {
       cleanup();
@@ -56,7 +64,7 @@ function put(
     xhr.addEventListener("load", () => {
       cleanup();
       if (xhr.status < 200 || xhr.status >= 300)
-        reject(new Error("Storage rejected the upload"));
+        reject(new StorageError("Storage rejected the upload", xhr.status));
       else resolve(xhr.getResponseHeader("ETag") ?? "");
     });
     xhr.send(body);
@@ -83,6 +91,61 @@ export async function entries(
   if (!("entries" in result)) throw new Error("Unexpected Drive response");
   return result.entries;
 }
+// Browsers keep at most six HTTP/1.1 connections per storage host, so every
+// storage request, across files, shares six slots.
+const STORAGE_SLOTS = 6;
+let activeSlots = 0;
+const waitingSlots: (() => void)[] = [];
+async function withSlot<T>(run: () => Promise<T>): Promise<T> {
+  if (activeSlots < STORAGE_SLOTS) activeSlots++;
+  else await new Promise<void>((resolve) => waitingSlots.push(resolve));
+  try {
+    return await run();
+  } finally {
+    const next = waitingSlots.shift();
+    if (next) next();
+    else activeSlots--;
+  }
+}
+const pause = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const stop = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Upload cancelled", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", stop);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", stop, { once: true });
+  });
+// Connection drops, storage hiccups and expired part URLs are worth another
+// try; a part retry asks for a fresh URL.
+const retryable = (error: unknown) =>
+  error instanceof TypeError ||
+  (error instanceof StorageError &&
+    (error.status === 0 ||
+      error.status === 403 ||
+      error.status === 408 ||
+      error.status === 429 ||
+      error.status >= 500));
+async function retry<T>(
+  signal: AbortSignal,
+  attempt: () => Promise<T>,
+  reset: () => void,
+): Promise<T> {
+  const run = async (tries: number): Promise<T> => {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (signal.aborted || tries >= 3 || !retryable(error)) throw error;
+      reset();
+      await pause(500 * 2 ** tries, signal);
+      return run(tries + 1);
+    }
+  };
+  return run(0);
+}
 export async function uploadFile(
   file: File,
   parentId: string | null,
@@ -91,65 +154,127 @@ export async function uploadFile(
 ) {
   if (file.size > DRIVE_MAX_FILE_SIZE)
     throw new Error("File exceeds the maximum supported size.");
-  const checksum = await hashFile(file, signal, (fraction) =>
-    progress("Checking file", fraction),
-  );
+  signal.throwIfAborted();
   const multipart = file.size > DRIVE_MIN_PART_SIZE;
   const partSize = drivePartSize(file.size);
+  const count = multipart ? Math.ceil(file.size / partSize) : 1;
   const type = contentType(file);
-  signal.throwIfAborted();
+  // The checksum is only needed at finish, so hashing runs alongside the
+  // transfer. A failed hash or part stops the rest of the file.
+  const stop = new AbortController();
+  const transfer = AbortSignal.any([signal, stop.signal]);
+  let uploaded = false;
+  let hashed = 0;
+  let failure: unknown;
+  const fail = (error: unknown) => {
+    failure ??= error;
+    stop.abort();
+  };
+  const checksum = hashFile(file, transfer, (fraction) => {
+    hashed = fraction;
+    if (uploaded && fraction < 1) progress("Checking file", fraction);
+  });
+  checksum.catch(fail);
+  const loaded = Array.from({ length: count }, () => 0);
+  let sent = 0;
+  const track = (index: number, bytes: number) => {
+    sent += bytes - (loaded[index] ?? 0);
+    loaded[index] = bytes;
+    progress("Uploading", file.size ? sent / file.size : 1);
+  };
   const reservation = await command({
     action: "upload",
     name: file.name,
     parentId,
     size: file.size,
-    checksum,
     contentType: type,
     multipart,
+  }).catch((error: unknown) => {
+    stop.abort();
+    throw error;
   });
-  if (!("id" in reservation) || !("url" in reservation))
+  if (!("id" in reservation) || !("url" in reservation)) {
+    stop.abort();
     throw new Error("Unexpected upload response");
-  const id = reservation.id;
+  }
+  const { id, url } = reservation;
   try {
-    signal.throwIfAborted();
+    transfer.throwIfAborted();
+    const parts: { partNumber: number; etag: string }[] = [];
     if (multipart) {
-      const parts: { partNumber: number; etag: string }[] = [];
-      await Array.from(
-        { length: Math.ceil(file.size / partSize) },
-        (_, index) => index,
-      ).reduce<Promise<void>>(async (previous, index) => {
-        await previous;
-        const offset = index * partSize;
-        const partNumber = index + 1;
-        signal.throwIfAborted();
-        const part = await command({ action: "part", id, partNumber });
-        if (!("url" in part) || !part.url) throw new Error("Missing part URL");
-        const etag = await driveTransport.put(
-          part.url,
-          file.slice(offset, offset + partSize),
-          null,
-          signal,
-          (loaded) => progress("Uploading", (offset + loaded) / file.size),
-        );
-        if (!etag)
-          throw new Error(
-            "Storage did not expose the part ETag. Check storage CORS settings.",
-          );
-        parts.push({ partNumber, etag });
-      }, Promise.resolve());
-      signal.throwIfAborted();
-      progress("Finalizing", 1);
-      await command({ action: "finish", id, parts });
-    } else {
-      if (!reservation.url) throw new Error("Missing upload URL");
-      await driveTransport.put(reservation.url, file, type, signal, (loaded) =>
-        progress("Uploading", file.size ? loaded / file.size : 1),
+      let next = 0;
+      await Promise.all(
+        Array.from(
+          { length: Math.min(STORAGE_SLOTS, count) },
+          async function send() {
+            if (next >= count) return;
+            transfer.throwIfAborted();
+            const index = next++;
+            const offset = index * partSize;
+            const partNumber = index + 1;
+            const body = file.slice(offset, offset + partSize);
+            try {
+              const etag = await retry(
+                transfer,
+                () =>
+                  withSlot(async () => {
+                    transfer.throwIfAborted();
+                    const part = await command({
+                      action: "part",
+                      id,
+                      partNumber,
+                    });
+                    if (!("url" in part) || !part.url)
+                      throw new Error("Missing part URL");
+                    return driveTransport.put(
+                      part.url,
+                      body,
+                      null,
+                      transfer,
+                      (bytes) => track(index, bytes),
+                    );
+                  }),
+                () => track(index, 0),
+              );
+              if (!etag)
+                throw new Error(
+                  "Storage did not expose the part ETag. Check storage CORS settings.",
+                );
+              parts[index] = { partNumber, etag };
+            } catch (error) {
+              fail(error);
+              throw error;
+            }
+            await send();
+          },
+        ),
       );
-      signal.throwIfAborted();
-      progress("Finalizing", 1);
-      await command({ action: "finish", id });
+    } else {
+      if (!url) throw new Error("Missing upload URL");
+      await retry(
+        transfer,
+        () =>
+          withSlot(() => {
+            transfer.throwIfAborted();
+            return driveTransport.put(url, file, type, transfer, (bytes) =>
+              track(0, bytes),
+            );
+          }),
+        () => track(0, 0),
+      );
     }
+    uploaded = true;
+    if (hashed < 1) progress("Checking file", hashed);
+    const sum = await checksum;
+    signal.throwIfAborted();
+    progress("Finalizing", 1);
+    await command(
+      multipart
+        ? { action: "finish", id, checksum: sum, parts }
+        : { action: "finish", id, checksum: sum },
+    );
   } catch (error) {
+    stop.abort();
     // The contract has no abort action. Remove the reservation when ownership allows it.
     try {
       await command({ action: "trash", id });
@@ -159,6 +284,6 @@ export async function uploadFile(
         "Upload failed or was cancelled; its pending reservation could not be removed. Check the destination folder.",
       );
     }
-    throw error;
+    throw failure ?? error;
   }
 }

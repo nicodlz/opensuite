@@ -199,6 +199,13 @@ it("uploads and protects files, shares, links and previews", async () => {
       })
     ).ok,
   ).toBe(true);
+  await expect(
+    command("a", {
+      action: "finish",
+      id: begin.id,
+      checksum: digest(Buffer.alloc(1)),
+    }),
+  ).rejects.toThrow(/checksum mismatch/);
   await command("a", { action: "finish", id: begin.id });
   await expect(storage.get(storage.key(begin.id, true))).rejects.toMatchObject({
     name: "NoSuchKey",
@@ -307,7 +314,6 @@ it("handles multipart and reserves quota before signing", async () => {
       name: "large.bin",
       parentId: null,
       size: bytes.length,
-      checksum: digest(bytes),
       contentType: "application/octet-stream",
       multipart: true,
     }),
@@ -339,7 +345,16 @@ it("handles multipart and reserves quota before signing", async () => {
       return { partNumber, etag };
     }),
   );
-  await command("a", { action: "finish", id: begin.id, parts });
+  // The checksum may arrive at finish, once the client has hashed the file.
+  await expect(
+    command("a", { action: "finish", id: begin.id, parts }),
+  ).rejects.toThrow(/Missing upload checksum/);
+  await command("a", {
+    action: "finish",
+    id: begin.id,
+    parts,
+    checksum: digest(bytes),
+  });
   const download = signedPart.parse(
     await command("a", { action: "download", id: begin.id }),
   );
@@ -1046,7 +1061,7 @@ it("serializes creating children against trash and restricts orphaning", async (
 }, 120_000);
 
 it("limits repeated finish attempts per user", async () => {
-  await Array.from({ length: 10 }).reduce<Promise<void>>(async (previous) => {
+  await Array.from({ length: 300 }).reduce<Promise<void>>(async (previous) => {
     await previous;
     await expect(
       command("limited-user", { action: "finish", id: "missing" }),

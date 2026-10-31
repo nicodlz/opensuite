@@ -270,6 +270,13 @@ function FolderTree({
   );
 }
 
+type Transfer = {
+  name: string;
+  phase: string;
+  progress: number;
+  index: number;
+  total: number;
+};
 export function DrivePage() {
   const queryClient = useQueryClient();
   const billingOverview = useQuery(billingQuery);
@@ -299,13 +306,7 @@ export function DrivePage() {
   const [days, setDays] = useState("7");
   const [notice, setNoticeState] = useState<Notice>({ text: "" });
   const [busy, setBusy] = useState(false);
-  const [transfer, setTransfer] = useState<{
-    name: string;
-    phase: string;
-    progress: number;
-    index: number;
-    total: number;
-  } | null>(null);
+  const [transfer, setTransfer] = useState<Transfer | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [newMenu, setNewMenu] = useState<"sidebar" | "main" | null>(null);
   const [fileDrag, setFileDrag] = useState<DOMRect | null>(null);
@@ -654,6 +655,24 @@ export function DrivePage() {
     queue.current.push(job);
     void drainUploads();
   }
+  // Parallel transfers report many times per frame; render at most once.
+  const pendingTransfer = useRef<{ value: Transfer | null; frame: number }>({
+    value: null,
+    frame: 0,
+  });
+  function showTransfer(value: Transfer | null) {
+    const pending = pendingTransfer.current;
+    pending.value = value;
+    if (value === null) {
+      cancelAnimationFrame(pending.frame);
+      pending.frame = 0;
+      setTransfer(null);
+    } else if (pending.frame === 0)
+      pending.frame = requestAnimationFrame(() => {
+        pending.frame = 0;
+        setTransfer(pending.value);
+      });
+  }
   async function drainUploads() {
     if (controller.current) return;
     const abort = new AbortController();
@@ -670,22 +689,60 @@ export function DrivePage() {
         const job = queue.current.shift();
         if (!job) return;
         affected.add(job.parentId);
-        let current = { name: "", index: 0, total: 0 };
+        // Files upload in parallel; the bar shows the whole job by bytes.
+        const files = new Map<
+          File,
+          { phase: string; fraction: number; order: number }
+        >();
+        const jobBytes =
+          job.plan.files.reduce((sum, item) => sum + item.file.size, 0) || 1;
+        let started = 0;
+        const report = () => {
+          let done = 0;
+          let sent = 0;
+          let latest: [File, { phase: string; order: number }] | undefined;
+          for (const [file, state] of files) {
+            sent += state.fraction * (file.size || 1);
+            if (state.phase === "Done") done++;
+            else if (!latest || state.order > latest[1].order)
+              latest = [file, state];
+          }
+          const phases = new Set(
+            [...files.values()].map((state) => state.phase),
+          );
+          showTransfer({
+            name: latest?.[0].name ?? "",
+            phase: phases.has("Uploading")
+              ? "Uploading"
+              : phases.has("Checking file")
+                ? "Checking file"
+                : started < job.plan.files.length
+                  ? "Uploading"
+                  : "Finalizing",
+            progress: Math.min(1, sent / jobBytes),
+            index: Math.min(done + 1, job.plan.files.length),
+            total: job.plan.files.length,
+          });
+        };
         failed.push(...(job.plan.skipped ?? []));
         const result = await executePlan(job.plan, job.parentId, {
           signal: abort.signal,
+          concurrency: 4,
           step: (step) => {
-            current = {
-              name: step.kind === "folder" ? step.name : step.file.name,
-              index: step.index + 1,
-              total: step.total,
-            };
-            setTransfer({
-              ...current,
-              phase:
-                step.kind === "folder" ? "Creating folder" : "Checking file",
-              progress: 0,
+            if (step.kind === "folder")
+              return showTransfer({
+                name: step.name,
+                index: step.index + 1,
+                total: step.total,
+                phase: "Creating folder",
+                progress: 0,
+              });
+            files.set(step.file, {
+              phase: "Uploading",
+              fraction: 0,
+              order: started++,
             });
+            report();
           },
           createFolder: async (folderName, folderParent) => {
             const created = await command({
@@ -699,21 +756,29 @@ export function DrivePage() {
           },
           upload: async (file, fileParent) => {
             affected.add(fileParent);
+            const state = files.get(file);
             try {
               await uploadFile(
                 file,
                 fileParent,
                 abort.signal,
-                (phase, progress) =>
-                  setTransfer({ ...current, phase, progress }),
+                (phase, value) => {
+                  if (state) Object.assign(state, { phase, fraction: value });
+                  report();
+                },
               );
+              if (state) Object.assign(state, { phase: "Done", fraction: 1 });
             } catch (error) {
               if (
                 error instanceof ORPCError &&
                 (error.code === "QUOTA_EXCEEDED" || error.code === "NO_PLAN")
               )
                 quotaExceeded = true;
+              // A failed file no longer counts towards the bar.
+              files.delete(file);
               throw error;
+            } finally {
+              report();
             }
           },
         });
@@ -754,7 +819,7 @@ export function DrivePage() {
       );
     } finally {
       controller.current = null;
-      setTransfer(null);
+      showTransfer(null);
       await invalidate([...affected].map((id) => listKey("drive", id)));
       void queryClient.invalidateQueries({ queryKey: billingQuery.queryKey });
     }

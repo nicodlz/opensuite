@@ -217,7 +217,8 @@ async function put(
   const segments = new URL(url).pathname.split("/");
   const id = segments[1] ?? "";
   const parts = pending.get(id) ?? fail("Upload not found");
-  parts.push(body);
+  // Parts arrive in parallel; keep them in part order.
+  parts[Math.max(0, Number(segments[2] ?? 0) - 1)] = body;
   progress(body.size);
   return `"part-${segments[2] ?? "0"}"`;
 }

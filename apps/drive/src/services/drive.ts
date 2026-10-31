@@ -10,6 +10,10 @@ import { createLinkToken, hashLinkToken } from "../sharing/tokens.ts";
 
 const missing = () =>
   new ORPCError("NOT_FOUND", { message: "Entry not found" });
+const tooMany = () =>
+  new ORPCError("TOO_MANY_REQUESTS", {
+    message: "Too many upload finalizations",
+  });
 const invalid = (message: string) => new ORPCError("BAD_REQUEST", { message });
 const visible = (entry: Entry) => ({
   id: entry.id,
@@ -122,25 +126,109 @@ export const createDrive = (
     if (entry === null) throw missing();
     return entry;
   };
-  // Bound both request rate and memory use. The state claim below also prevents
-  // concurrent verification of the same upload across service instances.
+  // Bound request rate, concurrent verification work and memory use. The state
+  // claim below also prevents concurrent verification of the same upload across
+  // service instances. The rate allows folder uploads of many small files.
   const finishAttempts = new Map<string, { count: number; until: number }>();
+  const finishing = new Map<string, number>();
   const limitFinish = (user: string) => {
     const now = Date.now();
     for (const [key, value] of finishAttempts)
       if (value.until <= now) finishAttempts.delete(key);
     const current = finishAttempts.get(user);
-    if (current !== undefined && current.count >= 10)
-      throw new ORPCError("TOO_MANY_REQUESTS", {
-        message: "Too many upload finalizations",
-      });
+    if (current !== undefined && current.count >= 300) throw tooMany();
+    const active = finishing.get(user) ?? 0;
+    if (active >= 8) throw tooMany();
     if (current !== undefined) current.count++;
     else {
-      if (finishAttempts.size >= 10_000)
-        throw new ORPCError("TOO_MANY_REQUESTS", {
-          message: "Too many upload finalizations",
-        });
+      if (finishAttempts.size >= 10_000) throw tooMany();
       finishAttempts.set(user, { count: 1, until: now + 60_000 });
+    }
+    finishing.set(user, active + 1);
+    return () => {
+      const left = (finishing.get(user) ?? 1) - 1;
+      if (left > 0) finishing.set(user, left);
+      else finishing.delete(user);
+    };
+  };
+  const finish = async (
+    user: string,
+    input: Extract<DriveCommand, { action: "finish" }>,
+  ): Promise<DriveOutput> => {
+    const entry = await get(user, input.id, "write");
+    const checksum = entry.checksum ?? input.checksum;
+    if (entry.state !== "pending" || entry.contentType === null)
+      throw invalid("Upload is not pending");
+    if (checksum === undefined) throw invalid("Missing upload checksum");
+    if (
+      entry.checksum !== null &&
+      input.checksum !== undefined &&
+      input.checksum !== entry.checksum
+    )
+      throw invalid("Upload checksum mismatch");
+    if (entry.expiresAt === null || entry.expiresAt <= new Date())
+      throw invalid("Upload expired");
+    if ((entry.uploadId === null) !== (input.parts === undefined))
+      throw invalid("Invalid multipart parts");
+    if (
+      input.parts !== undefined &&
+      (input.parts.length !==
+        Math.ceil(Number(entry.size) / drivePartSize(Number(entry.size))) ||
+        input.parts.length === 0 ||
+        input.parts.some((p, index) => p.partNumber !== index + 1))
+    )
+      throw invalid("Parts must be consecutive");
+    const claim = await db.$transaction(async (tx) => {
+      await lockOwner(tx, entry.ownerId);
+      return tx.entry.updateMany({
+        where: {
+          id: entry.id,
+          ownerId: entry.ownerId,
+          state: "pending",
+          trashedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+        data: { state: "verifying", checksum },
+      });
+    });
+    if (claim.count !== 1)
+      throw invalid("Upload expired or already being finalized");
+    try {
+      if (entry.uploadId !== null && input.parts !== undefined) {
+        await storage.complete(entry.id, entry.uploadId, input.parts);
+        await db.entry.update({
+          where: { id: entry.id },
+          data: { uploadId: null },
+        });
+      }
+      const contentType = await storage.verifyAndCopy(
+        entry.id,
+        Number(entry.size),
+        checksum,
+        entry.contentType,
+      );
+      const result = await db.entry.update({
+        where: { id: entry.id },
+        data: {
+          state: "ready",
+          objectKey: storage.key(entry.id, false),
+          contentType,
+          uploadId: null,
+          expiresAt: null,
+        },
+      });
+      // A failure to remove staging must not roll back an already committed entry.
+      await storage.removeStaging(entry.id).catch(() => {});
+      notifyQuota(entry.ownerId);
+      return visible(result);
+    } catch (error) {
+      await db.entry.updateMany({
+        where: { id: entry.id, state: "verifying" },
+        data: {
+          state: error instanceof UploadMismatchError ? "failed" : "pending",
+        },
+      });
+      throw error;
     }
   };
   const file = async (user: string, id: string) => {
@@ -290,7 +378,7 @@ export const createDrive = (
                   kind: "file",
                   state: "pending",
                   size: BigInt(input.size),
-                  checksum: input.checksum,
+                  checksum: input.checksum ?? null,
                   contentType: input.contentType,
                   expiresAt: new Date(
                     Date.now() + (input.multipart ? 86_400_000 : 300_000),
@@ -349,78 +437,11 @@ export const createDrive = (
         };
       }
       case "finish": {
-        limitFinish(user);
-        const entry = await get(user, input.id, "write");
-        if (
-          entry.state !== "pending" ||
-          entry.checksum === null ||
-          entry.contentType === null
-        )
-          throw invalid("Upload is not pending");
-        if (entry.expiresAt === null || entry.expiresAt <= new Date())
-          throw invalid("Upload expired");
-        if ((entry.uploadId === null) !== (input.parts === undefined))
-          throw invalid("Invalid multipart parts");
-        if (
-          input.parts !== undefined &&
-          (input.parts.length !==
-            Math.ceil(Number(entry.size) / drivePartSize(Number(entry.size))) ||
-            input.parts.length === 0 ||
-            input.parts.some((p, index) => p.partNumber !== index + 1))
-        )
-          throw invalid("Parts must be consecutive");
-        const claim = await db.$transaction(async (tx) => {
-          await lockOwner(tx, entry.ownerId);
-          return tx.entry.updateMany({
-            where: {
-              id: entry.id,
-              ownerId: entry.ownerId,
-              state: "pending",
-              trashedAt: null,
-              expiresAt: { gt: new Date() },
-            },
-            data: { state: "verifying" },
-          });
-        });
-        if (claim.count !== 1)
-          throw invalid("Upload expired or already being finalized");
+        const release = limitFinish(user);
         try {
-          if (entry.uploadId !== null && input.parts !== undefined) {
-            await storage.complete(entry.id, entry.uploadId, input.parts);
-            await db.entry.update({
-              where: { id: entry.id },
-              data: { uploadId: null },
-            });
-          }
-          const contentType = await storage.verifyAndCopy(
-            entry.id,
-            Number(entry.size),
-            entry.checksum,
-            entry.contentType,
-          );
-          const result = await db.entry.update({
-            where: { id: entry.id },
-            data: {
-              state: "ready",
-              objectKey: storage.key(entry.id, false),
-              contentType,
-              uploadId: null,
-              expiresAt: null,
-            },
-          });
-          // A failure to remove staging must not roll back an already committed entry.
-          await storage.removeStaging(entry.id).catch(() => {});
-          notifyQuota(entry.ownerId);
-          return visible(result);
-        } catch (error) {
-          await db.entry.updateMany({
-            where: { id: entry.id, state: "verifying" },
-            data: {
-              state:
-                error instanceof UploadMismatchError ? "failed" : "pending",
-            },
-          });
-          throw error;
+          return await finish(user, input);
+        } finally {
+          release();
         }
       }
       case "download": {

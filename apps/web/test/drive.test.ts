@@ -6,7 +6,7 @@ import {
   DRIVE_MAX_FILE_SIZE,
   drivePartSize,
 } from "@opensuite/contracts";
-import { Sha256 } from "../src/drive/hash.ts";
+import { hashChunks, Sha256 } from "../src/drive/sha256.ts";
 import type * as HashModule from "../src/drive/hash.ts";
 import { driveTransport, uploadFile } from "../src/drive/client.ts";
 import {
@@ -54,9 +54,6 @@ describe("Drive upload hashing", () => {
     }
   });
   it("hashes a file across chunks and stops when cancelled", async () => {
-    const { hashFile } = await vi.importActual<typeof HashModule>(
-      "../src/drive/hash.ts",
-    );
     const bytes = randomBytes(1024 * 1024 + 13);
     const file = new Blob([Uint8Array.from(bytes)]);
     vi.spyOn(file, "slice").mockImplementation(
@@ -72,16 +69,38 @@ describe("Drive upload hashing", () => {
     const progress: number[] = [];
     const signal = new AbortController();
     expect(
-      await hashFile(file, signal.signal, (fraction) =>
-        progress.push(fraction),
+      await hashChunks(
+        file,
+        signal.signal,
+        (fraction) => progress.push(fraction),
+        1024 * 1024,
       ),
     ).toBe(createHash("sha256").update(bytes).digest("hex"));
     expect(progress).toHaveLength(2);
     expect(progress.at(-1)).toBe(1);
     const cancelled = new AbortController();
     await expect(
-      hashFile(file, cancelled.signal, () => cancelled.abort()),
+      hashChunks(file, cancelled.signal, () => cancelled.abort(), 1024 * 1024),
     ).rejects.toMatchObject({ name: "AbortError" });
+  });
+  it("hashes small files natively in one pass", async () => {
+    const { hashFile } = await vi.importActual<typeof HashModule>(
+      "../src/drive/hash.ts",
+    );
+    vi.stubGlobal("isSecureContext", true);
+    const bytes = randomBytes(70_000);
+    const file = new Blob([Uint8Array.from(bytes)]);
+    Object.defineProperty(file, "arrayBuffer", {
+      value: () => Promise.resolve(Uint8Array.from(bytes).buffer),
+    });
+    const progress: number[] = [];
+    expect(
+      await hashFile(file, new AbortController().signal, (fraction) =>
+        progress.push(fraction),
+      ),
+    ).toBe(createHash("sha256").update(bytes).digest("hex"));
+    expect(progress).toEqual([1]);
+    vi.unstubAllGlobals();
   });
 });
 it("accepts files above 5 GB and sizes parts within the multipart limit", () => {
@@ -139,6 +158,59 @@ it("uploads a file larger than 5 GB through multipart finalization", async () =>
   expect(last?.action).toBe("finish");
   expect(last?.action === "finish" ? last.parts : undefined).toHaveLength(
     Math.ceil(size / drivePartSize(size)),
+  );
+  expect(last?.action === "finish" ? last.checksum : undefined).toBe(
+    "0".repeat(64),
+  );
+});
+it("uploads parts in parallel, in order, and retries a dropped part", async () => {
+  const size = 40 * 1024 * 1024;
+  const file = new File(["x"], "video.mp4", { type: "video/mp4" });
+  Object.defineProperty(file, "size", { value: size });
+  vi.spyOn(file, "slice").mockReturnValue(new Blob(["part"]));
+  const urls: number[] = [];
+  vi.spyOn(driveTransport, "command").mockImplementation((input) => {
+    if (input.action === "upload")
+      return Promise.resolve({ id: "file", url: null, expiresIn: 300 });
+    if (input.action === "part") {
+      urls.push(input.partNumber);
+      return Promise.resolve({
+        url: `https://storage.test/${input.partNumber}`,
+        expiresIn: 300,
+      });
+    }
+    if (input.action === "finish") return Promise.resolve({ deleted: true });
+    return Promise.reject(new Error("Unexpected command"));
+  });
+  let active = 0;
+  let peak = 0;
+  let dropped = false;
+  const put = vi
+    .spyOn(driveTransport, "put")
+    .mockImplementation(async (url) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active--;
+      const part = url.split("/").at(-1) ?? "";
+      if (part === "3" && !dropped) {
+        dropped = true;
+        throw new TypeError("Failed to fetch");
+      }
+      return `"etag-${part}"`;
+    });
+  await uploadFile(file, null, new AbortController().signal, () => {});
+  const count = Math.ceil(size / drivePartSize(size));
+  expect(peak).toBeGreaterThan(1);
+  expect(peak).toBeLessThanOrEqual(6);
+  expect(put).toHaveBeenCalledTimes(count + 1);
+  expect(urls.filter((part) => part === 3)).toHaveLength(2);
+  const last = vi.mocked(driveTransport.command).mock.calls.at(-1)?.[0];
+  expect(last?.action === "finish" ? last.parts : undefined).toEqual(
+    Array.from({ length: count }, (_, index) => ({
+      partNumber: index + 1,
+      etag: `"etag-${index + 1}"`,
+    })),
   );
 });
 describe("Drive presentation helpers", () => {

@@ -50,29 +50,45 @@ export async function copyVerifiedObject(
       512 * 1024 * 1024,
       Math.ceil(size / DRIVE_MAX_PARTS),
     );
+    const count = Math.ceil(size / partSize);
     const parts: { PartNumber: number; ETag: string }[] = [];
-    await Array.from(
-      { length: Math.ceil(size / partSize) },
-      (_, index) => index,
-    ).reduce<Promise<void>>(async (previous, index) => {
-      await previous;
-      const offset = index * partSize;
-      const number = index + 1;
-      const result = await client.send(
-        new UploadPartCopyCommand({
-          Bucket: bucket,
-          Key: targetKey,
-          UploadId: uploadId,
-          PartNumber: number,
-          CopySource: copySource,
-          CopySourceIfMatch: etag,
-          CopySourceRange: `bytes=${offset}-${Math.min(offset + partSize, size) - 1}`,
-        }),
-      );
-      if (!result.CopyPartResult?.ETag)
-        throw new Error("storage did not return copy part ETag");
-      parts.push({ PartNumber: number, ETag: result.CopyPartResult.ETag });
-    }, Promise.resolve());
+    let next = 0;
+    let failed = false;
+    // Part copies run inside the storage provider and are independent, so a
+    // few in flight shorten large finalizations.
+    const workers = await Promise.allSettled(
+      Array.from({ length: Math.min(4, count) }, async function copy() {
+        if (failed || next >= count) return;
+        const index = next++;
+        const offset = index * partSize;
+        const number = index + 1;
+        try {
+          const result = await client.send(
+            new UploadPartCopyCommand({
+              Bucket: bucket,
+              Key: targetKey,
+              UploadId: uploadId,
+              PartNumber: number,
+              CopySource: copySource,
+              CopySourceIfMatch: etag,
+              CopySourceRange: `bytes=${offset}-${Math.min(offset + partSize, size) - 1}`,
+            }),
+          );
+          if (!result.CopyPartResult?.ETag)
+            throw new Error("storage did not return copy part ETag");
+          parts[index] = {
+            PartNumber: number,
+            ETag: result.CopyPartResult.ETag,
+          };
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+        await copy();
+      }),
+    );
+    const rejected = workers.find((worker) => worker.status === "rejected");
+    if (rejected) throw rejected.reason;
     await client.send(
       new CompleteMultipartUploadCommand({
         Bucket: bucket,

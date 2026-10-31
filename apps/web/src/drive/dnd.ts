@@ -144,6 +144,36 @@ function sequence<T>(values: readonly T[], run: (value: T) => Promise<void>) {
   }, Promise.resolve());
 }
 
+// Runs up to `limit` values at a time, in order. The first rejection stops
+// new work and is reported once the running values settle.
+async function pool<T>(
+  values: readonly T[],
+  limit: number,
+  run: (value: T) => Promise<void>,
+) {
+  let next = 0;
+  let stopped = false;
+  const workers = await Promise.allSettled(
+    Array.from(
+      { length: Math.min(limit, values.length) },
+      async function work() {
+        if (stopped || next >= values.length) return;
+        const value = values[next++];
+        if (value === undefined) return;
+        try {
+          await run(value);
+        } catch (error) {
+          stopped = true;
+          throw error;
+        }
+        await work();
+      },
+    ),
+  );
+  const rejected = workers.find((worker) => worker.status === "rejected");
+  if (rejected) throw rejected.reason;
+}
+
 // An unreadable file or folder is reported and skipped; the rest still uploads.
 async function walk(entry: DropEntry, path: string[], plan: UploadPlan) {
   try {
@@ -199,9 +229,9 @@ export type PlanStep =
   | { kind: "file"; file: File; index: number; total: number };
 
 /**
- * Creates the plan's folders below `rootId`, then uploads its files into them,
- * one step at a time. A failed folder or file is recorded and the plan goes
- * on; only cancellation stops it.
+ * Creates the plan's folders below `rootId`, one at a time, then uploads its
+ * files into them, `concurrency` at a time. A failed folder or file is
+ * recorded and the plan goes on; only cancellation stops it.
  */
 export async function executePlan(
   plan: UploadPlan,
@@ -211,6 +241,7 @@ export async function executePlan(
     upload: (file: File, parentId: string | null) => Promise<void>;
     step?: (step: PlanStep) => void;
     signal?: AbortSignal;
+    concurrency?: number;
   },
 ) {
   const ids = new Map<string, string | null>([["", rootId]]);
@@ -243,8 +274,9 @@ export async function executePlan(
       }
     },
   );
-  await sequence(
+  await pool(
     plan.files.map((item, index) => ({ ...item, index })),
+    actions.concurrency ?? 1,
     async ({ file, path, index }) => {
       actions.signal?.throwIfAborted();
       actions.step?.({ kind: "file", file, index, total: plan.files.length });
