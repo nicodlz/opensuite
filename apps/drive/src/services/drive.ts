@@ -136,7 +136,7 @@ export const createDrive = (
     for (const [key, value] of finishAttempts)
       if (value.until <= now) finishAttempts.delete(key);
     const current = finishAttempts.get(user);
-    if (current !== undefined && current.count >= 300) throw tooMany();
+    if (current !== undefined && current.count >= 1200) throw tooMany();
     const active = finishing.get(user) ?? 0;
     if (active >= 8) throw tooMany();
     if (current !== undefined) current.count++;
@@ -185,6 +185,7 @@ export const createDrive = (
           id: entry.id,
           ownerId: entry.ownerId,
           state: "pending",
+          checksum: entry.checksum,
           trashedAt: null,
           expiresAt: { gt: new Date() },
         },

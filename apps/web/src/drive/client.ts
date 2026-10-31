@@ -7,7 +7,7 @@ import {
   drivePartSize,
 } from "@opensuite/contracts";
 import type { DriveCommand, DriveOutput } from "@opensuite/contracts";
-import { createORPCClient } from "@orpc/client";
+import { createORPCClient, ORPCError } from "@orpc/client";
 import type { ContractRouterClient } from "@orpc/contract";
 import { OpenAPILink } from "@orpc/openapi-client/fetch";
 import { hashFile } from "./hash.ts";
@@ -119,29 +119,34 @@ const pause = (ms: number, signal: AbortSignal) =>
     }, ms);
     signal.addEventListener("abort", stop, { once: true });
   });
-// Connection drops, storage hiccups and expired part URLs are worth another
-// try; a part retry asks for a fresh URL.
-const retryable = (error: unknown) =>
+// Connection drops and storage hiccups are worth another try. An expired URL
+// is too when the retry asks for a fresh one, as part retries do.
+const retryable = (fresh: boolean) => (error: unknown) =>
   error instanceof TypeError ||
   (error instanceof StorageError &&
     (error.status === 0 ||
-      error.status === 403 ||
+      (fresh && error.status === 403) ||
       error.status === 408 ||
       error.status === 429 ||
       error.status >= 500));
+// The service bounds finalizations per user and minute; waiting out a busy
+// answer keeps bytes that are already uploaded.
+const busy = (error: unknown) =>
+  error instanceof ORPCError && error.code === "TOO_MANY_REQUESTS";
 async function retry<T>(
   signal: AbortSignal,
   attempt: () => Promise<T>,
-  reset: () => void,
+  when: (error: unknown) => boolean,
+  { reset = () => {}, tries = 3, delay = 500 } = {},
 ): Promise<T> {
-  const run = async (tries: number): Promise<T> => {
+  const run = async (tried: number): Promise<T> => {
     try {
       return await attempt();
     } catch (error) {
-      if (signal.aborted || tries >= 3 || !retryable(error)) throw error;
+      if (signal.aborted || tried >= tries || !when(error)) throw error;
       reset();
-      await pause(500 * 2 ** tries, signal);
-      return run(tries + 1);
+      await pause(delay * 2 ** tried, signal);
+      return run(tried + 1);
     }
   };
   return run(0);
@@ -234,7 +239,8 @@ export async function uploadFile(
                       (bytes) => track(index, bytes),
                     );
                   }),
-                () => track(index, 0),
+                retryable(true),
+                { reset: () => track(index, 0) },
               );
               if (!etag)
                 throw new Error(
@@ -260,7 +266,8 @@ export async function uploadFile(
               track(0, bytes),
             );
           }),
-        () => track(0, 0),
+        retryable(false),
+        { reset: () => track(0, 0) },
       );
     }
     uploaded = true;
@@ -268,10 +275,16 @@ export async function uploadFile(
     const sum = await checksum;
     signal.throwIfAborted();
     progress("Finalizing", 1);
-    await command(
-      multipart
-        ? { action: "finish", id, checksum: sum, parts }
-        : { action: "finish", id, checksum: sum },
+    await retry(
+      signal,
+      () =>
+        command(
+          multipart
+            ? { action: "finish", id, checksum: sum, parts }
+            : { action: "finish", id, checksum: sum },
+        ),
+      busy,
+      { tries: 6, delay: 1000 },
     );
   } catch (error) {
     stop.abort();

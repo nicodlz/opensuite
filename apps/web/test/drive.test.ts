@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { createHash, randomBytes } from "node:crypto";
+import { ORPCError } from "@orpc/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DriveCommandSchema,
@@ -212,6 +213,31 @@ it("uploads parts in parallel, in order, and retries a dropped part", async () =
       etag: `"etag-${index + 1}"`,
     })),
   );
+});
+it("waits out a busy finalization instead of dropping the upload", async () => {
+  const file = new File(["photo"], "photo.jpg", { type: "image/jpeg" });
+  let busy = true;
+  const commands: string[] = [];
+  vi.spyOn(driveTransport, "command").mockImplementation((input) => {
+    commands.push(input.action);
+    if (input.action === "upload")
+      return Promise.resolve({
+        id: "file",
+        url: "https://storage.test/file",
+        expiresIn: 300,
+      });
+    if (input.action === "finish" && busy) {
+      busy = false;
+      return Promise.reject(
+        new ORPCError("TOO_MANY_REQUESTS", { message: "Too many" }),
+      );
+    }
+    if (input.action === "finish") return Promise.resolve({ deleted: true });
+    return Promise.reject(new Error("Unexpected command"));
+  });
+  vi.spyOn(driveTransport, "put").mockResolvedValue('"etag"');
+  await uploadFile(file, null, new AbortController().signal, () => {});
+  expect(commands).toEqual(["upload", "finish", "finish"]);
 });
 describe("Drive presentation helpers", () => {
   const file: DriveEntry = {

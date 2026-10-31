@@ -1061,7 +1061,7 @@ it("serializes creating children against trash and restricts orphaning", async (
 }, 120_000);
 
 it("limits repeated finish attempts per user", async () => {
-  await Array.from({ length: 300 }).reduce<Promise<void>>(async (previous) => {
+  await Array.from({ length: 1200 }).reduce<Promise<void>>(async (previous) => {
     await previous;
     await expect(
       command("limited-user", { action: "finish", id: "missing" }),

@@ -763,7 +763,12 @@ export function DrivePage() {
                 fileParent,
                 abort.signal,
                 (phase, value) => {
-                  if (state) Object.assign(state, { phase, fraction: value });
+                  // Only the transfer moves the bar; later phases keep it full.
+                  if (state)
+                    Object.assign(state, {
+                      phase,
+                      fraction: phase === "Uploading" ? value : 1,
+                    });
                   report();
                 },
               );
@@ -774,8 +779,8 @@ export function DrivePage() {
                 (error.code === "QUOTA_EXCEEDED" || error.code === "NO_PLAN")
               )
                 quotaExceeded = true;
-              // A failed file no longer counts towards the bar.
-              files.delete(file);
+              // A failed file is settled; the bar moves past it.
+              if (state) Object.assign(state, { phase: "Done", fraction: 1 });
               throw error;
             } finally {
               report();
