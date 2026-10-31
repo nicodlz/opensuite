@@ -78,7 +78,13 @@ type TreeDnd = {
   highlight: (key: string) => string;
   prefetch: (id: string) => void;
 };
-type UploadJob = { plan: UploadPlan; parentId: string | null; label?: string };
+type UploadJob = {
+  plan: UploadPlan;
+  parentId: string | null;
+  label?: string;
+  /** In My drive the user owns every existing file and can replace it. */
+  owned?: boolean;
+};
 
 const root: Crumb = { id: null, name: "My drive" };
 const sharedRoot: Crumb = { id: null, name: "Shared with me" };
@@ -269,7 +275,7 @@ function FolderTree({
   );
 }
 
-type ConflictChoice = "replace" | "skip";
+type ConflictChoice = "replace" | "keep" | "skip";
 type Transfer = {
   name: string;
   phase: string;
@@ -648,36 +654,42 @@ export function DrivePage() {
 
   function queueUpload(job: UploadJob) {
     if (job.plan.files.length === 0 && job.plan.folders.length === 0) return;
-    queue.current.push(job);
+    queue.current.push({ ...job, owned: place === "drive" });
     void drainUploads();
   }
   // One name conflict is asked at a time; "apply to all" answers the rest of
-  // the upload.
+  // the upload. Only files the user owns can be replaced (moved to trash).
   const [conflict, setConflict] = useState<{
     name: string;
+    replaceable: boolean;
     resolve: (choice: ConflictChoice, all: boolean) => void;
   } | null>(null);
   const [conflictAll, setConflictAll] = useState(false);
   const conflictTurn = useRef<Promise<unknown>>(Promise.resolve());
   const conflictChoice = useRef<ConflictChoice | null>(null);
-  function askConflict(fileName: string, signal: AbortSignal) {
-    const turn = conflictTurn.current.then(
-      () =>
-        conflictChoice.current ??
-        new Promise<ConflictChoice>((resolve) => {
-          if (signal.aborted) return resolve("skip");
-          const stop = () => answer("skip", false);
-          const answer = (choice: ConflictChoice, everywhere: boolean) => {
-            signal.removeEventListener("abort", stop);
-            if (everywhere) conflictChoice.current = choice;
-            setConflict(null);
-            resolve(choice);
-          };
-          signal.addEventListener("abort", stop, { once: true });
-          setConflictAll(false);
-          setConflict({ name: fileName, resolve: answer });
-        }),
-    );
+  function askConflict(
+    fileName: string,
+    replaceable: boolean,
+    signal: AbortSignal,
+  ) {
+    const turn = conflictTurn.current.then(() => {
+      const remembered = conflictChoice.current;
+      if (remembered)
+        return remembered === "replace" && !replaceable ? "keep" : remembered;
+      return new Promise<ConflictChoice>((resolve) => {
+        if (signal.aborted) return resolve("skip");
+        const stop = () => answer("skip", false);
+        const answer = (choice: ConflictChoice, everywhere: boolean) => {
+          signal.removeEventListener("abort", stop);
+          if (everywhere) conflictChoice.current = choice;
+          setConflict(null);
+          resolve(choice);
+        };
+        signal.addEventListener("abort", stop, { once: true });
+        setConflictAll(false);
+        setConflict({ name: fileName, replaceable, resolve: answer });
+      });
+    });
     conflictTurn.current = turn;
     return turn;
   }
@@ -712,12 +724,12 @@ export function DrivePage() {
     let uploadedFiles = 0;
     let skippedFiles = 0;
     const unreplaced: string[] = [];
-    conflictChoice.current = null;
     try {
       const next = async (): Promise<void> => {
         const job = queue.current.shift();
         if (!job) return;
         affected.add(job.parentId);
+        conflictChoice.current = null;
         // Existing folders are merged into and existing file names are
         // resolved with the user; folders created by this job start empty.
         const fresh = new Set<string>();
@@ -731,6 +743,22 @@ export function DrivePage() {
             );
           listings.set(folder, listing);
           return listing;
+        };
+        // Names chosen by "keep both" in this job, per folder.
+        const reserved = new Map<string | null, Set<string>>();
+        const freeName = async (folder: string | null, wanted: string) => {
+          const taken = new Set([
+            ...(await existing(folder)).map((entry) => entry.name),
+            ...(reserved.get(folder) ?? []),
+          ]);
+          const dot = wanted.lastIndexOf(".");
+          const [stem, extension] =
+            dot > 0 ? [wanted.slice(0, dot), wanted.slice(dot)] : [wanted, ""];
+          let copy = 1;
+          while (taken.has(`${stem} (${copy})${extension}`)) copy++;
+          const chosen = `${stem} (${copy})${extension}`;
+          reserved.set(folder, taken.add(chosen));
+          return chosen;
         };
         const named = async (
           folder: string | null,
@@ -815,14 +843,18 @@ export function DrivePage() {
             affected.add(fileParent);
             const state = files.get(file);
             const twin = await named(fileParent, "file", file.name);
-            if (
-              twin &&
-              (await askConflict(file.name, abort.signal)) === "skip"
-            ) {
+            const choice = twin
+              ? await askConflict(file.name, job.owned === true, abort.signal)
+              : "keep";
+            if (choice === "skip") {
               if (state) Object.assign(state, { phase: "Done", fraction: 1 });
               report();
               return false;
             }
+            const uploadName =
+              twin && choice === "keep"
+                ? await freeName(fileParent, file.name)
+                : file.name;
             try {
               await uploadFile(
                 file,
@@ -837,10 +869,11 @@ export function DrivePage() {
                     });
                   report();
                 },
+                uploadName,
               );
               if (state) Object.assign(state, { phase: "Done", fraction: 1 });
               // The replaced file goes to the trash, where it can be restored.
-              if (twin)
+              if (twin && choice === "replace")
                 await command({ action: "trash", id: twin.id }).catch(() =>
                   unreplaced.push(file.name),
                 );
@@ -1878,8 +1911,12 @@ export function DrivePage() {
       >
         {conflict && (
           <DialogContent
-            title="Replace existing file?"
-            description={`“${conflict.name}” already exists here. A replaced file moves to the trash.`}
+            title="File already exists"
+            description={
+              conflict.replaceable
+                ? `“${conflict.name}” already exists here. Replace it (the current file moves to the trash), keep both, or skip it.`
+                : `“${conflict.name}” already exists here. Keep both or skip it.`
+            }
           >
             <label className="drive-conflict-all">
               <input
@@ -1896,9 +1933,19 @@ export function DrivePage() {
               >
                 Skip
               </Button>
-              <Button onClick={() => conflict.resolve("replace", conflictAll)}>
-                Replace
+              <Button
+                variant={conflict.replaceable ? "secondary" : "primary"}
+                onClick={() => conflict.resolve("keep", conflictAll)}
+              >
+                Keep both
               </Button>
+              {conflict.replaceable && (
+                <Button
+                  onClick={() => conflict.resolve("replace", conflictAll)}
+                >
+                  Replace
+                </Button>
+              )}
             </div>
           </DialogContent>
         )}

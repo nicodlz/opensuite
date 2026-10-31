@@ -125,8 +125,13 @@ export const buildServer = (
           "sandbox; default-src 'none'; style-src 'none'",
         "x-content-type-options": "nosniff",
         "cross-origin-resource-policy": "same-origin",
-        // Short private caching keeps thumbnails and the viewer quick.
-        "cache-control": "private, max-age=600",
+        // Images may be cached briefly, per session, so thumbnails and the
+        // viewer stay quick; documents and text are never stored.
+        "cache-control":
+          text === undefined && entry.contentType.startsWith("image/")
+            ? "private, max-age=300"
+            : "private, no-store",
+        vary: "Cookie",
       })
       .send(Readable.from(object.Body.transformToWebStream()));
   });

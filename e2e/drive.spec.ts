@@ -252,7 +252,7 @@ test("previews text, resolves upload name conflicts and trashes whole folders", 
     ]);
   await upload("New ideas");
   const conflict = page.getByRole("dialog", {
-    name: "Replace existing file?",
+    name: "File already exists",
   });
   await expect(conflict.getByText(/“Ideas.txt” already exists/)).toBeVisible();
   await conflict.getByRole("button", { name: "Replace" }).click();
@@ -265,6 +265,15 @@ test("previews text, resolves upload name conflicts and trashes whole folders", 
     page.getByRole("dialog", { name: "Ideas.txt" }).getByText("New ideas"),
   ).toBeVisible();
   await page.keyboard.press("Escape");
+  await page.getByLabel("Choose files to upload").setInputFiles({
+    name: "Ideas.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Second copy"),
+  });
+  await conflict.getByRole("button", { name: "Keep both" }).click();
+  await expect(
+    page.getByRole("button", { name: "Ideas (1).txt, file" }),
+  ).toBeVisible();
   // One answer can cover every conflict of the upload.
   await upload("Ignored");
   await conflict

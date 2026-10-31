@@ -171,22 +171,22 @@ export const createDrive = (
       else finishing.delete(user);
     };
   };
+  const removeObject = (item: Entry) =>
+    storage.remove(item.id, item.objectKey, item.uploadId);
   const removeObjects = async (files: readonly Entry[]) => {
     let next = 0;
-    // A few storage deletions run at once so large folders stay quick.
-    const workers = await Promise.allSettled(
-      Array.from(
-        { length: Math.min(8, files.length) },
-        async function remove() {
-          const item = files[next++];
-          if (item === undefined) return;
-          await storage.remove(item.id, item.objectKey, item.uploadId);
-          await remove();
-        },
-      ),
+    // A few storage deletions run at once so large folders stay quick; one
+    // retry absorbs a transient storage error.
+    await Promise.all(
+      Array.from({ length: Math.min(8, files.length) }, async function work() {
+        const item = files[next++];
+        if (item === undefined) return;
+        await removeObject(item).catch(() =>
+          removeObject(item).catch(() => {}),
+        );
+        await work();
+      }),
     );
-    const rejected = workers.find((worker) => worker.status === "rejected");
-    if (rejected) throw rejected.reason;
   };
   const finish = async (
     user: string,
@@ -594,13 +594,20 @@ export const createDrive = (
             // place with one time, restore brings that batch back and delete
             // removes everything below it.
             const tree = await subtree(tx, user, entry);
-            if (tree.some((item) => item.state === "verifying"))
+            // A finalization blocks the tree while it may still run; one
+            // left behind by a crash stops blocking after an hour.
+            if (
+              tree.some(
+                (item) =>
+                  item.state === "verifying" &&
+                  item.updatedAt.getTime() > Date.now() - 3_600_000,
+              )
+            )
               throw invalid("Upload is being finalized");
             if (input.action === "delete") {
               if (entry.trashedAt === null)
                 throw invalid("Trash entry before deleting");
               const files = tree.filter((item) => item.kind === "file");
-              await removeObjects(files);
               await tree
                 .map((item) => item.depth)
                 .filter((depth, index, all) => all.indexOf(depth) === index)
@@ -618,7 +625,7 @@ export const createDrive = (
                     },
                   });
                 }, Promise.resolve());
-              return { deleted: true as const, files: files.length };
+              return { deleted: true as const, files };
             }
             if (input.action === "trash") {
               if (entry.trashedAt !== null) return visible(entry);
@@ -667,10 +674,13 @@ export const createDrive = (
               await tx.entry.findUniqueOrThrow({ where: { id: entry.id } }),
             );
           },
-          { timeout: 120_000 },
+          { timeout: 30_000 },
         );
         if ("files" in result) {
-          if (result.files > 0) notifyQuota(original.ownerId);
+          // Rows go first, so a storage failure can never leave entries
+          // without content; leftovers surface as orphans in reconciliation.
+          await removeObjects(result.files);
+          if (result.files.length > 0) notifyQuota(original.ownerId);
           return { deleted: true };
         }
         return result;

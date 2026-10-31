@@ -316,8 +316,12 @@ function PdfPage({
       const base = page.getViewport({ scale: 1 });
       if (cancelled) return null;
       setRatio(base.height / base.width);
-      const dpr = window.devicePixelRatio || 1;
-      const viewport = page.getViewport({ scale: (width / base.width) * dpr });
+      // Browsers refuse very large canvases; deep zoom stays within ~16 MP.
+      const scale = Math.min(
+        (width / base.width) * (window.devicePixelRatio || 1),
+        Math.sqrt(16_000_000 / (base.width * base.height)),
+      );
+      const viewport = page.getViewport({ scale });
       const element = canvas.current;
       if (!element) return null;
       element.width = Math.floor(viewport.width);

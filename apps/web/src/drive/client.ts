@@ -166,6 +166,7 @@ export async function uploadFile(
   parentId: string | null,
   signal: AbortSignal,
   progress: (phase: string, fraction: number) => void,
+  name = file.name,
 ) {
   if (file.size > DRIVE_MAX_FILE_SIZE)
     throw new Error("File exceeds the maximum supported size.");
@@ -199,7 +200,7 @@ export async function uploadFile(
   };
   const reservation = await command({
     action: "upload",
-    name: file.name,
+    name,
     parentId,
     size: file.size,
     contentType: type,
