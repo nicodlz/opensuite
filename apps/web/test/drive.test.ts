@@ -214,12 +214,19 @@ it("uploads parts in parallel, in order, and retries a dropped part", async () =
     })),
   );
 });
-it("waits out a busy finalization instead of dropping the upload", async () => {
+it("waits out a busy reservation and finalization instead of dropping the upload", async () => {
   const file = new File(["photo"], "photo.jpg", { type: "image/jpeg" });
   let busy = true;
+  let unavailable = true;
   const commands: string[] = [];
   vi.spyOn(driveTransport, "command").mockImplementation((input) => {
     commands.push(input.action);
+    if (input.action === "upload" && unavailable) {
+      unavailable = false;
+      return Promise.reject(
+        new ORPCError("SERVICE_UNAVAILABLE", { message: "Session check" }),
+      );
+    }
     if (input.action === "upload")
       return Promise.resolve({
         id: "file",
@@ -237,7 +244,7 @@ it("waits out a busy finalization instead of dropping the upload", async () => {
   });
   vi.spyOn(driveTransport, "put").mockResolvedValue('"etag"');
   await uploadFile(file, null, new AbortController().signal, () => {});
-  expect(commands).toEqual(["upload", "finish", "finish"]);
+  expect(commands).toEqual(["upload", "upload", "finish", "finish"]);
 });
 describe("Drive presentation helpers", () => {
   const file: DriveEntry = {

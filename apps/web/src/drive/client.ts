@@ -139,10 +139,12 @@ const retryable = (fresh: boolean) => (error: unknown) =>
       error.status === 408 ||
       error.status === 429 ||
       error.status >= 500));
-// The service bounds finalizations per user and minute; waiting out a busy
-// answer keeps bytes that are already uploaded.
+// The service bounds finalizations per user and minute, and answers 503 when
+// it cannot check the session or plan. Both come before any change, so waiting
+// them out keeps the file, and the bytes already uploaded.
 const busy = (error: unknown) =>
-  error instanceof ORPCError && error.code === "TOO_MANY_REQUESTS";
+  error instanceof ORPCError &&
+  (error.code === "TOO_MANY_REQUESTS" || error.code === "SERVICE_UNAVAILABLE");
 async function retry<T>(
   signal: AbortSignal,
   attempt: () => Promise<T>,
@@ -198,14 +200,20 @@ export async function uploadFile(
     loaded[index] = bytes;
     progress("Uploading", file.size ? sent / file.size : 1);
   };
-  const reservation = await command({
-    action: "upload",
-    name,
-    parentId,
-    size: file.size,
-    contentType: type,
-    multipart,
-  }).catch((error: unknown) => {
+  const reservation = await retry(
+    signal,
+    () =>
+      command({
+        action: "upload",
+        name,
+        parentId,
+        size: file.size,
+        contentType: type,
+        multipart,
+      }),
+    busy,
+    { tries: 6, delay: 1000 },
+  ).catch((error: unknown) => {
     stop.abort();
     throw error;
   });
@@ -250,7 +258,7 @@ export async function uploadFile(
                       (bytes) => track(index, bytes),
                     );
                   }),
-                retryable(true),
+                (error) => retryable(true)(error) || busy(error),
                 { reset: () => track(index, 0) },
               );
               if (!etag)

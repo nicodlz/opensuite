@@ -48,6 +48,7 @@ const pg = `opensuite-auth-prod-db-${fixtureId}`;
 const mail = `opensuite-auth-prod-mail-${fixtureId}`;
 const origin = "https://suite.example.test";
 const monotonicMs = () => performance.now();
+const serviceToken = "service-token-at-least-32-characters";
 let app: FastifyInstance | undefined;
 let base = "";
 let databaseUrl = "";
@@ -282,6 +283,7 @@ beforeAll(async () => {
       },
       accounts: runtime.accounts,
       mail: mailService,
+      internalToken: serviceToken,
     });
     base = await app.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
@@ -1024,5 +1026,112 @@ it("resolves a ready mailbox address for sign-in while excluding hide-my-email a
     ).toBeGreaterThan(0);
   } finally {
     await owner.value.$disconnect();
+  }
+}, 120_000);
+
+const userOf = async (response: Response) =>
+  z.object({ userId: z.string().nullable() }).parse(await response.json())
+    .userId;
+// Runs last: it spends the per-network auth budget of this test client.
+it("checks Drive sessions per user on the internal route, past the shared auth limits", async () => {
+  const session = (cookie?: string, token = serviceToken) =>
+    fetch(`${base}/internal/session`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(cookie === undefined ? {} : { cookie }),
+      },
+    });
+  const people = ["drive-a", "drive-b", "drive-c"].map((local) => ({
+    name: local,
+    email: `${local}@example.test`,
+    password: `long-test-password-${local}`,
+  }));
+  await Promise.all(
+    people.map((person) =>
+      bootstrap(person.email, person.password, person.name),
+    ),
+  );
+  const ids = await Promise.all(people.map((person) => userId(person.email)));
+  const cookies = await Promise.all(
+    people.map(async (person) => {
+      const signed = await post("/api/auth/sign-in/email", person);
+      expect(signed.status).toBe(200);
+      return cookieOf(signed);
+    }),
+  );
+  const [a, b, c] = cookies;
+  const [idA, idB, idC] = ids;
+  if (
+    a === undefined ||
+    b === undefined ||
+    c === undefined ||
+    idA === undefined ||
+    idB === undefined ||
+    idC === undefined
+  )
+    throw new Error("sign-in failed");
+
+  expect((await fetch(`${base}/internal/session`)).status).toBe(401);
+  expect((await session(a, "x".repeat(40))).status).toBe(401);
+  const answer = await session(a);
+  expect(answer.headers.get("cache-control")).toBe("no-store");
+  expect(await userOf(answer)).toBe(idA);
+  expect(await userOf(await session())).toBeNull();
+  expect(await userOf(await session("unrelated=1"))).toBeNull();
+  expect(
+    await userOf(await session(`${b}; __Host-opensuite.two_factor=pending`)),
+  ).toBeNull();
+  expect((await session(`${b}; ${b}`)).status).toBe(400);
+  const second = await post("/api/auth/sign-in/email", people[0] ?? {});
+  const signedOut = cookieOf(second);
+  expect(await userOf(await session(signedOut))).toBe(idA);
+  expect((await post("/api/auth/sign-out", {}, signedOut)).status).toBe(200);
+  expect(await userOf(await session(signedOut))).toBeNull();
+  expect(await userOf(await session(a))).toBe(idA);
+
+  // Drive calls arrive from one address for every user: well past both auth
+  // budgets, each request still resolves to its own user.
+  const burst = await Promise.all(
+    Array.from({ length: 360 }, (_, index) =>
+      session(cookies[index % 3]).then(async (response) => ({
+        status: response.status,
+        user: await userOf(response),
+        expected: ids[index % 3],
+      })),
+    ),
+  );
+  expect(burst.every((item) => item.status === 200)).toBe(true);
+  expect(burst.every((item) => item.user === item.expected)).toBe(true);
+  const publicChecks = await Promise.all(
+    Array.from({ length: 110 }, () =>
+      fetch(`${base}/api/auth/get-session?disableCookieCache=true`, {
+        headers: { cookie: b },
+      }).then((response) => response.status),
+    ),
+  );
+  expect(publicChecks).toContain(429);
+  expect(await userOf(await session(b))).toBe(idB);
+
+  // Sign-out, revocation, expiry and disabled accounts apply to the very
+  // next check, for that user only.
+  const db = createDatabase(databaseUrl);
+  if (db.isErr()) throw new Error("database unavailable");
+  try {
+    await db.value.session.deleteMany({ where: { userId: idA } });
+    expect(await userOf(await session(a))).toBeNull();
+    expect(await userOf(await session(b))).toBe(idB);
+    await db.value.session.updateMany({
+      where: { userId: idB },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+    expect(await userOf(await session(b))).toBeNull();
+    expect(await userOf(await session(c))).toBe(idC);
+    await db.value.user.update({
+      where: { id: idC },
+      data: { disabled: true },
+    });
+    expect(await userOf(await session(c))).toBeNull();
+  } finally {
+    await db.value.$disconnect();
   }
 }, 120_000);

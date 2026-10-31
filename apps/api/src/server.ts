@@ -185,6 +185,7 @@ export const buildServer = async (
     if (
       identity !== undefined &&
       pendingFactor &&
+      rawPath !== "/internal/session" &&
       !rawPath.startsWith("/auth/") &&
       !rawPath.startsWith("/api/auth/")
     )
@@ -434,6 +435,29 @@ export const buildServer = async (
       tokenDigest(authorization ?? ""),
       tokenDigest(`Bearer ${dependencies.internalToken}`),
     );
+  // Drive checks every request's session here rather than through
+  // /auth/get-session: all its calls come from one container address, so the
+  // per-network auth limits would be shared by every Drive user. The answer
+  // is the same: no cache, and pending second factors, disabled accounts,
+  // expired and revoked sessions all resolve to no user.
+  app.get("/internal/session", async (request, reply) => {
+    if (!internalAuthorized(request.headers.authorization))
+      return reply.code(401).send({ code: "UNAUTHORIZED" });
+    reply.header("cache-control", "no-store");
+    const actor = dependencies.identity?.actor;
+    if (actor === undefined)
+      return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+    const cookie = request.headers.cookie;
+    if (cookie === undefined || cookie === "" || hasPendingFactor(cookie))
+      return { userId: null };
+    try {
+      return {
+        userId: (await actor(new Headers({ cookie })))?.id ?? null,
+      };
+    } catch {
+      return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+    }
+  });
   app.get("/internal/storage/:userId", async (request, reply) => {
     if (!internalAuthorized(request.headers.authorization))
       return reply.code(401).send({ code: "UNAUTHORIZED" });
