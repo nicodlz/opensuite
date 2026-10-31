@@ -423,7 +423,7 @@ describe("Drive drag and drop", () => {
         return Promise.resolve();
       },
     });
-    expect(uploaded).toEqual({ uploaded: 2, failed: [] });
+    expect(uploaded).toEqual({ uploaded: 2, skipped: 0, failed: [] });
     expect(calls).toEqual([
       "folder Album in target",
       "folder Raw in id-Album",
@@ -456,10 +456,12 @@ describe("Drive drag and drop", () => {
       upload: (file) =>
         file.name.includes("\\")
           ? Promise.reject(new Error("invalid name"))
-          : Promise.resolve(),
+          : Promise.resolve(file.name !== "c.txt"),
     });
+    // A deliberately skipped file is neither uploaded nor failed.
     expect(result).toEqual({
-      uploaded: 2,
+      uploaded: 1,
+      skipped: 1,
       failed: ["Docs/bad\\name.txt"],
     });
   });

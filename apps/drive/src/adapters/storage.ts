@@ -186,8 +186,14 @@ export const createStorage = (config: StorageConfig) => {
         { expiresIn: 300 },
       );
     },
-    async get(objectKey: string) {
-      return client.send(new GetObjectCommand({ Bucket, Key: objectKey }));
+    async get(objectKey: string, range?: string) {
+      return client.send(
+        new GetObjectCommand({
+          Bucket,
+          Key: objectKey,
+          ...(range === undefined ? {} : { Range: range }),
+        }),
+      );
     },
     async remove(
       id: string,

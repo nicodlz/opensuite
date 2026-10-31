@@ -29,6 +29,7 @@
     "@zxcvbn-ts/language-common": "catalog:",
     "@zxcvbn-ts/language-en": "catalog:",
     "@orpc/client": "catalog:",
+    "pdfjs-dist": "catalog:",
     "@radix-ui/react-dialog": "catalog:",
     "@radix-ui/react-dropdown-menu": "catalog:",
     "@radix-ui/react-label": "catalog:",

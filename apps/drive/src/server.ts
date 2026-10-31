@@ -12,6 +12,7 @@ import { router, type Context } from "./routes/index.ts";
 
 const Token = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const digest = (value: string) => createHash("sha256").update(value).digest();
+const TEXT_PREVIEW_BYTES = 512 * 1024;
 export const buildServer = (
   drive: DriveService,
   storage: Storage,
@@ -87,10 +88,15 @@ export const buildServer = (
       .code(report.readiness.status === "ready" ? 200 : 503)
       .send(report.readiness);
   });
+  // Images and PDFs preview as themselves. `?text` returns the start of any
+  // readable file as plain text for the in-app text viewer.
   app.get("/v1/preview/:id", async (request, reply) => {
     const params = z
       .object({ id: z.string().min(1).max(200) })
       .parse(request.params);
+    const { text } = z
+      .object({ text: z.string().optional() })
+      .parse(request.query);
     const entry = await drive.file(
       await identity(request.headers.cookie),
       params.id,
@@ -98,21 +104,29 @@ export const buildServer = (
     if (entry.objectKey === null || entry.contentType === null)
       throw new ORPCError("NOT_FOUND");
     if (
+      text === undefined &&
       !entry.contentType.startsWith("image/") &&
       entry.contentType !== "application/pdf"
     )
       return reply.code(415).send();
-    const object = await storage.get(entry.objectKey);
+    const object = await storage.get(
+      entry.objectKey,
+      text === undefined || entry.size === 0n
+        ? undefined
+        : `bytes=0-${TEXT_PREVIEW_BYTES - 1}`,
+    );
     if (object.Body === undefined) throw new ORPCError("NOT_FOUND");
     return reply
       .headers({
-        "content-type": entry.contentType,
+        "content-type":
+          text === undefined ? entry.contentType : "text/plain; charset=utf-8",
         "content-disposition": "inline",
         "content-security-policy":
           "sandbox; default-src 'none'; style-src 'none'",
         "x-content-type-options": "nosniff",
         "cross-origin-resource-policy": "same-origin",
-        "cache-control": "private, no-store",
+        // Short private caching keeps thumbnails and the viewer quick.
+        "cache-control": "private, max-age=600",
       })
       .send(Readable.from(object.Body.transformToWebStream()));
   });

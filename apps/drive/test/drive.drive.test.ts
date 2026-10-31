@@ -472,6 +472,25 @@ it("rejects invalid bytes and never previews active content", async () => {
       })
     ).statusCode,
   ).toBe(415);
+  // Any readable file can be shown as text, never as active content.
+  const text = await app.inject({
+    method: "GET",
+    url: `/v1/preview/${safe.id}?text`,
+    headers: { cookie: "user=a" },
+  });
+  expect(text.statusCode).toBe(200);
+  expect(text.headers["content-type"]).toBe("text/plain; charset=utf-8");
+  expect(text.headers["content-security-policy"]).toContain("sandbox");
+  expect(text.rawPayload.equals(bytes)).toBe(true);
+  expect(
+    (
+      await app.inject({
+        method: "GET",
+        url: `/v1/preview/${safe.id}?text`,
+        headers: { cookie: "user=b" },
+      })
+    ).statusCode,
+  ).toBe(404);
   expect(
     (
       await app.inject({
@@ -1045,19 +1064,90 @@ it("serializes creating children against trash and restricts orphaning", async (
       parentId: folder.id,
     }),
   ]);
-  expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  // Either the child lands before the folder is trashed, and goes with it, or
+  // it is refused because the folder is already in the trash.
+  expect(results[0].status).toBe("fulfilled");
   const children = await db.entry.findMany({ where: { parentId: folder.id } });
   const parent = await db.entry.findUniqueOrThrow({ where: { id: folder.id } });
-  expect(parent.trashedAt === null || children.length === 0).toBe(true);
-  await Promise.all(
-    children.map(async (child) => {
-      await command("race-user", { action: "trash", id: child.id });
-      await command("race-user", { action: "delete", id: child.id });
+  expect(parent.trashedAt).not.toBeNull();
+  expect(children.every((child) => child.trashedAt !== null)).toBe(true);
+  await command("race-user", { action: "delete", id: folder.id });
+  expect(await db.entry.count({ where: { ownerId: "race-user" } })).toBe(0);
+}, 120_000);
+
+it("trashes, restores and deletes a whole folder tree", async () => {
+  const user = "tree-user";
+  const names = async (parentId: string | null, trash: boolean) =>
+    z
+      .object({ entries: z.array(z.object({ name: z.string() })) })
+      .parse(await command(user, { action: "list", parentId, trash }))
+      .entries.map((entry) => entry.name)
+      .toSorted();
+  const folder = resultId.parse(
+    await command(user, { action: "folder", name: "photos", parentId: null }),
+  );
+  const year = resultId.parse(
+    await command(user, {
+      action: "folder",
+      name: "2026",
+      parentId: folder.id,
     }),
   );
-  if (parent.trashedAt === null)
-    await command("race-user", { action: "trash", id: folder.id });
-  await command("race-user", { action: "delete", id: folder.id });
+  const early = resultId.parse(
+    await command(user, { action: "folder", name: "old", parentId: folder.id }),
+  );
+  const bytes = Buffer.from("tree file");
+  const begin = signed.parse(
+    await command(user, {
+      action: "upload",
+      name: "a.txt",
+      parentId: year.id,
+      size: bytes.length,
+      contentType: "text/plain",
+      multipart: false,
+    }),
+  );
+  if (begin.url === null) throw new Error("upload URL missing");
+  await fetch(begin.url, {
+    method: "PUT",
+    headers: { "content-type": "text/plain" },
+    body: bytes,
+  });
+  await command(user, {
+    action: "finish",
+    id: begin.id,
+    checksum: digest(bytes),
+  });
+  await command(user, { action: "trash", id: early.id });
+  expect(await names(null, true)).toEqual(["old"]);
+  await command(user, { action: "trash", id: folder.id });
+  expect(await names(null, true)).toEqual(["old", "photos"]);
+  expect(await names(folder.id, true)).toEqual(["2026", "old"]);
+  await expect(
+    command(user, { action: "list", parentId: year.id, trash: false }),
+  ).rejects.toThrow(/Entry not found/);
+  await expect(
+    command(user, { action: "download", id: begin.id }),
+  ).rejects.toThrow(/Entry not found/);
+  // Restoring the folder brings back its batch, not the item trashed earlier.
+  await command(user, { action: "restore", id: folder.id });
+  expect(await names(year.id, false)).toEqual(["a.txt"]);
+  expect(await names(folder.id, false)).toEqual(["2026"]);
+  expect(await names(null, true)).toEqual(["old"]);
+  await command(user, { action: "restore", id: early.id });
+  expect(await names(folder.id, false)).toEqual(["2026", "old"]);
+  // An item restored from a trashed folder comes back to the root.
+  await command(user, { action: "trash", id: folder.id });
+  await command(user, { action: "restore", id: year.id });
+  expect(await names(null, false)).toEqual(["2026"]);
+  expect(await names(year.id, false)).toEqual(["a.txt"]);
+  await command(user, { action: "trash", id: year.id });
+  await command(user, { action: "delete", id: folder.id });
+  await command(user, { action: "delete", id: year.id });
+  expect(await db.entry.count({ where: { ownerId: user } })).toBe(0);
+  await expect(storage.get(storage.key(begin.id, false))).rejects.toMatchObject(
+    { name: "NoSuchKey" },
+  );
 }, 120_000);
 
 it("limits repeated finish attempts per user", async () => {
@@ -1090,8 +1180,9 @@ it("restricts database deletion of a folder with children", async () => {
   await expect(db.entry.delete({ where: { id: folder.id } })).rejects.toThrow(
     /foreign key/i,
   );
-  await command("fk-user", { action: "trash", id: child.id });
-  await command("fk-user", { action: "delete", id: child.id });
   await command("fk-user", { action: "trash", id: folder.id });
   await command("fk-user", { action: "delete", id: folder.id });
+  await expect(
+    db.entry.findUnique({ where: { id: child.id } }),
+  ).resolves.toBeNull();
 }, 120_000);

@@ -148,13 +148,13 @@ test("guarded preview, permanent deletion and cancellation", async ({
   page,
 }) => {
   await page.goto("/drive");
-  const popupPromise = page.waitForEvent("popup");
   await page
     .getByRole("button", { name: "Welcome to Drive.pdf, file" })
     .dblclick();
-  const popup = await popupPromise;
-  await expect(popup).toHaveURL(/blob:/);
-  await popup.close();
+  const pdfViewer = page.getByRole("dialog", { name: "Welcome to Drive.pdf" });
+  await expect(pdfViewer.getByLabel("Page 1")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(pdfViewer).toHaveCount(0);
   await page.getByLabel("Choose files to upload").setInputFiles({
     name: "image.png",
     mimeType: "image/png",
@@ -167,11 +167,23 @@ test("guarded preview, permanent deletion and cancellation", async ({
     timeout: 30000,
   });
   await page.getByRole("button", { name: "image.png, file" }).dblclick();
-  await expect(page.getByRole("dialog").locator("iframe")).toHaveAttribute(
-    "sandbox",
-    "",
-  );
-  await page.getByRole("button", { name: "Close dialog" }).click();
+  const imageViewer = page.getByRole("dialog", { name: "image.png" });
+  await expect(
+    imageViewer.getByRole("img", { name: "image.png" }),
+  ).toBeVisible();
+  await imageViewer.getByRole("button", { name: "Zoom in" }).click();
+  await expect(
+    imageViewer.getByRole("button", { name: "Fit to screen" }),
+  ).toHaveText("125%");
+  // Arrow keys step through the files of the folder.
+  await page.keyboard.press("ArrowRight");
+  await expect(
+    page.getByRole("dialog", { name: "Welcome to Drive.pdf" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Next file" }).waitFor({
+    state: "detached",
+  });
+  await page.getByRole("button", { name: "Close preview" }).click();
   await page.getByRole("button", { name: "Photos, folder" }).click();
   await page.getByRole("button", { name: "Move to trash" }).click();
   await page.getByRole("button", { name: "Trash", exact: true }).click();
@@ -212,9 +224,83 @@ test("guarded preview, permanent deletion and cancellation", async ({
   });
   await expect(page.getByText("File uploaded.")).toBeVisible();
   await page.getByRole("button", { name: "unsafe.svg, file" }).click();
+  await page
+    .getByRole("toolbar")
+    .getByRole("button", { name: "Preview" })
+    .click();
+  const svgViewer = page.getByRole("dialog", { name: "unsafe.svg" });
   await expect(
-    page.getByRole("toolbar").getByRole("button", { name: "Preview" }),
-  ).toBeDisabled();
+    svgViewer.getByText(/No preview for this file type/),
+  ).toBeVisible();
+  await expect(svgViewer.locator("img, iframe")).toHaveCount(0);
+});
+
+test("previews text, resolves upload name conflicts and trashes whole folders", async ({
+  page,
+}) => {
+  await page.goto("/drive");
+  await page.getByRole("button", { name: "Projects, folder" }).dblclick();
+  await page.getByRole("button", { name: "Ideas.txt, file" }).dblclick();
+  await expect(
+    page.getByRole("dialog", { name: "Ideas.txt" }).getByText("Project ideas"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  const upload = (text: string) =>
+    page.getByLabel("Choose files to upload").setInputFiles([
+      { name: "Ideas.txt", mimeType: "text/plain", buffer: Buffer.from(text) },
+      { name: "fresh.txt", mimeType: "text/plain", buffer: Buffer.from(text) },
+    ]);
+  await upload("New ideas");
+  const conflict = page.getByRole("dialog", {
+    name: "Replace existing file?",
+  });
+  await expect(conflict.getByText(/“Ideas.txt” already exists/)).toBeVisible();
+  await conflict.getByRole("button", { name: "Replace" }).click();
+  await expect(page.getByText(/Files uploaded/)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Ideas.txt, file" }),
+  ).toHaveCount(1);
+  await page.getByRole("button", { name: "Ideas.txt, file" }).dblclick();
+  await expect(
+    page.getByRole("dialog", { name: "Ideas.txt" }).getByText("New ideas"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  // One answer can cover every conflict of the upload.
+  await upload("Ignored");
+  await conflict
+    .getByLabel("Do this for every conflict in this upload")
+    .check();
+  await conflict.getByRole("button", { name: "Skip" }).click();
+  await expect(page.getByText("2 existing files skipped.")).toBeVisible();
+  await expect(conflict).toHaveCount(0);
+  // A folder goes to the trash with everything inside it.
+  await page
+    .getByRole("button", { name: "My drive", exact: true })
+    .first()
+    .click();
+  await page.getByRole("button", { name: "Projects, folder" }).click();
+  await page.getByRole("button", { name: "Move to trash" }).click();
+  await expect(page.getByText("Moved to trash.")).toBeVisible();
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+  await page.getByRole("button", { name: "Projects, folder" }).dblclick();
+  await expect(
+    page.getByRole("button", { name: "fresh.txt, file" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Trash", exact: true })
+    .first()
+    .click();
+  await page.getByRole("button", { name: "Projects, folder" }).click();
+  await page.getByRole("button", { name: "Restore" }).click();
+  await expect(page.getByText("Item restored.")).toBeVisible();
+  await page
+    .getByRole("button", { name: "My drive", exact: true })
+    .first()
+    .click();
+  await page.getByRole("button", { name: "Projects, folder" }).dblclick();
+  await expect(
+    page.getByRole("button", { name: "fresh.txt, file" }),
+  ).toBeVisible();
 });
 
 test("OS files dropped on the page, a folder row or a breadcrumb upload there", async ({

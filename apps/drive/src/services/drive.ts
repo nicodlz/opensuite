@@ -28,6 +28,26 @@ const visible = (entry: Entry) => ({
   createdAt: entry.createdAt.toISOString(),
 });
 
+// Every item below a folder shares its owner, so the walk stays within one owner.
+const subtree = async (
+  tx: Prisma.TransactionClient,
+  owner: string,
+  root: Entry,
+) => {
+  if (root.kind !== "folder") return [{ ...root, depth: 0 }];
+  const rows = z
+    .array(z.object({ id: z.string(), depth: z.number() }))
+    .parse(
+      await tx.$queryRaw`WITH RECURSIVE tree AS (SELECT id, 0 AS depth FROM "Entry" WHERE id = ${root.id} AND "ownerId" = ${owner} UNION ALL SELECT child.id, tree.depth + 1 FROM "Entry" child JOIN tree ON child."parentId" = tree.id WHERE child."ownerId" = ${owner}) SELECT id, depth FROM tree`,
+    );
+  const depth = new Map(rows.map((row) => [row.id, row.depth]));
+  const entries = await tx.entry.findMany({
+    where: { ownerId: owner, id: { in: rows.map((row) => row.id) } },
+  });
+  return entries.map((item) =>
+    Object.assign(item, { depth: depth.get(item.id) ?? 0 }),
+  );
+};
 const creatorShare = (user: string, owner: string) =>
   user === owner
     ? {}
@@ -151,6 +171,23 @@ export const createDrive = (
       else finishing.delete(user);
     };
   };
+  const removeObjects = async (files: readonly Entry[]) => {
+    let next = 0;
+    // A few storage deletions run at once so large folders stay quick.
+    const workers = await Promise.allSettled(
+      Array.from(
+        { length: Math.min(8, files.length) },
+        async function remove() {
+          const item = files[next++];
+          if (item === undefined) return;
+          await storage.remove(item.id, item.objectKey, item.uploadId);
+          await remove();
+        },
+      ),
+    );
+    const rejected = workers.find((worker) => worker.status === "rejected");
+    if (rejected) throw rejected.reason;
+  };
   const finish = async (
     user: string,
     input: Extract<DriveCommand, { action: "finish" }>,
@@ -248,6 +285,24 @@ export const createDrive = (
   ): Promise<DriveOutput> => {
     switch (input.action) {
       case "list": {
+        // The trash root shows each trashed batch once: items whose folder
+        // is still in place or was trashed separately.
+        if (input.trash && input.parentId === null) {
+          const trashed = await db.entry.findMany({
+            where: { ownerId: user, trashedAt: { not: null } },
+            include: { parent: { select: { trashedAt: true } } },
+            orderBy: { trashedAt: "desc" },
+          });
+          return {
+            entries: trashed
+              .filter(
+                (entry) =>
+                  entry.parent?.trashedAt?.getTime() !==
+                  entry.trashedAt?.getTime(),
+              )
+              .map(visible),
+          };
+        }
         if (input.parentId !== null)
           await get(
             user,
@@ -535,36 +590,89 @@ export const createDrive = (
               where: { id: original.id, ownerId: user },
             });
             if (entry === null) throw missing();
-            if (entry.state === "verifying")
+            // A folder carries its whole tree: trash marks every item still in
+            // place with one time, restore brings that batch back and delete
+            // removes everything below it.
+            const tree = await subtree(tx, user, entry);
+            if (tree.some((item) => item.state === "verifying"))
               throw invalid("Upload is being finalized");
-            if (
-              entry.kind === "folder" &&
-              (await tx.entry.count({ where: { parentId: entry.id } })) > 0
-            )
-              throw invalid("Folder must be empty");
             if (input.action === "delete") {
               if (entry.trashedAt === null)
                 throw invalid("Trash entry before deleting");
-              if (entry.kind === "file")
-                await storage.remove(entry.id, entry.objectKey, entry.uploadId);
-              await tx.entry.delete({ where: { id: entry.id } });
-              return { deleted: true as const };
+              const files = tree.filter((item) => item.kind === "file");
+              await removeObjects(files);
+              await tree
+                .map((item) => item.depth)
+                .filter((depth, index, all) => all.indexOf(depth) === index)
+                .toSorted((a, b) => b - a)
+                .reduce<Promise<void>>(async (previous, depth) => {
+                  await previous;
+                  await tx.entry.deleteMany({
+                    where: {
+                      ownerId: user,
+                      id: {
+                        in: tree
+                          .filter((item) => item.depth === depth)
+                          .map((item) => item.id),
+                      },
+                    },
+                  });
+                }, Promise.resolve());
+              return { deleted: true as const, files: files.length };
             }
-            if (input.action === "restore")
-              await destinationOwner(tx, user, entry.parentId, user);
-            return visible(
-              await tx.entry.update({
-                where: { id: entry.id },
-                data: {
-                  trashedAt: input.action === "trash" ? new Date() : null,
+            if (input.action === "trash") {
+              if (entry.trashedAt !== null) return visible(entry);
+              await tx.entry.updateMany({
+                where: {
+                  ownerId: user,
+                  id: { in: tree.map((item) => item.id) },
+                  trashedAt: null,
                 },
-              }),
+                data: { trashedAt: new Date() },
+              });
+            } else {
+              if (entry.trashedAt === null) return visible(entry);
+              const batch = entry.trashedAt.getTime();
+              // Without its folder in place, an item comes back to the root.
+              const home =
+                entry.parentId === null
+                  ? null
+                  : await tx.entry.findFirst({
+                      where: {
+                        id: entry.parentId,
+                        ownerId: user,
+                        kind: "folder",
+                        state: "ready",
+                        trashedAt: null,
+                      },
+                    });
+              await tx.entry.updateMany({
+                where: {
+                  ownerId: user,
+                  id: {
+                    in: tree
+                      .filter((item) => item.trashedAt?.getTime() === batch)
+                      .map((item) => item.id),
+                  },
+                },
+                data: { trashedAt: null },
+              });
+              if (entry.parentId !== null && home === null)
+                await tx.entry.update({
+                  where: { id: entry.id },
+                  data: { parentId: null },
+                });
+            }
+            return visible(
+              await tx.entry.findUniqueOrThrow({ where: { id: entry.id } }),
             );
           },
-          { timeout: 30_000 },
+          { timeout: 120_000 },
         );
-        if (input.action === "delete" && original.kind === "file")
-          notifyQuota(original.ownerId);
+        if ("files" in result) {
+          if (result.files > 0) notifyQuota(original.ownerId);
+          return { deleted: true };
+        }
         return result;
       }
       case "share": {

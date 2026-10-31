@@ -26,6 +26,7 @@ import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { Icon, type IconName } from "../ui/icons.tsx";
 import { TextField } from "../ui/text-field.tsx";
 import { command, driveTransport, entries, uploadFile } from "./client.ts";
+import { Viewer } from "./viewer.tsx";
 import {
   checkMove,
   decodeItems,
@@ -55,8 +56,7 @@ type Place = "drive" | "shared" | "trash";
 type Scope = "drive" | "shared" | "trash";
 type Crumb = { id: string | null; name: string };
 type Destination = Crumb & { path: (string | null)[] };
-type Modal =
-  "folder" | "rename" | "move" | "share" | "preview" | "delete" | null;
+type Modal = "folder" | "rename" | "move" | "share" | "delete" | null;
 type Notice = { text: string; undo?: { label: string; run: () => void } };
 /** A folder (or Trash) that accepts drops. `path` lists folder ids from the root to the target. */
 type DropTarget = {
@@ -83,8 +83,7 @@ type UploadJob = { plan: UploadPlan; parentId: string | null; label?: string };
 const root: Crumb = { id: null, name: "My drive" };
 const sharedRoot: Crumb = { id: null, name: "Shared with me" };
 const trashRoot: Crumb = { id: null, name: "Trash" };
-const failure =
-  "Could not complete this action. Check access and try again. Folders must be empty before moving to trash or deleting.";
+const failure = "Could not complete this action. Check access and try again.";
 
 function listQuery(scope: Scope, parentId: string | null) {
   return queryOptions({
@@ -270,6 +269,7 @@ function FolderTree({
   );
 }
 
+type ConflictChoice = "replace" | "skip";
 type Transfer = {
   name: string;
   phase: string;
@@ -307,7 +307,7 @@ export function DrivePage() {
   const [notice, setNoticeState] = useState<Notice>({ text: "" });
   const [busy, setBusy] = useState(false);
   const [transfer, setTransfer] = useState<Transfer | null>(null);
-  const [previewUrl, setPreviewUrl] = useState("");
+  const [viewing, setViewing] = useState<string | null>(null);
   const [newMenu, setNewMenu] = useState<"sidebar" | "main" | null>(null);
   const [fileDrag, setFileDrag] = useState<DOMRect | null>(null);
   const [hover, setHover] = useState<{
@@ -331,12 +331,6 @@ export function DrivePage() {
   const canMoveItems = place === "drive";
 
   useEffect(() => () => controller.current?.abort(), []);
-  useEffect(
-    () => () => {
-      if (previewUrl.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
-    },
-    [previewUrl],
-  );
   useEffect(() => {
     const timer = setTimeout(() => setSearch(searchInput), 250);
     return () => clearTimeout(timer);
@@ -351,6 +345,11 @@ export function DrivePage() {
     entry.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
   );
   const selectedEntries = all.filter((entry) => selectedIds.includes(entry.id));
+  // The viewer steps through the files of the current listing.
+  const viewerFiles = visible.filter(
+    (entry) => entry.kind === "file" && entry.state === "ready",
+  );
+  const viewerIndex = viewerFiles.findIndex((entry) => entry.id === viewing);
   const selected =
     selectedEntries.length === 1 ? (selectedEntries[0] ?? null) : null;
   const stale = list.isPlaceholderData;
@@ -585,10 +584,8 @@ export function DrivePage() {
       command({ action: "trash", id: item.id }),
     );
     if (result.failed.length > 0) rollback();
-    await invalidate([
-      ...items.map((item) => listKey("drive", item.parentId)),
-      trashKey,
-    ]);
+    // A trashed folder takes its whole tree, so every listing may change.
+    await invalidate([["drive", "list"]]);
     setBusy(false);
     const undo = {
       label: "Undo",
@@ -598,7 +595,7 @@ export function DrivePage() {
       setNotice(
         result.done.length === 0
           ? failure
-          : `Moved ${plural(result.done.length, "item")} to trash. ${plural(result.failed.length, "item")} could not be moved; folders must be empty first.`,
+          : `Moved ${plural(result.done.length, "item")} to trash. ${plural(result.failed.length, "item")} could not be moved.`,
         result.done.length ? undo : undefined,
       );
     else
@@ -616,10 +613,9 @@ export function DrivePage() {
     const result = await run(items, (item) =>
       command({ action: "restore", id: item.id }),
     );
-    await invalidate([
-      trashKey,
-      ...items.map((item) => listKey("drive", item.parentId)),
-    ]);
+    // A folder brings back its tree; an item whose folder is gone returns to
+    // the root.
+    await invalidate([["drive", "list"]]);
     setBusy(false);
     setNotice(
       result.failed.length
@@ -655,6 +651,36 @@ export function DrivePage() {
     queue.current.push(job);
     void drainUploads();
   }
+  // One name conflict is asked at a time; "apply to all" answers the rest of
+  // the upload.
+  const [conflict, setConflict] = useState<{
+    name: string;
+    resolve: (choice: ConflictChoice, all: boolean) => void;
+  } | null>(null);
+  const [conflictAll, setConflictAll] = useState(false);
+  const conflictTurn = useRef<Promise<unknown>>(Promise.resolve());
+  const conflictChoice = useRef<ConflictChoice | null>(null);
+  function askConflict(fileName: string, signal: AbortSignal) {
+    const turn = conflictTurn.current.then(
+      () =>
+        conflictChoice.current ??
+        new Promise<ConflictChoice>((resolve) => {
+          if (signal.aborted) return resolve("skip");
+          const stop = () => answer("skip", false);
+          const answer = (choice: ConflictChoice, everywhere: boolean) => {
+            signal.removeEventListener("abort", stop);
+            if (everywhere) conflictChoice.current = choice;
+            setConflict(null);
+            resolve(choice);
+          };
+          signal.addEventListener("abort", stop, { once: true });
+          setConflictAll(false);
+          setConflict({ name: fileName, resolve: answer });
+        }),
+    );
+    conflictTurn.current = turn;
+    return turn;
+  }
   // Parallel transfers report many times per frame; render at most once.
   const pendingTransfer = useRef<{ value: Transfer | null; frame: number }>({
     value: null,
@@ -684,11 +710,39 @@ export function DrivePage() {
     let quotaExceeded = false;
     setQuotaError(false);
     let uploadedFiles = 0;
+    let skippedFiles = 0;
+    const unreplaced: string[] = [];
+    conflictChoice.current = null;
     try {
       const next = async (): Promise<void> => {
         const job = queue.current.shift();
         if (!job) return;
         affected.add(job.parentId);
+        // Existing folders are merged into and existing file names are
+        // resolved with the user; folders created by this job start empty.
+        const fresh = new Set<string>();
+        const listings = new Map<string | null, Promise<DriveEntry[]>>();
+        const existing = (folder: string | null) => {
+          if (folder !== null && fresh.has(folder)) return Promise.resolve([]);
+          const listing =
+            listings.get(folder) ??
+            entries({ action: "list", parentId: folder, trash: false }).catch(
+              () => [],
+            );
+          listings.set(folder, listing);
+          return listing;
+        };
+        const named = async (
+          folder: string | null,
+          kind: string,
+          entryName: string,
+        ) =>
+          (await existing(folder)).find(
+            (entry) =>
+              entry.kind === kind &&
+              entry.state === "ready" &&
+              entry.name === entryName,
+          );
         // Files upload in parallel; the bar shows the whole job by bytes.
         const files = new Map<
           File,
@@ -745,6 +799,8 @@ export function DrivePage() {
             report();
           },
           createFolder: async (folderName, folderParent) => {
+            const match = await named(folderParent, "folder", folderName);
+            if (match) return match.id;
             const created = await command({
               action: "folder",
               name: folderName,
@@ -752,11 +808,21 @@ export function DrivePage() {
             });
             if (!("kind" in created)) throw new Error("Unexpected response");
             affected.add(folderParent);
+            fresh.add(created.id);
             return created.id;
           },
           upload: async (file, fileParent) => {
             affected.add(fileParent);
             const state = files.get(file);
+            const twin = await named(fileParent, "file", file.name);
+            if (
+              twin &&
+              (await askConflict(file.name, abort.signal)) === "skip"
+            ) {
+              if (state) Object.assign(state, { phase: "Done", fraction: 1 });
+              report();
+              return false;
+            }
             try {
               await uploadFile(
                 file,
@@ -773,6 +839,12 @@ export function DrivePage() {
                 },
               );
               if (state) Object.assign(state, { phase: "Done", fraction: 1 });
+              // The replaced file goes to the trash, where it can be restored.
+              if (twin)
+                await command({ action: "trash", id: twin.id }).catch(() =>
+                  unreplaced.push(file.name),
+                );
+              return true;
             } catch (error) {
               if (
                 error instanceof ORPCError &&
@@ -788,6 +860,7 @@ export function DrivePage() {
           },
         });
         uploadedFiles += result.uploaded;
+        skippedFiles += result.skipped;
         failed.push(...result.failed);
         finished.push(job);
         await next();
@@ -802,10 +875,23 @@ export function DrivePage() {
         finished.length === 1 && finished[0]?.label
           ? ` to ${finished[0].label}`
           : "";
-      const done =
-        created > 0
-          ? `Uploaded ${plural(files, "file")} in ${plural(created, "folder")}${label}.`
-          : `${files === 1 ? "File" : "Files"} uploaded${label}.`;
+      const uploadedText =
+        files === 0 && skippedFiles > 0
+          ? ""
+          : created > 0
+            ? `Uploaded ${plural(files, "file")} in ${plural(created, "folder")}${label}.`
+            : `${files === 1 ? "File" : "Files"} uploaded${label}.`;
+      const done = [
+        uploadedText,
+        skippedFiles > 0
+          ? `${plural(skippedFiles, "existing file")} skipped.`
+          : "",
+        unreplaced.length > 0
+          ? `${plural(unreplaced.length, "replaced file")} could not be moved to trash: ${unreplaced.slice(0, 5).join(", ")}.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
       const shown = failed.slice(0, 5).join(", ");
       setQuotaError(quotaExceeded);
       setNotice(
@@ -1037,16 +1123,9 @@ export function DrivePage() {
     anchor.current = entry.id;
     setSelectedIds([entry.id]);
     if (entry.kind === "folder") openFolder(entry);
-    else if (entry.contentType === "application/pdf" && canPreview(entry)) {
-      window.open(
-        driveTransport.preview(entry.id),
-        "_blank",
-        "noopener,noreferrer",
-      );
-    } else if (canPreview(entry)) {
-      setPreviewUrl(driveTransport.preview(entry.id));
+    else if (place !== "trash" && entry.state === "ready") {
       setNotice("");
-      setModal("preview");
+      setViewing(entry.id);
     }
   }
   async function shareUser(revoke: boolean) {
@@ -1475,7 +1554,7 @@ export function DrivePage() {
                       label={selected.kind === "folder" ? "Open" : "Preview"}
                       onClick={() => openEntry(selected)}
                       disabled={
-                        selected.kind !== "folder" && !canPreview(selected)
+                        selected.kind !== "folder" && selected.state !== "ready"
                       }
                     />
                     <Action
@@ -1679,16 +1758,30 @@ export function DrivePage() {
                           aria-pressed={isSelected}
                           aria-label={`${entry.name}, ${entry.kind}${entry.state !== "ready" ? `, ${entry.state}` : ""}`}
                         >
-                          <span
-                            className={`drive-file-icon ${tone}`}
-                            aria-hidden="true"
-                          >
-                            <Icon
-                              name={icon}
-                              size={view === "grid" ? 28 : 20}
-                              filled={entry.kind === "folder"}
+                          {view === "grid" &&
+                          place !== "trash" &&
+                          canPreview(entry) &&
+                          entry.contentType !== "application/pdf" ? (
+                            <img
+                              className="drive-thumbnail"
+                              src={driveTransport.preview(entry.id)}
+                              alt=""
+                              loading="lazy"
+                              decoding="async"
+                              draggable={false}
                             />
-                          </span>
+                          ) : (
+                            <span
+                              className={`drive-file-icon ${tone}`}
+                              aria-hidden="true"
+                            >
+                              <Icon
+                                name={icon}
+                                size={view === "grid" ? 28 : 20}
+                                filled={entry.kind === "folder"}
+                              />
+                            </span>
+                          )}
                           <span className="drive-file-name">
                             <strong>{entry.name}</strong>
                             <small>
@@ -1777,6 +1870,39 @@ export function DrivePage() {
           </Menu.Item>
         </Menu.Content>
       </Menu.Portal>
+      <Dialog
+        open={conflict !== null}
+        onOpenChange={(open) => {
+          if (!open) conflict?.resolve("skip", conflictAll);
+        }}
+      >
+        {conflict && (
+          <DialogContent
+            title="Replace existing file?"
+            description={`“${conflict.name}” already exists here. A replaced file moves to the trash.`}
+          >
+            <label className="drive-conflict-all">
+              <input
+                type="checkbox"
+                checked={conflictAll}
+                onChange={(event) => setConflictAll(event.target.checked)}
+              />
+              Do this for every conflict in this upload
+            </label>
+            <div className="dialog-actions">
+              <Button
+                variant="secondary"
+                onClick={() => conflict.resolve("skip", conflictAll)}
+              >
+                Skip
+              </Button>
+              <Button onClick={() => conflict.resolve("replace", conflictAll)}>
+                Replace
+              </Button>
+            </div>
+          </DialogContent>
+        )}
+      </Dialog>
       <Dialog
         open={modal !== null}
         onOpenChange={(open) => {
@@ -1885,7 +2011,7 @@ export function DrivePage() {
         {modal === "delete" && selectedEntries.length > 0 && (
           <DialogContent
             title="Delete permanently?"
-            description={`This permanently deletes ${selected ? selected.name : plural(selectedEntries.length, "item")}. This cannot be undone.`}
+            description={`This permanently deletes ${selected ? selected.name : plural(selectedEntries.length, "item")}${selectedEntries.some((entry) => entry.kind === "folder") ? " and everything inside" : ""}. This cannot be undone.`}
           >
             <div className="dialog-actions">
               <Button variant="secondary" onClick={() => setModal(null)}>
@@ -1898,29 +2024,6 @@ export function DrivePage() {
                 }}
               >
                 Delete permanently
-              </Button>
-            </div>
-          </DialogContent>
-        )}
-        {modal === "preview" && selected && (
-          <DialogContent title={selected.name} description="Protected preview">
-            <div className="drive-preview">
-              {previewUrl && (
-                <iframe
-                  title={`Preview of ${selected.name}`}
-                  src={previewUrl}
-                  sandbox=""
-                />
-              )}
-            </div>
-            <div className="dialog-actions">
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  void download(selected);
-                }}
-              >
-                Download
               </Button>
             </div>
           </DialogContent>
@@ -2053,6 +2156,23 @@ export function DrivePage() {
           </DialogContent>
         )}
       </Dialog>
+      {viewerIndex >= 0 && (
+        <Viewer
+          files={viewerFiles}
+          index={viewerIndex}
+          onIndex={(next) => {
+            const target = viewerFiles[next];
+            if (!target) return;
+            setViewing(target.id);
+            setSelectedIds([target.id]);
+            anchor.current = target.id;
+          }}
+          onClose={() => setViewing(null)}
+          onDownload={(target) => {
+            void download(target);
+          }}
+        />
+      )}
     </Menu.Root>
   );
 }

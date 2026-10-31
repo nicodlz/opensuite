@@ -28,6 +28,8 @@ type Transport = {
     progress: (loaded: number) => void,
   ) => Promise<string>;
   preview: (id: string) => string;
+  /** The start of a file as text, for the text viewer. */
+  text: (id: string) => Promise<string>;
 };
 // A storage status of 0 means the connection failed before a response.
 class StorageError extends Error {
@@ -74,6 +76,14 @@ const live: Transport = {
   command: (input) => production.command(input),
   put,
   preview: (id) => `/drive/api/v1/preview/${encodeURIComponent(id)}`,
+  text: async (id) => {
+    const response = await fetch(
+      `/drive/api/v1/preview/${encodeURIComponent(id)}?text`,
+      { credentials: "same-origin" },
+    );
+    if (!response.ok) throw new Error("Preview unavailable");
+    return response.text();
+  },
 };
 export const driveTransport: Transport =
   import.meta.env.DEV && sessionStorage.getItem("drive-fixture-live") !== "1"

@@ -238,7 +238,8 @@ export async function executePlan(
   rootId: string | null,
   actions: {
     createFolder: (name: string, parentId: string | null) => Promise<string>;
-    upload: (file: File, parentId: string | null) => Promise<void>;
+    /** Resolves `false` when the file was deliberately skipped. */
+    upload: (file: File, parentId: string | null) => Promise<boolean | void>;
     step?: (step: PlanStep) => void;
     signal?: AbortSignal;
     concurrency?: number;
@@ -247,6 +248,7 @@ export async function executePlan(
   const ids = new Map<string, string | null>([["", rootId]]);
   const failed: string[] = [];
   let uploaded = 0;
+  let skipped = 0;
   const parentOf = (path: readonly string[]) => {
     const id = ids.get(folderKey(path));
     if (id === undefined) throw new Error("Parent folder was not created");
@@ -281,13 +283,14 @@ export async function executePlan(
       actions.signal?.throwIfAborted();
       actions.step?.({ kind: "file", file, index, total: plan.files.length });
       try {
-        await actions.upload(file, parentOf(path));
-        uploaded += 1;
+        if ((await actions.upload(file, parentOf(path))) === false)
+          skipped += 1;
+        else uploaded += 1;
       } catch (error) {
         if (isAbort(error, actions.signal)) throw error;
         failed.push([...path, file.name].join("/"));
       }
     },
   );
-  return { uploaded, failed };
+  return { uploaded, skipped, failed };
 }
