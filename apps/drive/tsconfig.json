@@ -1,4 +1,4 @@
 {
   "extends": "@opensuite/typescript-config/base.json",
-  "include": ["src", "test"]
+  "include": ["src", "test", "prisma.config.ts"]
 }
