@@ -103,3 +103,16 @@ export function createSetupStatus(options: {
     };
   };
 }
+
+// Stalwart relay management for the setup checklist, when SES domains are enabled.
+export function relayManagementFromEnv(env: NodeJS.ProcessEnv) {
+  const origin = env["DOMAINS_STALWART_ORIGIN"];
+  const username = env["DOMAINS_STALWART_USER"];
+  const passwordFile = env["DOMAINS_STALWART_PASSWORD_FILE"];
+  return env["DOMAINS_SES_ENABLED"] === "true" &&
+    origin &&
+    username &&
+    passwordFile
+    ? { relayManagement: { origin, username, passwordFile } }
+    : {};
+}

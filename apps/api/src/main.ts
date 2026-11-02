@@ -37,7 +37,10 @@ import {
 } from "./config.ts";
 import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
-import { createSetupStatus } from "./routes/setup-status.ts";
+import {
+  createSetupStatus,
+  relayManagementFromEnv,
+} from "./routes/setup-status.ts";
 import { buildServer, createCalendarImport } from "./server.ts";
 import {
   configurePush,
@@ -332,18 +335,7 @@ const app = await buildServer({
   setupStatus: createSetupStatus({
     readiness,
     mailDomain: authConfig.value.mailDomain,
-    ...(process.env["DOMAINS_SES_ENABLED"] === "true" &&
-    process.env["DOMAINS_STALWART_ORIGIN"] &&
-    process.env["DOMAINS_STALWART_USER"] &&
-    process.env["DOMAINS_STALWART_PASSWORD_FILE"]
-      ? {
-          relayManagement: {
-            origin: process.env["DOMAINS_STALWART_ORIGIN"],
-            username: process.env["DOMAINS_STALWART_USER"],
-            passwordFile: process.env["DOMAINS_STALWART_PASSWORD_FILE"],
-          },
-        }
-      : {}),
+    ...relayManagementFromEnv(process.env),
     ...(process.env["SETUP_BACKUP_MARKER"] === undefined
       ? {}
       : { backupMarker: process.env["SETUP_BACKUP_MARKER"] }),
