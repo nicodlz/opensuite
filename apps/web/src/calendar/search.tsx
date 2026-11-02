@@ -1,7 +1,14 @@
 import * as React from "react";
 import type { CalendarEvent } from "@opensuite/contracts";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "../ui/button.tsx";
 import { Icon } from "../ui/icons.tsx";
 import {
@@ -72,24 +79,28 @@ function byMonth(events: CalendarEvent[]) {
 }
 
 /**
- * Search results replace the grid until the search is cleared or another
- * period or view is shown, including the period of a chosen result.
+ * The search query and its results panel. Results replace the grid until
+ * the search is cleared or another period or view is shown, including the
+ * period of a chosen result. A cleared search starts again in the grid, so
+ * typing a new one is not interrupted.
  */
-export function useSearchPanel(
-  anchor: Date,
-  view: CalendarView,
-  query: string,
-) {
+export function useSearch(anchor: Date, view: CalendarView) {
+  const [query, setQueryState] = useState("");
   const [shownAt, setShownAt] = useState<{
     anchor: Date;
     view: CalendarView;
   } | null>(null);
+  const setQuery = useCallback((value: string) => {
+    setQueryState(value);
+    if (!value.trim()) setShownAt(null);
+  }, []);
   return {
-    open:
-      shownAt?.anchor === anchor &&
-      shownAt.view === view &&
-      query.trim() !== "",
-    show: () => setShownAt({ anchor, view }),
+    query,
+    setQuery,
+    open: shownAt?.anchor === anchor && shownAt.view === view,
+    show: () => {
+      if (query.trim()) setShownAt({ anchor, view });
+    },
     hide: () => setShownAt(null),
   };
 }

@@ -467,6 +467,23 @@ test("a creation from the Create button focuses the new event", async ({
   await expect(chip(page, "Offsite prep")).toBeFocused();
 });
 
+test("a saved event outside the shown period leaves focus on its trigger", async ({
+  page,
+}) => {
+  await open(page);
+  const create = page
+    .getByRole("button", { name: "Create C", exact: true })
+    .first();
+  await create.click();
+  const editor = page.getByRole("dialog", { name: "New event" });
+  await editor.getByLabel("Title").fill("Next week plan");
+  await editor.getByLabel("Start date").fill("2026-11-04");
+  await editor.getByRole("button", { name: "Save" }).click();
+  await expect(notice(page)).toHaveText("Event created");
+  await expect(create).toBeFocused();
+  await expect(chip(page, "Next week plan")).toHaveCount(0);
+});
+
 test("a deletion is sent only when its notification closes", async ({
   page,
 }) => {
@@ -588,6 +605,33 @@ test("search lists matches from nearby months", async ({ page }) => {
     page.getByRole("heading", { name: period("2 – 8 Nov 2026") }),
   ).toBeVisible();
   await expect(chip(page, "Roadmap workshop")).toBeFocused();
+});
+
+test("a cleared search does not interrupt typing the next one", async ({
+  page,
+}) => {
+  await open(page);
+  const search = page.getByLabel("Search events");
+  const results = page.locator(".cal-results");
+  await search.fill("design");
+  await search.press("Enter");
+  await expect(results).toBeFocused();
+  await search.focus();
+  await page.getByRole("button", { name: "Clear search" }).click();
+  await expect(search).toBeFocused();
+  await page.keyboard.type("roadmap");
+  await expect(search).toHaveValue("roadmap");
+  await expect(search).toBeFocused();
+  await expect(results).toHaveCount(0);
+  // Escape in the field clears it too.
+  await search.press("Enter");
+  await expect(results).toBeFocused();
+  await search.focus();
+  await search.press("Escape");
+  await expect(search).toHaveValue("");
+  await page.keyboard.type("lunch");
+  await expect(search).toHaveValue("lunch");
+  await expect(results).toHaveCount(0);
 });
 
 test.describe("on a phone", () => {

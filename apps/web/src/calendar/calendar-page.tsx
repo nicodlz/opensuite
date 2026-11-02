@@ -47,7 +47,7 @@ import {
   type Colors,
 } from "./events.ts";
 import { offerReminder } from "./reminder-offer.ts";
-import { PeriodEmpty, SearchResults, useSearchPanel } from "./search.tsx";
+import { PeriodEmpty, SearchResults, useSearch } from "./search.tsx";
 import {
   compactWeekQuery,
   periodName as periodOf,
@@ -135,7 +135,12 @@ type Popover =
   | { kind: "detail"; eventId: string; rect: DOMRect }
   | { kind: "create"; content: EventContent; rect: DOMRect }
   | { kind: "day"; day: Date; rect: DOMRect };
-type Editor = { content: EventContent; event?: CalendarEvent };
+/** `trigger` is the control that opened the editor for a new event. */
+type Editor = {
+  content: EventContent;
+  event?: CalendarEvent;
+  trigger?: Element | null;
+};
 
 function contentOf(event: CalendarEvent): EventContent {
   const { id: _id, seriesId: _seriesId, ...content } = event;
@@ -385,7 +390,11 @@ function CalendarWorkspace() {
     }
     return startOfDay(Number.isNaN(date.getTime()) ? new Date() : date);
   });
-  const [search, setSearch] = useState("");
+  const {
+    query: search,
+    setQuery: setSearch,
+    ...results
+  } = useSearch(anchor, view);
   const [hidden, setHidden] = useState(readHidden);
   const [popover, setPopover] = useState<Popover | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
@@ -396,7 +405,6 @@ function CalendarWorkspace() {
   const surfaceRef = useRef<HTMLElement>(null);
   const focus = useEventFocus(surfaceRef);
   const changes = useEventChanges(focus);
-  const results = useSearchPanel(anchor, view, search);
   const compact = useMediaQuery(compactWeekQuery);
   const firstDay = useMemo(() => firstDayOfWeek(), []);
   const now = useNow();
@@ -539,6 +547,7 @@ function CalendarWorkspace() {
         false,
         defaultCalendarId,
       ),
+      trigger: document.activeElement,
     });
   }
   function requestTiming(event: CalendarEvent, timing: EventTiming) {
@@ -553,7 +562,9 @@ function CalendarWorkspace() {
     const current = editor?.event;
     setEditor(null);
     void (
-      current ? changes.save(current, content) : changes.create(content)
+      current
+        ? changes.save(current, content)
+        : changes.create(content, editor?.trigger)
     ).then((saved) => offerReminder(saved, content, offer));
   }
   function createQuick(content: EventContent) {
@@ -724,7 +735,7 @@ function CalendarWorkspace() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && search.trim()) results.show();
+              if (event.key === "Enter") results.show();
               if (event.key === "Escape" && search) {
                 event.preventDefault();
                 setSearch("");

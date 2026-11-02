@@ -11,11 +11,17 @@ import { eventsKey } from "./events.ts";
 
 /**
  * Where focus should go after a change: the chip of event `start` in series
- * `seriesId`, any chip of that series, or else the calendar surface. `wait`
- * keeps the request open for a target that is not known yet, such as the
- * server id of an event being created.
+ * `seriesId` or any chip of that series. Without one, focus goes back to
+ * `trigger`, the control that opened the change, or to the calendar surface
+ * when there is none, as after a deletion. `wait` keeps the request open for
+ * a target that is not known yet, such as the server id of a new event.
  */
-export type FocusTarget = { seriesId?: string; start?: string; wait?: boolean };
+export type FocusTarget = {
+  seriesId?: string;
+  start?: string;
+  wait?: boolean;
+  trigger?: Element | null;
+};
 export type EventFocus = {
   /** Starts a request; focus moves even if a closing dialog restored it elsewhere. */
   request: (target: FocusTarget) => void;
@@ -61,8 +67,9 @@ function userMoved(
 }
 
 /**
- * The chip at the target time, else a stand-in: another chip of the series
- * or the surface. `found` is false while a stand-in may still be replaced.
+ * The chip at the target time, else a stand-in: another chip of the series,
+ * else the trigger while it is still on the page, else the surface. `found`
+ * is false while a stand-in may still be replaced.
  */
 function destination(
   request: Request,
@@ -70,11 +77,18 @@ function destination(
   chips: HTMLElement[],
 ) {
   const exact = chips.find((chip) => chip.dataset["start"] === request.start);
-  const element = exact ?? chips[0] ?? surface;
+  const { trigger } = request;
+  const opener =
+    trigger instanceof HTMLElement &&
+    trigger.isConnected &&
+    !isNeutral(trigger, surface)
+      ? trigger
+      : undefined;
+  const element = exact ?? chips[0] ?? opener ?? surface;
   const found =
     request.seriesId === undefined ||
     exact !== undefined ||
-    (request.start === undefined && element !== surface);
+    (request.start === undefined && chips.length > 0);
   return { element, found };
 }
 

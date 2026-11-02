@@ -225,9 +225,12 @@ export function useEventChanges(focus: EventFocus) {
   return {
     deleting,
     remove,
-    /** Focus waits on the calendar until the server has named the event. */
-    async create(content: EventContent) {
-      focus.request({ wait: true });
+    /**
+     * Focus waits on `trigger`, or the calendar, until the server has named
+     * the event; it stays there when the event is not shown.
+     */
+    async create(content: EventContent, trigger: Element | null = null) {
+      focus.request({ wait: true, trigger });
       const id = `draft-${crypto.randomUUID()}`;
       const saved = await run({ type: "create", id, content }, "create");
       if (saved) notify({ message: "Event created" });
