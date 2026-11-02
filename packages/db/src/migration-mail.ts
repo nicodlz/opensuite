@@ -154,6 +154,47 @@ class MailImportStore {
       return changed;
     });
   }
+  async abandon(
+    userId: string,
+    accountId: string,
+    id: string,
+    expectedUncertain: number,
+  ) {
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "MailImportJob" WHERE "id" = ${id} AND "userId" = ${userId} AND "accountId" = ${accountId} FOR UPDATE`;
+      const job = await tx.mailImportJob.findFirst({
+        where: { id, userId, accountId },
+        include: { items: true },
+      });
+      if (
+        job === null ||
+        job.status !== "attention" ||
+        job.claimToken !== null ||
+        job.archive === null
+      )
+        return false;
+      const count = (statuses: string[]) =>
+        job.items.filter((item) => statuses.includes(item.status)).length;
+      const counts = {
+        imported: count(["imported"]),
+        uncertain: count(["uncertain", "importing"]),
+        failed: count(["failed"]),
+        duplicate: count(["duplicate"]),
+        pending: count(["pending"]),
+      };
+      if (counts.uncertain === 0 || counts.uncertain !== expectedUncertain)
+        return false;
+      await tx.auditEvent.create({
+        data: {
+          userId,
+          action: "mail.import.abandoned",
+          detail: { jobId: id, accountId, ...counts },
+        },
+      });
+      await tx.mailImportJob.delete({ where: { id } });
+      return true;
+    });
+  }
   async claim(now: Date) {
     const token = randomUUID();
     const until = new Date(now.getTime() + 300_000);

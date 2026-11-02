@@ -52,6 +52,18 @@ export const migrationMailRouter = route.router({
     const { actor, service } = access(context);
     return result(service.resume(actor, input.accountId, input.jobId));
   }),
+  abandon: route.abandon.handler(({ context, input }) => {
+    const { actor, service } = access(context);
+    return result(
+      service.abandon(
+        actor,
+        input.accountId,
+        input.jobId,
+        input.confirm,
+        input.uncertainCount,
+      ),
+    );
+  }),
 });
 
 /** Authenticate and rate-limit the large upload before Fastify parses its body. */

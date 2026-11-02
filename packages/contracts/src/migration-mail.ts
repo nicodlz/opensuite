@@ -36,6 +36,8 @@ const entry = z.object({
   ]),
   error: z.string().nullable(),
 });
+const abandonWarning =
+  "Some uncertain messages may already be in your mailbox. Abandoning removes the stored archive and import progress; it never deletes delivered mail.";
 export const MailImportReportSchema = z.object({
   id: IdSchema,
   status: z.enum(["queued", "running", "completed", "cancelled", "attention"]),
@@ -45,6 +47,12 @@ export const MailImportReportSchema = z.object({
   processed: z.number().int().nonnegative(),
   messages: z.array(entry),
   limitations: z.array(z.string()),
+  abandonment: z
+    .object({
+      uncertainCount: z.number().int().positive(),
+      warning: z.literal(abandonWarning),
+    })
+    .nullable(),
 });
 const procedure = oc.errors({
   FORBIDDEN: { status: 403, message: "Access denied" },
@@ -85,6 +93,15 @@ export const migrationMailContract = {
     .route({ method: "POST", path: "/mail/imports/resume" })
     .input(jobInput)
     .output(MailImportReportSchema),
+  abandon: procedure
+    .route({ method: "POST", path: "/mail/imports/abandon" })
+    .input(
+      jobInput.extend({
+        confirm: z.literal(true),
+        uncertainCount: z.number().int().positive().max(1000),
+      }),
+    )
+    .output(z.object({ abandoned: z.literal(true) })),
 };
 export type MailImportInput = z.infer<typeof MailImportInputSchema>;
 export type MailImportReport = z.infer<typeof MailImportReportSchema>;
@@ -198,9 +215,14 @@ type ReportInput = {
   cancelRequested: boolean;
   error: string | null;
   total: number;
+  archive: string | null;
+  claimToken: string | null;
   items: { index: number; status: string; error: string | null }[];
 };
 export function migrationReport(job: ReportInput): MailImportReport {
+  const uncertainCount = job.items.filter((item) =>
+    ["uncertain", "importing"].includes(item.status),
+  ).length;
   return MailImportReportSchema.parse({
     id: job.id,
     status: job.status,
@@ -216,5 +238,12 @@ export function migrationReport(job: ReportInput): MailImportReport {
       error: item.error,
     })),
     limitations: MAIL_IMPORT_LIMITATIONS,
+    abandonment:
+      job.status === "attention" &&
+      job.claimToken === null &&
+      job.archive !== null &&
+      uncertainCount > 0
+        ? { uncertainCount, warning: abandonWarning }
+        : null,
   });
 }

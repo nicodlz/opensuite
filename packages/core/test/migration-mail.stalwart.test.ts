@@ -43,6 +43,7 @@ let sent = "";
 let diagnostic: JmapClient;
 let service: ReturnType<typeof createMailMigrationService>;
 let loseResponse = false;
+let importsBeforeLostResponse = 0;
 let failUpload = false;
 let accountEnabled = true;
 let changeBeforeImport: (() => Promise<void>) | undefined;
@@ -98,8 +99,11 @@ const fetcher: typeof fetch = async (url, init) => {
     typeof init?.body === "string" &&
     init.body.includes('"Email/import"')
   ) {
-    loseResponse = false;
-    throw new Error("fixture lost response");
+    if (importsBeforeLostResponse > 0) importsBeforeLostResponse--;
+    else {
+      loseResponse = false;
+      throw new Error("fixture lost response");
+    }
   }
   return response;
 };
@@ -383,6 +387,163 @@ it("rejects a stale duplicate scan before importing, then succeeds after resume"
   expect(
     value(await diagnostic.queryEmails(session, account)).ids,
   ).toHaveLength(before + 2);
+}, 120_000);
+
+it("confirms and audits abandonment, preserves delivered mail, and deduplicates a later re-import", async () => {
+  const envelope = Buffer.from("From sender Thu Jan 2 06:04:05 2020 +0000\r\n");
+  const messages = ["failed", "imported", "uncertain"].map((name) =>
+    Buffer.from(
+      `From: sender@example.test\r\nTo: alice@example.test\r\nMessage-ID: <abandon-${name}@example.test>\r\n\r\n${name}\r\n\r\n`,
+    ),
+  );
+  const archive = Buffer.concat(
+    messages.flatMap((message) => [envelope, message]),
+  );
+  const create = () =>
+    service.create(actor, {
+      accountId: "default",
+      format: "mbox",
+      variant: "mboxo",
+      base64: archive.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    });
+  const session = value(await diagnostic.discover());
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
+  const job = value(await create());
+  failUpload = true;
+  loseResponse = true;
+  importsBeforeLostResponse = 1;
+  try {
+    await service.work();
+  } finally {
+    failUpload = false;
+    loseResponse = false;
+    importsBeforeLostResponse = 0;
+  }
+  const app = await buildServer({
+    config: { logLevel: "silent" },
+    monotonicMs: now,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: now,
+    }),
+    migrationMail: service,
+    identity: {
+      publicOrigin: "https://suite.example.test",
+      handler: () => Promise.resolve(new Response()),
+      actor: (headers) => {
+        const id = headers.get("cookie");
+        return Promise.resolve(
+          id === "owner" || id === "other"
+            ? { id, email: `${id}@example.test`, role: "user" }
+            : null,
+        );
+      },
+    },
+  });
+  try {
+    const headers = { origin: "https://suite.example.test", cookie: "owner" };
+    const input = { accountId: "default", jobId: job.id };
+    const report = await app.inject({
+      method: "POST",
+      url: "/mail/imports/report",
+      headers,
+      payload: input,
+    });
+    expect(report.statusCode).toBe(200);
+    expect(report.json()).toMatchObject({
+      status: "attention",
+      messages: [
+        { status: "failed" },
+        { status: "imported" },
+        { status: "uncertain" },
+      ],
+      abandonment: {
+        uncertainCount: 1,
+      },
+    });
+    const warning = z
+      .object({ abandonment: z.object({ warning: z.string() }) })
+      .parse(report.json()).abandonment.warning;
+    expect(warning).toContain("may already be in your mailbox");
+    const abandon = (payload: object, cookie = "owner") =>
+      app.inject({
+        method: "POST",
+        url: "/mail/imports/abandon",
+        headers: { ...headers, cookie },
+        payload,
+      });
+    expect(
+      (await abandon({ ...input, confirm: false, uncertainCount: 1 }))
+        .statusCode,
+    ).toBe(400);
+    expect(
+      (await abandon({ ...input, confirm: true, uncertainCount: 1 }, "other"))
+        .statusCode,
+    ).toBe(403);
+    expect(
+      (await abandon({ ...input, confirm: true, uncertainCount: 2 }))
+        .statusCode,
+    ).toBe(409);
+    expect(
+      (await db.mailImportJob.findUnique({ where: { id: job.id } }))?.archive,
+    ).toBeTruthy();
+    const responses = await Promise.all([
+      abandon({ ...input, confirm: true, uncertainCount: 1 }),
+      abandon({ ...input, confirm: true, uncertainCount: 1 }),
+    ]);
+    expect(
+      responses.filter((response) => response.statusCode === 200),
+    ).toHaveLength(1);
+    expect(
+      responses.filter((response) => [404, 409].includes(response.statusCode)),
+    ).toHaveLength(1);
+    expect(
+      await db.mailImportJob.findUnique({ where: { id: job.id } }),
+    ).toBeNull();
+    expect(await db.mailImportItem.count({ where: { jobId: job.id } })).toBe(0);
+    const events = await db.auditEvent.findMany({
+      where: { userId: actor.id, action: "mail.import.abandoned" },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      userId: actor.id,
+      detail: {
+        jobId: job.id,
+        accountId: account,
+        imported: 1,
+        uncertain: 1,
+        failed: 1,
+        duplicate: 0,
+        pending: 0,
+      },
+    });
+    expect(events[0]?.createdAt).toBeInstanceOf(Date);
+    expect(
+      value(await diagnostic.queryEmails(session, account)).ids,
+    ).toHaveLength(before + 2);
+    const again = value(await create());
+    await service.work();
+    expect(
+      value(await service.report(actor, "default", again.id)),
+    ).toMatchObject({
+      status: "completed",
+      messages: [
+        { status: "imported" },
+        { status: "duplicate" },
+        { status: "duplicate" },
+      ],
+    });
+    expect(
+      value(await diagnostic.queryEmails(session, account)).ids,
+    ).toHaveLength(before + 3);
+  } finally {
+    await app.close();
+  }
 }, 120_000);
 
 it("retains failures for resume, safely cancels, and never retries an unresolved import", async () => {

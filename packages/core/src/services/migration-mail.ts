@@ -59,10 +59,8 @@ class MigrationService {
     return this.access.connect(actor, accountId, "urn:ietf:params:jmap:mail");
   }
   private async ownerAccount(actor: Actor, accountId: string) {
-    const credential = await this.options.store.getForOwner(
-      actor.id,
-      accountId,
-    );
+    const store = this.options.store;
+    const credential = await store.getForOwner(actor.id, accountId);
     if (credential.isErr()) return fail("forbidden");
     if (accountId !== "default" && credential.value.accountId !== accountId)
       return fail("forbidden");
@@ -138,9 +136,8 @@ class MigrationService {
     return this.access.run(async () => {
       const current = await this.owned(actor, accountId, id);
       await this.store.cancel(actor.id, current.accountId, id);
-      return this.tools.migrationReport(
-        await this.owned(actor, current.accountId, id),
-      );
+      const updated = await this.owned(actor, current.accountId, id);
+      return this.tools.migrationReport(updated);
     });
   }
   resume(actor: Actor, accountId: string, id: string) {
@@ -148,9 +145,30 @@ class MigrationService {
       const current = await this.owned(actor, accountId, id);
       if (!(await this.store.resume(actor.id, current.accountId, id)).count)
         return fail("conflict");
-      return this.tools.migrationReport(
-        await this.owned(actor, current.accountId, id),
-      );
+      const updated = await this.owned(actor, current.accountId, id);
+      return this.tools.migrationReport(updated);
+    });
+  }
+  abandon(
+    actor: Actor,
+    accountId: string,
+    id: string,
+    confirm: boolean,
+    uncertainCount: number,
+  ) {
+    return this.access.run(async () => {
+      if (!confirm) return fail("validation");
+      const current = await this.owned(actor, accountId, id);
+      if (
+        !(await this.store.abandon(
+          actor.id,
+          current.accountId,
+          id,
+          uncertainCount,
+        ))
+      )
+        return fail("conflict");
+      return { abandoned: true as const };
     });
   }
   private async import(
