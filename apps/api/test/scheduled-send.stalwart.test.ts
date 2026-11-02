@@ -5,8 +5,13 @@ import { RecoveredDraftSchema } from "@opensuite/contracts";
 import { createReadinessService } from "@opensuite/core";
 import { createMailWithInvitations } from "@opensuite/core/services/invitations";
 import { invitationProtocol } from "@opensuite/core/adapters/invitations";
-import { createGuards } from "@opensuite/core/adapters/scheduled-send";
-import { createDatabase, type PrismaClient } from "@opensuite/db";
+import {
+  createAliasStore,
+  createDatabase,
+  createScheduledSendStore,
+  type PrismaClient,
+} from "@opensuite/db";
+import { createGuards as createScheduledGuards } from "../src/adapters/scheduled-send-job.ts";
 import { JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, ok } from "neverthrow";
@@ -119,6 +124,43 @@ beforeAll(async () => {
     await db.user.create({
       data: { id: actor.id, email: actor.email, name: "Fixture" },
     });
+    await db.mailboxLink.create({
+      data: {
+        userId: actor.id,
+        accountId,
+        address: actor.email,
+        credentialId: "fixture",
+        secret: "v1.AAAAAAAAAAAAAAAA.A.AAAAAAAAAAAAAAAAAAAAAA",
+        status: "active",
+      },
+    });
+    const domainRow = await db.domain.create({
+      data: {
+        userId: actor.id,
+        name: "example.test",
+        status: "verified",
+        stalwartId: domain.id,
+      },
+    });
+    const address = await db.address.create({
+      data: {
+        userId: actor.id,
+        domainId: domainRow.id,
+        localPart: "alias",
+        isAlias: true,
+      },
+    });
+    await db.emailAlias.create({
+      data: {
+        userId: actor.id,
+        domainId: domainRow.id,
+        addressId: address.id,
+        address: "alias@example.test",
+        localPart: "alias",
+        enabled: true,
+        ready: true,
+      },
+    });
   } catch (error) {
     await run("docker", ["rm", "-fv", pg]).catch(() => undefined);
     await compose("down", "--volumes", "--remove-orphans");
@@ -155,6 +197,21 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
   let immediateAttempts = 0;
   let cancellationAttempts = 0;
   let delayedMove: (() => Promise<Response>) | undefined;
+  let afterQuery: (() => Promise<void>) | undefined;
+  let afterQueryFor = "";
+  let entitled = true;
+  let quota: number | null = null;
+  let used = 0;
+  let measured = true;
+  let afterMeasure: (() => Promise<void>) | undefined;
+  const aliasStore = createAliasStore(database);
+  const aliases = {
+    canSendAs: async (userId: string, address: string) =>
+      (await aliasStore.canSendAs(userId, address)).map(
+        (row) => row?.id ?? null,
+      ),
+  };
+  const addresses = { canSendAs: () => Promise.resolve(ok(null)) };
   const fetchMaybeLose: typeof fetch = async (input, init) => {
     const body = typeof init?.body === "string" ? init.body : "";
     const guardedMove =
@@ -193,6 +250,15 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     }
     const response = await fetch(input, init);
     if (
+      afterQuery &&
+      body.includes('"EmailSubmission/query"') &&
+      body.includes(afterQueryFor)
+    ) {
+      const hook = afterQuery;
+      afterQuery = undefined;
+      await hook();
+    }
+    if (
       (lostResponse === "read" && body.includes('"Mailbox/get"')) ||
       (lostResponse === "editCreate" &&
         body.includes('"Email/set"') &&
@@ -226,20 +292,29 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
           : err({ kind: "not_found" }),
       ),
   };
-  const createService = () =>
+  const createService = (domains = ["example.test"]) =>
     createMailWithInvitations({
       origin: base,
       now: () => Date.now() + clockOffset,
       store: credentials,
-      ...createGuards(database),
+      ...createScheduledGuards(database, {
+        aliases,
+        addresses,
+        domains,
+        entitlements: {
+          get: () =>
+            Promise.resolve({ uploadsAllowed: entitled, quotaBytes: quota }),
+        },
+        storageMeter: {
+          measure: async () => {
+            await afterMeasure?.();
+            return { usedBytes: used, measured };
+          },
+        },
+      }),
       protocol: invitationProtocol,
-      aliases: {
-        canSendAs: (_user, address) =>
-          Promise.resolve(
-            ok(address === "alias@example.test" ? "alias" : null),
-          ),
-      },
-      addresses: { canSendAs: () => Promise.resolve(ok(null)) },
+      aliases,
+      addresses,
       beforeAliasSend: () => Promise.resolve(true),
       client: ({ address, secret }) =>
         new JmapClient(base, {
@@ -610,477 +685,558 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
         subject: "rescheduled-api",
       }),
     );
-    const retryDraft = value(await mail.createDraft(actor, "default", content));
-    const retryScheduled = value(
-      await mail.schedule(actor, "default", retryDraft.id, randomUUID(), {
-        type: "delay",
-        seconds: 30,
-      }),
-    );
-    lostResponse = "cancelBefore";
-    expect(
-      value(await mail.cancelScheduled(actor, "default", retryScheduled.id))
-        .state,
-    ).toBe("unknown");
-    expect(
-      (
-        await database.scheduledSend.findUniqueOrThrow({
-          where: { id: retryScheduled.id },
-        })
-      ).state,
-    ).toBe("canceling");
-    const attemptsBeforeRetry = cancellationAttempts;
-    lostResponse = "cancelBefore";
-    expect(
-      value(await mail.cancelScheduled(actor, "default", retryScheduled.id))
-        .state,
-    ).toBe("unknown");
-    expect(cancellationAttempts).toBe(attemptsBeforeRetry + 1);
-    await mail.reconcileScheduled();
-    expect(
-      value(await mail.cancelScheduled(actor, "default", retryScheduled.id))
-        .state,
-    ).toBe("canceled");
-    expect(
-      (await mail.updateDraft(actor, "default", retryDraft.id, content)).isOk(),
-    ).toBe(true);
-
-    const legacyDraft = value(
-      await mail.createDraft(actor, "default", content),
-    );
-    const legacyScheduled = value(
-      await mail.schedule(actor, "default", legacyDraft.id, randomUUID(), {
-        type: "delay",
-        seconds: 30,
-      }),
-    );
-    lostResponse = "cancelBefore";
-    expect(
-      value(await mail.cancelScheduled(actor, "default", legacyScheduled.id))
-        .state,
-    ).toBe("unknown");
-    await database.scheduledSend.update({
-      where: { id: legacyScheduled.id },
-      data: { state: "unknown" },
-    });
-    expect(
-      value(await mail.cancelScheduled(actor, "default", legacyScheduled.id))
-        .state,
-    ).toBe("canceled");
-    expect(
-      (
-        await mail.updateDraft(actor, "default", legacyDraft.id, content)
-      ).isOk(),
-    ).toBe(true);
-
-    const cancellationId = randomUUID();
-    const another = value(
-      await mail.schedule(actor, "default", edited.id, cancellationId, {
-        type: "delay",
-        seconds: 30,
-      }),
-    );
-    expect(another.state).toBe("pending");
-    lostResponse = "cancel";
-    const cancellationUnknown = value(
-      await mail.cancelScheduled(actor, "default", cancellationId),
-    );
-    expect(cancellationUnknown.state).toBe("unknown");
-    expect(
-      (await mail.updateDraft(actor, "default", edited.id, content)).isErr(),
-    ).toBe(true);
-    await mail.reconcileScheduled();
-    expect(
-      value(await mail.scheduled(actor, "default")).scheduled.find(
-        (item) => item.id === cancellationId,
-      )?.state,
-    ).toBe("canceled");
-    const editedAgain = value(
-      await mail.updateDraft(actor, "default", edited.id, {
-        ...content,
-        subject: "rescheduled-api",
-      }),
-    );
-    lostResponse = "create";
-    const uncertain = value(
-      await mail.schedule(actor, "default", editedAgain.id, randomUUID(), {
-        type: "delay",
-        seconds: 8,
-      }),
-    );
-    expect(uncertain.state).toBe("unknown");
-    mail = createService();
-    await mail.reconcileScheduled();
-    const found = value(await mail.scheduled(actor, "default")).scheduled.find(
-      (item) => item.id === uncertain.id,
-    );
-    expect(found?.state).toBe("pending");
-    await pause(
-      Math.max(0, Date.parse(found?.releaseAt ?? "") - Date.now()) + 3000,
-    );
-    await mail.reconcileScheduled();
-    const finished = value(
-      await mail.scheduled(actor, "default"),
-    ).scheduled.find((item) => item.id === uncertain.id);
-    expect(finished?.state).toBe("sent");
-    const blind = new JmapClient(base, {
-      authorization: `Basic ${Buffer.from(`blind@example.test:${password}`).toString("base64")}`,
-      rewriteSessionUrlsToOrigin: base,
-    });
-    const session = value(await blind.discover());
-    const id = session.primaryAccounts["urn:ietf:params:jmap:mail"];
-    if (!id) throw new Error("Missing blind recipient");
-    const deliveries = value(
-      await blind.queryEmails(session, id, {
-        filter: { subject: "rescheduled-api" },
-      }),
-    ).ids;
-    expect(deliveries).toHaveLength(1);
-    const received = value(await blind.emails(session, id, deliveries)).list[0];
-    expect(received?.from?.[0]?.email).toBe("alias@example.test");
-    expect(received?.attachments).toHaveLength(1);
-    lostResponse = "flag";
-    expect(
-      (
-        await mail.action(
-          actor,
-          "default",
-          uncertain.threadId,
-          { type: "read", value: false },
-          [uncertain.draftId],
-        )
-      ).isErr(),
-    ).toBe(true);
-    expect(
-      (
-        await mail.action(
-          actor,
-          "default",
-          uncertain.threadId,
-          { type: "read", value: true },
-          [uncertain.draftId],
-        )
-      ).isOk(),
-    ).toBe(true);
-    const immediateDraft = value(
-      await mail.createDraft(actor, "default", {
-        ...content,
-        subject: "uncertain-immediate",
-      }),
-    );
-    lostResponse = "send";
-    expect((await mail.send(actor, "default", immediateDraft.id)).isErr()).toBe(
-      true,
-    );
-    expect(
-      value(await mail.draftGuardStatus(actor, "default", immediateDraft.id))
-        .state,
-    ).toBe("unknown");
-    const immediateBefore = immediateAttempts;
-    clockOffset = 301_000;
-    mail = createService();
-    await mail.reconcileScheduled();
-    expect(
-      value(await mail.draftGuardStatus(actor, "default", immediateDraft.id))
-        .state,
-    ).toBe("clear");
-    expect(immediateAttempts).toBe(immediateBefore);
-    clockOffset = 0;
-    const raceDraft = value(await mail.createDraft(actor, "default", content));
-    const raceId = randomUUID();
-    value(
-      await mail.schedule(actor, "default", raceDraft.id, raceId, {
+    // The server holds the item itself; the provider has no queued submission.
+    expect(submissionAttempts).toBe(0);
+    const queued = value(
+      await mail.schedule(actor, "default", edited.id, randomUUID(), {
         type: "at",
         at: new Date(Date.now() + 30_000).toISOString(),
       }),
     );
-    const [raceCancel, raceEdit] = await Promise.all([
-      mail.cancelScheduled(actor, "default", raceId),
-      mail.updateDraft(actor, "default", raceDraft.id, content),
-    ]);
-    expect(value(raceCancel).state).toBe("canceled");
-    expect(raceEdit.isErr() || raceEdit.value.id !== raceDraft.id).toBe(true);
-    const competingDraft = value(
-      await mail.createDraft(actor, "default", content),
-    );
-    const [competingSchedule, competingEdit] = await Promise.all([
-      mail.schedule(actor, "default", competingDraft.id, randomUUID(), {
-        type: "delay",
-        seconds: 30,
-      }),
-      mail.updateDraft(actor, "default", competingDraft.id, content),
-    ]);
+    expect(queued.state).toBe("pending");
     expect(
-      Number(competingSchedule.isOk()) + Number(competingEdit.isOk()),
-    ).toBe(1);
-    const ambiguousDraft = value(
-      await mail.createDraft(actor, "default", content),
-    );
-    lostResponse = "editDelete";
-    expect(
-      (
-        await mail.updateDraft(actor, "default", ambiguousDraft.id, content)
-      ).isErr(),
-    ).toBe(true);
-    expect(
-      value(await mail.draftGuardStatus(actor, "default", ambiguousDraft.id))
-        .state,
-    ).toBe("unknown");
-    clockOffset = 301_000;
+      value(
+        await ownerClient.scheduled.submissionIds(
+          ownerSession,
+          accountId,
+          edited.id,
+        ),
+      ).ids,
+    ).toEqual([]);
+    const before = immediateAttempts;
     mail = createService();
     await mail.reconcileScheduled();
-    expect(
-      value(await mail.draftGuardStatus(actor, "default", ambiguousDraft.id))
-        .state,
-    ).toBe("clear");
-    clockOffset = 0;
-    const copyDraft = value(await mail.createDraft(actor, "default", content));
-    lostResponse = "editCreate";
-    expect(
-      (await mail.updateDraft(actor, "default", copyDraft.id, content)).isErr(),
-    ).toBe(true);
-    expect(
-      value(await mail.draftGuardStatus(actor, "default", copyDraft.id)).state,
-    ).toBe("clear");
-    const staleDraft = value(await mail.createDraft(actor, "default", content));
-    const staleToken = randomUUID();
-    await database.mailDraftGuard.create({
-      data: {
-        userId: actor.id,
-        accountId,
-        draftId: staleDraft.id,
-        token: staleToken,
-        phase: "preparing",
-        updatedAt: new Date(Date.now() - 301_000),
-      },
-    });
-    await mail.reconcileScheduled();
-    await expect(
-      createGuards(database).scheduledStore.beginWrite(
-        actor.id,
-        accountId,
-        [staleDraft.id],
-        staleToken,
-        "destroy",
-      ),
-    ).rejects.toThrow("draft guard changed");
-    expect(
-      value(await mail.draftGuardStatus(actor, "default", staleDraft.id)).state,
-    ).toBe("clear");
-    const missingDraft = value(
-      await mail.createDraft(actor, "default", content),
-    );
-    lostResponse = "missingCreate";
-    const missing = value(
-      await mail.schedule(actor, "default", missingDraft.id, randomUUID(), {
-        type: "delay",
-        seconds: 30,
-      }),
-    );
-    expect(missing.state).toBe("unknown");
-    const attempts = submissionAttempts;
-    await mail.reconcileScheduled();
-    await mail.reconcileScheduled();
-    expect(submissionAttempts).toBe(attempts);
+    expect(immediateAttempts).toBe(before);
+    clockOffset = 31_000;
+    const secondWorker = createService();
+    await Promise.all([
+      mail.reconcileScheduled(),
+      secondWorker.reconcileScheduled(),
+    ]);
+    expect(immediateAttempts).toBe(before + 1);
     expect(
       value(await mail.scheduled(actor, "default")).scheduled.find(
-        (item) => item.id === missing.id,
+        (x) => x.id === queued.id,
       )?.state,
-    ).toBe("unknown");
-    const copyRequest = {
-      accountId: "default",
-      draftId: missingDraft.id,
-      acknowledgeOriginalMayStillSend: true,
-    };
-    const deniedCopy = await app.inject({
-      method: "POST",
-      url: "/mail/drafts/recover-copy",
-      headers: { ...headers, cookie: "other" },
-      payload: copyRequest,
-    });
-    expect(deniedCopy.statusCode).toBe(403);
-    const noAcknowledgement = await app.inject({
-      method: "POST",
-      url: "/mail/drafts/recover-copy",
-      headers,
-      payload: { accountId: "default", draftId: missingDraft.id },
-    });
-    expect(noAcknowledgement.statusCode).toBe(400);
-    const originalDraft = value(
-      await mail.drafts(actor, "default"),
-    ).drafts.find((item) => item.id === missingDraft.id);
-    if (!originalDraft) throw new Error("Missing original draft");
-    const recoveredCopy = await app.inject({
-      method: "POST",
-      url: "/mail/drafts/recover-copy",
-      headers,
-      payload: copyRequest,
-    });
-    expect(recoveredCopy.statusCode).toBe(200);
-    const recovered = RecoveredDraftSchema.parse(recoveredCopy.json());
-    expect(recovered).toMatchObject({
-      state: "unknown",
-      originalMayStillSend: true,
-      draft: {
-        bcc: content.bcc,
-        attachmentBlobIds: originalDraft.attachmentBlobIds,
-      },
-    });
-    expect(recovered.draft.id).not.toBe(missingDraft.id);
-    const alice = new JmapClient(base, {
-      authorization: `Basic ${Buffer.from(`${actor.email}:${password}`).toString("base64")}`,
+    ).toBe("sent");
+    expect(submissionAttempts).toBe(0);
+    await pause(2000);
+    const blind = new JmapClient(base, {
+      authorization: `Basic ${Buffer.from(`blind@example.test:${password}`).toString("base64")}`,
       rewriteSessionUrlsToOrigin: base,
     });
-    const aliceSession = value(await alice.discover());
-    const copiedEmails = value(
-      await alice.emails(aliceSession, accountId, [
-        missingDraft.id,
-        recovered.draft.id,
-      ]),
-    ).list;
-    const sourceEmail = copiedEmails.find(
-      (item) => item.id === missingDraft.id,
-    );
-    const copiedEmail = copiedEmails.find(
-      (item) => item.id === recovered.draft.id,
-    );
-    if (!sourceEmail || !copiedEmail)
-      throw new Error("Missing recovered email");
-    expect(recovered.draft.threadId).toBe(copiedEmail.threadId);
-    expect(
-      copiedEmail.attachments.map(({ name, type, size }) => ({
-        name,
-        type,
-        size,
-      })),
-    ).toEqual(
-      sourceEmail.attachments.map(({ name, type, size }) => ({
-        name,
-        type,
-        size,
-      })),
-    );
-    expect(
-      (
-        await mail.updateDraft(
-          actor,
-          "default",
-          recovered.draft.id,
-          recovered.draft,
-        )
-      ).isOk(),
-    ).toBe(true);
-    expect(
-      value(await mail.cancelScheduled(actor, "default", missing.id)).state,
-    ).toBe("unknown");
-    expect(submissionAttempts).toBe(attempts);
-    expect(
-      (
-        await mail.schedule(actor, "default", ambiguousDraft.id, randomUUID(), {
-          type: "delay",
-          seconds: 30,
-        })
-      ).isErr(),
-    ).toBe(true);
-    const externallyCanceledDraft = value(
+    const blindSession = value(await blind.discover());
+    const blindId = blindSession.primaryAccounts["urn:ietf:params:jmap:mail"];
+    if (!blindId) throw new Error("Missing blind recipient");
+    const deliveries = value(
+      await blind.queryEmails(blindSession, blindId, {
+        filter: { subject: "rescheduled-api" },
+      }),
+    ).ids;
+    expect(deliveries).toHaveLength(1);
+    const received = value(
+      await blind.emails(blindSession, blindId, deliveries),
+    ).list[0];
+    expect(received?.from?.[0]?.email).toBe("alias@example.test");
+    expect(received?.attachments).toHaveLength(1);
+
+    // Cancel remains definitive even after the deadline until handoff wins.
+    clockOffset = 0;
+    const canceledDraft = value(
       await mail.createDraft(actor, "default", content),
     );
-    const externallyCanceled = value(
-      await mail.schedule(
-        actor,
-        "default",
-        externallyCanceledDraft.id,
-        randomUUID(),
-        { type: "delay", seconds: 30 },
-      ),
-    );
-    const submissionRow = await database.scheduledSend.findUniqueOrThrow({
-      where: { id: externallyCanceled.id },
-    });
-    if (!submissionRow.submissionId)
-      throw new Error("Missing scheduled submission");
-    expect(
-      (
-        await alice.scheduled.cancelSubmission(
-          aliceSession,
-          accountId,
-          submissionRow.submissionId,
-        )
-      ).isOk(),
-    ).toBe(true);
-    clockOffset = 31_000;
-    const attemptsBeforeReconcile = submissionAttempts;
-    await mail.reconcileScheduled();
-    expect(submissionAttempts).toBe(attemptsBeforeReconcile);
-    expect(
-      value(await mail.scheduled(actor, "default")).scheduled.find(
-        (item) => item.id === missing.id,
-      )?.state,
-    ).toBe("unknown");
-    expect(
-      value(await mail.scheduled(actor, "default")).scheduled.find(
-        (item) => item.id === externallyCanceled.id,
-      )?.state,
-    ).toBe("canceled");
-    clockOffset = 0;
-    expect(
-      (
-        await mail.updateDraft(
-          actor,
-          "default",
-          externallyCanceledDraft.id,
-          content,
-        )
-      ).isOk(),
-    ).toBe(true);
-    const lateDraft = value(await mail.createDraft(actor, "default", content));
-    const lateId = randomUUID();
-    value(
-      await mail.schedule(actor, "default", lateDraft.id, lateId, {
+    const canceledItem = value(
+      await mail.schedule(actor, "default", canceledDraft.id, randomUUID(), {
         type: "delay",
         seconds: 30,
       }),
     );
     clockOffset = 31_000;
     expect(
-      value(await mail.cancelScheduled(actor, "default", lateId)).state,
-    ).toBe("unknown");
-    clockOffset = 0;
+      value(await mail.cancelScheduled(actor, "default", canceledItem.id))
+        .state,
+    ).toBe("canceled");
     expect(
-      (await mail.cancelScheduled(actor, "default", uncertain.id)).match(
-        (v) => v.state,
-        () => "error",
-      ),
-    ).toBe("sent");
-    const neverSent = value(await mail.createDraft(actor, "default", content));
-    lostResponse = "missingSend";
-    expect((await mail.send(actor, "default", neverSent.id)).isErr()).toBe(
-      true,
+      (
+        await mail.updateDraft(actor, "default", canceledDraft.id, content)
+      ).isOk(),
+    ).toBe(true);
+    expect(cancellationAttempts).toBe(0);
+
+    // Cancellation and worker handoff use a single database transition.
+    clockOffset = 0;
+    const raceDraft = value(await mail.createDraft(actor, "default", content));
+    const race = value(
+      await mail.schedule(actor, "default", raceDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
     );
-    const immediateBeforeRecovery = immediateAttempts;
-    clockOffset = 301_000;
+    afterQueryFor = raceDraft.id;
+    afterQuery = async () => {
+      expect(
+        value(await mail.cancelScheduled(actor, "default", race.id)).state,
+      ).toBe("canceled");
+    };
+    clockOffset = 2000;
+    const beforeRace = immediateAttempts;
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(beforeRace);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (x) => x.id === race.id,
+      )?.state,
+    ).toBe("canceled");
+
+    // A worker that dies before handoff loses its expired lease; its token
+    // cannot later submit once another worker has taken over.
+    clockOffset = 0;
+    const leaseDraft = value(await mail.createDraft(actor, "default", content));
+    const lease = value(
+      await mail.schedule(actor, "default", leaseDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    const store = createScheduledSendStore(database);
+    clockOffset = 2000;
+    const staleToken = randomUUID();
+    expect(
+      await store.claim(
+        lease.id,
+        new Date(Date.now() + clockOffset),
+        staleToken,
+      ),
+    ).toBe(true);
+    clockOffset = 63_000;
+    const beforeLease = immediateAttempts;
+    await createService().reconcileScheduled();
+    expect(immediateAttempts).toBe(beforeLease + 1);
+    expect(
+      await store.beginSubmission(
+        lease.id,
+        staleToken,
+        new Date(Date.now() + clockOffset),
+        [],
+      ),
+    ).toBe(false);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (x) => x.id === lease.id,
+      )?.state,
+    ).toBe("sent");
+
+    // Verified custom domains remain valid without being listed as a configured
+    // shared domain; alias ownership still comes from the alias store.
+    clockOffset = 0;
+    const customService = createService([]);
+    const customDraft = value(
+      await customService.createDraft(actor, "default", content),
+    );
+    const custom = value(
+      await customService.schedule(
+        actor,
+        "default",
+        customDraft.id,
+        randomUUID(),
+        { type: "delay", seconds: 1 },
+      ),
+    );
+    clockOffset = 2000;
+    await customService.reconcileScheduled();
+    expect(
+      value(await customService.scheduled(actor, "default")).scheduled.find(
+        (x) => x.id === custom.id,
+      )?.state,
+    ).toBe("sent");
+
+    // Revoke each authorization after queueing, including during the final provider read.
+    const failureCases = [
+      {
+        reason: "account_inactive",
+        set: () =>
+          database.user.update({
+            where: { id: actor.id },
+            data: { disabled: true },
+          }),
+        reset: () =>
+          database.user.update({
+            where: { id: actor.id },
+            data: { disabled: false },
+          }),
+      },
+      {
+        reason: "domain_unavailable",
+        set: () =>
+          database.domain.update({
+            where: { name: "example.test" },
+            data: { removalPending: true },
+          }),
+        reset: () =>
+          database.domain.update({
+            where: { name: "example.test" },
+            data: { removalPending: false },
+          }),
+      },
+      {
+        reason: "entitlement_required",
+        set: () => {
+          entitled = false;
+          return Promise.resolve();
+        },
+        reset: () => {
+          entitled = true;
+          return Promise.resolve();
+        },
+      },
+      {
+        reason: "quota_exceeded",
+        set: () => {
+          quota = 100;
+          used = 100;
+          return Promise.resolve();
+        },
+        reset: () => {
+          quota = null;
+          used = 0;
+          return Promise.resolve();
+        },
+      },
+    ];
+    await failureCases.reduce<Promise<void>>(
+      (previous, test) =>
+        previous.then(async () => {
+          clockOffset = 0;
+          const draftToBlock = value(
+            await mail.createDraft(actor, "default", content),
+          );
+          const item = value(
+            await mail.schedule(
+              actor,
+              "default",
+              draftToBlock.id,
+              randomUUID(),
+              {
+                type: "delay",
+                seconds: 1,
+              },
+            ),
+          );
+          await test.set();
+          clockOffset = 2000;
+          const attempts = immediateAttempts;
+          await mail.reconcileScheduled();
+          await test.reset();
+          // Re-enable the fixture alias after the account-state trigger queues
+          // its normal provider reconciliation.
+          await database.emailAlias.update({
+            where: { address: "alias@example.test" },
+            data: { ready: true },
+          });
+          expect(immediateAttempts).toBe(attempts);
+          const failed = value(
+            await mail.scheduled(actor, "default"),
+          ).scheduled.find((x) => x.id === item.id);
+          expect(failed).toMatchObject({
+            state: "failed",
+            failure: { code: test.reason },
+          });
+          const editedAfterFailure = await mail.updateDraft(
+            actor,
+            "default",
+            draftToBlock.id,
+            content,
+          );
+          if (editedAfterFailure.isErr())
+            throw new Error(
+              `${test.reason}: edit failed: ${JSON.stringify(editedAfterFailure.error)}`,
+            );
+          expect(
+            await database.auditEvent.count({
+              where: {
+                userId: actor.id,
+                action: "mail.scheduled.failed",
+                detail: { path: ["scheduledId"], equals: item.id },
+              },
+            }),
+          ).toBe(1);
+          return undefined;
+        }),
+      Promise.resolve(),
+    );
+    clockOffset = 0;
+    const revokedDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    const revoked = value(
+      await mail.schedule(actor, "default", revokedDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    afterQueryFor = revokedDraft.id;
+    afterQuery = async () => {
+      await database.emailAlias.update({
+        where: { address: "alias@example.test" },
+        data: { enabled: false },
+      });
+    };
+    clockOffset = 2000;
+    const beforeRevoke = immediateAttempts;
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(beforeRevoke);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (x) => x.id === revoked.id,
+      ),
+    ).toMatchObject({
+      state: "failed",
+      failure: { code: "sender_unavailable" },
+    });
+    expect(
+      await database.auditEvent.count({
+        where: {
+          action: "mail.scheduled.failed",
+          detail: { path: ["scheduledId"], equals: revoked.id },
+        },
+      }),
+    ).toBe(1);
+    await database.emailAlias.update({
+      where: { address: "alias@example.test" },
+      data: { enabled: true },
+    });
+
+    // Even if the application alias still exists, a missing provider identity
+    // fails release and records why instead of handing off the draft.
+    clockOffset = 0;
+    const noIdentityDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    const noIdentity = value(
+      await mail.schedule(actor, "default", noIdentityDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    const admin = new StalwartAdmin(base, {
+      username: "admin",
+      password: "integration-password",
+    });
+    const domain = await database.domain.findUniqueOrThrow({
+      where: { name: "example.test" },
+    });
+    if (!domain.stalwartId) throw new Error("Missing domain id");
+    expect(
+      (await admin.removeAlias(accountId, "alias", domain.stalwartId)).isOk(),
+    ).toBe(true);
+    clockOffset = 2000;
+    const beforeIdentity = immediateAttempts;
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(beforeIdentity);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (x) => x.id === noIdentity.id,
+      ),
+    ).toMatchObject({
+      state: "failed",
+      failure: { code: "sender_unavailable" },
+    });
+    expect(
+      await database.auditEvent.count({
+        where: {
+          action: "mail.scheduled.failed",
+          detail: { path: ["scheduledId"], equals: noIdentity.id },
+        },
+      }),
+    ).toBe(1);
+    value(await admin.createAlias(accountId, "alias", domain.stalwartId));
+
+    // Sender authorization is checked after slow quota measurement, and the
+    // entitlement is re-read if billing changes while usage is measured.
+    const duringMeasurement = [
+      {
+        reason: "sender_unavailable",
+        revoke: async () => {
+          await database.emailAlias.update({
+            where: { address: "alias@example.test" },
+            data: { enabled: false },
+          });
+        },
+        restore: async () => {
+          await database.emailAlias.update({
+            where: { address: "alias@example.test" },
+            data: { enabled: true },
+          });
+        },
+      },
+      {
+        reason: "entitlement_required",
+        revoke: () => {
+          entitled = false;
+          return Promise.resolve();
+        },
+        restore: () => {
+          entitled = true;
+          return Promise.resolve();
+        },
+      },
+    ];
+    await duringMeasurement.reduce<Promise<void>>(
+      (previous, test) =>
+        previous.then(async () => {
+          clockOffset = 0;
+          quota = 1_000_000;
+          used = 0;
+          const draftToBlock = value(
+            await mail.createDraft(actor, "default", content),
+          );
+          const item = value(
+            await mail.schedule(
+              actor,
+              "default",
+              draftToBlock.id,
+              randomUUID(),
+              { type: "delay", seconds: 1 },
+            ),
+          );
+          let measurements = 0;
+          afterMeasure = async () => {
+            measurements++;
+            if (measurements === 2) await test.revoke();
+          };
+          clockOffset = 2000;
+          const beforeMeasurement = immediateAttempts;
+          await mail.reconcileScheduled();
+          afterMeasure = undefined;
+          await test.restore();
+          quota = null;
+          expect(immediateAttempts).toBe(beforeMeasurement);
+          expect(
+            value(await mail.scheduled(actor, "default")).scheduled.find(
+              (x) => x.id === item.id,
+            ),
+          ).toMatchObject({ state: "failed", failure: { code: test.reason } });
+          return undefined;
+        }),
+      Promise.resolve(),
+    );
+
+    // Incomplete quota information defers instead of authorizing or failing the item.
+    clockOffset = 0;
+    const deferredDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    const deferred = value(
+      await mail.schedule(actor, "default", deferredDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    quota = 100;
+    measured = false;
+    clockOffset = 2000;
     await expect(mail.reconcileScheduled()).rejects.toThrow(
       "scheduled reconciliation incomplete",
     );
-    expect(immediateAttempts).toBe(immediateBeforeRecovery);
     expect(
-      value(await mail.draftGuardStatus(actor, "default", neverSent.id)).state,
-    ).toBe("unknown");
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (x) => x.id === deferred.id,
+      )?.state,
+    ).toBe("pending");
+    expect(
+      value(await mail.cancelScheduled(actor, "default", deferred.id)).state,
+    ).toBe("canceled");
+    quota = null;
+    measured = true;
+
+    // A crash after committing the handoff marker is uncertain, even if the
+    // process died before issuing the provider request.
     clockOffset = 0;
-    const recoveredImmediate = await app.inject({
+    const crashDraft = value(await mail.createDraft(actor, "default", content));
+    const crash = value(
+      await mail.schedule(actor, "default", crashDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    clockOffset = 2000;
+    const crashToken = randomUUID();
+    const crashTime = new Date(Date.now() + clockOffset);
+    expect(await store.claim(crash.id, crashTime, crashToken)).toBe(true);
+    expect(
+      await store.beginSubmission(crash.id, crashToken, crashTime, []),
+    ).toBe(true);
+    const beforeCrashRecovery = immediateAttempts;
+    await createService().reconcileScheduled();
+    expect(immediateAttempts).toBe(beforeCrashRecovery);
+    expect(
+      value(await mail.cancelScheduled(actor, "default", crash.id)).state,
+    ).toBe("unknown");
+
+    // An interrupted provider request stays uncertain and never gets submitted twice.
+    clockOffset = 0;
+    const uncertainDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    const uncertain = value(
+      await mail.schedule(actor, "default", uncertainDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    lostResponse = "missingSend";
+    clockOffset = 2000;
+    await mail.reconcileScheduled();
+    const uncertainAttempts = immediateAttempts;
+    mail = createService();
+    await mail.reconcileScheduled();
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(uncertainAttempts);
+    expect(
+      value(await mail.cancelScheduled(actor, "default", uncertain.id)).state,
+    ).toBe("unknown");
+    const recovered = await app.inject({
       method: "POST",
       url: "/mail/drafts/recover-copy",
       headers,
       payload: {
         accountId: "default",
-        draftId: neverSent.id,
+        draftId: uncertainDraft.id,
         acknowledgeOriginalMayStillSend: true,
       },
     });
-    expect(recoveredImmediate.statusCode).toBe(200);
-    expect(RecoveredDraftSchema.parse(recoveredImmediate.json())).toMatchObject(
-      { state: "unknown", originalMayStillSend: true },
+    expect(recovered.statusCode).toBe(200);
+    expect(RecoveredDraftSchema.parse(recovered.json())).toMatchObject({
+      state: "unknown",
+      originalMayStillSend: true,
+    });
+
+    // An accepted submission with a lost response is reconciled without a second send.
+    clockOffset = 0;
+    const acceptedDraft = value(
+      await mail.createDraft(actor, "default", {
+        ...content,
+        subject: "lost-submission-response",
+      }),
     );
+    const accepted = value(
+      await mail.schedule(actor, "default", acceptedDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    lostResponse = "send";
+    clockOffset = 2000;
+    await mail.reconcileScheduled();
+    const acceptedAttempts = immediateAttempts;
+    mail = createService();
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(acceptedAttempts);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (x) => x.id === accepted.id,
+      )?.state,
+    ).toBe("sent");
   } finally {
     await app.close();
   }

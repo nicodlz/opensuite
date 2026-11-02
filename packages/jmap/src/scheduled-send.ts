@@ -29,10 +29,7 @@ export function matchesSubmission(
   return (
     submission.emailId === row.draftId &&
     submission.identityId === row.identityId &&
-    submission.envelope.mailFrom.parameters?.["ENVID"] === row.id &&
-    (row.submissionId !== null ||
-      Math.abs(Date.parse(submission.sendAt) - row.releaseAt.getTime()) <=
-        120_000)
+    submission.envelope.mailFrom.parameters?.["ENVID"] === row.id
   );
 }
 

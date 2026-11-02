@@ -2,8 +2,8 @@ import {
   scheduledDto,
   type Mailbox,
   type ScheduleDelivery,
-  type Scheduled,
 } from "@opensuite/contracts";
+import { randomUUID } from "node:crypto";
 import type {
   DraftGuardBegin as BeginWrite,
   ScheduledRecord,
@@ -38,9 +38,23 @@ type Sender = {
   identityId: string;
   recipients: { email: string }[];
 };
-type Timing = { release: number; seconds: number; max: number };
-type Reject = (kind: "validation" | "unavailable") => never;
-type Reservation = Omit<ScheduledRecord, "submissionId" | "createdAt">;
+export type ScheduledWorkerContext = {
+  store: ScheduledSendStore;
+  connect: Connect;
+  boxes: (c: Connection) => Promise<Mailbox[]>;
+  draft: (c: Connection, id: string) => Promise<Email>;
+  now: () => number;
+  sender: (
+    c: Connection,
+    email: Email,
+    forRelease?: boolean,
+  ) => Promise<Sender>;
+  reconcileSubmission: (
+    c: Connection,
+    row: ScheduledRecord,
+    store: ScheduledSendStore,
+  ) => Promise<Submission | undefined>;
+};
 type Dependencies = {
   store: ScheduledSendStore | undefined;
   connect: Connect;
@@ -53,28 +67,14 @@ type Dependencies = {
     row: ScheduledRecord,
     store: ScheduledSendStore,
   ) => Promise<Submission | undefined>;
-  sender: (c: Connection, email: Email) => Promise<Sender>;
-  delaySeconds: (
+  sender: (
     c: Connection,
-    d: ScheduleDelivery,
-    n: number,
-    reject: Reject,
-  ) => Timing;
-  reserve: (
-    store: ScheduledSendStore,
-    input: Reservation,
-    verify: () => Promise<string[]>,
-    conflict: () => never,
-  ) => Promise<void>;
-  submit: (
-    c: Connection,
-    store: ScheduledSendStore,
-    plan: Pick<
-      Prepared,
-      "requestId" | "draftId" | "identityId" | "from" | "recipients" | "seconds"
-    > & { threadId: string },
-    now: number,
-  ) => Promise<Scheduled>;
+    email: Email,
+    forRelease?: boolean,
+  ) => Promise<Sender>;
+  processRow?:
+    | ((row: ScheduledRecord, context: ScheduledWorkerContext) => Promise<void>)
+    | undefined;
 };
 export type ScheduledAdapters = {
   scheduledStore?: ScheduledSendStore;
@@ -85,19 +85,8 @@ export type ScheduledAdapters = {
     conflict: () => never,
   ) => Promise<T>;
   reconcileSubmission?: Dependencies["reconcileSubmission"];
-  delaySeconds?: Dependencies["delaySeconds"];
-  submit?: Dependencies["submit"];
-  reserve?: Dependencies["reserve"];
+  processRow?: Dependencies["processRow"];
   sweep?: Sweep;
-};
-type Prepared = Sender & {
-  c: Connection;
-  store: ScheduledSendStore;
-  draftId: string;
-  requestId: string;
-  encoded: string;
-  email: Email;
-  seconds: number;
 };
 const requiredStore = (deps: Dependencies) => deps.store ?? fail("unavailable");
 const noWriteGuard = () => Promise.resolve(undefined);
@@ -165,7 +154,7 @@ export async function senderFor(
   const identity = value(await c.client.identities(c.session, c.id)).list.find(
     (item) => item.email.toLowerCase() === from,
   );
-  if (!identity) return fail("unavailable");
+  if (!identity) return fail("forbidden");
   if (aliasId && !(await options.beforeAliasSend?.(c.owner, aliasId)))
     return fail("rate_limited");
   return {
@@ -175,35 +164,34 @@ export async function senderFor(
   };
 }
 
-async function prepare(
-  deps: Dependencies,
-  c: Connection,
+function sameSchedule(
+  row: ScheduledRecord,
+  accountId: string,
   draftId: string,
-  requestId: string,
   delivery: ScheduleDelivery,
-): Promise<Prepared> {
-  const store = requiredStore(deps);
-  const timing = deps.delaySeconds(c, delivery, deps.now(), fail);
-  const email = await getDraft(c, draftId, await deps.boxes(c));
-  const { from, identityId, recipients } = await deps.sender(c, email);
-  const seconds =
-    delivery.type === "at"
-      ? Math.ceil((timing.release - deps.now()) / 1000)
-      : timing.seconds;
-  if (seconds < 1 || seconds > timing.max) return fail("validation");
-  return {
-    c,
-    store,
-    draftId,
-    requestId,
-    encoded: JSON.stringify(delivery),
-    email,
-    identityId,
-    from,
-    recipients,
-    seconds,
-  };
+) {
+  if (
+    row.accountId !== accountId ||
+    row.draftId !== draftId ||
+    row.requestDelivery !== JSON.stringify(delivery)
+  )
+    return fail("conflict");
+  return scheduledDto(row);
 }
+function releaseTime(delivery: ScheduleDelivery, now: number) {
+  const release =
+    delivery.type === "delay"
+      ? now + delivery.seconds * 1000
+      : Date.parse(delivery.at);
+  if (
+    !Number.isFinite(release) ||
+    release <= now ||
+    release > now + 2_592_000_000
+  )
+    return fail("validation");
+  return release;
+}
+
 async function schedule(
   deps: Dependencies,
   actor: Actor,
@@ -213,53 +201,52 @@ async function schedule(
   delivery: ScheduleDelivery,
 ) {
   const store = requiredStore(deps);
+  if (!deps.processRow) return fail("unavailable");
   const c = await deps.connect(actor, accountId);
   const existing = await store.get(actor.id, requestId);
-  if (existing) {
+  if (existing) return sameSchedule(existing, c.id, draftId, delivery);
+  const now = deps.now();
+  const release = releaseTime(delivery, now);
+  const email = await getDraft(c, draftId, await deps.boxes(c));
+  const sender = await deps.sender(c, email);
+  const token = randomUUID();
+  const reserved = await store.reserve({
+    id: requestId,
+    userId: c.owner,
+    accountId: c.id,
+    draftId,
+    threadId: email.threadId,
+    identityId: sender.identityId,
+    senderAddress: sender.from,
+    releaseAt: new Date(release),
+    requestDelivery: JSON.stringify(delivery),
+    leaseToken: token,
+    leaseUntil: new Date(now + 60_000),
+  });
+  if (!reserved) {
+    const concurrent = await store.get(actor.id, requestId);
+    return concurrent
+      ? sameSchedule(concurrent, c.id, draftId, delivery)
+      : fail("conflict");
+  }
+  const row = await store.get(c.owner, requestId);
+  if (!row) return fail("unavailable");
+  try {
+    const current = await getDraft(c, draftId, await deps.boxes(c));
+    const currentSender = await deps.sender(c, current);
     if (
-      existing.accountId !== c.id ||
-      existing.draftId !== draftId ||
-      existing.requestDelivery !== JSON.stringify(delivery)
+      currentSender.from !== sender.from ||
+      currentSender.identityId !== sender.identityId
     )
       return fail("conflict");
-    return scheduledDto(existing);
+    await store.queue(requestId, token);
+  } catch (error) {
+    if (await store.finish(row, ["preparing"], "canceled")) throw error;
   }
-  const prepared = await prepare(deps, c, draftId, requestId, delivery);
-  await deps.reserve(
-    store,
-    {
-      id: requestId,
-      userId: c.owner,
-      accountId: c.id,
-      draftId,
-      threadId: prepared.email.threadId,
-      identityId: prepared.identityId,
-      releaseAt: new Date(deps.now() + prepared.seconds * 1000),
-      previousIds: [],
-      state: "preparing",
-      requestDelivery: prepared.encoded,
-    },
-    async () => {
-      await getDraft(c, draftId, await deps.boxes(c));
-      const previous = value(
-        await c.client.scheduled.submissionIds(c.session, c.id, draftId),
-      );
-      if (
-        previous.total === undefined ||
-        previous.total !== previous.ids.length
-      )
-        return fail("unavailable");
-      return previous.ids;
-    },
-    () => fail("conflict"),
-  );
-  return deps.submit(
-    prepared.c,
-    prepared.store,
-    { ...prepared, threadId: prepared.email.threadId },
-    deps.now(),
-  );
+  const found = await store.get(c.owner, requestId);
+  return found ? scheduledDto(found) : fail("unavailable");
 }
+
 async function cancel(
   deps: Dependencies,
   actor: Actor,
@@ -270,100 +257,28 @@ async function cancel(
   const c = await deps.connect(actor, accountId);
   const row = await store.get(actor.id, id);
   if (!row || row.accountId !== c.id) return fail("not_found");
-  if (row.state === "pending" && row.releaseAt.getTime() <= deps.now()) {
-    await store.transition(row.id, ["pending"], "unknown");
-    const found = await store.get(actor.id, id);
-    return found ? scheduledDto(found) : fail("unavailable");
-  }
-  if (!row.submissionId) return scheduledDto(row);
-  if (await store.beginCancel(row.id)) {
-    try {
-      const canceled = await c.client.scheduled.cancelSubmission(
-        c.session,
-        c.id,
-        row.submissionId,
-      );
-      if (canceled.isOk()) await store.finish(row, ["canceling"], "canceled");
-      const found = await store.get(actor.id, id);
-      return scheduledDto(found ?? { ...row, state: "unknown" });
-    } catch {
-      return scheduledDto({ ...row, state: "unknown" });
-    }
-  }
+  // The compare-and-swap competes with the worker's handoff. Once handoff
+  // starts, return the actual uncertain/sent state rather than claiming undo.
+  if (!row.submissionId)
+    await store.finish(row, ["pending", "preparing"], "canceled");
   const found = await store.get(actor.id, id);
   return found ? scheduledDto(found) : fail("unavailable");
 }
-async function release(
-  deps: Dependencies,
-  c: Connection,
-  row: ScheduledRecord,
-  store: ScheduledSendStore,
-) {
-  const sent =
-    (await deps.boxes(c)).find((box) => box.role === "sent")?.id ??
-    fail("not_found");
-  const updated = await c.client.updateEmail(c.session, c.id, row.draftId, {
-    mailboxIds: { [sent]: true },
-    "keywords/$draft": null,
-    "keywords/$seen": true,
-  });
-  if (updated.isOk()) await store.finish(row, ["releasing"], "sent");
-}
-async function reconcileOne(
-  deps: Dependencies,
-  row: ScheduledRecord,
-): Promise<void> {
-  const store = requiredStore(deps);
-  const c = await deps.connect(
-    { id: row.userId, email: "", role: "user" },
-    "default",
-  );
-  if (c.id !== row.accountId) return;
-  if (row.state === "preparing") {
-    if (row.createdAt && row.createdAt.getTime() <= deps.now() - 300_000)
-      await store.finish(row, ["preparing"], "failed");
-    return;
-  }
-  if (row.state === "pending" && row.releaseAt.getTime() > deps.now()) return;
-  const found = await deps.reconcileSubmission(c, row, store);
-  if (!found) return;
-  if (found.undoStatus === "canceled")
-    await store.finish(
-      row,
-      ["creating", "unknown", "canceling", "pending", "releasing"],
-      "canceled",
-    );
-  else if (found.undoStatus === "final") {
-    if (
-      row.state === "releasing" ||
-      (await store.transition(
-        row.id,
-        ["creating", "unknown", "canceling", "pending"],
-        "releasing",
-        { submissionId: found.id },
-      ))
-    )
-      await release(
-        deps,
-        c,
-        { ...row, state: "releasing", submissionId: found.id },
-        store,
-      );
-  } else if (["creating", "unknown"].includes(row.state) && !row.submissionId) {
-    await store.transition(
-      row.id,
-      ["creating", "unknown"],
-      "pending",
-      { submissionId: found.id, releaseAt: new Date(found.sendAt) },
-      true,
-    );
-  }
-}
+
 async function reconcile(deps: Dependencies) {
-  const store = deps.store;
-  if (!store) return;
-  await deps.sweep(store, deps.connect, deps.now, (row) =>
-    reconcileOne(deps, row),
+  const processRow = deps.processRow;
+  if (!deps.store || !processRow) return;
+  const context: ScheduledWorkerContext = {
+    store: deps.store,
+    connect: deps.connect,
+    boxes: deps.boxes,
+    draft: async (c, id) => getDraft(c, id, await deps.boxes(c)),
+    now: deps.now,
+    sender: deps.sender,
+    reconcileSubmission: deps.reconcileSubmission,
+  };
+  await deps.sweep(deps.store, deps.connect, deps.now, (row) =>
+    processRow(row, context),
   );
 }
 export function createScheduledSend(deps: Dependencies) {

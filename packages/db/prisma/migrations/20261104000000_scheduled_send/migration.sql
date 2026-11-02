@@ -5,11 +5,15 @@ CREATE TABLE "ScheduledSend" (
   "draftId" TEXT NOT NULL,
   "threadId" TEXT NOT NULL,
   "identityId" TEXT NOT NULL,
+  "senderAddress" TEXT NOT NULL,
   "releaseAt" TIMESTAMP(3) NOT NULL,
   "submissionId" TEXT,
   "previousIds" TEXT[] NOT NULL,
   "requestDelivery" TEXT NOT NULL,
   "state" TEXT NOT NULL,
+  "failureReason" TEXT,
+  "leaseToken" TEXT,
+  "leaseUntil" TIMESTAMP(3),
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updatedAt" TIMESTAMP(3) NOT NULL
 );

@@ -1,4 +1,4 @@
-import type { PrismaClient } from "./generated/index.js";
+import type { Prisma, PrismaClient } from "./generated/index.js";
 
 export type DraftGuardWrite = "destroy" | "send" | "mutation";
 export type DraftGuardBegin = (
@@ -15,6 +15,14 @@ type ScheduledState =
   | "sent"
   | "canceled"
   | "failed";
+export type ScheduledFailure =
+  | "account_inactive"
+  | "sender_unavailable"
+  | "domain_unavailable"
+  | "entitlement_required"
+  | "quota_exceeded"
+  | "draft_unavailable"
+  | "submission_rejected";
 
 export type ScheduledRecord = {
   id: string;
@@ -23,13 +31,43 @@ export type ScheduledRecord = {
   draftId: string;
   threadId: string;
   identityId: string;
+  senderAddress: string;
   releaseAt: Date;
   submissionId: string | null;
   previousIds: string[];
   requestDelivery: string;
   state: string;
+  failureReason: string | null;
+  leaseToken: string | null;
+  leaseUntil: Date | null;
   createdAt?: Date;
 };
+export type ScheduledReservation = Pick<
+  ScheduledRecord,
+  | "id"
+  | "userId"
+  | "accountId"
+  | "draftId"
+  | "threadId"
+  | "identityId"
+  | "senderAddress"
+  | "releaseAt"
+  | "requestDelivery"
+> & { leaseToken: string; leaseUntil: Date };
+
+async function clearScheduledGuard(
+  tx: Prisma.TransactionClient,
+  row: ScheduledRecord,
+) {
+  await tx.mailDraftGuard.deleteMany({
+    where: {
+      userId: row.userId,
+      accountId: row.accountId,
+      draftId: row.draftId,
+      token: row.id,
+    },
+  });
+}
 
 class Store {
   readonly #db: PrismaClient;
@@ -140,10 +178,11 @@ class Store {
     const guard = await this.guard(userId, accountId, draftId);
     if (!guard) return "clear" as const;
     const scheduled = await this.get(userId, guard.token);
-    if (scheduled?.state === "pending") return "scheduled" as const;
+    if (scheduled && ["preparing", "pending"].includes(scheduled.state))
+      return "scheduled" as const;
     return "unknown" as const;
   }
-  async reserve(input: Omit<ScheduledRecord, "submissionId" | "createdAt">) {
+  async reserve(input: ScheduledReservation) {
     try {
       await this.#db.$transaction(async (tx) => {
         await tx.mailDraftGuard.create({
@@ -155,7 +194,9 @@ class Store {
             phase: "scheduled",
           },
         });
-        await tx.scheduledSend.create({ data: input });
+        await tx.scheduledSend.create({
+          data: { ...input, previousIds: [], state: "preparing" },
+        });
       });
       return true;
     } catch (error) {
@@ -171,6 +212,59 @@ class Store {
   }
   get(userId: string, id: string) {
     return this.#db.scheduledSend.findFirst({ where: { id, userId } });
+  }
+  async queue(id: string, token: string) {
+    const result = await this.#db.scheduledSend.updateMany({
+      where: { id, state: "preparing", leaseToken: token },
+      data: { state: "pending", leaseToken: null, leaseUntil: null },
+    });
+    return result.count === 1;
+  }
+  async claim(id: string, now: Date, token: string) {
+    const result = await this.#db.scheduledSend.updateMany({
+      where: {
+        id,
+        releaseAt: { lte: now },
+        OR: [
+          { state: "pending" },
+          { state: "preparing", leaseUntil: { lte: now } },
+        ],
+      },
+      data: {
+        state: "preparing",
+        leaseToken: token,
+        leaseUntil: new Date(now.getTime() + 60_000),
+      },
+    });
+    return result.count === 1;
+  }
+  async defer(id: string, token: string) {
+    await this.#db.scheduledSend.updateMany({
+      where: { id, state: "preparing", leaseToken: token },
+      data: { state: "pending", leaseToken: null, leaseUntil: null },
+    });
+  }
+  async beginSubmission(
+    id: string,
+    token: string,
+    now: Date,
+    previousIds: string[],
+  ) {
+    const result = await this.#db.scheduledSend.updateMany({
+      where: {
+        id,
+        state: "preparing",
+        leaseToken: token,
+        leaseUntil: { gt: now },
+      },
+      data: {
+        state: "creating",
+        previousIds,
+        leaseToken: null,
+        leaseUntil: null,
+      },
+    });
+    return result.count === 1;
   }
   list(userId: string, accountId: string) {
     return this.#db.scheduledSend.findMany({
@@ -201,14 +295,13 @@ class Store {
         OR: [
           { state: "pending", releaseAt: { lte: now } },
           {
+            state: "preparing",
+            releaseAt: { lte: now },
+            leaseUntil: { lte: now },
+          },
+          {
             state: {
-              in: [
-                "preparing",
-                "creating",
-                "canceling",
-                "unknown",
-                "releasing",
-              ],
+              in: ["creating", "canceling", "unknown", "releasing"],
             },
           },
         ],
@@ -253,15 +346,33 @@ class Store {
     return this.#db.$transaction(async (tx) => {
       const result = await tx.scheduledSend.updateMany({
         where: { id: row.id, state: { in: from } },
-        data: { state },
+        data: { state, leaseToken: null, leaseUntil: null },
       });
       if (result.count !== 1) return false;
-      await tx.mailDraftGuard.deleteMany({
-        where: {
+      await clearScheduledGuard(tx, row);
+      return true;
+    });
+  }
+  async fail(row: ScheduledRecord, reason: ScheduledFailure, token?: string) {
+    return this.#db.$transaction(async (tx) => {
+      const result = await tx.scheduledSend.updateMany({
+        where: token
+          ? { id: row.id, state: "preparing", leaseToken: token }
+          : { id: row.id, state: { in: ["creating", "unknown"] } },
+        data: {
+          state: "failed",
+          failureReason: reason,
+          leaseToken: null,
+          leaseUntil: null,
+        },
+      });
+      if (result.count !== 1) return false;
+      await clearScheduledGuard(tx, row);
+      await tx.auditEvent.create({
+        data: {
           userId: row.userId,
-          accountId: row.accountId,
-          draftId: row.draftId,
-          token: row.id,
+          action: "mail.scheduled.failed",
+          detail: { scheduledId: row.id, reason },
         },
       });
       return true;

@@ -296,7 +296,13 @@ const credentialStore = {
     mailboxStore.getForOwner(userId, accountId),
 };
 const { mail, invitations } = createMailWithInvitations({
-  ...scheduledSend.createGuards(database.value),
+  ...scheduledSend.createGuards(database.value, {
+    aliases,
+    addresses,
+    entitlements,
+    storageMeter,
+    domains: authConfig.value.mailDomains,
+  }),
   aliases,
   addresses,
   store: credentialStore,

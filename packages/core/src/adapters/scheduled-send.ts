@@ -1,11 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
-  ScheduledSchema,
-  scheduledDto,
-  type ScheduleDelivery,
-} from "@opensuite/contracts";
-import {
   createScheduledSendStore,
   type DraftGuardBegin,
   type PrismaClient,
@@ -13,7 +8,6 @@ import {
   type ScheduledSendStore,
 } from "@opensuite/db";
 import {
-  delayedSendTiming,
   matchesSubmission,
   type JmapClient,
   type Session,
@@ -87,8 +81,8 @@ async function reconcileSubmission(
   row: ScheduledRecord,
   store: ScheduledSendStore,
 ) {
-  let id = row.submissionId;
-  if (!id) {
+  let ids = row.submissionId ? [row.submissionId] : [];
+  if (!ids.length) {
     const query = await c.client.scheduled.submissionIds(
       c.session,
       c.id,
@@ -100,20 +94,19 @@ async function reconcileSubmission(
       query.value.total !== query.value.ids.length
     )
       return undefined;
-    const candidates = query.value.ids.filter(
-      (item) => !row.previousIds.includes(item),
-    );
-    if (candidates.length !== 1) {
+    ids = query.value.ids.filter((item) => !row.previousIds.includes(item));
+    if (!ids.length) {
       await store.transition(row.id, ["creating"], "unknown");
       return undefined;
     }
-    id = candidates[0] ?? null;
-    if (!id) return undefined;
   }
-  const result = await c.client.scheduled.submissions(c.session, c.id, [id]);
-  if (result.isErr() || result.value.list.length !== 1) return undefined;
-  const submission = result.value.list[0];
-  if (!submission || !matchesSubmission(submission, row)) return undefined;
+  const result = await c.client.scheduled.submissions(c.session, c.id, ids);
+  if (result.isErr() || result.value.notFound.length) return undefined;
+  const matches = result.value.list.filter((item) =>
+    matchesSubmission(item, row),
+  );
+  const submission = matches[0];
+  if (matches.length !== 1 || !submission) return undefined;
   if (row.state === "canceling" && submission.undoStatus === "pending") {
     const canceled = await c.client.scheduled.cancelSubmission(
       c.session,
@@ -126,100 +119,6 @@ async function reconcileSubmission(
   return submission;
 }
 
-function delaySeconds(
-  c: MailConnection,
-  delivery: ScheduleDelivery,
-  now: number,
-  reject: (kind: "validation" | "unavailable") => never,
-) {
-  return delayedSendTiming(
-    { session: c.session, accountId: c.id, delivery, now },
-    reject,
-  );
-}
-async function submit(
-  c: MailConnection,
-  store: ScheduledSendStore,
-  p: {
-    requestId: string;
-    draftId: string;
-    threadId: string;
-    identityId: string;
-    from: string;
-    recipients: { email: string }[];
-    seconds: number;
-  },
-  now: number,
-) {
-  const {
-    requestId,
-    draftId,
-    threadId,
-    identityId,
-    from,
-    recipients,
-    seconds,
-  } = p;
-  const fallback = ScheduledSchema.parse({
-    id: requestId,
-    draftId,
-    threadId,
-    releaseAt: new Date(now + seconds * 1000).toISOString(),
-    state: "unknown",
-  });
-  try {
-    const sent = await c.client.scheduled.scheduleSubmission(
-      c.session,
-      c.id,
-      draftId,
-      identityId,
-      { mailFrom: { email: from }, rcptTo: recipients },
-      seconds,
-      requestId,
-    );
-    if (sent.isOk())
-      await store.transition(
-        requestId,
-        ["creating"],
-        sent.value.undoStatus === "pending" ? "pending" : "unknown",
-        { submissionId: sent.value.id, releaseAt: new Date(sent.value.sendAt) },
-      );
-    else if (
-      sent.error.kind === "set" ||
-      sent.error.kind === "method" ||
-      (sent.error.kind === "network" && sent.error.beforeRequest)
-    ) {
-      const row = await store.get(c.owner, requestId);
-      if (row) await store.finish(row, ["creating", "unknown"], "failed");
-    } else await store.transition(requestId, ["creating"], "unknown");
-    const row = await store.get(c.owner, requestId);
-    return row ? scheduledDto(row) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-async function reserve(
-  store: ScheduledSendStore,
-  input: Omit<ScheduledRecord, "submissionId" | "createdAt">,
-  verify: () => Promise<string[]>,
-  conflict: () => never,
-) {
-  if (!(await store.reserve(input))) return conflict();
-  try {
-    const previousIds = await verify();
-    if (
-      !(await store.transition(input.id, ["preparing"], "creating", {
-        previousIds,
-      }))
-    )
-      return conflict();
-  } catch (error) {
-    const row = await store.get(input.userId, input.id);
-    if (row) await store.finish(row, ["preparing"], "failed");
-    throw error;
-  }
-  return undefined;
-}
 async function recoverSentGuard(
   c: MailConnection,
   store: ScheduledSendStore,
@@ -371,9 +270,6 @@ export function createGuards(db: PrismaClient) {
       conflict: () => never,
     ) => guardDraft(store, c, ids, work, conflict),
     reconcileSubmission,
-    delaySeconds,
-    submit,
-    reserve,
     sweep,
   };
 }

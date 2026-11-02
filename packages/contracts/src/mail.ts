@@ -93,6 +93,29 @@ export const SearchSchema = z.object({
   after: z.iso.datetime().optional(),
   before: z.iso.datetime().optional(),
 });
+export const ScheduledFailureCodeSchema = z.enum([
+  "account_inactive",
+  "sender_unavailable",
+  "domain_unavailable",
+  "entitlement_required",
+  "quota_exceeded",
+  "draft_unavailable",
+  "submission_rejected",
+]);
+const scheduledFailureMessages: Record<
+  z.infer<typeof ScheduledFailureCodeSchema>,
+  string
+> = {
+  account_inactive: "The sending account is no longer active.",
+  sender_unavailable:
+    "The sending identity is no longer available or authorized.",
+  domain_unavailable:
+    "The sending domain is no longer configured or available.",
+  entitlement_required: "The account no longer has an entitlement to send.",
+  quota_exceeded: "The account's storage quota has been exceeded.",
+  draft_unavailable: "The original draft is no longer available for sending.",
+  submission_rejected: "The mail server rejected the submission.",
+};
 export const ScheduledSchema = z.object({
   id: z.uuid(),
   draftId: IdSchema,
@@ -108,6 +131,10 @@ export const ScheduledSchema = z.object({
     "canceled",
     "failed",
   ]),
+  failure: z
+    .object({ code: ScheduledFailureCodeSchema, message: z.string().min(1) })
+    .nullable()
+    .default(null),
 });
 export function scheduledDto(row: {
   id: string;
@@ -115,7 +142,11 @@ export function scheduledDto(row: {
   threadId: string;
   releaseAt: Date;
   state: string;
+  failureReason?: string | null | undefined;
 }) {
+  const reason = ScheduledFailureCodeSchema.nullable().parse(
+    row.failureReason ?? null,
+  );
   return ScheduledSchema.parse({
     id: row.id,
     draftId: row.draftId,
@@ -123,10 +154,13 @@ export function scheduledDto(row: {
     releaseAt: row.releaseAt.toISOString(),
     state:
       row.state === "preparing"
-        ? "creating"
-        : row.state === "canceling"
+        ? "pending"
+        : row.state === "canceling" || row.state === "creating"
           ? "unknown"
           : row.state,
+    failure: reason
+      ? { code: reason, message: scheduledFailureMessages[reason] }
+      : null,
   });
 }
 export type Scheduled = z.infer<typeof ScheduledSchema>;

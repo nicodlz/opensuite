@@ -29,6 +29,8 @@ export type {
   DraftGuardBegin,
   DraftGuardWrite,
   ScheduledRecord,
+  ScheduledFailure,
+  ScheduledReservation,
   ScheduledSendStore,
 } from "./scheduled-send.ts";
 

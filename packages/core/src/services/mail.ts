@@ -176,9 +176,7 @@ export function createMailService(dependencies: {
   scheduledStore?: ScheduledAdapters["scheduledStore"];
   guardDraft?: ScheduledAdapters["guardDraft"];
   reconcileSubmission?: ScheduledAdapters["reconcileSubmission"];
-  delaySeconds?: ScheduledAdapters["delaySeconds"];
-  submit?: ScheduledAdapters["submit"];
-  reserve?: ScheduledAdapters["reserve"];
+  processRow?: ScheduledAdapters["processRow"];
   sweep?: ScheduledAdapters["sweep"];
 }) {
   const { run, connect: open, now } = createJmapAccess(dependencies);
@@ -285,12 +283,15 @@ export function createMailService(dependencies: {
     boxes,
     now,
     run,
-    sender: (c, email) => senderFor(c, email, dependencies),
-    delaySeconds: dependencies.delaySeconds ?? (() => fail("unavailable")),
-    submit:
-      dependencies.submit ?? (() => Promise.reject(new Error("unavailable"))),
-    reserve:
-      dependencies.reserve ?? (() => Promise.reject(new Error("unavailable"))),
+    sender: (c, email, forRelease) =>
+      senderFor(
+        c,
+        email,
+        forRelease
+          ? dependencies
+          : { ...dependencies, beforeAliasSend: () => Promise.resolve(true) },
+      ),
+    processRow: dependencies.processRow,
     sweep:
       dependencies.sweep ?? (() => Promise.reject(new Error("unavailable"))),
     reconcileSubmission:

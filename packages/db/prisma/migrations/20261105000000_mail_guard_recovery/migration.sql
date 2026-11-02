@@ -13,4 +13,9 @@ CREATE INDEX "MailDraftGuard_phase_updatedAt_idx" ON "MailDraftGuard"("phase", "
 
 ALTER TABLE "ScheduledSend"
   ADD CONSTRAINT "ScheduledSend_state_check"
-  CHECK ("state" IN ('preparing', 'creating', 'pending', 'canceling', 'unknown', 'releasing', 'sent', 'canceled', 'failed'));
+  CHECK ("state" IN ('preparing', 'creating', 'pending', 'canceling', 'unknown', 'releasing', 'sent', 'canceled', 'failed')),
+  ADD CONSTRAINT "ScheduledSend_lease_check"
+  CHECK (("state" = 'preparing' AND "leaseToken" IS NOT NULL AND "leaseUntil" IS NOT NULL)
+    OR ("state" <> 'preparing' AND "leaseToken" IS NULL AND "leaseUntil" IS NULL)),
+  ADD CONSTRAINT "ScheduledSend_failure_check"
+  CHECK ("state" <> 'failed' OR "failureReason" IS NOT NULL);

@@ -522,11 +522,15 @@ model ScheduledSend {
   draftId String
   threadId String
   identityId String
+  senderAddress String
   releaseAt DateTime
   submissionId String?
   previousIds String[]
   requestDelivery String
   state String
+  failureReason String?
+  leaseToken String?
+  leaseUntil DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
