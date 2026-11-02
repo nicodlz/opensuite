@@ -11,20 +11,18 @@ import type { Connection, InvitationContext } from "./context.ts";
 import type { Actor } from "../accounts.ts";
 
 /** Trust only verdicts attached to this immutable imported message and mailbox. */
-export async function verifiedOrganizer(
+export async function verifiedSender(
   ctx: InvitationContext,
   mail: Connection,
   messageId: string,
-  invitation: ParsedInvitation,
-  previousOrganizer?: string,
+  sender: string,
+  from: string[],
+  signingDomains: string[],
 ): Promise<boolean> {
-  const organizer = invitation.events[0]?.organizer.email;
   if (
-    !organizer ||
-    invitation.from.length !== 1 ||
-    invitation.from[0] !== organizer ||
-    !alignedSigningDomains(organizer, invitation.signingDomains) ||
-    (previousOrganizer !== undefined && previousOrganizer !== organizer)
+    from.length !== 1 ||
+    from[0] !== sender ||
+    !alignedSigningDomains(sender, signingDomains)
   )
     return false;
   if (!ctx.dependencies.intentions) return false;
@@ -42,6 +40,29 @@ export async function verifiedOrganizer(
       receipt.dkimVerdict.status === "PASS"
     );
   });
+}
+
+export async function verifiedOrganizer(
+  ctx: InvitationContext,
+  mail: Connection,
+  messageId: string,
+  invitation: ParsedInvitation,
+  previousOrganizer?: string,
+): Promise<boolean> {
+  const organizer = invitation.events[0]?.organizer.email;
+  if (
+    !organizer ||
+    (previousOrganizer !== undefined && previousOrganizer !== organizer)
+  )
+    return false;
+  return verifiedSender(
+    ctx,
+    mail,
+    messageId,
+    organizer,
+    invitation.from,
+    invitation.signingDomains,
+  );
 }
 
 /** An explicit confirmation can only create an unverified new REQUEST. */

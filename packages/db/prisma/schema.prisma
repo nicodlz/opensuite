@@ -44,6 +44,8 @@ model User {
   calendarImportIdentities CalendarImportIdentity[]
   invitationSeries         InvitationSeries[]
   invitationOperations     InvitationOperation[]
+  organizedSeries          OrganizedSeries[]
+  organizedReplyScans      OrganizedReplyScan[]
   pushShowDetails          Boolean                  @default(false)
   calendarTimeZone         String                   @default("UTC")
   defaultAliasDomainId     String?
@@ -599,4 +601,83 @@ model CalendarImportIdentity {
   eventId    String?
 
   @@unique([userId, accountId, calendarId, uid])
+}
+
+model OrganizedSeries {
+  id         String               @id
+  userId     String
+  user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId  String
+  uid        String
+  organizer  String
+  calendarId String
+  eventId    String?
+  calendar   String?
+  snapshot   String?
+  sequence   Int                  @default(0)
+  pendingId  String?
+  revision   Int                  @default(0)
+  cancelled  Boolean              @default(false)
+  createdAt  DateTime             @default(now())
+  operations OrganizedOperation[]
+  responses  OrganizedResponse[]
+
+  @@unique([userId, accountId, uid])
+  @@unique([userId, accountId, eventId])
+}
+
+model OrganizedOperation {
+  id           String              @id
+  seriesId     String
+  series       OrganizedSeries     @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  fingerprint  String
+  phase        String
+  calendar     String
+  baseSnapshot String?
+  sequence     Int
+  cancelled    Boolean
+  deliveries   OrganizedDelivery[]
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+}
+
+model OrganizedDelivery {
+  id          String             @id
+  operationId String
+  operation   OrganizedOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  recipient   String
+  method      String
+  calendar    String
+  phase       String
+  draftId     String?
+  identityId  String?
+
+  @@unique([operationId, recipient])
+}
+
+model OrganizedResponse {
+  seriesId   String
+  series     OrganizedSeries @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  attendee   String
+  occurrence String
+  sequence   Int
+  timestamp  BigInt
+  partstat   String
+
+  @@id([seriesId, attendee, occurrence])
+}
+
+model OrganizedReplyScan {
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId     String
+  messageId     String
+  uid           String?
+  outcome       String
+  finished      Boolean   @default(false)
+  nextAttemptAt DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  @@id([userId, accountId, messageId])
+  @@index([userId, accountId, outcome, messageId])
 }

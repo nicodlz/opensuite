@@ -1,6 +1,7 @@
 import { oc } from "@orpc/contract";
 import { z } from "zod";
 import { IdSchema } from "./mail.ts";
+import { EventContentSchema } from "./calendar.ts";
 
 const person = z.object({ email: z.email(), name: z.string().nullable() });
 export const InvitationEventSchema = z.object({
@@ -50,7 +51,84 @@ const InvitationResultSchema = z.object({
   state: z.enum(["pending", "sent", "applied", "failed"]),
   eventId: IdSchema.nullable(),
 });
+const OrganizerResultSchema = InvitationResultSchema.extend({
+  failedRecipients: z
+    .array(
+      z.object({
+        email: z.email(),
+        reason: z.enum(["sender_unavailable", "submission_rejected"]),
+      }),
+    )
+    .optional(),
+});
+
+export const OrganizerActionSchema = z.object({
+  accountId: IdSchema,
+  requestId: z.uuid(),
+  eventId: IdSchema.nullable(),
+  organizer: z.email().max(320),
+  attendees: z.array(z.email().max(320)).max(100),
+  event: EventContentSchema,
+  cancel: z.boolean(),
+});
+export type OrganizerAction = z.infer<typeof OrganizerActionSchema>;
+
 export const invitationsContract = {
+  organize: procedure
+    .route({ method: "POST", path: "/invitations/organize" })
+    .input(OrganizerActionSchema)
+    .output(OrganizerResultSchema),
+  organizedStatus: procedure
+    .route({ method: "POST", path: "/invitations/organized/status" })
+    .input(z.object({ accountId: IdSchema, eventId: IdSchema }))
+    .output(
+      z.object({
+        organizer: z.email(),
+        sequence: z.number().int().nonnegative(),
+        cancelled: z.boolean(),
+        pendingOperationId: z.uuid().nullable(),
+        attendees: z.array(
+          z.object({
+            email: z.email(),
+            partstat: z.string(),
+            occurrence: z.string(),
+          }),
+        ),
+      }),
+    ),
+  unverifiedReplies: procedure
+    .route({ method: "POST", path: "/invitations/organized/unverified" })
+    .input(z.object({ accountId: IdSchema, cursor: IdSchema.optional() }))
+    .output(
+      z.object({
+        messageIds: z.array(IdSchema),
+        nextCursor: IdSchema.nullable(),
+      }),
+    ),
+  processReply: procedure
+    .route({ method: "POST", path: "/invitations/organized/reply" })
+    .input(z.object({ accountId: IdSchema, messageId: IdSchema }))
+    .output(
+      z.object({
+        senderStatus: z.enum(["verified", "unverified"]),
+        verificationPending: z.boolean(),
+        event: InvitationEventSchema,
+        from: z.array(z.email()),
+        occurrence: z.string(),
+        result: z.enum([
+          "applied",
+          "pending",
+          "unverified",
+          "stale",
+          "duplicate",
+          "conflict",
+        ]),
+      }),
+    ),
+  reconcileOrganized: procedure
+    .route({ method: "POST", path: "/invitations/organized/reconcile" })
+    .input(z.object({ accountId: IdSchema, operationId: z.uuid() }))
+    .output(OrganizerResultSchema),
   read: procedure
     .route({ method: "POST", path: "/invitations/read" })
     .input(z.object({ accountId: IdSchema, messageId: IdSchema }))

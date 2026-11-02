@@ -1,3 +1,4 @@
+import { err } from "neverthrow";
 import type { InvitationStore } from "@opensuite/db";
 import type {
   ParsedInvitation,
@@ -150,4 +151,21 @@ export class InvitationContext {
       return fail("conflict");
     return digest(raw);
   }
+}
+
+/** Bound concurrent invitation operations per user in addition to the shared work queue. */
+export function invitationRunner(ctx: InvitationContext) {
+  const active = new Map<string, number>();
+  return async <T>(actor: Actor, work: () => Promise<T>) => {
+    const count = active.get(actor.id) ?? 0;
+    if (count >= 2) return err({ kind: "rate_limited" as const });
+    active.set(actor.id, count + 1);
+    try {
+      return await ctx.access.run(work);
+    } finally {
+      const remaining = (active.get(actor.id) ?? 1) - 1;
+      if (remaining === 0) active.delete(actor.id);
+      else active.set(actor.id, remaining);
+    }
+  };
 }

@@ -1,8 +1,5 @@
 import { contactsConfig } from "./adapters/contacts-config.ts";
 import { createContactsService } from "@opensuite/core/services/contacts";
-import { createMailWithInvitations } from "@opensuite/core/services/invitations";
-import { invitationProtocol } from "@opensuite/core/adapters/invitations";
-import { createCalendarService } from "@opensuite/core/services/calendar";
 import {
   createAliasMail,
   createAliasSendGuard,
@@ -20,7 +17,6 @@ import {
   createDomainStore,
   createAliasStore,
   createAddressStore,
-  createInvitationStore,
   createMailboxStore,
   createPushStore,
 } from "@opensuite/db";
@@ -44,7 +40,9 @@ import {
 import { buildServer, createCalendarImport } from "./server.ts";
 import {
   configurePush,
+  createInvitationServices,
   createMailImport,
+  startOrganizerReplyJob,
   registerBackgroundJobs,
 } from "./push-runtime.ts";
 import { registerMailImport } from "./routes/migration-mail-job.ts";
@@ -302,24 +300,20 @@ const credentialStore = {
   getForOwner: async (userId: string, accountId: string) =>
     mailboxStore.getForOwner(userId, accountId),
 };
-const { mail, invitations } = createMailWithInvitations({
-  aliases,
-  addresses,
-  store: credentialStore,
-  origin: authConfig.value.stalwartOrigin,
-  protocol: invitationProtocol,
-  intentions: createInvitationStore(database.value),
-  beforeAliasSend: createAliasGuard,
-});
+const { mail, invitations, organizer, calendar, scans, organized } =
+  createInvitationServices({
+    db: database.value,
+    store: credentialStore,
+    origin: authConfig.value.stalwartOrigin,
+    aliases,
+    addresses,
+    beforeAliasSend: createAliasGuard,
+  });
 const migrationMail = createMailImport(
   database.value,
   authConfig.value,
   mailboxStore,
 );
-const calendar = createCalendarService({
-  store: credentialStore,
-  origin: authConfig.value.stalwartOrigin,
-});
 const calendarImport = createCalendarImport({
   database: database.value,
   encryptionKey: authConfig.value.mailboxKey,
@@ -355,6 +349,7 @@ const app = await buildServer({
     contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
   ),
   invitations,
+  organizer,
   aliases,
   entitlements,
   storageMeter,
@@ -376,9 +371,17 @@ const app = await buildServer({
   ...(push === undefined ? {} : { push }),
   pushCleanup,
 });
+const stopOrganizerReplyJob = startOrganizerReplyJob(
+  scans,
+  organized,
+  organizer,
+  () => app.log.warn("Invitation reply scan failed"),
+  auth.identity.audit,
+);
 logPushFailure = (event) => app.log.warn(event, "push delivery failed");
 registerBackgroundJobs({
   app,
+  stopOrganizerReplyJob,
   db: database.value,
   cloud: billing.value.mode === "cloud",
   storageMeter,

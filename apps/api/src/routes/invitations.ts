@@ -10,8 +10,56 @@ const access = (context: ApiContext) => {
     throw new ORPCError("UPSTREAM_UNAVAILABLE", { status: 503, defined: true });
   return { actor: context.actor, service: context.invitations };
 };
+const organizerAccess = (context: ApiContext) => {
+  if (!context.actor) throw new ORPCError("UNAUTHORIZED");
+  if (!context.organizer)
+    throw new ORPCError("UPSTREAM_UNAVAILABLE", { status: 503, defined: true });
+  return { actor: context.actor, service: context.organizer };
+};
 const result = accessResult;
 export const invitationsRouter = invitations.router({
+  organize: invitations.organize.handler(async ({ context, input }) => {
+    const { actor, service } = organizerAccess(context);
+    await context.audit?.({
+      userId: actor.id,
+      action: "invitation.organize.requested",
+    });
+    const response = await result(service.organize(actor, input));
+    await context.audit?.({
+      userId: actor.id,
+      action: `invitation.organize.${response.state}`,
+    });
+    return response;
+  }),
+  organizedStatus: invitations.organizedStatus.handler(({ context, input }) => {
+    const { actor, service } = organizerAccess(context);
+    return result(service.status(actor, input.accountId, input.eventId));
+  }),
+  unverifiedReplies: invitations.unverifiedReplies.handler(
+    ({ context, input }) => {
+      const { actor, service } = organizerAccess(context);
+      return result(service.unverified(actor, input.accountId, input.cursor));
+    },
+  ),
+  processReply: invitations.processReply.handler(async ({ context, input }) => {
+    const { actor, service } = organizerAccess(context);
+    const response = await result(
+      service.reply(actor, input.accountId, input.messageId),
+    );
+    await context.audit?.({
+      userId: actor.id,
+      action: `invitation.reply.${response.result}`,
+    });
+    return response;
+  }),
+  reconcileOrganized: invitations.reconcileOrganized.handler(
+    ({ context, input }) => {
+      const { actor, service } = organizerAccess(context);
+      return result(
+        service.reconcile(actor, input.accountId, input.operationId),
+      );
+    },
+  ),
   read: invitations.read.handler(({ context, input }) => {
     const { actor, service } = access(context);
     return result(service.read(actor, input.accountId, input.messageId));

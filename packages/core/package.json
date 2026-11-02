@@ -21,6 +21,7 @@
     "@opensuite/contracts": "workspace:*",
     "@opensuite/db": "workspace:*",
     "@opensuite/jmap": "workspace:*",
+    "@touch4it/ical-timezones": "catalog:",
     "ical.js": "catalog:",
     "mailparser": "catalog:",
     "neverthrow": "catalog:",

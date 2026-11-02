@@ -4,6 +4,7 @@ packages:
   - apps/*
   - packages/*
 catalog:
+  "@touch4it/ical-timezones": 1.9.0
   "pdfjs-dist": 6.4.299
   "@zxcvbn-ts/core": 4.2.0
   "@zxcvbn-ts/language-common": 4.1.3

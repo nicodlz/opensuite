@@ -1,9 +1,20 @@
+import {
+  rebaseOrganized,
+  organizerFields,
+  restoreOrganizerParticipants,
+} from "./invitations/organizer-rebase.ts";
 import { err, ok, type Result } from "neverthrow";
 import type {
   InvitationProtocol,
   InvitationProtocolFailure,
 } from "../domain/invitations/types.ts";
-import { parseInvitation } from "./invitations/parse.ts";
+import { parseInvitation, parseInvitationReply } from "./invitations/parse.ts";
+import type { OrganizerProtocol } from "../domain/invitations/organizer.ts";
+import {
+  prepareOrganizedCalendar,
+  organizedAttendees,
+  hasOrganizedOccurrence,
+} from "./invitations/organize.ts";
 import { createInvitationReply } from "./invitations/reply.ts";
 import { mergeInvitationCalendar } from "./invitations/merge.ts";
 import { calendarSignature } from "./invitations/signatures.ts";
@@ -14,6 +25,7 @@ import {
 
 export {
   parseInvitation,
+  parseInvitationReply,
   createInvitationReply,
   calendarSignature,
   mergeInvitationCalendar,
@@ -54,4 +66,19 @@ export const invitationProtocol: InvitationProtocol = {
     capture(() => calendarSignature(calendar), "unavailable"),
   findInvitationObject: (input) =>
     captureAsync(() => findInvitationObject(input), "unavailable"),
+};
+
+export const organizerProtocol: OrganizerProtocol = {
+  restoreParticipants: (previous, current) =>
+    capture(() => restoreOrganizerParticipants(previous, current), "conflict"),
+  fields: (calendar) => capture(() => organizerFields(calendar), "conflict"),
+  rebase: (...args) => capture(() => rebaseOrganized(...args), "conflict"),
+  parseReply: (raw) =>
+    captureAsync(() => parseInvitationReply(raw), "validation"),
+  prepare: (input) =>
+    capture(() => prepareOrganizedCalendar(input), "validation"),
+  attendees: (calendar) =>
+    capture(() => organizedAttendees(calendar), "conflict"),
+  hasOccurrence: (calendar, occurrence) =>
+    capture(() => hasOrganizedOccurrence(calendar, occurrence), "conflict"),
 };
