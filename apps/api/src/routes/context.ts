@@ -11,6 +11,7 @@ import type { ContactsService } from "@opensuite/core/services/contacts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { CalendarImportService } from "@opensuite/core/services/migration-calendar";
 import type { MailService } from "@opensuite/core/services/mail";
+import type { DirectMigrationService } from "@opensuite/core/services/migration-direct";
 import type { MailMigrationService } from "@opensuite/core/services/migration-mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { FastifyBaseLogger } from "fastify";
@@ -52,6 +53,9 @@ export interface ApiContext {
     | undefined;
   readonly mail: MailService | undefined;
   readonly migrationMail: MailMigrationService | undefined;
+  readonly migrationDirect: DirectMigrationService | undefined;
+  readonly directImportCreationLimit: (userId: string) => boolean;
+  readonly directImportMutationLimit: (userId: string) => boolean;
   /** Public origin of each application when they are served separately. */
   readonly vaultOrigin?: string | undefined;
   readonly productOrigins: Readonly<Record<string, string>>;

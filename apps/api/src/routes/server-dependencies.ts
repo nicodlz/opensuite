@@ -57,6 +57,7 @@ export interface ServerDependencies {
   readonly accounts?: AccountService;
   readonly mail?: MailService;
   readonly migrationMail?: ApiContext["migrationMail"];
+  readonly migrationDirect?: ApiContext["migrationDirect"];
   readonly calendar?: CalendarService;
   readonly calendarImport?: CalendarImportService;
   readonly contacts?: NonNullable<ApiContext["contacts"]>;

@@ -26,6 +26,10 @@ Use **New message** to enter recipients, subject and message text; add attachmen
 
 Use the search field within Mail and its filters to narrow the selected folder by sender, recipient, dates, unread status or attachments. Select a different folder to search there. The `?` shortcut opens the keyboard help. An unavailable or empty view is not evidence that mail was deleted; retry or contact the administrator.
 
+### Import mail from another account
+
+Your administrator can enable direct Gmail or IMAP migration through the Mail API; the current web interface has no direct migration wizard. Ask your administrator about the allowed source servers and use an app password. The job reports progress, source type, unmapped labels, failures and uncertain results. Imported mail remains in the source. See [direct mail migration](../operations/mail-migration.md) for limits and recovery.
+
 ## Calendar
 
 Open **Calendar** to see the Day, Week or Month view; **Today** and the arrows move between periods. Select or drag across an empty slot to create an event, or use **Create** for the full form (title, all-day, start and end, repeat, calendar, location and notes). Drag an event to move it and drag its lower edge to change its length. Changing one occurrence of a repeating event changes the whole series. Show or hide calendars in the side panel and create new ones there. Press `?` for keyboard shortcuts. Invitations, reminders and sharing are not available yet.

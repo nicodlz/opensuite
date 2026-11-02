@@ -23,6 +23,8 @@
     "@opensuite/jmap": "workspace:*",
     "@touch4it/ical-timezones": "catalog:",
     "ical.js": "catalog:",
+    "imapflow": "catalog:",
+    "ipaddr.js": "catalog:",
     "mailparser": "catalog:",
     "neverthrow": "catalog:",
     "tldts": "catalog:",

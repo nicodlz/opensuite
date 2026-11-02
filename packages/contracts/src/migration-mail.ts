@@ -19,8 +19,10 @@ export const MAIL_IMPORT_LIMITATIONS = [
   "Dates missing from message headers and unsupported source flags cannot be preserved.",
   "Envelope dates without a clear time zone fall back to the message Date header.",
 ];
-const account = z.object({ accountId: IdSchema });
-const jobInput = account.extend({ jobId: IdSchema });
+export const MailImportAccountSchema = z.object({ accountId: IdSchema });
+const account = MailImportAccountSchema;
+export const MailImportJobSchema = account.extend({ jobId: IdSchema });
+const jobInput = MailImportJobSchema;
 export const MailImportInputSchema = account.extend({
   format: z.enum(["eml", "mbox"]),
   variant: z.enum(["mboxo", "mboxrd"]).default("mboxo"),
@@ -61,7 +63,7 @@ export const MailImportReportSchema = z.object({
     })
     .nullable(),
 });
-const procedure = oc.errors({
+export const mailImportProcedure = oc.errors({
   FORBIDDEN: { status: 403, message: "Access denied" },
   NOT_FOUND: { status: 404, message: "Import not found" },
   VALIDATION: { status: 400, message: "Invalid import" },
@@ -69,19 +71,26 @@ const procedure = oc.errors({
   TOO_MANY_REQUESTS: { status: 429, message: "Too many import requests" },
   UPSTREAM_UNAVAILABLE: { status: 503, message: "Import service unavailable" },
 });
+export const MailImportListEntrySchema = z.object({
+  id: IdSchema,
+  status: MailImportReportSchema.shape.status,
+  createdAt: z.iso.datetime(),
+});
+export const MailImportAbandonSchema = jobInput.extend({
+  confirm: z.literal(true),
+  uncertainCount: z.number().int().positive().max(1000),
+});
+export const MailImportAbandonedSchema = z.object({
+  abandoned: z.literal(true),
+});
+const procedure = mailImportProcedure;
 export const migrationMailContract = {
   list: procedure
     .route({ method: "POST", path: "/mail/imports/list" })
     .input(account)
     .output(
       z.object({
-        jobs: z.array(
-          z.object({
-            id: IdSchema,
-            status: MailImportReportSchema.shape.status,
-            createdAt: z.iso.datetime(),
-          }),
-        ),
+        jobs: z.array(MailImportListEntrySchema),
       }),
     ),
   create: procedure
@@ -111,13 +120,8 @@ export const migrationMailContract = {
     .output(MailImportReportSchema),
   abandon: procedure
     .route({ method: "POST", path: "/mail/imports/abandon" })
-    .input(
-      jobInput.extend({
-        confirm: z.literal(true),
-        uncertainCount: z.number().int().positive().max(1000),
-      }),
-    )
-    .output(z.object({ abandoned: z.literal(true) })),
+    .input(MailImportAbandonSchema)
+    .output(MailImportAbandonedSchema),
 };
 export type MailImportInput = z.infer<typeof MailImportInputSchema>;
 export type MailImportReport = z.infer<typeof MailImportReportSchema>;

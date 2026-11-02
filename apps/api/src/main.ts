@@ -37,11 +37,14 @@ import {
   createSetupStatus,
   relayManagementFromEnv,
 } from "./routes/setup-status.ts";
-import { buildServer, createCalendarImport } from "./server.ts";
+import {
+  buildServer,
+  configureMailImports,
+  registerShutdown,
+} from "./server.ts";
 import {
   configurePush,
   createInvitationServices,
-  createMailImport,
   startOrganizerReplyJob,
   registerBackgroundJobs,
 } from "./push-runtime.ts";
@@ -309,15 +312,10 @@ const { mail, invitations, organizer, calendar, scans, organized } =
     addresses,
     beforeAliasSend: createAliasGuard,
   });
-const migrationMail = createMailImport(
+const { migrationMail, migrationDirect, calendarImport } = configureMailImports(
   database.value,
   authConfig.value,
   mailboxStore,
-);
-const calendarImport = createCalendarImport(
-  database.value,
-  authConfig.value,
-  credentialStore,
 );
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
@@ -342,6 +340,7 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   migrationMail,
+  migrationDirect,
   calendar,
   calendarImport,
   contacts: createContactsService(
@@ -396,11 +395,7 @@ registerBackgroundJobs({
   auth,
 });
 registerMailImport(app, migrationMail);
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => {
-    app.log.info({ signal }, "shutting down");
-    void app.close();
-  });
-}
+registerMailImport(app, migrationDirect);
+registerShutdown(app);
 
 await app.listen({ host: config.value.host, port: config.value.port });
