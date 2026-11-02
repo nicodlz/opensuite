@@ -35,8 +35,12 @@ import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
-import { configurePush, registerBackgroundJobs } from "./push-runtime.ts";
-import { createMailImport, registerMailImport } from "./migration-mail-job.ts";
+import {
+  configurePush,
+  createMailImport,
+  registerBackgroundJobs,
+} from "./push-runtime.ts";
+import { registerMailImport } from "./routes/migration-mail-job.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
 import { createStorageMeter } from "./billing/storage.ts";
