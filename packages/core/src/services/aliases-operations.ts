@@ -26,7 +26,7 @@ export function createAliasOperations(
         const reserved = await store.reserve(
           userId,
           input,
-          generateAliasLocalPart(input.prefix),
+          generateAliasLocalPart(input.prefix, input.website),
           limitForUser === undefined
             ? cap
             : Math.min(cap, await limitForUser(userId)),

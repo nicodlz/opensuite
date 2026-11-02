@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
-import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -36,7 +35,7 @@ test("routes authenticated external mail to the relay and keeps local mail local
   const overlay = join(directory, "compose.yaml");
   await writeFile(
     overlay,
-    `services:\n  stalwart:\n    extra_hosts:\n      - "host.docker.internal:host-gateway"\n    volumes:\n      - "${secret}:/run/opensuite/smtp-secret:ro"\n`,
+    `services:\n  stalwart:\n    volumes:\n      - "${secret}:/run/opensuite/smtp-secret:ro"\n  relay:\n    image: node:24.22.2-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446\n    command: ["node", "/fixture/smtp-relay.ts"]\n    volumes:\n      - "${root}test-support/smtp-relay.ts:/fixture/smtp-relay.ts:ro"\n    ports:\n      - "127.0.0.1::8081"\n`,
   );
   const compose = async (...args: string[]) =>
     (
@@ -55,85 +54,24 @@ test("routes authenticated external mail to the relay and keeps local mail local
         { maxBuffer: 4_000_000 },
       )
     ).stdout;
-  const messages: {
-    from: string;
-    to: string[];
-    authenticated: boolean;
-    data: string;
-  }[] = [];
-  const sockets = new Set<Socket>();
-  const sink = createServer((socket) => {
-    sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
-    socket.write("220 fixture ESMTP\r\n");
-    let buffer = "";
-    let from = "";
-    let to: string[] = [];
-    let authenticated = false;
-    let data = "";
-    let readingData = false;
-    let authLogin = 0;
-    socket.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      let end = buffer.indexOf("\r\n");
-      while (end !== -1) {
-        const line = buffer.slice(0, end);
-        buffer = buffer.slice(end + 2);
-        if (readingData) {
-          if (line === ".") {
-            messages.push({ from, to, authenticated, data });
-            readingData = false;
-            socket.write("250 queued\r\n");
-          } else data += `${line}\n`;
-        } else if (authLogin > 0) {
-          if (authLogin === 1) {
-            authenticated =
-              Buffer.from(line, "base64").toString() === "fixture-user";
-            authLogin = 2;
-            socket.write("334 UGFzc3dvcmQ6\r\n");
-          } else {
-            authenticated &&=
-              Buffer.from(line, "base64").toString() === "fixture-secret";
-            authLogin = 0;
-            socket.write(
-              authenticated ? "235 authenticated\r\n" : "535 denied\r\n",
-            );
-          }
-        } else if (/^EHLO /i.test(line))
-          socket.write("250-fixture\r\n250 AUTH PLAIN LOGIN\r\n");
-        else if (/^AUTH PLAIN /i.test(line)) {
-          authenticated =
-            Buffer.from(line.split(" ")[2] ?? "", "base64").toString() ===
-            "\0fixture-user\0fixture-secret";
-          socket.write(
-            authenticated ? "235 authenticated\r\n" : "535 denied\r\n",
-          );
-        } else if (/^AUTH LOGIN/i.test(line)) {
-          authLogin = 1;
-          socket.write("334 VXNlcm5hbWU6\r\n");
-        } else if (/^MAIL FROM:/i.test(line)) {
-          from = line;
-          to = [];
-          data = "";
-          socket.write("250 ok\r\n");
-        } else if (/^RCPT TO:/i.test(line)) {
-          to.push(line);
-          socket.write("250 ok\r\n");
-        } else if (line === "DATA") {
-          readingData = true;
-          socket.write("354 continue\r\n");
-        } else if (line === "QUIT") socket.end("221 bye\r\n");
-        else socket.write("250 ok\r\n");
-        end = buffer.indexOf("\r\n");
-      }
-    });
-  });
   try {
-    await new Promise<void>((resolve) => sink.listen(0, "0.0.0.0", resolve));
-    const address = sink.address();
-    if (address === null || typeof address === "string")
-      throw new Error("No SMTP port");
     await compose("up", "-d");
+    const relayPort = (await compose("port", "relay", "8081"))
+      .trim()
+      .split(":")
+      .at(-1);
+    if (!relayPort) throw new Error("No relay capture port");
+    const readMessages = async () =>
+      z
+        .array(
+          z.object({
+            from: z.string(),
+            to: z.array(z.string()),
+            authenticated: z.boolean(),
+            data: z.string(),
+          }),
+        )
+        .parse(await (await fetch(`http://127.0.0.1:${relayPort}/`)).json());
     const port = (await compose("port", "stalwart", "8080"))
       .trim()
       .split(":")
@@ -192,8 +130,8 @@ test("routes authenticated external mail to the relay and keeps local mail local
     expect(records[0]?.name).toContain("._domainkey.outbound.test");
     expect(records[0]?.value).toContain("v=DKIM1;");
     const config = {
-      host: "host.docker.internal",
-      port: address.port,
+      host: "relay",
+      port: 2525,
       username: "fixture-user",
       secretFile: "/run/opensuite/smtp-secret",
       tls: "insecure",
@@ -258,12 +196,13 @@ test("routes authenticated external mail to the relay and keeps local mail local
     await send("external@example.com", "External fixture");
     await send("bob@outbound.test", "Local fixture");
     const waitRelay = async (remaining: number): Promise<void> => {
-      if (messages.length > 0) return;
+      if ((await readMessages()).length > 0) return;
       if (remaining === 0) throw new Error("No relay delivery");
       await delay(500);
       return waitRelay(remaining - 1);
     };
     await waitRelay(60);
+    const messages = await readMessages();
     expect(messages).toHaveLength(1);
     expect(messages[0]?.authenticated).toBe(true);
     expect(messages[0]?.from).toMatch(/alice@outbound\.test/i);
@@ -285,17 +224,13 @@ test("routes authenticated external mail to the relay and keeps local mail local
     };
     expect((await waitLocal(60)).length).toBeGreaterThan(0);
     await delay(1000);
-    expect(messages).toHaveLength(1);
+    expect(await readMessages()).toHaveLength(1);
     value(await admin.configureRelay({ ...config, tls: "starttls" }));
     value(await admin.resetOutbound());
     // Reset restores Stalwart's own default signing and leaves every other
     // stage setting as it was.
     expect(await stageData()).toEqual(initialStage);
   } finally {
-    for (const socket of sockets) socket.destroy();
-    await new Promise<void>((resolve, reject) =>
-      sink.close((error) => (error ? reject(error) : resolve())),
-    );
     try {
       await compose("down", "--volumes", "--remove-orphans");
     } finally {
