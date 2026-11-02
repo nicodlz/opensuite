@@ -766,6 +766,117 @@ export class JmapClient {
         })
       : ok(item);
   }
+  async scheduleSubmission(
+    session: Session,
+    accountId: string,
+    emailId: string,
+    identityId: string,
+    envelope: { mailFrom: { email: string }; rcptTo: { email: string }[] },
+    holdFor: number,
+    requestId: string,
+  ): Promise<
+    JmapResult<{
+      id: string;
+      sendAt: string;
+      undoStatus: "pending" | "final" | "canceled";
+    }>
+  > {
+    const method = "EmailSubmission/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      {
+        accountId,
+        create: {
+          item: {
+            emailId,
+            identityId,
+            envelope: {
+              ...envelope,
+              mailFrom: {
+                ...envelope.mailFrom,
+                parameters: { HOLDFOR: String(holdFor), ENVID: requestId },
+              },
+            },
+          },
+        },
+      },
+      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      SetSchema(
+        z.object({
+          id: z.string(),
+          sendAt: z.iso.datetime(),
+          undoStatus: z.enum(["pending", "final", "canceled"]),
+        }),
+      ),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notCreated);
+    if (failure !== undefined) return err(failure);
+    const item = result.value.created?.["item"];
+    return item === undefined
+      ? err({ kind: "invalidResponse", message: "Missing submission" })
+      : ok(item);
+  }
+  async cancelSubmission(
+    session: Session,
+    accountId: string,
+    id: string,
+  ): Promise<JmapResult<void>> {
+    const method = "EmailSubmission/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      { accountId, update: { [id]: { undoStatus: "canceled" } } },
+      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      SetSchema(z.unknown()),
+    );
+    if (result.isErr()) return err(result.error);
+    const failure = setFailure(method, result.value.notUpdated);
+    if (failure !== undefined) return err(failure);
+    return result.value.updated && Object.hasOwn(result.value.updated, id)
+      ? ok(undefined)
+      : err({
+          kind: "invalidResponse",
+          message: "Missing cancellation result",
+        });
+  }
+  submissions(session: Session, accountId: string, ids: string[]) {
+    return this.#transport.call(
+      session.apiUrl,
+      "EmailSubmission/get",
+      { accountId, ids },
+      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      GetSchema(
+        z.object({
+          id: z.string(),
+          emailId: z.string(),
+          identityId: z.string(),
+          envelope: z.object({
+            mailFrom: z.object({
+              parameters: z.record(z.string(), z.string()).nullable(),
+            }),
+          }),
+          sendAt: z.iso.datetime(),
+          undoStatus: z.enum(["pending", "final", "canceled"]),
+        }),
+      ),
+    );
+  }
+  submissionIds(session: Session, accountId: string, emailId: string) {
+    return this.#transport.call(
+      session.apiUrl,
+      "EmailSubmission/query",
+      {
+        accountId,
+        filter: { emailIds: [emailId] },
+        calculateTotal: true,
+        limit: 500,
+      },
+      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      QuerySchema,
+    );
+  }
   calendars(session: Session, accountId: string) {
     return this.#transport.call(
       session.apiUrl,

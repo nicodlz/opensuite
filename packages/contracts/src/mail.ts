@@ -88,6 +88,31 @@ export const SearchSchema = z.object({
   after: z.iso.datetime().optional(),
   before: z.iso.datetime().optional(),
 });
+export const ScheduledSchema = z.object({
+  id: z.uuid(),
+  draftId: IdSchema,
+  threadId: IdSchema,
+  releaseAt: z.iso.datetime(),
+  state: z.enum([
+    "creating",
+    "pending",
+    "canceling",
+    "unknown",
+    "releasing",
+    "sent",
+    "canceled",
+    "failed",
+  ]),
+});
+export type Scheduled = z.infer<typeof ScheduledSchema>;
+export const ScheduleDeliverySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("delay"),
+    seconds: z.number().int().min(1).max(2592000),
+  }),
+  z.object({ type: z.literal("at"), at: z.iso.datetime() }),
+]);
+export type ScheduleDelivery = z.infer<typeof ScheduleDeliverySchema>;
 const AccountSchema = z.object({ accountId: IdSchema });
 const ThreadInputSchema = AccountSchema.extend({ threadId: IdSchema });
 const DraftInputSchema = AccountSchema.extend({ draftId: IdSchema });
@@ -183,6 +208,25 @@ export const mailContract = {
     .route({ method: "POST", path: "/mail/attachments/download" })
     .input(AccountSchema.extend({ blobId: IdSchema }))
     .output(z.object({ url: z.url(), expiresAt: z.iso.datetime() })),
+};
+export const scheduledMailContract = {
+  schedule: procedure
+    .route({ method: "POST", path: "/mail/scheduled/create" })
+    .input(
+      DraftInputSchema.extend({
+        requestId: z.uuid(),
+        delivery: ScheduleDeliverySchema,
+      }),
+    )
+    .output(ScheduledSchema),
+  scheduled: procedure
+    .route({ method: "POST", path: "/mail/scheduled/list" })
+    .input(AccountSchema)
+    .output(z.object({ scheduled: z.array(ScheduledSchema) })),
+  cancelScheduled: procedure
+    .route({ method: "POST", path: "/mail/scheduled/cancel" })
+    .input(AccountSchema.extend({ id: z.uuid() }))
+    .output(ScheduledSchema),
 };
 export type Mailbox = z.infer<typeof MailboxSchema>;
 export type Message = z.infer<typeof MessageSchema>;

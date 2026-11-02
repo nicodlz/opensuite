@@ -47,6 +47,8 @@ model User {
   billingCustomer BillingCustomer?
   billingGrant BillingGrant?
   subscriptions Subscription[]
+  scheduledSends ScheduledSend[]
+  mailDraftGuards MailDraftGuard[]
 }
 
 model SecurityKey {
@@ -460,4 +462,36 @@ model BillingSyncState {
   lastCompletedAt DateTime?
   leaseUntil DateTime?
   leaseToken String?
+}
+
+model ScheduledSend {
+  id String @id
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId String
+  draftId String
+  threadId String
+  identityId String
+  releaseAt DateTime
+  submissionId String?
+  previousIds String[]
+  requestDelivery String
+  state String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, id])
+  @@index([userId, accountId, state])
+  @@index([state, releaseAt])
+}
+
+model MailDraftGuard {
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId String
+  draftId String
+  token String
+  createdAt DateTime @default(now())
+
+  @@id([userId, accountId, draftId])
 }
