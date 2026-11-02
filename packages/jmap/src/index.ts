@@ -349,14 +349,14 @@ export class JmapClient {
       },
       usingMail,
       GetSchema(
-        z.object({
-          id: z.string(),
-          threadId: z.string(),
-          mailboxIds: z.record(z.string(), z.boolean()),
-          keywords: z.record(z.string(), z.boolean()),
-          receivedAt: z.string(),
-          subject: z.string().nullable(),
-          from: z.array(Address).nullable(),
+        EmailSchema.pick({
+          id: true,
+          threadId: true,
+          mailboxIds: true,
+          keywords: true,
+          receivedAt: true,
+          subject: true,
+          from: true,
         }),
       ),
     );
