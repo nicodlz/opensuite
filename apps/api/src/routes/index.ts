@@ -1,3 +1,4 @@
+import { portableExportRouter } from "./portable-export.ts";
 import { migrationCalendarRouter } from "./migration-calendar.ts";
 import { invitationsRouter } from "./invitations.ts";
 import { addressesRouter } from "./addresses.ts";
@@ -15,6 +16,7 @@ import { billingRouter } from "./billing.ts";
 export type { ApiContext } from "./context.ts";
 
 export const router = {
+  portableExport: portableExportRouter,
   aliases: aliasesRouter,
   addresses: addressesRouter,
   system: systemRouter,

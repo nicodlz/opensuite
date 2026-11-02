@@ -1,3 +1,6 @@
+import { createPortableExportService } from "@opensuite/core/services/portable-export";
+import { portableExportTools } from "@opensuite/core/adapters/portable-export";
+import { createPortableExportAccess } from "./routes/portable-export.ts";
 import { calendarImportLimits } from "@opensuite/contracts";
 import {
   createCalendarImportStore,
@@ -75,6 +78,13 @@ export const buildServer = async (
     logController: new LogController({ disableRequestLogging: true }),
     trustProxy: dependencies.config.trustProxy ?? false,
   });
+  app.addHook("onRequest", (request, reply, done) => {
+    if ((request.url.split("?")[0] ?? "") === "/portable-export")
+      void reply
+        .header("Cache-Control", "private, no-store")
+        .header("X-Content-Type-Options", "nosniff");
+    done();
+  });
   const startedAt = dependencies.monotonicMs();
   const aliasLimits = createAliasLimiter();
   const addressLimits = createAliasLimiter();
@@ -140,7 +150,14 @@ export function configureMailImports(
   };
   const migrationDirect = configureDirectImport(db, config, store, process.env);
   const calendarImport = createCalendarImport(db, config, store);
-  return { migrationMail, migrationDirect, calendarImport };
+  const portableExport = createPortableExportAccess(
+    createPortableExportService({
+      store,
+      origin: config.stalwartOrigin,
+      tools: portableExportTools,
+    }),
+  );
+  return { migrationMail, migrationDirect, calendarImport, portableExport };
 }
 export function registerShutdown(app: FastifyInstance) {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {

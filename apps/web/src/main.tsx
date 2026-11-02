@@ -21,7 +21,7 @@ import { AuthError } from "./auth/client.ts";
 import { LoginPage, Protected, expireSession } from "./auth/components.tsx";
 import { CallbackPage, HandoffPage, startHandoff } from "./auth/handoff.tsx";
 import { activeLayout, redirectFor, rewriteFor } from "./origins.ts";
-import { MailPage } from "./mail/mail-page.tsx";
+import { MailWithExport } from "./export/mail-entry.tsx";
 import { BillingSettings } from "./billing/settings.tsx";
 import { SubscribePage, WelcomePage } from "./billing/public.tsx";
 import { ProductPlaceholder } from "./shell/admin-pages.tsx";
@@ -41,6 +41,11 @@ const moved = redirectFor(
 if (moved !== null && /^https?:/.test(moved)) window.location.replace(moved);
 else if (moved !== null) window.history.replaceState(null, "", moved);
 
+const ExportPage = lazy(() =>
+  import("./export/page.tsx").then((module) => ({
+    default: module.ExportPage,
+  })),
+);
 const DrivePage = lazy(() =>
   import("./drive/drive-page.tsx").then((module) => ({
     default: module.DrivePage,
@@ -138,6 +143,17 @@ const addressesSettingsRoute = createRoute({
     </Protected>
   ),
 });
+const exportRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/export",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <ExportPage />
+      </Lazy>
+    </Protected>
+  ),
+});
 const billingSettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/billing",
@@ -170,7 +186,7 @@ const mailRoute = createRoute({
   path: "/mail",
   component: () => (
     <Protected>
-      <MailPage />
+      <MailWithExport />
     </Protected>
   ),
 });
@@ -287,6 +303,7 @@ const router = createRouter({
     callbackRoute,
     loginRoute,
     billingSettingsRoute,
+    exportRoute,
     addressesSettingsRoute,
     subscribeRoute,
     welcomeRoute,
