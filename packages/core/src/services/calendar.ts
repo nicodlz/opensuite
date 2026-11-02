@@ -6,6 +6,10 @@ import {
 } from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
 import {
+  calendarWriteAccess,
+  unsafeSimpleEdit,
+} from "../domain/calendar-edit.ts";
+import {
   createObject,
   expand,
   locate,
@@ -72,6 +76,48 @@ export const toCalendars = (list: readonly JmapCalendar[]): Calendar[] => {
 const validated = (content: EventContent) =>
   timing(content) ?? fail("validation");
 
+type CalendarConnection = Awaited<
+  ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
+>;
+async function prepareUpdate(
+  c: CalendarConnection,
+  calendars: string[],
+  eventId: string,
+  content: EventContent,
+  time: NonNullable<ReturnType<typeof timing>>,
+) {
+  const raw =
+    value(
+      await c.client.calendarEvents(c.session, c.id, [seriesIdOf(eventId)]),
+    ).list.find((item) => item.id === seriesIdOf(eventId)) ?? fail("not_found");
+  const stored = toSeries(raw, calendars) ?? fail("unavailable");
+  const current = locate(stored, eventId) ?? fail("not_found");
+  const patch = updatePatch(stored, current, content, time);
+  if (unsafeSimpleEdit(raw, patch)) return fail("conflict");
+  return { stored, patch };
+}
+
+async function applyUpdate(
+  c: CalendarConnection,
+  calendars: string[],
+  eventId: string,
+  content: EventContent,
+  time: NonNullable<ReturnType<typeof timing>>,
+) {
+  const { stored, patch } = await prepareUpdate(
+    c,
+    calendars,
+    eventId,
+    content,
+    time,
+  );
+  if (Object.keys(patch).length > 0)
+    value(
+      await c.client.updateCalendarEvent(c.session, c.id, stored.id, patch),
+    );
+  return stored.id;
+}
+
 /** One instance per server; credentials and client instances never leave this service. */
 export function createCalendarService(dependencies: {
   store: MailCredentialStore;
@@ -88,9 +134,8 @@ export function createCalendarService(dependencies: {
     value(await c.client.calendars(c.session, c.id)).list;
   const writable = async (c: Connection, calendarId: string) => {
     const calendars = await list(c);
-    const calendar = calendars.find((item) => item.id === calendarId);
-    if (calendar === undefined) return fail("not_found");
-    if (calendar.myRights?.mayWriteAll === false) return fail("forbidden");
+    const access = calendarWriteAccess(calendars, calendarId);
+    if (access !== "allowed") return fail(access);
     return calendars.map((item) => item.id);
   };
   const series = async (c: Connection, id: string, calendars: string[]) => {
@@ -238,19 +283,8 @@ export function createCalendarService(dependencies: {
         const time = validated(content);
         const c = await connect(actor, accountId);
         const calendars = await writable(c, content.calendarId);
-        const stored = await series(c, seriesIdOf(eventId), calendars);
-        const current = locate(stored, eventId) ?? fail("not_found");
-        const patch = updatePatch(stored, current, content, time);
-        if (Object.keys(patch).length > 0)
-          value(
-            await c.client.updateCalendarEvent(
-              c.session,
-              c.id,
-              stored.id,
-              patch,
-            ),
-          );
-        return first(c, stored.id, calendars);
+        const id = await applyUpdate(c, calendars, eventId, content, time);
+        return first(c, id, calendars);
       }),
     deleteEvent: (actor: Actor, accountId: string, eventId: string) =>
       run(async () => {

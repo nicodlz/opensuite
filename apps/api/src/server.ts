@@ -1,3 +1,13 @@
+import { calendarImportLimits } from "@opensuite/contracts";
+import {
+  createCalendarImportStore,
+  createSecretBox,
+  type PrismaClient,
+} from "@opensuite/db";
+import { createCalendarImportService } from "@opensuite/core/services/migration-calendar";
+import type { MailCredentialStore } from "@opensuite/core/services/jmap-access";
+import * as calendarImportParser from "@opensuite/core/adapters/migration-calendar";
+import { previews as calendarImportPreviews } from "@opensuite/core/adapters/migration-calendar-preview";
 import Fastify, {
   LogController,
   type FastifyInstance,
@@ -16,6 +26,27 @@ import { registerVault } from "./routes/vault-route.ts";
 import { registerDispatch } from "./routes/dispatch.ts";
 import type { ServerDependencies } from "./routes/server-dependencies.ts";
 export type { ServerDependencies } from "./routes/server-dependencies.ts";
+
+export function createCalendarImport(dependencies: {
+  database: PrismaClient;
+  encryptionKey: string;
+  origin: string;
+  credentials: MailCredentialStore;
+}) {
+  const box = createSecretBox(dependencies.encryptionKey);
+  if (box.isErr()) throw new Error("Invalid calendar import encryption key");
+  return createCalendarImportService({
+    store: dependencies.credentials,
+    origin: dependencies.origin,
+    imports: createCalendarImportStore(
+      dependencies.database,
+      calendarImportLimits.jobs,
+      box.value,
+    ),
+    parser: calendarImportParser,
+    previews: calendarImportPreviews,
+  });
+}
 
 export const buildServer = async (
   dependencies: ServerDependencies,

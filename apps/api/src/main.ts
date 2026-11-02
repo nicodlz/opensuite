@@ -38,7 +38,7 @@ import {
 import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
-import { buildServer } from "./server.ts";
+import { buildServer, createCalendarImport } from "./server.ts";
 import {
   configurePush,
   createMailImport,
@@ -317,6 +317,12 @@ const calendar = createCalendarService({
   store: credentialStore,
   origin: authConfig.value.stalwartOrigin,
 });
+const calendarImport = createCalendarImport({
+  database: database.value,
+  encryptionKey: authConfig.value.mailboxKey,
+  origin: authConfig.value.stalwartOrigin,
+  credentials: credentialStore,
+});
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
 const app = await buildServer({
@@ -352,6 +358,7 @@ const app = await buildServer({
   mail,
   migrationMail,
   calendar,
+  calendarImport,
   contacts: createContactsService(
     contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
   ),

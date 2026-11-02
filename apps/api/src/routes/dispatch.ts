@@ -20,6 +20,7 @@ export function registerDispatch(
 ) {
   const pushLimits = createFixedWindow();
   const checkoutLimits = createFixedWindow();
+  const calendarImportLimits = createFixedWindow();
   const handleApi = async (request: FastifyRequest, reply: FastifyReply) => {
     // The origin map decides cross-origin navigation; never let a browser
     // or intermediary keep an old copy.
@@ -46,6 +47,7 @@ export function registerDispatch(
         addressLimits,
         pushLimits,
         checkoutLimits,
+        calendarImportLimits,
       ),
     });
     if (!matched) {
@@ -76,6 +78,7 @@ function createApiContext(
   addressLimits: ReturnType<typeof createAliasLimiter>,
   pushLimits: ReturnType<typeof createFixedWindow>,
   checkoutLimits: ReturnType<typeof createFixedWindow>,
+  calendarImportLimits: ReturnType<typeof createFixedWindow>,
 ): ApiContext {
   return {
     actor,
@@ -109,6 +112,11 @@ function createApiContext(
     audit: dependencies.identity?.audit,
     ...mailContext(dependencies),
     migrationMail: dependencies.migrationMail,
+    calendarImport: dependencies.calendarImport,
+    calendarImportPreviewLimit: (userId) =>
+      calendarImportLimits.consume(`preview:${userId}`, 3) === undefined,
+    calendarImportResumeLimit: (userId) =>
+      calendarImportLimits.consume(`resume:${userId}`, 20) === undefined,
     contacts: dependencies.contacts,
     productOrigins: dependencies.identity?.productOrigins ?? {},
     vaultOrigin: dependencies.vaultOrigin,
