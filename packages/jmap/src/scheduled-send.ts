@@ -9,6 +9,7 @@ import {
   type Transport,
 } from "./protocol.ts";
 import { GetSchema, QuerySchema, SetSchema } from "./schemas.ts";
+import { submissionCapabilities, SubmissionCore } from "./submission-schema.ts";
 
 export function matchesSubmission(
   submission: {
@@ -106,7 +107,7 @@ export class ScheduledSubmissions {
           },
         },
       },
-      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      submissionCapabilities,
       SetSchema(
         z.object({
           id: z.string(),
@@ -137,7 +138,7 @@ export class ScheduledSubmissions {
       session.apiUrl,
       method,
       { accountId, update: { [id]: { undoStatus: "canceled" } } },
-      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      submissionCapabilities,
       SetSchema(z.unknown()),
     );
     return result.andThen((response) => {
@@ -156,19 +157,15 @@ export class ScheduledSubmissions {
       session.apiUrl,
       "EmailSubmission/get",
       { accountId, ids },
-      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      submissionCapabilities,
       GetSchema(
-        z.object({
-          id: z.string(),
-          emailId: z.string(),
-          identityId: z.string(),
+        SubmissionCore.extend({
           envelope: z.object({
             mailFrom: z.object({
               parameters: z.record(z.string(), z.string()).nullable(),
             }),
           }),
           sendAt: z.iso.datetime(),
-          undoStatus: z.enum(["pending", "final", "canceled"]),
         }),
       ),
     );
@@ -183,7 +180,7 @@ export class ScheduledSubmissions {
         calculateTotal: true,
         limit: 500,
       },
-      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      submissionCapabilities,
       QuerySchema,
     );
   }

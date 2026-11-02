@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CalendarClient } from "./calendar-client.ts";
 import { JmapCapability, type Session } from "./protocol.ts";
 import { GetSchema, QuerySchema } from "./schemas.ts";
+import { submissionCapabilities, SubmissionCore } from "./submission-schema.ts";
 
 /** JMAP operations needed to apply and respond to received invitations. */
 export class InvitationClient extends CalendarClient {
@@ -31,7 +32,7 @@ export class InvitationClient extends CalendarClient {
       session.apiUrl,
       "EmailSubmission/query",
       { accountId, filter: { emailIds: [emailId] }, limit: 2 },
-      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      submissionCapabilities,
       QuerySchema,
     );
   }
@@ -44,19 +45,15 @@ export class InvitationClient extends CalendarClient {
         ids,
         properties: ["id", "emailId", "identityId", "envelope", "undoStatus"],
       },
-      [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
+      submissionCapabilities,
       GetSchema(
-        z.object({
-          id: z.string(),
-          emailId: z.string(),
-          identityId: z.string(),
+        SubmissionCore.extend({
           envelope: z
             .object({
               mailFrom: z.object({ email: z.string() }),
               rcptTo: z.array(z.object({ email: z.string() })),
             })
             .nullable(),
-          undoStatus: z.enum(["pending", "final", "canceled"]),
         }),
       ),
     );
