@@ -148,16 +148,31 @@ export function AdminShell({
   );
 }
 
+/** A failed session check, with a way to try again. */
+function SessionProblem({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="session-problem" role="alert">
+      <p>Could not check your session. Account controls are unavailable.</p>
+      <Button variant="secondary" size="small" onClick={onRetry}>
+        Try again
+      </Button>
+    </div>
+  );
+}
+
 /**
  * System status in the shell that matches the visitor's session. At the root,
- * a signed-in user goes to Mail instead.
+ * a signed-in user goes to Mail instead. A failed session check is shown, not
+ * treated as signed out.
  */
 export function StatusScreen({ home }: { home: boolean }) {
   const session = useOptionalSession();
-  if (session.pending) return <PageLoading />;
-  if (home && session.signedIn) return <Navigate to="/mail" replace />;
+  if (session.state === "pending") return <PageLoading />;
+  if (home && session.state === "signed-in")
+    return <Navigate to="/mail" replace />;
   return (
-    <AdminShell signedIn={session.signedIn}>
+    <AdminShell signedIn={session.state === "signed-in"}>
+      {session.state === "failed" && <SessionProblem onRetry={session.retry} />}
       <StatusPage />
     </AdminShell>
   );

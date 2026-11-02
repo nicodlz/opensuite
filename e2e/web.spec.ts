@@ -452,6 +452,114 @@ for (const theme of ["light", "dark"] as const)
     await expect(drawer).toHaveCount(0);
   });
 
+/** Records focus that settles outside the open drawer, after any redirect. */
+async function recordFocusOutsideDrawer(page: Page) {
+  await page.evaluate(() => {
+    const outside: string[] = [];
+    Reflect.set(window, "focusOutsideDrawer", outside);
+    document.addEventListener("focusin", () => {
+      queueMicrotask(() => {
+        const active = document.activeElement;
+        if (
+          active &&
+          active !== document.body &&
+          !active.closest(".shell-sidebar")
+        )
+          outside.push(active.outerHTML.slice(0, 80));
+      });
+    });
+  });
+}
+async function focusOutsideDrawer(page: Page) {
+  return page.evaluate(() => {
+    const outside: unknown = Reflect.get(window, "focusOutsideDrawer");
+    return Array.isArray(outside) ? outside.map(String) : null;
+  });
+}
+for (const theme of ["light", "dark"] as const)
+  test(`${theme} mobile: a notification cannot take focus out of the open drawer`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(mobile);
+    await useTheme(page, theme);
+    await mockHealthy(page);
+    await page.goto("/status");
+    await expect(
+      page.getByRole("heading", { name: "All checks operational" }),
+    ).toBeVisible();
+    await page.keyboard.press("s");
+    await page.keyboard.press("Enter");
+    const notice = page.locator(".toast[data-state='open']");
+    await expect(notice).toBeVisible();
+    const opener = page.getByRole("button", { name: "Open navigation" });
+    await opener.focus();
+    await page.keyboard.press("Enter");
+    const drawer = page.getByRole("dialog", {
+      name: "Administration navigation",
+    });
+    const close = drawer.getByRole("button", { name: "Close navigation" });
+    await expect(close).toBeFocused();
+    await recordFocusOutsideDrawer(page);
+    await page.keyboard.press("F8");
+    await expect(close).toBeFocused();
+    await expect(notice).toBeVisible();
+    await Array.from({ length: 12 }).reduce<Promise<void>>(
+      (previous) => previous.then(() => page.keyboard.press("Tab")),
+      Promise.resolve(),
+    );
+    expect(await focusOutsideDrawer(page)).toEqual([]);
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+    await expect(opener).toBeFocused();
+
+    // A dialog opened by its shortcut takes over from the drawer.
+    await page.keyboard.press("Enter");
+    await expect(close).toBeFocused();
+    await page.keyboard.press("s");
+    const settings = page.getByRole("dialog", { name: "Workspace settings" });
+    await expect(
+      settings.getByRole("textbox", { name: "Workspace label" }),
+    ).toBeFocused();
+    await expect(drawer).toHaveCount(0);
+    await expect(page.locator(".shell-body")).not.toHaveAttribute("inert");
+  });
+
+test("a failed session check is reported with a retry, not shown as signed out", async ({
+  page,
+}) => {
+  await mockHealthy(page);
+  // The development session fixture reads this key; make that read fail.
+  await page.addInitScript(() => {
+    const read: unknown = Reflect.get(Storage.prototype, "getItem");
+    if (typeof read !== "function") return;
+    Storage.prototype.getItem = function failing(this: Storage, key: string) {
+      if (
+        key === "auth-fixture-signed-out" &&
+        Reflect.get(window, "sessionWorks") !== true
+      )
+        throw new Error("Session service unavailable");
+      const value: unknown = Reflect.apply(read, this, [key]);
+      return typeof value === "string" ? value : null;
+    };
+  });
+  await page.goto("/");
+  const problem = page.getByRole("alert").filter({
+    hasText: "Could not check your session.",
+  });
+  await expect(problem).toBeVisible();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(
+    page.getByRole("heading", { name: "All checks operational" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Account menu" })).toHaveCount(
+    0,
+  );
+  await checkAxe(page);
+  await page.evaluate(() => Reflect.set(window, "sessionWorks", true));
+  await problem.getByRole("button", { name: "Try again" }).click();
+  await expect(page).toHaveURL(/\/mail$/);
+});
+
 test("only the exact sidebar and product links are marked current", async ({
   page,
 }) => {
