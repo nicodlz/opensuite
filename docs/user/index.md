@@ -26,13 +26,21 @@ Use **New message** to enter recipients, subject and message text; add attachmen
 
 Use the search field within Mail and its filters to narrow the selected folder by sender, recipient, dates, unread status or attachments. Select a different folder to search there. The `?` shortcut opens the keyboard help. An unavailable or empty view is not evidence that mail was deleted; retry or contact the administrator.
 
-### Import mail from another account
-
-Your administrator can enable direct Gmail or IMAP migration through the Mail API; the current web interface has no direct migration wizard. Ask your administrator about the allowed source servers and use an app password. The job reports progress, source type, unmapped labels, failures and uncertain results. Imported mail remains in the source. See [direct mail migration](../operations/mail-migration.md) for limits and recovery.
-
 ## Calendar
 
 Open **Calendar** to see the Day, Week or Month view; **Today** and the arrows move between periods. Select or drag across an empty slot to create an event, or use **Create** for the full form (title, all-day, start and end, repeat, calendar, location and notes). Drag an event to move it and drag its lower edge to change its length. Changing one occurrence of a repeating event changes the whole series. Show or hide calendars in the side panel and create new ones there. Press `?` for keyboard shortcuts. Invitations, reminders and sharing are not available yet.
+
+## Importing mail and calendars
+
+On first use, Mail offers an optional migration assistant; **Not now** dismisses the offer for your account in that browser. Open the assistant at any time from the account menu (**Migration**) or from the **Workspace settings** sidebar. It imports from:
+
+- **Gmail account** or **Other mail server (IMAP)**, connected with an app password. The web interface offers app passwords only; signing in with Google (OAuth) is not available. Your administrator must allow the source server. The password is sent once, stored encrypted for that migration only and deleted when it ends or after 24 hours; it is never shown again. Remove the app password at your provider afterwards.
+- **Mail archive**: one Google Takeout `.mbox` file, another MBOX file or a single `.eml` message, up to 8 MB per import. Extract the `.mbox` file from a Takeout download first; compressed archives are not accepted.
+- **Calendar files**: up to 10 `.ics` files of at most 732 KB each and 879 KB together (the server accepts requests of up to 1,000,000 bytes), with 200 events per import. At most 10 calendar imports are kept, including previews and finished reports; remove finished ones under **Migration** to start more.
+
+Choose the destination mailbox or calendar and, for mail, optionally map source labels or folders to mailboxes; unmapped labels are not kept. The review step lists the limits and, for calendars, previews new, already present, conflicting and invalid events. Nothing is imported before you select **Start import**.
+
+Each migration has a page under **Migration** with its progress, the number of imported, skipped (already present), uncertain and failed items, an item report and **Download report** (CSV). Mail imports continue on the server after you leave the page. Calendar imports advance only while their page is open: when you come back, select **Continue import**. A mail import that needs attention can be resumed, with a new app password if the old one expired or was refused. The server is checked against your administrator's allowed list only when the migration connects: a server that is not allowed, like a refused app password, makes the migration need attention with a generic connection message, so check the server, port and password and ask your administrator before resuming. Cancelling keeps what was already imported. An uncertain item may already be in your mailbox or calendar: check before importing it again, and abandon uncertain mail only after checking. The source is never changed. See [direct mail migration](../operations/mail-migration.md) for server limits and recovery.
 
 ## Drive
 

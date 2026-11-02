@@ -8,7 +8,8 @@ import {
   type BillingOverview,
   type PlanId,
 } from "@opensuite/contracts";
-import { AppShell, SidebarLink } from "../shell/app-shell.tsx";
+import { AppShell } from "../shell/app-shell.tsx";
+import { SettingsNav } from "../shell/settings-nav.tsx";
 import { Button } from "../ui/button.tsx";
 import { billing, billingQuery } from "./client.ts";
 import {
@@ -190,17 +191,7 @@ export function BillingSettings() {
     <AppShell
       product="mail"
       title="Plan & storage"
-      sidebar={
-        <>
-          <p className="shell-nav-heading">Workspace settings</p>
-          <SidebarLink
-            to="/settings/billing"
-            icon="settings"
-            label="Plan & storage"
-            active
-          />
-        </>
-      }
+      sidebar={<SettingsNav current="/settings/billing" />}
     >
       <div className="content-wrap billing-page">
         <div className="page-breadcrumb">

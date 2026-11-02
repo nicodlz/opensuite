@@ -1,7 +1,11 @@
 # Direct mail migration
 
-Direct migration is available through the authenticated Mail API. The current
-web interface does not provide a direct migration wizard. The source is opened
+Direct migration is available through the authenticated Mail API and through
+the web migration assistant (account menu, **Migration**; see the
+[user guide](../user/index.md#importing-mail-and-calendars)). The assistant
+offers app passwords only. It never shows the Google OAuth option: the API does
+not report whether `MAIL_MIGRATION_GOOGLE_OAUTH` is enabled, and real Google
+OAuth use is not yet authorized. The source is opened
 with TLS and read-only IMAP commands. No Esuno-hosted Gmail account is needed.
 The Gmail preset uses `imap.gmail.com:993`; generic IMAP requires a hostname and
 port. Use an app password, not the source account's main password.
@@ -31,7 +35,8 @@ servers the operator trusts. No source server is contacted during setup.
 
 `MAIL_MIGRATION_GOOGLE_OAUTH` defaults to `false`. Setting it to `true` permits
 an authenticated user to provide a previously obtained Google OAuth access
-token for the Gmail preset. This API does not register a Google application,
+token for the Gmail preset. The token can only be supplied through the API; the web
+assistant has no field for it. This API does not register a Google application,
 run an authorization flow, or obtain or refresh tokens. The operator and user
 must arrange an authorized token with the IMAP scope separately. Enabling the
 option does not itself contact Google. On completion or cancellation the API

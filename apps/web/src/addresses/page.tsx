@@ -2,7 +2,8 @@ import * as React from "react";
 import { useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ORPCError } from "@orpc/client";
-import { AppShell, SidebarLink } from "../shell/app-shell.tsx";
+import { AppShell } from "../shell/app-shell.tsx";
+import { SettingsNav } from "../shell/settings-nav.tsx";
 import { Button } from "../ui/button.tsx";
 import { TextField } from "../ui/text-field.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
@@ -81,22 +82,7 @@ export function AddressesPage() {
   return (
     <AppShell
       product="mail"
-      sidebar={
-        <>
-          <p className="shell-nav-heading">Workspace settings</p>
-          <SidebarLink
-            to="/settings/addresses"
-            icon="mail"
-            label="Addresses"
-            active
-          />
-          <SidebarLink
-            to="/settings/billing"
-            icon="settings"
-            label="Plan & storage"
-          />
-        </>
-      }
+      sidebar={<SettingsNav current="/settings/addresses" />}
     >
       <div className="content-wrap vault-content">
         <div className="page-breadcrumb">
