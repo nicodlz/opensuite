@@ -33,12 +33,13 @@ async function guardDraft<T>(
   store: ScheduledSendStore,
   c: MailConnection,
   ids: string[],
-  work: () => Promise<T>,
+  work: (beginWrite: () => void) => Promise<T>,
   conflict: () => never,
 ): Promise<T> {
   const token = randomUUID();
   const acquired: string[] = [];
   let completed = false;
+  const state = { writing: false };
   try {
     await [...new Set(ids)].toSorted().reduce<Promise<void>>(
       (previous, id) =>
@@ -50,11 +51,13 @@ async function guardDraft<T>(
         }),
       Promise.resolve(),
     );
-    const result = await work();
+    const result = await work(() => {
+      state.writing = true;
+    });
     completed = true;
     return result;
   } catch (error) {
-    if (KnownError.safeParse(error).success) completed = true;
+    if (!state.writing || KnownError.safeParse(error).success) completed = true;
     throw error;
   } finally {
     if (completed || acquired.length < new Set(ids).size)
@@ -240,7 +243,7 @@ export function createGuards(db: PrismaClient) {
     guardDraft: <T>(
       c: MailConnection,
       ids: string[],
-      work: () => Promise<T>,
+      work: (beginWrite: () => void) => Promise<T>,
       conflict: () => never,
     ) => guardDraft(store, c, ids, work, conflict),
     findSubmission,

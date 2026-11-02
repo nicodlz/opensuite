@@ -10,6 +10,11 @@ import { fail, value, type createJmapAccess } from "./jmap-access.ts";
 
 type Access = ReturnType<typeof createJmapAccess>;
 type Connection = Awaited<ReturnType<Access["connect"]>>;
+type DraftGuard = <T>(
+  c: Connection,
+  ids: string[],
+  work: (beginWrite: () => void) => Promise<T>,
+) => Promise<T>;
 type EmailResult = Awaited<ReturnType<Connection["client"]["emails"]>>;
 type Email = Extract<EmailResult, { value: unknown }>["value"]["list"][number];
 type Submission = {
@@ -64,7 +69,7 @@ export type ScheduledAdapters = {
   guardDraft?: <T>(
     c: Connection,
     ids: string[],
-    work: () => Promise<T>,
+    work: (beginWrite: () => void) => Promise<T>,
     conflict: () => never,
   ) => Promise<T>;
   findSubmission?: Dependencies["findSubmission"];
@@ -72,19 +77,27 @@ export type ScheduledAdapters = {
   submit?: Dependencies["submit"];
   reserve?: Dependencies["reserve"];
 };
-type Prepared = {
+type Prepared = Sender & {
   c: Connection;
   store: ScheduledSendStore;
   draftId: string;
   requestId: string;
   encoded: string;
   email: Email;
-  identityId: string;
-  from: string;
-  recipients: { email: string }[];
   seconds: number;
 };
 const requiredStore = (deps: Dependencies) => deps.store ?? fail("unavailable");
+const noWriteGuard = () => undefined;
+export function draftGuard(
+  store: ScheduledSendStore | undefined,
+  guarded: ScheduledAdapters["guardDraft"],
+): DraftGuard {
+  return (c, ids, work) => {
+    if (!store) return work(noWriteGuard);
+    if (!guarded) return fail("unavailable");
+    return guarded(c, ids, work, () => fail("conflict"));
+  };
+}
 export async function getDraft(c: Connection, id: string, boxes: Mailbox[]) {
   const draftBox =
     boxes.find((box) => box.role === "drafts")?.id ?? fail("not_found");
@@ -97,23 +110,24 @@ export function draftOperations(deps: {
   connect: Dependencies["connect"];
   run: Dependencies["run"];
   boxes: Dependencies["boxes"];
-  guard: <T>(
-    c: Connection,
-    ids: string[],
-    work: () => Promise<T>,
-  ) => Promise<T>;
+  guard: DraftGuard;
 }) {
   return <T>(
     actor: Actor,
     accountId: string,
     id: string,
-    work: (c: Connection, list: Mailbox[], email: Email) => Promise<T>,
+    work: (
+      c: Connection,
+      list: Mailbox[],
+      email: Email,
+      beginWrite: () => void,
+    ) => Promise<T>,
   ) =>
     deps.run(async () => {
       const c = await deps.connect(actor, accountId);
-      return deps.guard(c, [id], async () => {
+      return deps.guard(c, [id], async (beginWrite) => {
         const list = await deps.boxes(c);
-        return work(c, list, await getDraft(c, id, list));
+        return work(c, list, await getDraft(c, id, list), beginWrite);
       });
     });
 }
@@ -233,7 +247,7 @@ async function schedule(
     deps.now(),
   );
 }
-async function current(
+async function cancel(
   deps: Dependencies,
   actor: Actor,
   accountId: string,
@@ -243,15 +257,6 @@ async function current(
   const c = await deps.connect(actor, accountId);
   const row = await store.get(actor.id, id);
   if (!row || row.accountId !== c.id) return fail("not_found");
-  return { c, row, store };
-}
-async function cancel(
-  deps: Dependencies,
-  actor: Actor,
-  accountId: string,
-  id: string,
-) {
-  const { c, row, store } = await current(deps, actor, accountId, id);
   if (row.state === "pending" && row.releaseAt.getTime() <= deps.now()) {
     await store.transition(row.id, ["pending"], "releasing");
     const found = await store.get(actor.id, id);
@@ -292,18 +297,6 @@ async function release(
   });
   if (updated.isOk()) await store.finish(row, ["releasing"], "sent");
 }
-async function releaseDue(
-  deps: Dependencies,
-  c: Connection,
-  row: ScheduledRecord,
-  store: ScheduledSendStore,
-) {
-  if (
-    row.releaseAt.getTime() <= deps.now() &&
-    (await store.transition(row.id, ["pending"], "releasing"))
-  )
-    await release(deps, c, { ...row, state: "releasing" }, store);
-}
 async function reconcileOne(
   deps: Dependencies,
   row: ScheduledRecord,
@@ -320,7 +313,14 @@ async function reconcileOne(
     return;
   }
   if (row.state === "releasing") return release(deps, c, row, store);
-  if (row.state === "pending") return releaseDue(deps, c, row, store);
+  if (row.state === "pending") {
+    if (
+      row.releaseAt.getTime() <= deps.now() &&
+      (await store.transition(row.id, ["pending"], "releasing"))
+    )
+      await release(deps, c, { ...row, state: "releasing" }, store);
+    return;
+  }
   const found = await deps.findSubmission(c, row, store);
   if (!found) return;
   if (found.undoStatus === "canceled")

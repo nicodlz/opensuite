@@ -11,6 +11,7 @@ import { JmapCapability, type Email, type JmapClient } from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
 import {
   createScheduledSend,
+  draftGuard,
   draftOperations,
   senderFor,
   type ScheduledAdapters,
@@ -160,7 +161,6 @@ const filterFor = (options: ThreadOptions) => {
 
 const role = (list: Mailbox[], name: Mailbox["role"]) =>
   list.find((box) => box.role === name)?.id ?? fail("not_found");
-
 async function applyAction(
   c: MailConnection,
   email: Email,
@@ -253,6 +253,7 @@ export function createMailService(dependencies: {
     content: DraftContent,
     list: Mailbox[],
     prior?: Email,
+    beginWrite?: () => void,
   ) => {
     const existing = new Map(
       (prior ? attachments(prior) : []).map((item) => [item.blobId, item]),
@@ -284,6 +285,7 @@ export function createMailService(dependencies: {
       if (!identities.some((identity) => identity.email.toLowerCase() === from))
         return fail("validation");
     }
+    beginWrite?.();
     return value(
       await c.client.createEmail(c.session, c.id, {
         mailboxIds: { [role(list, "drafts")]: true },
@@ -323,12 +325,7 @@ export function createMailService(dependencies: {
     findSubmission:
       dependencies.findSubmission ?? (() => Promise.resolve(undefined)),
   });
-  const guard = <T>(c: Connection, ids: string[], work: () => Promise<T>) => {
-    if (!store) return work();
-    const guarded = dependencies.guardDraft;
-    if (!guarded) return fail("unavailable");
-    return guarded(c, ids, work, () => fail("conflict"));
-  };
+  const guard = draftGuard(store, dependencies.guardDraft);
   const withDraft = draftOperations({ connect, run, boxes, guard });
   return {
     identity: (actor: Actor, accountId: string) =>
@@ -458,7 +455,8 @@ export function createMailService(dependencies: {
         return guard(
           c,
           targets.map((item) => item.id),
-          async () => {
+          async (beginWrite) => {
+            beginWrite();
             await targets.reduce<Promise<void>>(
               (previous, email) =>
                 previous.then(() => applyAction(c, email, action, list)),
@@ -493,24 +491,26 @@ export function createMailService(dependencies: {
       id: string,
       content: DraftContent,
     ) =>
-      withDraft(actor, accountId, id, async (c, list, previous) => {
-        const created = await create(c, content, list, previous);
+      withDraft(actor, accountId, id, async (c, list, previous, beginWrite) => {
+        const created = await create(c, content, list, previous, beginWrite);
         const removed = await c.client.destroyEmail(c.session, c.id, id);
         if (store) value(removed);
         return { ...content, id: created.id };
       }),
     deleteDraft: (actor: Actor, accountId: string, id: string) =>
-      withDraft(actor, accountId, id, async (c) => {
+      withDraft(actor, accountId, id, async (c, _list, _email, beginWrite) => {
+        beginWrite();
         value(await c.client.destroyEmail(c.session, c.id, id));
         return { success: true } satisfies { success: true };
       }),
     send: (actor: Actor, accountId: string, id: string) =>
-      withDraft(actor, accountId, id, async (c, list, email) => {
+      withDraft(actor, accountId, id, async (c, list, email, beginWrite) => {
         const { from, identityId, recipients } = await senderFor(
           c,
           email,
           dependencies,
         );
+        beginWrite();
         value(
           await c.client.submit(
             c.session,

@@ -132,17 +132,16 @@ afterAll(async () => {
 it("persists, isolates, cancels, restarts, reconciles lost responses and releases mail", async () => {
   if (!db) throw new Error("Database unavailable");
   const database = db;
-  let lostResponse: "create" | "cancel" | null = null;
+  let lostResponse: "create" | "cancel" | "read" | "edit" | null = null;
   let clockOffset = 0;
   const fetchMaybeLose: typeof fetch = async (input, init) => {
     const response = await fetch(input, init);
+    const body = typeof init?.body === "string" ? init.body : "";
     if (
-      lostResponse &&
-      typeof init?.body === "string" &&
-      init.body.includes("EmailSubmission/set") &&
-      (lostResponse === "create"
-        ? init.body.includes("HOLDFOR")
-        : init.body.includes("canceled"))
+      (lostResponse === "read" && body.includes('"Mailbox/get"')) ||
+      (lostResponse === "edit" && body.includes('"Email/set"')) ||
+      (lostResponse === "create" && body.includes("HOLDFOR")) ||
+      (lostResponse === "cancel" && body.includes("canceled"))
     ) {
       lostResponse = null;
       throw new Error("response lost after submission");
@@ -221,6 +220,10 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     );
     content.attachmentBlobIds.push(upload.blobId);
     const draft = value(await mail.createDraft(actor, "default", content));
+    lostResponse = "read";
+    expect(
+      (await mail.updateDraft(actor, "default", draft.id, content)).isErr(),
+    ).toBe(true);
     const requestId = randomUUID();
     const scheduled = await app.inject({
       method: "POST",
@@ -382,6 +385,23 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     expect(
       Number(competingSchedule.isOk()) + Number(competingEdit.isOk()),
     ).toBe(1);
+    const ambiguousDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    lostResponse = "edit";
+    expect(
+      (
+        await mail.updateDraft(actor, "default", ambiguousDraft.id, content)
+      ).isErr(),
+    ).toBe(true);
+    expect(
+      (
+        await mail.schedule(actor, "default", ambiguousDraft.id, randomUUID(), {
+          type: "delay",
+          seconds: 30,
+        })
+      ).isErr(),
+    ).toBe(true);
     const lateDraft = value(await mail.createDraft(actor, "default", content));
     const lateId = randomUUID();
     value(
