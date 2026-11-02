@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { z } from "zod";
 import type { ScheduledRecord, ScheduledSendStore } from "@opensuite/db";
 import {
   type Draft,
@@ -24,93 +22,14 @@ import {
 type MailConnection = Awaited<
   ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
 >;
-const KnownError = z.object({
-  kind: z.enum([
-    "not_found",
-    "forbidden",
-    "validation",
-    "conflict",
-    "rate_limited",
-  ]),
-});
-
-async function guardDraft<T>(
-  store: ScheduledSendStore | undefined,
-  c: MailConnection,
-  ids: string[],
-  work: () => Promise<T>,
-): Promise<T> {
-  if (!store) return work();
-  const token = randomUUID();
-  const acquired: string[] = [];
-  let completed = false;
-  try {
-    await [...new Set(ids)].toSorted().reduce<Promise<void>>(
-      (previous, id) =>
-        previous.then(async () => {
-          if (!(await store.acquire(c.owner, c.id, id, token)))
-            return fail("conflict");
-          acquired.push(id);
-          return undefined;
-        }),
-      Promise.resolve(),
-    );
-    const result = await work();
-    completed = true;
-    return result;
-  } catch (error) {
-    if (KnownError.safeParse(error).success) completed = true;
-    throw error;
-  } finally {
-    if (completed || acquired.length < new Set(ids).size)
-      await Promise.all(
-        acquired.map((id) => store.release(c.owner, c.id, id, token)),
-      );
-  }
-}
-
-async function findSubmission(
+type FindSubmission = (
   c: MailConnection,
   row: ScheduledRecord,
   store: ScheduledSendStore,
-) {
-  let id = row.submissionId;
-  if (!id) {
-    const query = await c.client.submissionIds(c.session, c.id, row.draftId);
-    if (
-      query.isErr() ||
-      query.value.total === undefined ||
-      query.value.total !== query.value.ids.length
-    )
-      return undefined;
-    const candidates = query.value.ids.filter(
-      (item) => !row.previousIds.includes(item),
-    );
-    if (candidates.length !== 1) {
-      await store.transition(row.id, ["creating"], "unknown");
-      return undefined;
-    }
-    id = candidates[0] ?? null;
-    if (!id) return undefined;
-  }
-  const result = await c.client.submissions(c.session, c.id, [id]);
-  if (result.isErr() || result.value.list.length !== 1) return undefined;
-  const submission = result.value.list[0];
-  if (
-    !submission ||
-    submission.emailId !== row.draftId ||
-    submission.identityId !== row.identityId ||
-    submission.envelope.mailFrom.parameters?.["ENVID"] !== row.id
-  )
-    return undefined;
-  if (
-    !row.submissionId &&
-    Math.abs(Date.parse(submission.sendAt) - row.releaseAt.getTime()) > 120_000
-  )
-    return undefined;
-  return submission;
-}
-
+) => Promise<
+  | { id: string; sendAt: string; undoStatus: "pending" | "final" | "canceled" }
+  | undefined
+>;
 export type MailFailureKind = AccessFailureKind;
 export interface MailFailure {
   kind: MailFailureKind;
@@ -298,6 +217,13 @@ export function createMailService(dependencies: {
   canSendAs?: (userId: string, address: string) => Promise<string | null>;
   beforeAliasSend?: (userId: string, aliasId: string) => Promise<boolean>;
   scheduledStore?: ScheduledSendStore;
+  guardDraft?: <T>(
+    c: MailConnection,
+    ids: string[],
+    work: () => Promise<T>,
+    conflict: () => never,
+  ) => Promise<T>;
+  findSubmission?: FindSubmission;
 }) {
   const { run, connect: open, now } = createJmapAccess(dependencies);
   const uploads = new Map<
@@ -438,10 +364,29 @@ export function createMailService(dependencies: {
     now,
     run,
     sender,
-    findSubmission,
+    findSubmission:
+      dependencies.findSubmission ?? (() => Promise.resolve(undefined)),
   });
-  const guard = <T>(c: Connection, ids: string[], work: () => Promise<T>) =>
-    guardDraft(store, c, ids, work);
+  const guard = <T>(c: Connection, ids: string[], work: () => Promise<T>) => {
+    if (!store) return work();
+    return (
+      dependencies.guardDraft?.(c, ids, work, () => fail("conflict")) ??
+      fail("unavailable")
+    );
+  };
+  const withDraft = <T>(
+    actor: Actor,
+    accountId: string,
+    id: string,
+    work: (c: Connection, list: Mailbox[], email: Email) => Promise<T>,
+  ) =>
+    run(async () => {
+      const c = await connect(actor, accountId);
+      return guard(c, [id], async () => {
+        const list = await boxes(c);
+        return work(c, list, await getDraft(c, id, list));
+      });
+    });
   return {
     identity: (actor: Actor, accountId: string) =>
       run(async () => {
@@ -605,49 +550,31 @@ export function createMailService(dependencies: {
       id: string,
       content: DraftContent,
     ) =>
-      run(async () => {
-        const c = await connect(actor, accountId);
-        return guard(c, [id], async () => {
-          const list = await boxes(c);
-          const previous = await getDraft(c, id, list);
-          const created = await create(c, content, list, previous);
-          const removed = await c.client.destroyEmail(c.session, c.id, id);
-          if (store) value(removed);
-          return { ...content, id: created.id };
-        });
+      withDraft(actor, accountId, id, async (c, list, previous) => {
+        const created = await create(c, content, list, previous);
+        const removed = await c.client.destroyEmail(c.session, c.id, id);
+        if (store) value(removed);
+        return { ...content, id: created.id };
       }),
     deleteDraft: (actor: Actor, accountId: string, id: string) =>
-      run(async () => {
-        const c = await connect(actor, accountId);
-        return guard(c, [id], async () => {
-          const list = await boxes(c);
-          await getDraft(c, id, list);
-          value(await c.client.destroyEmail(c.session, c.id, id));
-          return { success: true } satisfies { success: true };
-        });
+      withDraft(actor, accountId, id, async (c) => {
+        value(await c.client.destroyEmail(c.session, c.id, id));
+        return { success: true } satisfies { success: true };
       }),
     send: (actor: Actor, accountId: string, id: string) =>
-      run(async () => {
-        const c = await connect(actor, accountId);
-        return guard(c, [id], async () => {
-          const list = await boxes(c);
-          const email = await getDraft(c, id, list);
-          const { from, identityId, recipients } = await sender(c, email);
-          value(
-            await c.client.submit(
-              c.session,
-              c.id,
-              id,
-              identityId,
-              {
-                mailFrom: { email: from },
-                rcptTo: recipients,
-              },
-              role(list, "sent"),
-            ),
-          );
-          return { messageId: id, threadId: email.threadId };
-        });
+      withDraft(actor, accountId, id, async (c, list, email) => {
+        const { from, identityId, recipients } = await sender(c, email);
+        value(
+          await c.client.submit(
+            c.session,
+            c.id,
+            id,
+            identityId,
+            { mailFrom: { email: from }, rcptTo: recipients },
+            role(list, "sent"),
+          ),
+        );
+        return { messageId: id, threadId: email.threadId };
       }),
     schedule: scheduled.schedule,
     scheduled: scheduled.scheduled,

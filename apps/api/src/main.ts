@@ -18,7 +18,6 @@ import {
   createMailboxStore,
   createPushStore,
   createMailPushStore,
-  createScheduledSendStore,
 } from "@opensuite/db";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import { createMailService } from "@opensuite/core/services/mail";
@@ -40,7 +39,7 @@ import { startDomainJob } from "./routes/domain-job.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
-import { startScheduledSendJob } from "@opensuite/core/adapters/scheduled-send";
+import * as queue from "@opensuite/core/adapters/scheduled-send";
 import { startCalendarReminderJob } from "./calendar-reminder-job.ts";
 import { configurePush } from "./push-runtime.ts";
 import type { PushProduct } from "@opensuite/contracts";
@@ -164,11 +163,8 @@ const entitlements = createEntitlements(
 const driveOrigin = z
   .url()
   .refine((value) => {
-    const parsedUrl = new URL(value);
-    return (
-      ["http:", "https:"].includes(parsedUrl.protocol) &&
-      parsedUrl.origin === value
-    );
+    const { protocol, origin } = new URL(value);
+    return ["http:", "https:"].includes(protocol) && origin === value;
   })
   .safeParse(process.env["BILLING_DRIVE_ORIGIN"] || "http://drive:3001");
 if (!driveOrigin.success) {
@@ -297,7 +293,7 @@ const createAliasGuard = createAliasSendGuard(
   addresses.auditSubmission,
 );
 const mail = createMailService({
-  scheduledStore: createScheduledSendStore(database.value),
+  ...queue.createGuards(database.value),
   store: {
     getForOwner: async (userId, accountId) =>
       mailboxStore.getForOwner(userId, accountId),
@@ -458,9 +454,7 @@ const stopCalendarReminders =
         publicKey: push.publicKey,
         onError: () => app.log.warn("calendar reminder job failed"),
       });
-const stopScheduledSendJob = startScheduledSendJob(mail, () =>
-  app.log.warn("scheduled mail reconciliation failed"),
-);
+const stopQueue = queue.start(mail, () => app.log.warn("send failed"));
 let running: Promise<void> | undefined;
 const work = async () => {
   try {
@@ -499,8 +493,7 @@ app.addHook("onClose", async () => {
   await stopSubscriptionSync?.();
   await stopDomainJob?.();
   await stopMailNotifier?.();
-  await stopCalendarReminders?.();
-  await stopScheduledSendJob();
+  await Promise.all([stopCalendarReminders?.(), stopQueue()]);
   await running;
   await database.value.$disconnect();
 });

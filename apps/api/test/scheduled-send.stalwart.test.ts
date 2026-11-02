@@ -3,11 +3,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { createReadinessService } from "@opensuite/core";
 import { createMailService } from "@opensuite/core/services/mail";
-import {
-  createDatabase,
-  createScheduledSendStore,
-  type PrismaClient,
-} from "@opensuite/db";
+import { createGuards } from "@opensuite/core/adapters/scheduled-send";
+import { createDatabase, type PrismaClient } from "@opensuite/db";
 import { JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, ok } from "neverthrow";
@@ -166,7 +163,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       origin: base,
       now: () => Date.now() + clockOffset,
       store: credentials,
-      scheduledStore: createScheduledSendStore(database),
+      ...createGuards(database),
       canSendAs: (_user, address) =>
         Promise.resolve(address === "alias@example.test" ? "alias" : null),
       beforeAliasSend: () => Promise.resolve(true),

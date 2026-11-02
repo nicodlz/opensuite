@@ -5,7 +5,6 @@ import type { Result } from "neverthrow";
 import type { ApiContext } from "./context.ts";
 
 const mail = implement(contract.mail).$context<ApiContext>();
-const scheduled = implement(scheduledMailContract).$context<ApiContext>();
 const access = (context: ApiContext) => {
   if (context.actor === null) throw new ORPCError("UNAUTHORIZED");
   if (context.mail === undefined)
@@ -42,6 +41,7 @@ const result = async <T>(
     defined: true,
   });
 };
+const scheduled = implement(scheduledMailContract).$context<ApiContext>();
 export const mailRouter = {
   ...mail.router({
     identity: mail.identity.handler(({ context, input }) => {

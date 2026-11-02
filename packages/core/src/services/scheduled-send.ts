@@ -5,12 +5,14 @@ import {
   type ScheduleDelivery,
 } from "@opensuite/contracts";
 import type { ScheduledRecord, ScheduledSendStore } from "@opensuite/db";
-import { JmapCapability, type Email } from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
 import { fail, value, type createJmapAccess } from "./jmap-access.ts";
 
 type Access = ReturnType<typeof createJmapAccess>;
 type Connection = Awaited<ReturnType<Access["connect"]>>;
+type EmailResult = Awaited<ReturnType<Connection["client"]["emails"]>>;
+type Email = Extract<EmailResult, { value: unknown }>["value"]["list"][number];
+const submissionCapability = "urn:ietf:params:jmap:submission";
 type Dependencies = {
   store: ScheduledSendStore | undefined;
   connect: (actor: Actor, accountId: string) => Promise<Connection>;
@@ -75,7 +77,7 @@ function delaySeconds(c: Connection, delivery: ScheduleDelivery, now: number) {
       : Date.parse(delivery.at);
   const seconds = Math.ceil((releaseTime - now) / 1000);
   const capability = Capability.safeParse(
-    c.session.accounts[c.id]?.accountCapabilities[JmapCapability.submission],
+    c.session.accounts[c.id]?.accountCapabilities[submissionCapability],
   );
   if (
     !capability.success ||
@@ -83,11 +85,10 @@ function delaySeconds(c: Connection, delivery: ScheduleDelivery, now: number) {
     !("DSN" in capability.data.submissionExtensions)
   )
     return fail("unavailable");
-  if (
-    !Number.isFinite(seconds) ||
-    seconds < 1 ||
-    seconds > Math.min(2_592_000, capability.data.maxDelayedSend)
-  )
+  if (!(
+    seconds >= 1 &&
+    seconds <= Math.min(2_592_000, capability.data.maxDelayedSend)
+  ))
     return fail("validation");
   return { release: releaseTime, seconds, max: capability.data.maxDelayedSend };
 }
@@ -141,7 +142,7 @@ async function reserve(deps: Dependencies, p: Prepared) {
   try {
     await deps.getDraft(c, draftId, await deps.boxes(c));
     const previous = value(
-      await c.client.submissionIds(c.session, c.id, draftId),
+      await c.client.scheduled.submissionIds(c.session, c.id, draftId),
     );
     if (previous.total === undefined || previous.total !== previous.ids.length)
       fail("unavailable");
@@ -178,7 +179,7 @@ async function submit(deps: Dependencies, p: Prepared) {
     state: "unknown",
   });
   try {
-    const sent = await c.client.scheduleSubmission(
+    const sent = await c.client.scheduled.scheduleSubmission(
       c.session,
       c.id,
       draftId,
@@ -259,7 +260,7 @@ async function cancel(
   if (row.state !== "pending" || !row.submissionId) return dto(row);
   if (await store.transition(row.id, ["pending"], "canceling")) {
     try {
-      const canceled = await c.client.cancelSubmission(
+      const canceled = await c.client.scheduled.cancelSubmission(
         c.session,
         c.id,
         row.submissionId,
@@ -291,6 +292,18 @@ async function release(
   });
   if (updated.isOk()) await store.finish(row, ["releasing"], "sent");
 }
+async function releaseDue(
+  deps: Dependencies,
+  c: Connection,
+  row: ScheduledRecord,
+  store: ScheduledSendStore,
+) {
+  if (
+    row.releaseAt.getTime() <= deps.now() &&
+    (await store.transition(row.id, ["pending"], "releasing"))
+  )
+    await release(deps, c, { ...row, state: "releasing" }, store);
+}
 async function reconcileOne(
   deps: Dependencies,
   row: ScheduledRecord,
@@ -307,14 +320,7 @@ async function reconcileOne(
     return;
   }
   if (row.state === "releasing") return release(deps, c, row, store);
-  if (row.state === "pending") {
-    if (
-      row.releaseAt.getTime() <= deps.now() &&
-      (await store.transition(row.id, ["pending"], "releasing"))
-    )
-      await release(deps, c, { ...row, state: "releasing" }, store);
-    return;
-  }
+  if (row.state === "pending") return releaseDue(deps, c, row, store);
   const found = await deps.findSubmission(c, row, store);
   if (!found) return;
   if (found.undoStatus === "canceled")
