@@ -9,6 +9,7 @@ const config = Config.parse({
 const healthy: Sources = {
   ready: () => Promise.resolve(true),
   backupAge: () => Promise.resolve(100),
+  ingestCaptureAge: () => Promise.resolve(100),
   backupFailure: () => Promise.resolve(null),
   diskPercent: () => Promise.resolve(50),
   certificateDays: () => Promise.resolve(60),
@@ -45,6 +46,39 @@ describe("observations", () => {
     expect(report.alerts.map((alert) => alert.code)).toEqual([
       "backup_vault_failure",
     ]);
+  });
+  it("alerts on stale, future or unreadable ingestion capture markers", async () => {
+    const ages = [93601, -1];
+    const reports = await Promise.all(
+      ages.map((age) =>
+        run({ ...healthy, ingestCaptureAge: () => Promise.resolve(age) }),
+      ),
+    );
+    reports.forEach((report, index) => {
+      expect(report.alerts).toContainEqual({
+        code: "ingest_capture_age_seconds",
+        value: ages[index],
+      });
+    });
+    const missing = await run({
+      ...healthy,
+      ingestCaptureAge: () => Promise.reject(new Error("private path")),
+    });
+    expect(missing.alerts).toContainEqual({
+      code: "ingest_capture_age_seconds_unavailable",
+    });
+    expect(JSON.stringify(missing)).not.toContain("private path");
+    const disabled = await inspect(
+      Config.parse({}),
+      {
+        ...healthy,
+        ingestCaptureAge: () => Promise.reject(new Error("missing")),
+      },
+      new Date(),
+    );
+    expect(disabled.alerts.map((alert) => alert.code)).not.toContain(
+      "ingest_capture_age_seconds_unavailable",
+    );
   });
   it("reports independent failures and thresholds without exception details", async () => {
     const report = await run({

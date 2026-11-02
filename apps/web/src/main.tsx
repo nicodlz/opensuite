@@ -5,25 +5,15 @@ import {
   QueryCache,
   MutationCache,
   QueryClientProvider,
-  useQuery,
 } from "@tanstack/react-query";
 import {
-  Link,
   Outlet,
   RouterProvider,
   createRootRoute,
   createRoute,
   createRouter,
-  useRouterState,
 } from "@tanstack/react-router";
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useState,
-  type FormEvent,
-  type ReactNode,
-} from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { ORPCError } from "@orpc/client";
@@ -32,20 +22,13 @@ import { LoginPage, Protected, expireSession } from "./auth/components.tsx";
 import { CallbackPage, HandoffPage, startHandoff } from "./auth/handoff.tsx";
 import { activeLayout, redirectFor, rewriteFor } from "./origins.ts";
 import { MailPage } from "./mail/mail-page.tsx";
-import { getHealth, getReadiness } from "./api.ts";
 import { BillingSettings } from "./billing/settings.tsx";
 import { SubscribePage, WelcomePage } from "./billing/public.tsx";
-import {
-  AppShell,
-  SidebarItem,
-  SidebarLink,
-  type Product,
-} from "./shell/app-shell.tsx";
-import { Button } from "./ui/button.tsx";
-import { Dialog, DialogContent } from "./ui/dialog.tsx";
-import { useKeyboardShortcut } from "./ui/keyboard-shortcut.ts";
-import { TextField } from "./ui/text-field.tsx";
-import { Toast, ToastProvider } from "./ui/toast.tsx";
+import { ProductPlaceholder } from "./shell/admin-pages.tsx";
+import { AdminShell, StatusScreen } from "./shell/admin-shell.tsx";
+import { PageLoading } from "./shell/app-shell.tsx";
+import { useDocumentTitle } from "./ui/document-title.ts";
+import { ToastProvider } from "./ui/toast.tsx";
 
 // The bootstrap has already resolved the origin and selected app metadata.
 const layout = activeLayout();
@@ -99,351 +82,52 @@ const queryClient = new QueryClient({
   },
 });
 
-function PageLoading() {
-  return <div className="page-loading" aria-busy="true" />;
-}
 function Lazy({ children }: { children: ReactNode }) {
   return <Suspense fallback={<PageLoading />}>{children}</Suspense>;
 }
-
-/** Frame for the administration pages and the Contacts placeholder. */
-function AdminShell({
-  product = "admin",
-  signedIn = true,
-  children,
-}: {
-  product?: Product;
-  signedIn?: boolean;
-  children: ReactNode;
-}) {
-  const path = useRouterState({ select: (state) => state.location.pathname });
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [label, setLabel] = useState(
-    () => localStorage.getItem("opensuite-label") || "My workspace",
-  );
-  const [draft, setDraft] = useState(label);
-  const [error, setError] = useState("");
-  const [toastOpen, setToastOpen] = useState(false);
-  const openSettings = useCallback(() => {
-    setDraft(label);
-    setError("");
-    setSettingsOpen(true);
-  }, [label]);
-  useKeyboardShortcut("s", openSettings);
-  function saveLabel(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const value = draft.trim();
-    if (!value) {
-      setError("Enter a workspace label.");
-      return;
-    }
-    localStorage.setItem("opensuite-label", value);
-    setLabel(value);
-    setError("");
-    setSettingsOpen(false);
-    setToastOpen(true);
-  }
-  const links = [
-    { to: "/status", label: "System status", icon: "status" },
-    { to: "/setup", label: "Setup wizard", icon: "sparkle" },
-    { to: "/domains", label: "Domains", icon: "globe" },
-  ] as const;
-  return (
-    <ToastProvider>
-      <AppShell
-        product={product}
-        signedIn={signedIn}
-        sidebar={
-          product === "admin" && (
-            <>
-              <p className="shell-nav-heading">Workspace</p>
-              <p className="admin-workspace-name">{label}</p>
-              <p className="shell-nav-heading">Administration</p>
-              {links.map((link) => (
-                <SidebarLink
-                  key={link.to}
-                  to={link.to}
-                  icon={link.icon}
-                  label={link.label}
-                  active={
-                    path === link.to || (link.to === "/status" && path === "/")
-                  }
-                />
-              ))}
-              <SidebarItem
-                icon="settings"
-                label="Workspace settings"
-                onClick={openSettings}
-                aria-keyshortcuts="S"
-              />
-            </>
-          )
-        }
-      >
-        {children}
-      </AppShell>
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent
-          title="Workspace settings"
-          description="Choose a label for this browser. It is stored locally."
-        >
-          <form onSubmit={saveLabel} noValidate>
-            <TextField
-              label="Workspace label"
-              description="Visible in the sidebar on this device."
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              maxLength={40}
-              error={error}
-            />
-            <div className="dialog-actions">
-              <Button type="submit">Save label</Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
-      <Toast
-        open={toastOpen}
-        onOpenChange={setToastOpen}
-        message="Workspace label saved on this device"
-      />
-    </ToastProvider>
-  );
-}
-
-function StatusPage() {
-  const health = useQuery({
-    queryKey: ["health"],
-    queryFn: getHealth,
-    refetchInterval: 30_000,
-  });
-  const readiness = useQuery({
-    queryKey: ["readiness"],
-    queryFn: getReadiness,
-    refetchInterval: 30_000,
-  });
-  const loading = health.isPending || readiness.isPending;
-  const unavailable = health.isError || readiness.isError;
-  const degraded = readiness.data?.status === "not_ready";
-  const overview = loading
-    ? "Checking services"
-    : unavailable
-      ? "Some checks are unavailable"
-      : degraded
-        ? "Attention needed"
-        : "All checks operational";
-  return (
-    <div className="content-wrap">
-      <div className="page-breadcrumb">
-        WORKSPACE <span>/</span> SYSTEM STATUS
-      </div>
-      <div className="page-header">
-        <div>
-          <p className="eyebrow">YOUR INSTALLATION</p>
-          <h1>System status</h1>
-          <p className="page-subtitle">
-            A live view of your Esuno API and its dependencies.
-          </p>
-        </div>
-        <Button
-          variant="secondary"
-          onClick={() => {
-            void health.refetch();
-            void readiness.refetch();
-          }}
-          disabled={health.isFetching || readiness.isFetching}
-        >
-          <span aria-hidden="true">↻</span> Refresh checks
-        </Button>
-      </div>
-      <section
-        className="overview-card"
-        aria-labelledby="overview-heading"
-        aria-live="polite"
-      >
-        <div
-          className={`overview-icon ${unavailable ? "danger" : degraded ? "warning" : "success"}`}
-          aria-hidden="true"
-        >
-          {loading ? "…" : unavailable ? "!" : degraded ? "!" : "✓"}
-        </div>
-        <div>
-          <p className="eyebrow">CURRENT OVERVIEW</p>
-          <h2 id="overview-heading">{overview}</h2>
-          <p>
-            {loading
-              ? "Waiting for the API to respond."
-              : unavailable
-                ? "A check could not be completed. Check your connection and try again."
-                : degraded
-                  ? "One or more dependencies need attention."
-                  : "The API is responding and its readiness check passed."}
-          </p>
-        </div>
-        <span className="live-label">
-          <span className="live-dot" /> LIVE CHECKS
-        </span>
-      </section>
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">SERVICE CHECKS</p>
-          <h2>API health</h2>
-          <p>Checks refresh automatically every 30 seconds.</p>
-        </div>
-      </div>
-      <div className="checks-grid">
-        <article className="check-card">
-          <div className="check-top">
-            <div className="check-icon" aria-hidden="true">
-              ♡
-            </div>
-            <StatusBadge
-              state={
-                health.isPending ? "loading" : health.isError ? "error" : "ok"
-              }
-            />
-          </div>
-          <h3>Liveness</h3>
-          <p>Confirms the API process is responding.</p>
-          <div className="check-detail">
-            {health.isPending
-              ? "Waiting for response"
-              : health.isError
-                ? "Unable to reach or validate the API"
-                : `Uptime: ${Math.floor(health.data.uptimeSeconds)} seconds`}
-          </div>
-          <code>GET /api/health</code>
-        </article>
-        <article className="check-card">
-          <div className="check-top">
-            <div className="check-icon" aria-hidden="true">
-              ◈
-            </div>
-            <StatusBadge
-              state={
-                readiness.isPending
-                  ? "loading"
-                  : readiness.isError
-                    ? "error"
-                    : degraded
-                      ? "degraded"
-                      : "ok"
-              }
-            />
-          </div>
-          <h3>Readiness</h3>
-          <p>Checks whether declared dependencies are available.</p>
-          <div className="check-detail">
-            {readiness.isPending
-              ? "Waiting for response"
-              : readiness.isError
-                ? "Unable to reach or validate the API"
-                : readiness.data.dependencies.length === 0
-                  ? "No dependencies declared"
-                  : `${readiness.data.dependencies.filter((dependency) => dependency.status === "up").length} of ${readiness.data.dependencies.length} dependencies up`}
-          </div>
-          <code>GET /api/ready</code>
-        </article>
-      </div>
-      {readiness.data && readiness.data.dependencies.length > 0 && (
-        <section className="dependency-card">
-          <h2>Dependencies</h2>
-          <ul>
-            {readiness.data.dependencies.map((dependency) => (
-              <li key={dependency.name}>
-                <span>{dependency.name}</span>
-                <StatusBadge
-                  state={dependency.status === "up" ? "ok" : "degraded"}
-                />
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      <p className="status-footnote">Status reflects these API checks only.</p>
-    </div>
-  );
-}
-
-type BadgeState = "loading" | "ok" | "degraded" | "error";
-function StatusBadge({ state }: { state: BadgeState }) {
-  const labels: Record<BadgeState, string> = {
-    loading: "Checking",
-    ok: "Operational",
-    degraded: "Degraded",
-    error: "Unavailable",
-  };
-  return (
-    <span className={`status-badge status-${state}`}>
-      <span aria-hidden="true">●</span> {labels[state]}
-    </span>
-  );
-}
-function ProductPlaceholder({ name }: { name: string }) {
-  return (
-    <div className="content-wrap">
-      <div className="page-breadcrumb">
-        WORKSPACE <span>/</span> {name.toUpperCase()}
-      </div>
-      <div className="page-header">
-        <div>
-          <p className="eyebrow">PRODUCTS</p>
-          <h1>{name}</h1>
-          <p className="page-subtitle">
-            {name} is not available in the web app yet.
-          </p>
-        </div>
-      </div>
-      <section className="empty-card">
-        <div className="check-icon" aria-hidden="true">
-          ◇
-        </div>
-        <h2>Coming later</h2>
-        <p>
-          This area is reserved for {name.toLowerCase()}. You can check your
-          installation while it is being built.
-        </p>
-        <Button asChild variant="secondary">
-          <Link to="/status">View system status</Link>
-        </Button>
-      </section>
-    </div>
-  );
+/** Browser tab title for routes that have no application shell. */
+function Titled({ title, children }: { title: string; children: ReactNode }) {
+  useDocumentTitle(`${title} · Esuno`);
+  return children;
 }
 
 const rootRoute = createRootRoute({ component: Outlet });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: () => (
-    <AdminShell signedIn={false}>
-      <StatusPage />
-    </AdminShell>
-  ),
+  component: () => <StatusScreen home />,
 });
 const statusRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/status",
-  component: () => (
-    <AdminShell signedIn={false}>
-      <StatusPage />
-    </AdminShell>
-  ),
+  component: () => <StatusScreen home={false} />,
 });
 const handoffRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/auth/handoff",
-  component: HandoffPage,
+  component: () => (
+    <Titled title="Signing in">
+      <HandoffPage />
+    </Titled>
+  ),
 });
 const callbackRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/auth/callback",
-  component: CallbackPage,
+  component: () => (
+    <Titled title="Signing in">
+      <CallbackPage />
+    </Titled>
+  ),
 });
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  component: LoginPage,
+  component: () => (
+    <Titled title="Sign in">
+      <LoginPage />
+    </Titled>
+  ),
 });
 const addressesSettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -466,12 +150,20 @@ const billingSettingsRoute = createRoute({
 const subscribeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/subscribe",
-  component: SubscribePage,
+  component: () => (
+    <Titled title="Choose a plan">
+      <SubscribePage />
+    </Titled>
+  ),
 });
 const welcomeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/welcome",
-  component: WelcomePage,
+  component: () => (
+    <Titled title="Welcome">
+      <WelcomePage />
+    </Titled>
+  ),
 });
 const mailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -630,6 +322,8 @@ if (!root) throw new Error("Root element missing");
 if (moved === null || !/^https?:/.test(moved))
   createRoot(root).render(
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <ToastProvider>
+        <RouterProvider router={router} />
+      </ToastProvider>
     </QueryClientProvider>,
   );

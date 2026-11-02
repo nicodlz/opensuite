@@ -3,6 +3,7 @@ set -eu
 trap 'printf "{\"component\":\"backup\",\"event\":\"failure\"}\n"' EXIT
 . "$(dirname "$0")/common.sh"
 running=''
+capture_started=''
 phase=backup
 locked=0
 cleanup() {
@@ -15,7 +16,10 @@ cleanup() {
   if ! clean_stage; then result=1; log scratch_cleanup_failed; fi
   if [ "$result" -eq 0 ]; then
     marker_dir=${OBSERVE_BACKUP_DIR:-./deploy/backup-status}
-    if ! (umask 022; mkdir -p "$marker_dir" && marker=$(mktemp "$marker_dir/.last-success.XXXXXXXX") &&
+    if ! (umask 022; mkdir -p "$marker_dir" && [ -n "$capture_started" ] &&
+      capture_marker=$(mktemp "$marker_dir/.last-ingest-capture.XXXXXXXX") &&
+      printf '%s\n' "$capture_started" > "$capture_marker" && chmod 0644 "$capture_marker" && mv -f "$capture_marker" "$marker_dir/last-ingest-capture" &&
+      marker=$(mktemp "$marker_dir/.last-success.XXXXXXXX") &&
       printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker" && chmod 0644 "$marker" && mv -f "$marker" "$marker_dir/last-success" && rm -f "$marker_dir/last-failure"); then
       result=1
       log marker_failed
@@ -106,6 +110,11 @@ running=$(printf '%s\n' "$services" | awk '/^(caddy|api|drive|stalwart|ingest|ob
 [ -z "$running" ] || compose stop $running >&2
 log quiesced
 mkdir -p "$BACKUP_STAGE/data/config" "$BACKUP_STAGE/data/postgres"
+# This time is a conservative boundary for this coordinated capture, not a
+# claim that every earlier receipt was imported. Keep it in the snapshot so
+# recovery can inspect the actual ledger and mailbox state from that capture.
+capture_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '%s\n' "$capture_started" > "$BACKUP_STAGE/data/config/ingest-capture-start"
 cp .env "$BACKUP_STAGE/data/config/env"
 cp "$BACKUP_CONFIG" "$BACKUP_STAGE/data/config/backup.conf"
 cp deploy/stalwart/config.json "$BACKUP_STAGE/data/config/stalwart.json"

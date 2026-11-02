@@ -4,7 +4,7 @@ import {
   type MailMigrationService,
 } from "@opensuite/core/services/migration-mail";
 import type { createMailboxStore, PrismaClient } from "@opensuite/db";
-import type { FastifyBaseLogger } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 
 type MailboxStore = Extract<
   ReturnType<typeof createMailboxStore>,
@@ -29,7 +29,7 @@ export function createMailImport(
 }
 
 export function startMailImport(
-  service: MailMigrationService,
+  service: Pick<MailMigrationService, "work">,
   log: Pick<FastifyBaseLogger, "warn">,
 ) {
   let running: Promise<void> | undefined;
@@ -50,4 +50,12 @@ export function startMailImport(
     clearInterval(timer);
     await running;
   };
+}
+
+export function registerMailImport(
+  app: FastifyInstance,
+  service: Pick<MailMigrationService, "work">,
+) {
+  const stop = startMailImport(service, app.log);
+  app.addHook("onClose", stop);
 }

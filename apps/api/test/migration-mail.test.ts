@@ -1,5 +1,7 @@
 import { createReadinessService } from "@opensuite/core";
+import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
+import { registerMailImport } from "../src/migration-mail-job.ts";
 import { buildServer } from "../src/server.ts";
 
 const now = () => performance.now();
@@ -68,4 +70,22 @@ describe("mail import HTTP boundary", () => {
       await app.close();
     }
   });
+});
+
+it("waits for an active import before disconnecting the database", async () => {
+  const app = Fastify();
+  const work = Promise.withResolvers<boolean>();
+  let databaseDisconnected = false;
+  app.addHook("onClose", async () => {
+    databaseDisconnected = true;
+  });
+  registerMailImport(app, { work: () => work.promise });
+  await app.ready();
+  const closing = app.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const disconnectedWhileWorking = databaseDisconnected;
+  work.resolve(true);
+  await closing;
+  expect(disconnectedWhileWorking).toBe(false);
+  expect(databaseDisconnected).toBe(true);
 });

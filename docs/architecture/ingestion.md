@@ -20,6 +20,74 @@ When the keyword query returns zero candidates, the worker waits at least 15 min
 
 SQS visibility starts at five minutes and is extended every minute while handling a message. Failure delays start at one minute and double to an hour; AWS and local queues allow 100 receives and retain messages for 14 days. A prolonged outage can still exhaust retention or reach the DLQ, so alert on both and retain the archive. JMAP requests have a 120-second deadline including response bodies; buffer and archive SDK clients use connection and request deadlines, and S3 body reads have a deadline. Timeout during import is ambiguous. Configure and monitor the DLQ, backlog and replay scheduler independently.
 
+## Retention and backup coverage
+
+A successful import, a delete marker, and an SQS acknowledgement are not a
+backup. Keep every original MIME version and its complete SES notification
+(including Bcc) for **at least 30 days and until it is covered by a verified,
+restorable coordinated backup**. Keep unfinished, held, uncertain, and
+unresolved recipients regardless of age. The worker does not permanently purge
+versions or archive entries. Its delete operation creates a delete marker only
+after checking that buffer versioning is enabled and no enabled lifecycle rule
+that could apply to the key expires current or noncurrent versions. It treats
+tag filters as potentially matching and fails closed on unavailable permissions
+or malformed responses; `ingest_failure` with stage `buffer_delete` and code
+`UnsafeRetentionConfiguration` identifies a refused deletion. Grant
+`s3:GetBucketVersioning` and `s3:GetLifecycleConfiguration` to the worker.
+The check and delete are separate provider operations, not an atomic fence:
+restrict lifecycle/versioning changes and version deletion to an independent
+administrator and monitor configuration drift even while the VPS is down.
+Other lifecycle rules and manual or privileged deletion can defeat retention.
+Before reception, reconcile the **whole** shared bucket lifecycle, including
+old rule prefixes and Firehose metadata, and prohibit expiration of unprotected
+originals or notifications. The module disables its old Esuno expiration rule;
+review the plan carefully because S3 has one lifecycle configuration per bucket.
+
+The backup records `config/ingest-capture-start` after workers and mail are
+stopped. A successful run publishes `last-ingest-capture` next to
+`last-success` as an operational hint. When ingestion monitoring is enabled,
+the observer alerts if that recorded time is missing, invalid, future or
+older than `OBSERVE_BACKUP_MAX_AGE_SECONDS`. A timestamp alone does not prove
+coverage: messages received before that time may still have been queued or
+held, and a local marker can be lost or can be newer than a failed run if
+writing the final success marker fails. Independently record the snapshot ID,
+capture time, successful job outcome and a restore verification. Inspect the
+restored ledger and mailbox for each message and every envelope recipient;
+confirm the original bytes and intended mailbox, including aliases and Bcc.
+A missing, rejected, held, failed or uncertain recipient is not proof of a
+backed-up delivery. Treat a deliberately rejected message as a separate,
+audited disposition, never infer coverage from a receipt timestamp.
+
+There is no automatic purge. For a controlled cleanup, fence workers and other
+writers, independently preserve the snapshot and keys, inventory exact message
+IDs, versions and all notification variants, and verify each against the
+restored capture and the 30-day minimum. Preserve all copies for unresolved
+messages and keep notification and MIME retention aligned. Have an independent
+operator check the inventory before using a separately privileged deletion
+identity; dry-run and record the version IDs and decisions. Do not use a broad
+prefix or age-only lifecycle rule. If a message or its recipients cannot be
+verified, retain it and investigate. A snapshot that restores an older mailbox
+or ledger does not cover later imports, even if another later snapshot did;
+keep the corresponding originals and notifications for every snapshot that
+may be selected for recovery, or explicitly retire that snapshot first.
+
+Alert on backup failure and age, missing capture records, Firehose delivery
+freshness/failure, SNS subscription DLQ, queue backlog, replay errors and
+buffer/archive capacity. If backup or verification fails for an extended
+period, suspend cleanup, restore backups and add storage or stop accepting new
+mail before capacity is exhausted; old data must not be discarded to keep the
+pipeline apparently healthy. Independent monitoring is required during VPS or
+network loss. Costs and stored third-party mail grow while cleanup is suspended;
+provider loss, privileged deletion, unmonitored drift, exhausted storage or a
+failed Firehose subscription can still cause loss. No real-provider retention,
+SNS/Firehose delivery or restore has been proved.
+
+Before rollback, stop and fence every worker, preserve all buffer versions and
+both notification archives, and do not re-enable the 30-day lifecycle. An
+older worker lacks the retention check: verify bucket configuration and IAM
+independently before restarting it. Reconcile Firehose and the buffer before
+redriving or changing receipt rules, and retain all prior rule prefixes.
+
 ## Running and recovery
 
 Run `pnpm --filter @opensuite/ingest start` for the worker or `pnpm --filter @opensuite/ingest start replay` for reconciliation. Supply `DATABASE_URL`, `INBOUND_BUCKET`, `INBOUND_QUEUE_URL`, `INBOUND_TOPIC_ARN`, `INBOUND_BUFFER_PREFIX`, `ARCHIVE_BUCKET`, `ARCHIVE_PREFIX`, and either `MAILBOX_KEY_FILE` together with `INGEST_MAILBOX_ORIGIN`, or at least one static destination in `INGEST_DESTINATIONS` (with `INGEST_ROUTES`), or both. With the key file and origin, the worker delivers to every active mailbox linked in the database: it decrypts the stored credential with the mailbox key, which is the same key the API uses, and connects to `INGEST_MAILBOX_ORIGIN` with session URLs rewritten to it. At start it decrypts one stored credential and exits (`invalid_mailbox_key`) if the key does not match. Quarantine for these mailboxes goes to the mailbox with the `junk` role. The stored credential is the mailbox's full credential, not an import-only one, and the key opens every mailbox: protect it like the API's, as a read-only file that is never logged or copied into the ledger. The worker already uses the API's database role, so this widens a compromise of the worker to reading, sending and deleting mail in every mailbox. Static destinations remain for mailboxes delivered with a separate credential; one with the same ID takes precedence over a linked mailbox. Every static route must name a static destination, and a static route that names a different destination than the database for the same address fails the message (`Conflicting recipient routes`). For every destination, static or linked, the `id` is the Stalwart account ID and the credential is used only if its primary mail account is exactly that account. Routes are JSON objects with `address` and stable `destination`; destinations have `id`, JMAP `origin`, `authorization` and the quarantine mailbox ID `quarantineMailbox`. When Stalwart advertises a public URL but the worker must use an internal origin, set `rewriteSessionUrls: true` on that destination. This server-side opt-in rewrites the advertised API, upload and download origins to the configured JMAP `origin`, retaining their paths and queries; only use it for a trusted server. Without it, cross-origin endpoints and redirects are rejected. Store these credentials in a protected secret store and inject them only into the worker. `AWS_REGION` defaults to `eu-north-1`; SDK default credentials are used for the buffer and queue. `AWS_ENDPOINT_URL` enables LocalStack. `ARCHIVE_ENDPOINT_URL`, `ARCHIVE_REGION`, `ARCHIVE_ACCESS_KEY_ID` and `ARCHIVE_SECRET_ACCESS_KEY` configure the archive independently. SES names each object after its receipt rule's object key prefix followed by the message ID, and the worker refuses any notification whose object key is not exactly one accepted prefix followed by its message ID (a message ID never contains a slash). SES's setup test for a rule (a `Received` notification whose message ID is `AMAZON_SES_SETUP_NOTIFICATION`, without verdicts, its object under an accepted prefix followed by that marker) carries no mail: the worker acknowledges it without archiving or delivering it and logs `ingest_setup_notice`, Firehose recovery counts it as `setup` (or `foreign` under a prefix that is not accepted, the sign of a missing prefix), and replay neither uses nor reports as an orphan the test object SES writes under that prefix. Any other record that is not a valid notification stays an error. The accepted prefixes are `INBOUND_OBJECT_PREFIXES` (comma separated, each ending with a slash and within `INBOUND_BUFFER_PREFIX`, which scopes buffer listing), or `INBOUND_BUFFER_PREFIX` alone when it is empty. Replay checks every archived notification, imported or not, so list every prefix a rule uses or has used as long as the archives hold notifications under it, for instance `messages/,messages/esuno/` after the rule moved to `messages/esuno/`. `INGEST_MAX_ATTEMPTS` defaults to 5, `INGEST_AGE_SECONDS` to 3600 and `INGEST_HOLD_DAYS` to 14 (1–365).
@@ -56,6 +124,6 @@ node apps/ingest/src/main.ts operator recover objects <operator> [--apply]
 
 The list also shows `held` recipients; `operator list held [cursor]` shows only those, and the default `operator list` omits them so that rows needing a decision are not buried (their `destination` is the unknown address itself, so protect the output). To deliver one, provision the address (mailbox or alias) and run replay. To give up on one, run replay first (the address may have been provisioned since), then `reject` it. Only a `held` row, or a `failed` one whose error is `Destination is not configured` (its mailbox was disabled after routing, so it would otherwise be retried without end), can be rejected. Reject such a failed row only once the account is closed for good: the command refuses while its mailbox is active again, since replay would deliver it, but a disabled account may still be re-enabled. A permanent failure can be rejected too, as replay never retries it: an import the mail server refused (`forbidden`, invalid arguments or message), a copy that only partly matches (moved by its owner to another folder) or an original that is gone. Run `inspect` first: while it can read the original, prefer `resolve ... retry` once the cause is fixed, since rejecting discards the mail and lets replay delete its object; keep `reject` for a partial match or an original `inspect` cannot read; the command takes the same message lock as routing, the change and the operator, reason and prior state are recorded atomically in `InboundResolutionAudit`, and the next replay deletes the original object once no other recipient needs it. Rejection does not notify the sender.
 
-**Hold window.** Anyone can send to any address at an accepted domain, so held mail is bounded by `INGEST_HOLD_DAYS` (default 14), counted from the SES receipt time with the worker's clock (keep it synchronized); the routing decision is taken under the message lock. Within the window, an address provisioned later receives every message held for it, with the original dates; beyond it, the address is never routed and replay rejects the held recipient automatically, recorded in `InboundResolutionAudit` as operator `system:expiry`, action `expire`, then deletes the object. Until then the full raw messages of these third parties, including ones with failing verdicts, stay in the buffer. Deleting a buffer object only adds a delete marker in the versioned buffer, so the raw message remains as a noncurrent version until a lifecycle rule expires it. The AWS module expires noncurrent versions after 30 days only under its dedicated Esuno prefix; versions outside that prefix or in a bucket without a lifecycle configuration can remain indefinitely: check `GetBucketLifecycleConfiguration` on the real bucket and agree a noncurrent-version policy before enabling reception, rather than assuming the module's value. The SES notification, which carries the envelope recipients and the headers SES includes (such as From, To and Subject), stays in the `InboundMessage` ledger and therefore in database backups indefinitely, and in the archive until its retention ends; neither holds the raw body. Choose the window with that privacy cost in mind, and mind that reusing an address for a new person within the window delivers the previous holder's pending mail. Each replay reprocesses every held message and emits `ingest_notification_old` for those older than `INGEST_AGE_SECONDS`, so expect that event for held mail.
+**Hold window.** Anyone can send to any address at an accepted domain, so held mail is bounded by `INGEST_HOLD_DAYS` (default 14), counted from the SES receipt time with the worker's clock (keep it synchronized); the routing decision is taken under the message lock. Within the window, an address provisioned later receives every message held for it, with the original dates; beyond it, the address is never routed and replay rejects the held recipient automatically, recorded in `InboundResolutionAudit` as operator `system:expiry`, action `expire`, then deletes the object. Until then the full raw messages of these third parties, including ones with failing verdicts, stay in the buffer. Deleting a buffer object only adds a delete marker in the versioned buffer, so the raw message remains as a noncurrent version until a lifecycle rule expires it. The AWS module disables its previous 30-day expiration rule. Versions are retained until an operator verifies backup coverage and follows the controlled cleanup procedure below. This increases storage and privacy costs; it is not a promise of infinite retention. The SES notification, which carries the envelope recipients and the headers SES includes (such as From, To and Subject), stays in the `InboundMessage` ledger and therefore in database backups indefinitely, and in the archive until its retention ends; neither holds the raw body. Choose the window with that privacy cost in mind, and mind that reusing an address for a new person within the window delivers the previous holder's pending mail. Each replay reprocesses every held message and emits `ingest_notification_old` for those older than `INGEST_AGE_SECONDS`, so expect that event for held mail.
 
 Structured JSON log events are the metrics interface: `ingest_imported` includes `delaySeconds` and `placement`, and `ingest_failure`, `ingest_duplicate`, `ingest_held`, `ingest_held_expired`, `ingest_notification_old` and `ingest_buffer_without_notification` include per-process event counts. `ingest_failure` carries a `stage` (`buffer_delete`, `archive_read`, `archive_parse`, `buffer_list`, `replay_message`, `processing` and others) and, for storage errors, the provider's error `code` such as `AccessDenied`; a failed replay logs these before `replay_failed`. At start, linked delivery exits with `mailbox_key_unavailable`, `invalid_mailbox_key` or, when the database cannot be read, `mailbox_key_check_failed`. Export and aggregate these logs as counters and delay distributions; counts reset on restart. Worker logs exclude recipient addresses, message IDs and object keys; access should still be restricted. See [observability](../operations/observability.md) for the status job and alert delivery.

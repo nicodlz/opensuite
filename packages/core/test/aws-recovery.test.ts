@@ -1,12 +1,15 @@
 import {
   GetObjectCommand,
+  DeleteObjectCommand,
+  GetBucketLifecycleConfigurationCommand,
+  GetBucketVersioningCommand,
   HeadObjectCommand,
   ListObjectVersionsCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
-import { awsRecovery } from "../src/adapters/aws.ts";
+import { awsRecovery, awsStorage } from "../src/adapters/aws.ts";
 
 // S3 failures carry their HTTP status in `$metadata`.
 const names: Record<number, string> = {
@@ -20,6 +23,112 @@ const status = (code: number) =>
     name: names[code] ?? "Unknown",
     $metadata: { httpStatusCode: code },
   });
+
+const retentionAttempt = async (version: string, lifecycle: unknown) => {
+  const client = new S3Client({ region: "eu-north-1" });
+  let deleted = false;
+  Object.defineProperty(client, "send", {
+    value: (command: unknown) => {
+      if (command instanceof GetBucketVersioningCommand)
+        return Promise.resolve({ Status: version });
+      if (command instanceof GetBucketLifecycleConfigurationCommand)
+        return lifecycle instanceof Error
+          ? Promise.reject(lifecycle)
+          : Promise.resolve(lifecycle);
+      if (command instanceof DeleteObjectCommand) {
+        deleted = true;
+        return Promise.resolve({});
+      }
+      return Promise.reject(new Error("unexpected command"));
+    },
+  });
+  const result = await awsStorage(
+    client,
+    client,
+    "inbound",
+    "archive",
+    "n/",
+    "messages/",
+  ).deleteBuffer("inbound", "messages/esuno/id");
+  return { result, deleted };
+};
+
+describe("inbound retention before hiding an object", () => {
+  it("keeps the original current when versioning or an applicable expiration is unsafe", async () => {
+    const cases = [
+      ["Suspended", { Rules: [] }],
+      [
+        "Enabled",
+        {
+          Rules: [
+            {
+              Status: "Enabled",
+              Filter: { Prefix: "messages/" },
+              NoncurrentVersionExpiration: { NoncurrentDays: 30 },
+            },
+          ],
+        },
+      ],
+      [
+        "Enabled",
+        {
+          Rules: [
+            {
+              Status: "Enabled",
+              Filter: {
+                And: { Prefix: "messages/", Tags: [{ Key: "x", Value: "y" }] },
+              },
+              Expiration: { Days: 30 },
+            },
+          ],
+        },
+      ],
+      ["Enabled", status(403)],
+      ["Enabled", { Rules: [{ Status: "unknown" }] }],
+    ] as const;
+    const outcomes = await Promise.all(
+      cases.map(([version, lifecycle]) => retentionAttempt(version, lifecycle)),
+    );
+    for (const outcome of outcomes) {
+      expect(outcome.result.isErr()).toBe(true);
+      expect(outcome.deleted).toBe(false);
+    }
+  });
+
+  it("allows a delete marker only for enabled versioning without applicable expiration", async () => {
+    const noLifecycle = Object.assign(status(404), {
+      name: "NoSuchLifecycleConfiguration",
+    });
+    const cases = [
+      noLifecycle,
+      {
+        Rules: [
+          {
+            Status: "Disabled",
+            Filter: { Prefix: "messages/" },
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 },
+          },
+        ],
+      },
+      {
+        Rules: [
+          {
+            Status: "Enabled",
+            Filter: { Prefix: "other/" },
+            Expiration: { Days: 1 },
+          },
+        ],
+      },
+    ];
+    const outcomes = await Promise.all(
+      cases.map((rules) => retentionAttempt("Enabled", rules)),
+    );
+    for (const outcome of outcomes) {
+      expect(outcome.result.isOk()).toBe(true);
+      expect(outcome.deleted).toBe(true);
+    }
+  });
+});
 
 const restoreWith = async (outcome: "ok" | 412 | 409) => {
   const client = new S3Client({ region: "eu-north-1" });
