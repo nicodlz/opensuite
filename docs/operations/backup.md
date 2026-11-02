@@ -85,7 +85,13 @@ separate recovery requirements, not supplied by this backup.
    Vault is detected from its existing Compose container (even stopped), dedicated database, or `COMPOSE_PROFILES=vault` or `COMPOSE_PROFILES=*`. Set `BACKUP_VAULT_ENABLED=1` in backup.conf for every installation using Vault, so a missing database/container fails instead of being mistaken for an unused profile. Missing Vault keys, credentials or unreadable data fail the whole backup, including when its database exists but its volume is missing. To deliberately exclude Vault from a snapshot, set `BACKUP_VAULT_EXCLUDE=1` in the trusted backup configuration; the controller logs `vault_explicitly_excluded`. Such a snapshot cannot recover Vault. Remove the override after the emergency.
 
    After detection succeeds, Vault failures write `vault` to `last-failure` and observe reports `backup_vault_failure`. Capture starts emit `vault_capture_start`; a completed capture emits `vault_captured`. Detection errors and other failures report `backup_failure`; a successful run clears the failure marker. A lock overlap logs `overlap` without changing either marker. Observe also alerts on a missing or stale `last-success`. Failures before the marker can be written must be caught by systemd/journal monitoring. Only after capture, service restart, upload, retention and scratch cleanup
-   succeed does the script atomically replace `OBSERVE_BACKUP_DIR/last-success`.
+   succeed does the script publish `OBSERVE_BACKUP_DIR/last-ingest-capture`
+   and atomically replace `last-success`. The capture time is also inside the
+   snapshot as `config/ingest-capture-start`. The local capture marker is an
+   operational hint, not a snapshot identifier or proof of a successful
+   restore; inspect the snapshot and verify every message and recipient before
+   cleanup. If the success marker write fails, the capture marker may be newer
+   than the last successful run. See [inbound retention](../architecture/ingestion.md#retention-and-backup-coverage).
 
 4. Install `deploy/backup/opensuite-backup.service` and
    `deploy/backup/opensuite-backup.timer` into `/etc/systemd/system/` (edit
@@ -164,9 +170,10 @@ it longer. All changes since the last successful coordinated capture can be
 lost. A provider's object versioning may retain old object bytes after
 replacement or deletion, but does not restore RocksDB, PostgreSQL, secrets,
 mailbox indexes, exact object-to-database mappings or data never uploaded.
-It is not an application-consistent backup. An independent inbound archive
-may allow later mail replay only after reconciliation is implemented and
-proved. Database WAL/PITR and continuous backups are not implemented.
+It is not an application-consistent backup. The inbound buffer and independent notification archives support replay after
+a local restore, subject to their retention and the reconciliation limits in
+[inbound ingestion](../architecture/ingestion.md#retention-and-backup-coverage).
+Local fixture results do not prove real-provider recovery. Database WAL/PITR and continuous backups are not implemented.
 
 RTO is **not yet established**: provision and configure a replacement VPS,
 download and decrypt the full snapshot, restore both databases and all
