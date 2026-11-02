@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { AddressService } from "@opensuite/core/services/addresses";
 import type { NotificationDispatcher } from "@opensuite/core/services/notifications";
 import type { createPushStore } from "@opensuite/db";
@@ -75,15 +74,3 @@ export interface ApiContext {
   readonly readiness: ReadinessService;
   readonly uptimeSeconds: () => number;
 }
-
-export const tokenDigest = (value: string) =>
-  createHash("sha256").update(value).digest();
-export const mailServices = (source: {
-  mail?: ApiContext["mail"];
-  calendar?: ApiContext["calendar"];
-  contacts?: ApiContext["contacts"];
-}) => ({
-  mail: source.mail,
-  calendar: source.calendar,
-  contacts: source.contacts,
-});

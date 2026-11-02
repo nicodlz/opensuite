@@ -470,3 +470,26 @@
     background-position: 150% 0;
   }
 }
+.session-problem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  width: calc(100% - 80px);
+  max-width: 1140px;
+  margin: 24px auto 0;
+  padding: 12px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: var(--danger-soft);
+  color: var(--foreground);
+}
+.session-problem p {
+  flex: 1;
+  min-width: 200px;
+}
+@media (max-width: 760px) {
+  .session-problem {
+    width: calc(100% - 40px);
+  }
+}

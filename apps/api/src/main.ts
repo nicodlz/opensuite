@@ -1,13 +1,16 @@
-import { createAddressService } from "@opensuite/core/services/addresses";
-import { StalwartAdmin } from "@opensuite/jmap/admin";
-import { err, ok } from "neverthrow";
-import { timedFetch } from "./adapters/timed-fetch.ts";
-import { entitledAddressLimit } from "./address-limit.ts";
-import { createAliasService } from "@opensuite/core/services/aliases";
+import { createContactsRuntime } from "./contacts-runtime.ts";
+import { createMailService } from "@opensuite/core/services/mail";
+import { createCalendarService } from "@opensuite/core/services/calendar";
 import {
   createAliasMail,
   createAliasSendGuard,
 } from "./adapters/alias-mail.ts";
+import { createAliasService } from "@opensuite/core/services/aliases";
+import { entitledAddressLimit } from "./address-limit.ts";
+import { timedFetch } from "./adapters/timed-fetch.ts";
+import { err, ok } from "neverthrow";
+import { StalwartAdmin } from "@opensuite/jmap/admin";
+import { createAddressService } from "@opensuite/core/services/addresses";
 import { createReadinessService, httpProbe } from "@opensuite/core";
 import {
   createDatabase,
@@ -17,12 +20,7 @@ import {
   createAddressStore,
   createMailboxStore,
   createPushStore,
-  createMailPushStore,
 } from "@opensuite/db";
-import { contactVcardCodec } from "@opensuite/core/adapters/contacts";
-import { createContactsService } from "@opensuite/core/services/contacts";
-import { createCalendarService } from "@opensuite/core/services/calendar";
-import { createMailService } from "@opensuite/core/services/mail";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { readFile } from "node:fs/promises";
@@ -31,27 +29,20 @@ import {
   loadApplicationDatabaseUrl,
   loadAuthConfig,
   loadConfig,
-  loadMailPushConfig,
   loadBillingConfig,
   loadSubscriberDomains,
 } from "./config.ts";
-import { startMailNotifier } from "./adapters/mail-notifier.ts";
 import { createAuthRuntime } from "./auth/runtime.ts";
-import { startDomainJob } from "./routes/domain-job.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
-import { startCalendarReminderJob } from "./calendar-reminder-job.ts";
-import { configurePush } from "./push-runtime.ts";
+import { configurePush, registerBackgroundJobs } from "./push-runtime.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
 import { createStorageMeter } from "./billing/storage.ts";
 import { createStripeBilling } from "./billing/stripe.ts";
 import { createClaimService } from "./billing/claims.ts";
 import { createWebhookProcessor } from "./billing/webhook.ts";
-import { startQuotaJob } from "./billing/quota-job.ts";
-import { startSubscriptionSync } from "./billing/subscription-sync.ts";
-import { startCustomerMetadataJob } from "./billing/customer-job.ts";
 
 const config = loadConfig(process.env);
 if (config.isErr()) {
@@ -292,27 +283,30 @@ const addresses = createAddressService(
   },
   authConfig.value.mailDomains,
 );
-const mailConnection = {
+const createAliasGuard = createAliasSendGuard(
+  aliases,
+  addresses.auditSubmission,
+);
+const mail = createMailService({
   store: {
-    getForOwner: async (userId: string, accountId: string) =>
+    getForOwner: async (userId, accountId) =>
       mailboxStore.getForOwner(userId, accountId),
   },
   origin: authConfig.value.stalwartOrigin,
-};
-const mail = createMailService({
-  ...mailConnection,
   canSendAs: async (userId, address) => {
     const result = await aliases.canSendAs(userId, address);
     if (result.isOk() && result.value) return `alias:${result.value}`;
     const found = await addresses.canSendAs(userId, address);
     return found.isOk() && found.value ? `address:${found.value}` : null;
   },
-  beforeAliasSend: createAliasSendGuard(aliases, addresses.auditSubmission),
+  beforeAliasSend: createAliasGuard,
 });
-const calendar = createCalendarService(mailConnection);
-const contacts = createContactsService({
-  ...mailConnection,
-  codec: contactVcardCodec,
+const calendar = createCalendarService({
+  store: {
+    getForOwner: async (userId, accountId) =>
+      mailboxStore.getForOwner(userId, accountId),
+  },
+  origin: authConfig.value.stalwartOrigin,
 });
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
@@ -348,7 +342,10 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   calendar,
-  contacts,
+  contacts: createContactsRuntime(
+    mailboxStore,
+    authConfig.value.stalwartOrigin,
+  ),
   aliases,
   entitlements,
   storageMeter,
@@ -371,133 +368,22 @@ const app = await buildServer({
   pushCleanup,
 });
 logPushFailure = (event) => app.log.warn(event, "push delivery failed");
-const stopQuotaJob =
-  billing.value.mode === "cloud"
-    ? startQuotaJob(database.value, storageMeter, () =>
-        app.log.warn("mail quota refresh failed"),
-      )
-    : undefined;
-const stopCustomerJob =
-  stripeBilling === undefined
-    ? undefined
-    : startCustomerMetadataJob(database.value, stripeBilling.client, () =>
-        app.log.warn("billing customer synchronization failed"),
-      );
-const stopSubscriptionSync =
-  stripeBilling === undefined
-    ? undefined
-    : startSubscriptionSync(
-        database.value,
-        stripeBilling.client,
-        storageMeter.refresh,
-        () => app.log.warn("billing subscription synchronization failed"),
-      );
-const stuckEventsTimer = setInterval(() => {
-  void database.value.stripeEvent
-    .count({
-      where: {
-        processedAt: null,
-        receivedAt: { lt: new Date(Date.now() - 6 * 60 * 60 * 1000) },
-      },
-    })
-    .then((count) => {
-      if (count > 0)
-        app.log.error(
-          { count },
-          "Stripe events unprocessed for over six hours",
-        );
-      return undefined;
-    })
-    .catch(() => app.log.warn("could not count stuck Stripe events"));
-}, 300_000);
-stuckEventsTimer.unref();
-const mailPushConfig = loadMailPushConfig(process.env);
-if (mailPushConfig.isErr())
-  app.log.error(
-    { issues: mailPushConfig.error.issues },
-    "mail notifications disabled: invalid configuration",
-  );
-const stopMailNotifier =
-  push === undefined || mailPushConfig.isErr()
-    ? undefined
-    : startMailNotifier({
-        store: createMailPushStore(database.value, push.publicKey),
-        mailboxes: {
-          getForOwner: async (userId, accountId) =>
-            mailboxStore.getForOwner(userId, accountId),
-        },
-        origin: authConfig.value.stalwartOrigin,
-        dispatcher: push.dispatcher,
-        options: mailPushConfig.value,
-        log: () => app.log.warn("mail notification worker failed"),
-      });
-const stopDomainJob =
-  domains === undefined
-    ? undefined
-    : startDomainJob(
-        domainStore,
-        domains,
-        process.env["DOMAINS_CHECK_INTERVAL_SECONDS"],
-        () => app.log.warn("domain verification failed"),
-        authConfig.value.mailDomains,
-      );
-const stopCalendarReminders =
-  push === undefined
-    ? undefined
-    : startCalendarReminderJob({
-        db: database.value,
-        store: {
-          getForOwner: async (userId, accountId) =>
-            mailboxStore.getForOwner(userId, accountId),
-        },
-        origin: authConfig.value.stalwartOrigin,
-        dispatcher: push.dispatcher,
-        publicKey: push.publicKey,
-        onError: () => app.log.warn("calendar reminder job failed"),
-      });
-let running: Promise<void> | undefined;
-const work = async () => {
-  try {
-    const configuredResult = await addresses.ensureDomains();
-    if (configuredResult.isErr())
-      app.log.warn("configured address domains incomplete");
-    const addressResult = await addresses.reconcile();
-    if (addressResult.isErr() || addressResult.value > 0)
-      app.log.warn("address reconciliation incomplete");
-    const aliasResult = await aliases.reconcile();
-    if (aliasResult.isErr() || aliasResult.value > 0)
-      app.log.warn("alias reconciliation incomplete");
-    const failures = await auth.reconcile();
-    if (failures > 0)
-      app.log.warn({ failures }, "mailbox reconciliation incomplete");
-  } catch {
-    app.log.error("mailbox reconciliation failed");
-  }
-};
-const reconcile = () => {
-  if (running !== undefined) return running;
-  running = work().finally(() => {
-    running = undefined;
-  });
-  return running;
-};
-void reconcile();
-const timer = setInterval(() => {
-  void reconcile();
-}, 60_000);
-app.addHook("onClose", async () => {
-  clearInterval(timer);
-  clearInterval(stuckEventsTimer);
-  await stopQuotaJob?.();
-  await stopCustomerJob?.();
-  await stopSubscriptionSync?.();
-  await stopDomainJob?.();
-  await stopMailNotifier?.();
-  await stopCalendarReminders?.();
-  await running;
-  await database.value.$disconnect();
+registerBackgroundJobs({
+  app,
+  db: database.value,
+  cloud: billing.value.mode === "cloud",
+  storageMeter,
+  stripeBilling,
+  push,
+  mailboxStore,
+  domainStore,
+  domains,
+  mailDomains: authConfig.value.mailDomains,
+  origin: authConfig.value.stalwartOrigin,
+  addresses,
+  aliases,
+  auth,
 });
-
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     app.log.info({ signal }, "shutting down");

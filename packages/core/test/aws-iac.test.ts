@@ -169,7 +169,7 @@ describe("AWS infrastructure ownership and complete policies", () => {
     ).toContain("policy = data.aws_iam_policy_document.topic.json");
   });
 
-  it("limits lifecycle expiration to noncurrent versions in the Esuno prefix", () => {
+  it("does not expire inbound versions based on age alone", () => {
     const lifecycle = block(
       readModule("storage.tf"),
       'resource "aws_s3_bucket_lifecycle_configuration" "buffer"',
@@ -179,7 +179,7 @@ describe("AWS infrastructure ownership and complete policies", () => {
         bucket = aws_s3_bucket.buffer.id
         rule {
           id = "esuno-recover-deleted-messages"
-          status = "Enabled"
+          status = "Disabled"
           filter { prefix = var.esuno_message_prefix }
           noncurrent_version_expiration { noncurrent_days = 30 }
         }

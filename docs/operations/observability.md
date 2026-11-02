@@ -25,7 +25,11 @@ queue. Docker stores at most three 10 MB log files per container. View with
    `deploy/backup-status`.
 3. `deploy/backup/backup.sh` atomically writes `last-success` after a fully
    successful run. Its mtime is the marker; clocks must be synchronized.
-   Missing, future-dated or stale markers alert. Test restore independently.
+   Missing, future-dated or stale markers alert. `last-ingest-capture` records
+   the quiesced capture start, but is not proof of a successful restore or
+   message coverage. With ingestion observation enabled, its recorded time is
+   checked against the same maximum age as the success marker. Record and
+   verify the snapshot independently.
 4. If ingestion is configured, create `deploy/ingest.env` (0600) with the
    variables and secrets described in [ingestion](../architecture/ingestion.md),
    then start with `docker compose --profile ingest up -d --build`. The worker
@@ -85,7 +89,17 @@ webhook. Health status alone does not restart an unhealthy container.
 - `backup_age_seconds` or `backup_age_seconds_unavailable`: no recent success
   marker, a future marker, or inaccessible marker. Check the backup job,
   permissions, disk, clock and remote copy, then perform and verify a backup.
-  Do not fabricate a marker. Regularly test a full restore and preserve keys.
+  Do not fabricate a marker. Suspend inbound cleanup until a coordinated
+  restore has been verified. Regularly test a full restore and preserve keys.
+- `ingest_capture_age_seconds` or `ingest_capture_age_seconds_unavailable`:
+  the recorded quiesced capture time is stale, future, missing or invalid.
+  Inspect the backup job and snapshot, then restore and verify coverage. A
+  timestamp alone is not proof of coverage and cannot authorize cleanup.
+  Independently alert on buffer and archive capacity, lifecycle/versioning
+  drift, Firehose freshness and SNS subscription DLQ.
+  The local observer does not check those independent signals or alert during
+  VPS loss; configure external monitoring as described in
+  [inbound retention](../architecture/ingestion.md#retention-and-backup-coverage).
 - `disk_used_percent` or `disk_used_percent_unavailable`: the monitored Docker
   filesystem is near full or inaccessible. Check `df -h`, Docker volume sizes,
   backup state and log rotation. Free space safely; do not delete live volumes.

@@ -110,6 +110,52 @@ describe("SES ingestion", () => {
     expect(memory.archives.size).toBe(1);
     expect(memory.buffers.size).toBe(0);
   });
+  it("does not acknowledge or import when the notification archive fails", async () => {
+    const memory = synthetic();
+    const bytes = new Uint8Array([0, 13, 10, 255]);
+    memory.buffers.set("ses-1", bytes);
+    const service = new IngestService({
+      storage: {
+        ...memory.storage,
+        archive: () => Promise.resolve(err({ message: "archive unavailable" })),
+      },
+      ledger: memory.ledger,
+      delivery: memory.delivery,
+      events: memory.sink,
+      routes,
+      bucket: "inbound",
+      bufferPrefix: "",
+      topic: "arn:aws:sns:eu-north-1:123456789012:inbound",
+      maxAttempts: 3,
+    });
+    let deleted = false;
+    let deferred = false;
+    const result = await service.handle(
+      {
+        receive: () => Promise.resolve(ok([])),
+        delete: () => {
+          deleted = true;
+          return Promise.resolve(ok(undefined));
+        },
+        defer: () => {
+          deferred = true;
+          return Promise.resolve(ok(undefined));
+        },
+      },
+      {
+        body: JSON.stringify(
+          notification(["alice@example.test", "hidden@example.test"]),
+        ),
+        receipt: "receipt",
+        attempts: 1,
+      },
+    );
+    expect(result.isErr()).toBe(true);
+    expect(deleted).toBe(false);
+    expect(deferred).toBe(true);
+    expect(memory.imports).toHaveLength(0);
+    expect(memory.buffers.get("ses-1")).toEqual(bytes);
+  });
   it("quarantines failures and holds unknown recipients with their message", async () => {
     const { memory, service } = create();
     memory.buffers.set("ses-1", new Uint8Array([1]));
