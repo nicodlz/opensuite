@@ -82,7 +82,7 @@ async function guardDraft<T>(
   }
 }
 
-async function findSubmission(
+async function reconcileSubmission(
   c: MailConnection,
   row: ScheduledRecord,
   store: ScheduledSendStore,
@@ -114,6 +114,15 @@ async function findSubmission(
   if (result.isErr() || result.value.list.length !== 1) return undefined;
   const submission = result.value.list[0];
   if (!submission || !matchesSubmission(submission, row)) return undefined;
+  if (row.state === "canceling" && submission.undoStatus === "pending") {
+    const canceled = await c.client.scheduled.cancelSubmission(
+      c.session,
+      c.id,
+      submission.id,
+    );
+    if (canceled.isOk())
+      return { ...submission, undoStatus: "canceled" as const };
+  }
   return submission;
 }
 
@@ -361,7 +370,7 @@ export function createGuards(db: PrismaClient) {
       work: (beginWrite: DraftGuardBegin) => Promise<T>,
       conflict: () => never,
     ) => guardDraft(store, c, ids, work, conflict),
-    findSubmission,
+    reconcileSubmission,
     delaySeconds,
     submit,
     reserve,

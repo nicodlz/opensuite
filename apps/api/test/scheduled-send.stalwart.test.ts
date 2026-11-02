@@ -137,6 +137,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
   let lostResponse:
     | "create"
     | "cancel"
+    | "cancelBefore"
     | "read"
     | "editCreate"
     | "editDelete"
@@ -152,6 +153,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
   let clockOffset = 0;
   let submissionAttempts = 0;
   let immediateAttempts = 0;
+  let cancellationAttempts = 0;
   let delayedMove: (() => Promise<Response>) | undefined;
   const fetchMaybeLose: typeof fetch = async (input, init) => {
     const body = typeof init?.body === "string" ? init.body : "";
@@ -160,11 +162,17 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       body.includes('"mailboxIds"') &&
       body.includes('"ifInState"');
     if (body.includes("HOLDFOR")) submissionAttempts++;
+    if (body.includes('"EmailSubmission/set"') && body.includes('"canceled"'))
+      cancellationAttempts++;
     if (body.includes('"EmailSubmission/set"') && !body.includes("HOLDFOR"))
       immediateAttempts++;
     if (lostResponse === "missingCreate" && body.includes("HOLDFOR")) {
       lostResponse = null;
       throw new Error("submission request lost");
+    }
+    if (lostResponse === "cancelBefore" && body.includes('"canceled"')) {
+      lostResponse = null;
+      throw new Error("cancellation request lost");
     }
     if (lostResponse === "delayedMove" && guardedMove) {
       lostResponse = null;
@@ -602,6 +610,69 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
         subject: "rescheduled-api",
       }),
     );
+    const retryDraft = value(await mail.createDraft(actor, "default", content));
+    const retryScheduled = value(
+      await mail.schedule(actor, "default", retryDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 30,
+      }),
+    );
+    lostResponse = "cancelBefore";
+    expect(
+      value(await mail.cancelScheduled(actor, "default", retryScheduled.id))
+        .state,
+    ).toBe("unknown");
+    expect(
+      (
+        await database.scheduledSend.findUniqueOrThrow({
+          where: { id: retryScheduled.id },
+        })
+      ).state,
+    ).toBe("canceling");
+    const attemptsBeforeRetry = cancellationAttempts;
+    lostResponse = "cancelBefore";
+    expect(
+      value(await mail.cancelScheduled(actor, "default", retryScheduled.id))
+        .state,
+    ).toBe("unknown");
+    expect(cancellationAttempts).toBe(attemptsBeforeRetry + 1);
+    await mail.reconcileScheduled();
+    expect(
+      value(await mail.cancelScheduled(actor, "default", retryScheduled.id))
+        .state,
+    ).toBe("canceled");
+    expect(
+      (await mail.updateDraft(actor, "default", retryDraft.id, content)).isOk(),
+    ).toBe(true);
+
+    const legacyDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    const legacyScheduled = value(
+      await mail.schedule(actor, "default", legacyDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 30,
+      }),
+    );
+    lostResponse = "cancelBefore";
+    expect(
+      value(await mail.cancelScheduled(actor, "default", legacyScheduled.id))
+        .state,
+    ).toBe("unknown");
+    await database.scheduledSend.update({
+      where: { id: legacyScheduled.id },
+      data: { state: "unknown" },
+    });
+    expect(
+      value(await mail.cancelScheduled(actor, "default", legacyScheduled.id))
+        .state,
+    ).toBe("canceled");
+    expect(
+      (
+        await mail.updateDraft(actor, "default", legacyDraft.id, content)
+      ).isOk(),
+    ).toBe(true);
+
     const cancellationId = randomUUID();
     const another = value(
       await mail.schedule(actor, "default", edited.id, cancellationId, {

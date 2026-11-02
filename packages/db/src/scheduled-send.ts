@@ -217,6 +217,13 @@ class Store {
       take: 100,
     });
   }
+  beginCancel(id: string) {
+    return this.transition(
+      id,
+      ["pending", "unknown", "canceling"],
+      "canceling",
+    );
+  }
   async transition(
     id: string,
     from: ScheduledState[],

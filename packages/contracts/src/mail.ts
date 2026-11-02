@@ -121,7 +121,12 @@ export function scheduledDto(row: {
     draftId: row.draftId,
     threadId: row.threadId,
     releaseAt: row.releaseAt.toISOString(),
-    state: row.state === "preparing" ? "creating" : row.state,
+    state:
+      row.state === "preparing"
+        ? "creating"
+        : row.state === "canceling"
+          ? "unknown"
+          : row.state,
   });
 }
 export type Scheduled = z.infer<typeof ScheduledSchema>;

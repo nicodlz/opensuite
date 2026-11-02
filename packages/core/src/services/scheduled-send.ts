@@ -48,7 +48,7 @@ type Dependencies = {
   now: () => number;
   run: Access["run"];
   sweep: Sweep;
-  findSubmission: (
+  reconcileSubmission: (
     c: Connection,
     row: ScheduledRecord,
     store: ScheduledSendStore,
@@ -84,7 +84,7 @@ export type ScheduledAdapters = {
     work: (beginWrite: BeginWrite) => Promise<T>,
     conflict: () => never,
   ) => Promise<T>;
-  findSubmission?: Dependencies["findSubmission"];
+  reconcileSubmission?: Dependencies["reconcileSubmission"];
   delaySeconds?: Dependencies["delaySeconds"];
   submit?: Dependencies["submit"];
   reserve?: Dependencies["reserve"];
@@ -275,8 +275,8 @@ async function cancel(
     const found = await store.get(actor.id, id);
     return found ? scheduledDto(found) : fail("unavailable");
   }
-  if (row.state !== "pending" || !row.submissionId) return scheduledDto(row);
-  if (await store.transition(row.id, ["pending"], "canceling")) {
+  if (!row.submissionId) return scheduledDto(row);
+  if (await store.beginCancel(row.id)) {
     try {
       const canceled = await c.client.scheduled.cancelSubmission(
         c.session,
@@ -284,7 +284,6 @@ async function cancel(
         row.submissionId,
       );
       if (canceled.isOk()) await store.finish(row, ["canceling"], "canceled");
-      else await store.transition(row.id, ["canceling"], "unknown");
       const found = await store.get(actor.id, id);
       return scheduledDto(found ?? { ...row, state: "unknown" });
     } catch {
@@ -326,7 +325,7 @@ async function reconcileOne(
     return;
   }
   if (row.state === "pending" && row.releaseAt.getTime() > deps.now()) return;
-  const found = await deps.findSubmission(c, row, store);
+  const found = await deps.reconcileSubmission(c, row, store);
   if (!found) return;
   if (found.undoStatus === "canceled")
     await store.finish(

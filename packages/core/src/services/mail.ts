@@ -175,7 +175,7 @@ export function createMailService(dependencies: {
   beforeAliasSend?: (userId: string, aliasId: string) => Promise<boolean>;
   scheduledStore?: ScheduledAdapters["scheduledStore"];
   guardDraft?: ScheduledAdapters["guardDraft"];
-  findSubmission?: ScheduledAdapters["findSubmission"];
+  reconcileSubmission?: ScheduledAdapters["reconcileSubmission"];
   delaySeconds?: ScheduledAdapters["delaySeconds"];
   submit?: ScheduledAdapters["submit"];
   reserve?: ScheduledAdapters["reserve"];
@@ -293,8 +293,8 @@ export function createMailService(dependencies: {
       dependencies.reserve ?? (() => Promise.reject(new Error("unavailable"))),
     sweep:
       dependencies.sweep ?? (() => Promise.reject(new Error("unavailable"))),
-    findSubmission:
-      dependencies.findSubmission ?? (() => Promise.resolve(undefined)),
+    reconcileSubmission:
+      dependencies.reconcileSubmission ?? (() => Promise.resolve(undefined)),
   });
   const guard = draftGuard(store, dependencies.guardDraft);
   const withDraft = draftOperations({ connect, run, boxes, guard });
