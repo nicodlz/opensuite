@@ -227,7 +227,7 @@ export interface MailImportTools<Client, Session, Job, Raw extends Uint8Array> {
     keepAlive: () => Promise<boolean>;
     expected: unknown;
     onChanged: () => Promise<unknown>;
-  }): Promise<boolean>;
+  }): Promise<"continue" | "defer" | "stop">;
   importMigrationMessage(input: {
     client: Client;
     session: Session;

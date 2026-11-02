@@ -1,4 +1,5 @@
 import { inspectMigrationCandidates } from "./migration-candidates.ts";
+import { migrationResponseStatus } from "./migration-failures.ts";
 import type { MigrationMailClient } from "./migration-mail.ts";
 import type { MigrationSnapshot } from "./migration-snapshot.ts";
 import type { Session } from "./protocol.ts";
@@ -31,10 +32,10 @@ export function migrationMailboxPatch(mailboxes: Record<string, boolean>) {
 function retryableMapping(result: Awaited<ReturnType<Client["migrationMap"]>>) {
   if (result.isOk()) return false;
   const error = result.error;
+  const status = migrationResponseStatus(error);
   return (
     error.kind === "network" ||
-    (error.kind === "http" &&
-      [429, 500, 502, 503, 504].includes(error.status)) ||
+    (status !== undefined && [408, 429, 500, 502, 503, 504].includes(status)) ||
     (error.kind === "method" &&
       ["stateMismatch", "serverUnavailable", "serverPartialFail"].includes(
         error.type,
@@ -44,7 +45,10 @@ function retryableMapping(result: Awaited<ReturnType<Client["migrationMap"]>>) {
 }
 function mappingError(result: Awaited<ReturnType<Client["migrationMap"]>>) {
   if (result.isOk()) return null;
-  return result.error.kind === "set" && result.error.type === "overQuota"
+  const error = result.error;
+  return ((error.kind === "set" || error.kind === "request") &&
+    error.type === "overQuota") ||
+    migrationResponseStatus(error) === 507
     ? "Mailbox quota exceeded. Free space and resume the import."
     : "Duplicate mailbox mapping failed";
 }
@@ -110,7 +114,7 @@ export async function resolveMigrationCandidate(input: Input) {
       id,
     };
   if (snapshot === undefined || !(await input.beforeMapping()))
-    return { action: "stop" as const };
+    return { action: "defer" as const };
   const updated = await client.migrationMap(
     session,
     accountId,

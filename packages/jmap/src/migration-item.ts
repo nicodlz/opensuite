@@ -26,15 +26,14 @@ type ImportResult =
   | { kind: "retry"; proceed: false }
   | { kind: "failed" | "uncertain"; error: string; proceed: boolean };
 interface MigrationItemActions {
-  record(
-    this: void,
+  beforeImport: () => Promise<boolean>;
+  onChanged: () => Promise<unknown>;
+  record: (
     status: string,
     error: string | null,
     id: string | null,
-  ): Promise<boolean>;
-  beforeImport(this: void): Promise<boolean>;
-  keepAlive(this: void): Promise<boolean>;
-  onChanged(this: void): Promise<unknown>;
+  ) => Promise<boolean>;
+  keepAlive: () => Promise<boolean>;
 }
 export type MigrationItemInput<C extends Client, Raw extends Uint8Array> = {
   client: C;
@@ -68,7 +67,7 @@ export type MigrationItemInput<C extends Client, Raw extends Uint8Array> = {
   }) => Promise<ImportResult>;
   expected: unknown;
 } & MigrationItemActions;
-type Decision = "continue" | "retry" | "stop";
+type Decision = "continue" | "retry" | "defer" | "stop";
 function inspectionOptions<C extends Client, Raw extends Uint8Array>(
   input: MigrationItemInput<C, Raw>,
 ) {
@@ -94,11 +93,8 @@ async function importMessage<C extends Client, Raw extends Uint8Array>(
   });
   if (result.kind === "retry")
     return (await input.record("pending", null, null)) ? "retry" : "stop";
-  if (
-    result.kind !== "recorded" &&
-    !(await input.record(result.kind, result.error, null))
-  )
-    return "stop";
+  if (result.kind === "recorded") return result.proceed ? "continue" : "defer";
+  if (!(await input.record(result.kind, result.error, null))) return "stop";
   return result.proceed ? "continue" : "stop";
 }
 

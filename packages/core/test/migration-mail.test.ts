@@ -1,4 +1,5 @@
 import { JmapClient, type Session } from "@opensuite/jmap";
+import { mailImportOutcome } from "@opensuite/db";
 import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -9,6 +10,31 @@ import {
 } from "../src/adapters/migration-mail.ts";
 
 const bytes = (value: string) => Buffer.from(value, "latin1");
+
+describe("import job outcomes", () => {
+  it("requeues a safe deferral but preserves uncertainty and deliberate stops", () => {
+    const job = {
+      cancelRequested: false,
+      items: [{ status: "failed" }, { status: "pending" }],
+    };
+    expect(mailImportOutcome(job, true)).toMatchObject({
+      status: "queued",
+      clearArchive: false,
+    });
+    expect(mailImportOutcome(job, false).status).toBe("attention");
+    expect(
+      mailImportOutcome(
+        { ...job, items: [...job.items, { status: "uncertain" }] },
+        true,
+      ).status,
+    ).toBe("attention");
+    expect(mailImportOutcome({ ...job, cancelRequested: true }, true)).toEqual({
+      status: "cancelled",
+      clearArchive: true,
+    });
+  });
+});
+
 async function framed(
   archive: Buffer,
   variant: "mboxo" | "mboxrd" = "mboxo",
@@ -30,6 +56,17 @@ async function framed(
 }
 
 describe("MBOX framing", () => {
+  it("preserves a zoned Takeout envelope date with the year after the zone", async () => {
+    const raw = bytes("Date: Tue, 02 Jan 2018 01:02:03 +0000\r\n\r\nBody\r\n");
+    const withZone = bytes("From sender Sat Jan 13 20:47:36 +0130 2024\r\n");
+    const withoutZone = bytes("From sender Sat Jan 13 20:47:36 2024\r\n");
+    expect((await messageMetadata(raw, {}, "inbox", withZone)).receivedAt).toBe(
+      "2024-01-13T19:17:36Z",
+    );
+    expect(
+      (await messageMetadata(raw, {}, "inbox", withoutZone)).receivedAt,
+    ).toBe("2018-01-02T01:02:03Z");
+  });
   it("maps Gmail labels and read flags without rewriting MIME bytes", async () => {
     const raw = bytes(
       "X-Gmail-Labels: Sent,Unread,Starred\r\nMessage-ID: <gmail@example.test>\r\n\r\nBody\r\n",

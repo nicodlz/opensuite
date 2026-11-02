@@ -284,7 +284,7 @@ class MigrationService {
       const item = job.items[index++];
       if (item === undefined) return fail("unavailable");
       if (!(await this.shouldProcess(job, token, actor, item))) continue;
-      const continued = await this.tools.runMigrationItem({
+      const outcome = await this.tools.runMigrationItem({
         client: connection.client,
         session: connection.session,
         accountId: connection.id,
@@ -317,7 +317,8 @@ class MigrationService {
             false,
           ),
       });
-      if (!continued) break;
+      if (outcome !== "continue")
+        return outcome === "defer" ? ("defer" as const) : undefined;
     }
     return undefined;
   }
@@ -354,7 +355,7 @@ class MigrationService {
       return undefined;
     }
     if (prepared?.kind === "failed" && prepared.error === "unavailable")
-      return undefined;
+      return "defer" as const;
     const snapshotError = "Destination exceeds the duplicate scan limit";
     return this.processArchive({
       job,
@@ -372,6 +373,7 @@ class MigrationService {
     if (claimed === null) return false;
     const { job, token } = claimed;
     try {
+      let deferred = false;
       if (
         !job.cancelRequested ||
         job.items.some((item) =>
@@ -381,8 +383,9 @@ class MigrationService {
         const result = await this.access.run(() => this.process(job, token));
         if (result.isErr())
           return await this.store.defer(job.id, token, result.error.kind);
+        deferred = result.value === "defer";
       }
-      await this.store.settle(job, token);
+      await this.store.settle(job, token, deferred);
     } catch {
       await this.store.finish(
         job.id,
@@ -395,9 +398,6 @@ class MigrationService {
     return true;
   }
 }
-export function createMailMigrationService(options: Options) {
-  return new MigrationService(options);
-}
-export type MailMigrationService = ReturnType<
-  typeof createMailMigrationService
->;
+export const createMailMigrationService = (options: Options) =>
+  new MigrationService(options);
+export type MailMigrationService = MigrationService;

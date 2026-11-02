@@ -13,10 +13,10 @@ const activeClaim = (id: string, token: string, now: Date) => ({
   data: { claimUntil: new Date(now.getTime() + 300_000) },
 });
 
-export function mailImportOutcome(job: {
-  cancelRequested: boolean;
-  items: { status: string }[];
-}) {
+export function mailImportOutcome(
+  job: { cancelRequested: boolean; items: { status: string }[] },
+  deferred = false,
+) {
   const uncertain = job.items.some((item) =>
     ["uncertain", "importing"].includes(item.status),
   );
@@ -26,11 +26,15 @@ export function mailImportOutcome(job: {
     ? uncertain
       ? "attention"
       : "cancelled"
-    : uncertain || failed
+    : uncertain
       ? "attention"
-      : pending
+      : deferred && pending
         ? "queued"
-        : "completed";
+        : failed
+          ? "attention"
+          : pending
+            ? "queued"
+            : "completed";
   return {
     status,
     clearArchive:
@@ -342,6 +346,7 @@ class MailImportStore {
   async settle(
     job: { id: string; userId: string; accountId: string },
     token: string,
+    deferred: boolean,
   ) {
     await this.db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "MailImportJob" WHERE "id" = ${job.id} FOR UPDATE`;
@@ -355,7 +360,7 @@ class MailImportStore {
         include: { items: true },
       });
       if (current === null) return;
-      const outcome = mailImportOutcome(current);
+      const outcome = mailImportOutcome(current, deferred);
       await tx.mailImportJob.update({
         where: { id: job.id },
         data: {

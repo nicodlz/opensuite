@@ -13,6 +13,7 @@ import {
   captureMigrationDestinations,
   checkMigrationDestinations,
   inspectMigrationCandidates,
+  migrationUploadFailure,
   migrationMailboxPatch as mailboxPatch,
   rememberMigrationImport,
   runMigrationItem,
@@ -244,15 +245,8 @@ export async function importMigrationMessage(input: {
 }) {
   const { client, session, accountId, metadata, snapshot } = input;
   const uploaded = await client.upload(session, accountId, input.bytes);
-  if (uploaded.isErr()) {
-    if (uploaded.error.kind === "http" && uploaded.error.status === 507)
-      return {
-        kind: "failed" as const,
-        error: MAIL_IMPORT_OVER_QUOTA,
-        proceed: false,
-      };
-    return { kind: "retry" as const, proceed: false as const };
-  }
+  if (uploaded.isErr())
+    return migrationUploadFailure(uploaded.error, MAIL_IMPORT_OVER_QUOTA);
   if (!(await input.beforeImport()))
     return { kind: "recorded" as const, proceed: false };
   const imported = await client.migrationImport(
@@ -354,7 +348,7 @@ export async function messageMetadata(
   );
   const separator = envelope?.toString("ascii");
   const envelopeDate = separator?.match(
-    /^From\s+\S+\s+(.+(?:[+-]\d{2}:?\d{2}|UTC|GMT))\s*$/i,
+    /^From\s+\S+\s+(.+(?:[+-]\d{2}:?\d{2}|UTC|GMT)(?:\s+\d{4})?)\s*$/i,
   )?.[1];
   const timestamp = envelopeDate === undefined ? NaN : Date.parse(envelopeDate);
   const date = Number.isFinite(timestamp) ? new Date(timestamp) : parsed.date;

@@ -46,6 +46,12 @@ let loseResponse = false;
 let importsBeforeLostResponse = 0;
 let rejectNextImport: string | undefined;
 let failUpload = false;
+let rejectUpload: { status: number; type: string } | undefined;
+let uploadFailures = 0;
+let failSnapshotQuery = false;
+let failReadAfterImport = false;
+let failNextEmailGet = false;
+let rejectMapping = false;
 let failDiscovery = false;
 let accountEnabled = true;
 let changeBeforeImport: (() => Promise<void>) | undefined;
@@ -91,6 +97,34 @@ const fetcher: typeof fetch = async (url, init) => {
     failUpload = false;
     return new Response("fixture upload failure", { status: 503 });
   }
+  if (rejectUpload && target.includes("/upload/")) {
+    const rejection = rejectUpload;
+    rejectUpload = undefined;
+    return Response.json(
+      { type: rejection.type },
+      { status: rejection.status },
+    );
+  }
+  if (uploadFailures > 0 && target.includes("/upload/")) {
+    uploadFailures--;
+    return new Response("temporary upload failure", { status: 503 });
+  }
+  if (
+    failSnapshotQuery &&
+    typeof init?.body === "string" &&
+    init.body.includes('"Email/query"')
+  ) {
+    failSnapshotQuery = false;
+    return Response.json({ type: "serverUnavailable" }, { status: 503 });
+  }
+  if (
+    failNextEmailGet &&
+    typeof init?.body === "string" &&
+    init.body.includes('"Email/get"')
+  ) {
+    failNextEmailGet = false;
+    return Response.json({ type: "serverUnavailable" }, { status: 503 });
+  }
   if (
     changeBeforeImport &&
     typeof init?.body === "string" &&
@@ -99,6 +133,14 @@ const fetcher: typeof fetch = async (url, init) => {
     const change = changeBeforeImport;
     changeBeforeImport = undefined;
     await change();
+  }
+  if (
+    rejectMapping &&
+    typeof init?.body === "string" &&
+    init.body.includes('"Email/set"')
+  ) {
+    rejectMapping = false;
+    return Response.json({ type: "serverUnavailable" }, { status: 503 });
   }
   if (
     changeBeforeMapping &&
@@ -132,6 +174,15 @@ const fetcher: typeof fetch = async (url, init) => {
     });
   }
   const response = await fetch(url, init);
+  if (
+    failReadAfterImport &&
+    response.ok &&
+    typeof init?.body === "string" &&
+    init.body.includes('"Email/import"')
+  ) {
+    failReadAfterImport = false;
+    failNextEmailGet = true;
+  }
   if (
     loseResponse &&
     typeof init?.body === "string" &&
@@ -351,7 +402,7 @@ it("imports raw MIME and mapped labels, deduplicates, and recovers an uncertain 
       labels: { Sent: sent },
     });
   const archive = Buffer.concat([
-    Buffer.from("From sender Thu Jan 2 06:04:05 2020 +0000\r\n"),
+    Buffer.from("From sender Thu Jan 2 06:04:05 +0000 2020\r\n"),
     raw,
   ]);
   const job = value(await create(archive, "mbox"));
@@ -609,7 +660,7 @@ it("deduplicates a matching message delivered between the scan and import", asyn
   }
 }, 120_000);
 
-it("retries a duplicate mailbox mapping after concurrent activity", async () => {
+it("retries a duplicate mailbox mapping after concurrent activity and a transient response", async () => {
   const session = value(await diagnostic.discover());
   const raw = Buffer.from(
     "Message-ID: <mapping-race@example.test>\r\n\r\nBody\r\n",
@@ -639,6 +690,7 @@ it("retries a duplicate mailbox mapping after concurrent activity", async () => 
         "keywords/$seen": true,
       }),
     );
+    rejectMapping = true;
   };
   try {
     await service.work();
@@ -657,6 +709,7 @@ it("retries a duplicate mailbox mapping after concurrent activity", async () => 
     ).toHaveLength(before);
   } finally {
     changeBeforeMapping = undefined;
+    rejectMapping = false;
   }
 }, 120_000);
 
@@ -870,24 +923,111 @@ it("requires a destination confirmation for jobs created before destination trac
   });
 }, 120_000);
 
-it("reports quota and safely resumes after the user resolves it", async () => {
-  const app = await fixtureApi();
-  const headers = { origin: "https://suite.example.test", cookie: "owner" };
+it("continues pending messages after a prior failure and temporary deferrals", async () => {
+  const session = value(await diagnostic.discover());
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
   const raw = Buffer.from(
-    "Message-ID: <quota-resume@example.test>\r\n\r\nBody\r\n",
+    ["failed", "deferred", "later"]
+      .map(
+        (name) =>
+          `From sender date\r\nMessage-ID: <mixed-${name}@example.test>\r\n\r\nBody\r\n\r\n`,
+      )
+      .join(""),
   );
   const job = value(
     await service.create(actor, {
       accountId: "default",
-      format: "eml",
+      format: "mbox",
       variant: "mboxo",
       base64: raw.toString("base64"),
       mailboxId: inbox,
       labels: {},
     }),
   );
-  rejectNextImport = "overQuota";
+  rejectUpload = { status: 413, type: "requestTooLarge" };
+  uploadFailures = 5;
   try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "queued",
+        messages: [
+          { status: "failed" },
+          { status: "pending" },
+          { status: "pending" },
+        ],
+      },
+    );
+    failSnapshotQuery = true;
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      { status: "queued" },
+    );
+    failReadAfterImport = true;
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "queued",
+        messages: [
+          { status: "failed" },
+          { status: "imported" },
+          { status: "pending" },
+        ],
+      },
+    );
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "attention",
+        messages: [
+          { status: "failed" },
+          { status: "imported" },
+          { status: "imported" },
+        ],
+      },
+    );
+    value(await service.resume(actor, "default", job.id));
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      { status: "completed" },
+    );
+    expect(
+      value(await diagnostic.queryEmails(session, account)).ids,
+    ).toHaveLength(before + 3);
+  } finally {
+    rejectUpload = undefined;
+    uploadFailures = 0;
+    failSnapshotQuery = false;
+    failReadAfterImport = false;
+    failNextEmailGet = false;
+  }
+}, 120_000);
+
+it("reports quota and safely resumes after the user resolves it", async () => {
+  const app = await fixtureApi();
+  const headers = { origin: "https://suite.example.test", cookie: "owner" };
+  const exerciseQuota = async (at: "import" | "upload") => {
+    const raw = Buffer.from(
+      ["first", "later"]
+        .map(
+          (name) =>
+            `From sender date\r\nMessage-ID: <quota-${at}-${name}@example.test>\r\n\r\nBody\r\n\r\n`,
+        )
+        .join(""),
+    );
+    const job = value(
+      await service.create(actor, {
+        accountId: "default",
+        format: "mbox",
+        variant: "mboxo",
+        base64: raw.toString("base64"),
+        mailboxId: inbox,
+        labels: {},
+      }),
+    );
+    if (at === "import") rejectNextImport = "overQuota";
+    else rejectUpload = { status: 507, type: "overQuota" };
     await service.work();
     expect(value(await service.report(actor, "default", job.id))).toMatchObject(
       {
@@ -896,7 +1036,7 @@ it("reports quota and safely resumes after the user resolves it", async () => {
           action: "resume",
           message: "Mailbox quota exceeded. Free space and resume the import.",
         },
-        messages: [{ status: "failed" }],
+        messages: [{ status: "failed" }, { status: "pending" }],
       },
     );
     expect(
@@ -913,13 +1053,56 @@ it("reports quota and safely resumes after the user resolves it", async () => {
     expect(value(await service.report(actor, "default", job.id))).toMatchObject(
       {
         status: "completed",
-        messages: [{ status: "imported" }],
+        messages: [{ status: "imported" }, { status: "imported" }],
         recovery: null,
       },
     );
+  };
+  try {
+    await exerciseQuota("import");
+    await exerciseQuota("upload");
   } finally {
     rejectNextImport = undefined;
+    rejectUpload = undefined;
     await app.close();
+  }
+}, 120_000);
+
+it("reports a server upload size rejection instead of retrying forever", async () => {
+  const raw = Buffer.from(
+    "Message-ID: <upload-size@example.test>\r\n\r\nBody\r\n",
+  );
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  rejectUpload = { status: 413, type: "requestTooLarge" };
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "attention",
+        messages: [
+          {
+            status: "failed",
+            error: "Message exceeds the server upload limit",
+          },
+        ],
+      },
+    );
+    value(await service.resume(actor, "default", job.id));
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      { status: "completed", messages: [{ status: "imported" }] },
+    );
+  } finally {
+    rejectUpload = undefined;
   }
 }, 120_000);
 

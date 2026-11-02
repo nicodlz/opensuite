@@ -2,6 +2,7 @@ import { MigrationMailClient } from "./migration-mail.ts";
 import { threadPage } from "./thread-page.ts";
 
 export { inspectMigrationCandidates } from "./migration-candidates.ts";
+export { migrationUploadFailure } from "./migration-failures.ts";
 export {
   resolveMigrationCandidate,
   migrationMailboxPatch,
