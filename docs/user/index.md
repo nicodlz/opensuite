@@ -34,6 +34,8 @@ Open **Calendar** to see the Day, Week or Month view; **Today** and the arrows m
 
 Open **Drive**, select a folder, and use **New** to upload files or create a folder. You can also drag files or whole folders from your computer onto the page, onto a folder, or onto a breadcrumb; folders keep their structure. Drag items onto another folder or onto **Trash** to move them; the Move dialog does the same from the keyboard. Uploads require access to the configured object store from your browser. The file list supports preview where available, download, rename, move, trash and restore. Empty a folder before trashing or deleting it. The filter searches names in the current view.
 
+Select a folder or multiple items and choose **Download as ZIP** to download an archive. ZIP downloads include empty folders and are limited to items you own. If preparation fails, review the selection or ask your administrator about archive limits. Your browser reports the final download status.
+
 Use **Share** on an item to grant another user ID read or write access. Sharing applies to that item, not its existing descendants. A write share on a folder permits creating items there; those new items receive their own shares. Only the owner can share, trash, delete or create public links. Ask your administrator for the recipient's user ID; the current interface does not list existing shares.
 
 In the share dialog, create a public link with an expiry. Copy the link **and its link ID** when shown: the token is shown only once and the ID is needed to revoke it. Anyone with an unexpired link can download the file. Revocation is checked on public requests, but an already issued signed download URL can remain valid for up to five minutes. Avoid sharing links publicly unless intended.

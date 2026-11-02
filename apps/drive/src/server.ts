@@ -8,11 +8,22 @@ import { z } from "zod";
 import type { Storage } from "./adapters/storage.ts";
 import type { SessionVerifier } from "./domain/session.ts";
 import type { DriveService } from "./services/drive.ts";
+import { registerZip } from "./routes/zip.ts";
+import { zipStream } from "./adapters/zip-stream.ts";
+import type { ZipItem, ZipLimits } from "./services/download-zip.ts";
 import { router, type Context } from "./routes/index.ts";
 
 const Token = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const digest = (value: string) => createHash("sha256").update(value).digest();
 const TEXT_PREVIEW_BYTES = 512 * 1024;
+const zipOutput = (storage: Storage) => (items: ZipItem[]) =>
+  zipStream(items, async (key, signal) => {
+    const object = await storage.get(key, undefined, signal);
+    if (!object.Body) throw new Error("Missing object body");
+    return object.Body instanceof Readable
+      ? object.Body
+      : Readable.from(object.Body.transformToWebStream());
+  });
 export const buildServer = (
   drive: DriveService,
   storage: Storage,
@@ -20,6 +31,7 @@ export const buildServer = (
   readiness?: ReadinessService,
   trustedOrigins?: readonly string[],
   internalToken?: string,
+  zipLimits: ZipLimits = { maxEntries: 10_000, maxBytes: 10_000_000_000 },
 ) => {
   const app = Fastify({
     logger: true,
@@ -83,11 +95,10 @@ export const buildServer = (
   app.get("/ready", async (_request, reply) => {
     if (readiness === undefined)
       return reply.code(503).send({ status: "not_ready" });
-    const report = await readiness.check();
-    return reply
-      .code(report.readiness.status === "ready" ? 200 : 503)
-      .send(report.readiness);
+    const { readiness: state } = await readiness.check();
+    return reply.code(state.status === "ready" ? 200 : 503).send(state);
   });
+  registerZip(app, drive, identity, zipLimits, zipOutput(storage));
   // Images and PDFs preview as themselves. `?text` returns the start of any
   // readable file as plain text for the in-app text viewer.
   app.get("/v1/preview/:id", async (request, reply) => {

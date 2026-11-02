@@ -93,6 +93,8 @@ const sessions: SessionVerifier = {
   verify: (cookie) =>
     okAsync(cookie === "user=a" ? "a" : cookie === "user=b" ? "b" : null),
 };
+const zipUrl = (ids: string[]) =>
+  `/v1/zip?${new URLSearchParams({ ids: JSON.stringify(ids) }).toString()}`;
 const digest = (bytes: Buffer) =>
   createHash("sha256").update(bytes).digest("hex");
 const resultId = z.object({ id: z.string() });
@@ -1203,3 +1205,263 @@ it("restricts database deletion of a folder with children", async () => {
     db.entry.findUnique({ where: { id: child.id } }),
   ).resolves.toBeNull();
 }, 120_000);
+
+it("streams owned folders as a ZIP and validates every selected item and limit", async () => {
+  const owner = "zip-owner";
+  const rootId = randomUUID();
+  const subId = randomUUID();
+  const emptyId = randomUUID();
+  const fileId = randomUUID();
+  const foreignId = randomUUID();
+  const trashedId = randomUUID();
+  const bytes = Buffer.from("ZIP integration test contents");
+  const key = storage.key(fileId, false);
+  const s3 = new S3Client({
+    endpoint: s3Endpoint,
+    region: "us-east-1",
+    forcePathStyle: true,
+    credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  });
+  try {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "opensuite-drive",
+        Key: key,
+        Body: bytes,
+      }),
+    );
+    await db.entry.createMany({
+      data: [
+        {
+          id: rootId,
+          ownerId: owner,
+          name: "root",
+          kind: "folder",
+          state: "ready",
+        },
+        {
+          id: foreignId,
+          ownerId: "someone-else",
+          name: "foreign",
+          kind: "folder",
+          state: "ready",
+        },
+        {
+          id: trashedId,
+          ownerId: owner,
+          name: "trash",
+          kind: "folder",
+          state: "ready",
+          trashedAt: new Date(),
+        },
+      ],
+    });
+    await db.entry.createMany({
+      data: [
+        {
+          id: subId,
+          ownerId: owner,
+          parentId: rootId,
+          name: "nested",
+          kind: "folder",
+          state: "ready",
+        },
+        {
+          id: emptyId,
+          ownerId: owner,
+          parentId: rootId,
+          name: "empty",
+          kind: "folder",
+          state: "ready",
+        },
+      ],
+    });
+    await db.entry.create({
+      data: {
+        id: fileId,
+        ownerId: owner,
+        parentId: subId,
+        name: "data.txt",
+        kind: "file",
+        state: "ready",
+        size: bytes.length,
+        objectKey: key,
+      },
+    });
+    const zipSessions: SessionVerifier = { verify: () => okAsync(owner) };
+    const zipApp = buildServer(
+      drive,
+      storage,
+      zipSessions,
+      undefined,
+      undefined,
+      undefined,
+      { maxEntries: 4, maxBytes: bytes.length },
+    );
+    try {
+      expect(
+        (await app.inject({ method: "GET", url: zipUrl([rootId]) })).statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: zipUrl([rootId]),
+            headers: { cookie: "user=a" },
+          })
+        ).statusCode,
+      ).toBe(400);
+      const response = await zipApp.inject({
+        method: "GET",
+        url: zipUrl([rootId]),
+      });
+      expect(response.statusCode).toBe(200);
+      const script = `import sys, zipfile, io, json, hashlib
+z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()))
+print(json.dumps({n: hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist()}))`;
+      const { spawn } = await import("node:child_process");
+      const extracted = await new Promise<string>((resolve, reject) => {
+        const child = spawn("python3", ["-c", script]);
+        let out = "";
+        let errors = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+          out += chunk.toString();
+        });
+        child.stderr.on("data", (chunk: Buffer) => {
+          errors += chunk.toString();
+        });
+        child.on("error", reject);
+        child.on("close", (code) =>
+          code === 0 ? resolve(out) : reject(new Error(errors)),
+        );
+        child.stdin.end(response.rawPayload);
+      });
+      const contents = z
+        .record(z.string(), z.string())
+        .parse(JSON.parse(extracted));
+      expect(contents["root/nested/data.txt"]).toBe(digest(bytes));
+      expect(contents["root/empty/"]).toBe(digest(Buffer.alloc(0)));
+      const rejectedResponses = await Promise.all(
+        [foreignId, trashedId, randomUUID()].map((id) =>
+          zipApp.inject({ method: "GET", url: zipUrl([rootId, id]) }),
+        ),
+      );
+      for (const rejected of rejectedResponses) {
+        expect(rejected.statusCode).toBe(400);
+        expect(
+          z.object({ message: z.string() }).parse(rejected.json()).message,
+        ).toMatch(/missing, trashed, or not owned/);
+      }
+      const overCount = buildServer(
+        drive,
+        storage,
+        zipSessions,
+        undefined,
+        undefined,
+        undefined,
+        { maxEntries: 3, maxBytes: bytes.length },
+      );
+      const overSize = buildServer(
+        drive,
+        storage,
+        zipSessions,
+        undefined,
+        undefined,
+        undefined,
+        { maxEntries: 4, maxBytes: bytes.length - 1 },
+      );
+      try {
+        expect(
+          z
+            .object({ message: z.string() })
+            .parse(
+              (
+                await overCount.inject({ method: "GET", url: zipUrl([rootId]) })
+              ).json(),
+            ).message,
+        ).toMatch(/entry limit/);
+        expect(
+          z
+            .object({ message: z.string() })
+            .parse(
+              (
+                await overSize.inject({ method: "GET", url: zipUrl([rootId]) })
+              ).json(),
+            ).message,
+        ).toMatch(/size limit/);
+      } finally {
+        await overCount.close();
+        await overSize.close();
+      }
+    } finally {
+      await zipApp.close();
+    }
+  } finally {
+    s3.destroy();
+  }
+});
+
+it("does not open storage if the client disconnects during ZIP validation", async () => {
+  let validationStarted: () => void = vi.fn<() => void>();
+  const started = new Promise<void>((resolve) => {
+    validationStarted = resolve;
+  });
+  let releaseValidation: () => void = vi.fn<() => void>();
+  const validationGate = new Promise<void>((resolve) => {
+    releaseValidation = resolve;
+  });
+  let disconnected: () => void = vi.fn<() => void>();
+  const closed = new Promise<void>((resolve) => {
+    disconnected = resolve;
+  });
+  const entry = {
+    id: "cancel-file",
+    ownerId: "a",
+    parentId: null,
+    name: "cancel",
+    kind: "file",
+    state: "ready",
+    size: 1n,
+    checksum: null,
+    contentType: null,
+    objectKey: "cancel-key",
+    uploadId: null,
+    expiresAt: null,
+    trashedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  const delayed = {
+    ...drive,
+    prepareZip: async () => {
+      validationStarted();
+      await validationGate;
+      return [{ path: "cancel", entry }];
+    },
+  };
+  const server = buildServer(delayed, storage, sessions);
+  server.addHook("onRequest", (_request, reply, done) => {
+    reply.raw.once("close", disconnected);
+    done();
+  });
+  const get = vi.spyOn(storage, "get");
+  const abort = new AbortController();
+  try {
+    const address = await server.listen({ port: 0, host: "127.0.0.1" });
+    const request = fetch(`${address}${zipUrl([entry.id])}`, {
+      headers: { cookie: "user=a" },
+      signal: abort.signal,
+    }).catch(() => undefined);
+    await started;
+    abort.abort();
+    await request;
+    await closed;
+    releaseValidation();
+    await server.close();
+    expect(get).not.toHaveBeenCalled();
+  } finally {
+    releaseValidation();
+    get.mockRestore();
+    await server.close();
+  }
+});

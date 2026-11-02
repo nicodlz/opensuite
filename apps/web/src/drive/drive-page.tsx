@@ -1134,24 +1134,6 @@ export function DrivePage() {
     };
   }, []);
 
-  async function download(entry: DriveEntry) {
-    try {
-      const result = await command({ action: "download", id: entry.id });
-      if (!("url" in result) || !result.url)
-        throw new Error("Missing download URL");
-      const anchorElement = document.createElement("a");
-      anchorElement.href = result.url;
-      anchorElement.download = entry.name;
-      anchorElement.rel = "noopener";
-      document.body.append(anchorElement);
-      anchorElement.click();
-      anchorElement.remove();
-      if (result.url.startsWith("blob:"))
-        setTimeout(() => URL.revokeObjectURL(result.url ?? ""), 60_000);
-    } catch {
-      setNotice("Could not download this file. Please try again.");
-    }
-  }
   function openEntry(entry: DriveEntry) {
     anchor.current = entry.id;
     setSelectedIds([entry.id]);
@@ -1594,12 +1576,13 @@ export function DrivePage() {
                       icon="download"
                       label="Download"
                       onClick={() => {
-                        void download(selected);
+                        void download(selected, setNotice);
                       }}
                       disabled={
                         selected.kind !== "file" || selected.state !== "ready"
                       }
                     />
+                    <ZipAction items={[selected]} folderOnly />
                     <Action
                       icon="edit"
                       label="Rename"
@@ -1629,6 +1612,7 @@ export function DrivePage() {
                   </>
                 ) : (
                   <>
+                    <ZipAction items={selectedEntries} />
                     <Action
                       icon="move"
                       label="Move"
@@ -2216,10 +2200,12 @@ export function DrivePage() {
           }}
           onClose={() => setViewing(null)}
           onDownload={(target) => {
-            void download(target);
+            void download(target, setNotice);
           }}
         />
       )}
     </Menu.Root>
   );
 }
+
+import { ZipAction, download } from "./zip-action.tsx";

@@ -27,6 +27,7 @@ type Transport = {
     signal: AbortSignal,
     progress: (loaded: number) => void,
   ) => Promise<string>;
+  zip: (ids: string[]) => Promise<string>;
   preview: (id: string) => string;
   /** The start of a file as text, for the text viewer. */
   text: (id: string) => Promise<string>;
@@ -75,6 +76,24 @@ function put(
 const live: Transport = {
   command: (input) => production.command(input),
   put,
+  zip: async (ids) => {
+    const params = new URLSearchParams({ ids: JSON.stringify(ids) });
+    const response = await fetch(`/drive/api/v1/zip?${params}&check=1`, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      const body: unknown = await response.json().catch(() => null);
+      const message =
+        body &&
+        typeof body === "object" &&
+        "message" in body &&
+        typeof body.message === "string"
+          ? body.message
+          : "Could not prepare ZIP download.";
+      throw new Error(message);
+    }
+    return `/drive/api/v1/zip?${params}`;
+  },
   preview: (id) => `/drive/api/v1/preview/${encodeURIComponent(id)}`,
   text: async (id) => {
     const response = await fetch(

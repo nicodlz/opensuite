@@ -1,0 +1,5 @@
+# Drive ZIP download limits
+
+The Drive service reads `DRIVE_ZIP_MAX_ENTRIES` (default 10,000, maximum 100,000) and `DRIVE_ZIP_MAX_BYTES` (default 10,000,000,000 bytes, maximum JavaScript safe integer) from its process environment. Both must be positive integers; invalid values prevent startup. The entry count includes folders, including empty folders. The byte limit is the sum of file sizes before compression. A request may select at most 100 distinct roots; their descendants also count toward the entry and byte limits.
+
+For Compose, supply these variables to the Drive container using a local Compose override under the service's `environment` section and recreate Drive. Setting them only in the Compose `.env` file does not pass them through the standard service definition. Balance limits against memory used for entry metadata and expected transfer duration. The service reads one object at a time and does not buffer the archive. If a storage read fails after a download starts, the connection is terminated and the browser's download fails; retry after storage is restored. Provider-specific behavior has not been verified by the local S3 substitute.
