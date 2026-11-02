@@ -15,6 +15,7 @@ export function createGuards(
     ...createCoreGuards(db),
     processRow: createScheduledWorker(
       createReleaseAuthorization({ db, ...deps }),
+      deps.domains,
     ),
   };
 }

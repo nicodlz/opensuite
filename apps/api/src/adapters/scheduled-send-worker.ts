@@ -87,14 +87,7 @@ async function reconcile(row: ScheduledRecord, ctx: WorkerContext) {
       "canceled",
     );
   } else if (found.undoStatus === "final") {
-    if (
-      await ctx.store.transition(
-        row.id,
-        ["creating", "unknown", "canceling"],
-        "releasing",
-        { submissionId: found.id },
-      )
-    )
+    if (await ctx.store.acceptHandoff(row, found.id))
       await release(c, row, ctx);
   } else {
     // A provider-held or otherwise unresolved item is never presented as canceled.
@@ -121,11 +114,7 @@ async function submit(
       { requestId: row.id },
     );
     if (result.isOk()) {
-      if (
-        await ctx.store.transition(row.id, ["creating"], "releasing", {
-          submissionId: result.value.id,
-        })
-      )
+      if (await ctx.store.acceptHandoff(row, result.value.id))
         await release(c, row, ctx);
     } else if (
       result.error.kind === "set" ||
@@ -168,6 +157,7 @@ async function prepare(
   ctx: WorkerContext,
   authorize: ReleaseAuthorization,
   token: string,
+  configured: readonly string[],
 ) {
   const reject = async (reason: ScheduledFailure) => {
     await ctx.store.fail(row, reason, token);
@@ -197,24 +187,28 @@ async function prepare(
   const final = await authorize(row);
   if (final) return reject(final);
   if (
-    await ctx.store.beginSubmission(
-      row.id,
+    await ctx.store.beginHandoff(
+      row,
       token,
-      new Date(ctx.now()),
+      () => ctx.now(),
       previous,
+      configured,
     )
   )
     await submit(row, ctx, c, sender);
 }
 
-export function createScheduledWorker(authorize: ReleaseAuthorization) {
+export function createScheduledWorker(
+  authorize: ReleaseAuthorization,
+  configured: readonly string[],
+) {
   return async (row: ScheduledRecord, ctx: WorkerContext) => {
     if (!["pending", "preparing"].includes(row.state))
       return reconcile(row, ctx);
     const token = randomUUID();
     if (!(await ctx.store.claim(row.id, new Date(ctx.now()), token))) return;
     try {
-      await prepare(row, ctx, authorize, token);
+      await prepare(row, ctx, authorize, token, configured);
     } catch (error) {
       await ctx.store.defer(row.id, token);
       throw error;

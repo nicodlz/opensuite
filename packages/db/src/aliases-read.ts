@@ -2,6 +2,7 @@ import { ResultAsync } from "neverthrow";
 import type { PrismaClient } from "./generated/index.js";
 import { unavailable } from "./aliases-shared.ts";
 import { withUserLease } from "./alias-locks.ts";
+import { findAllowedAlias } from "./sender-authorization.ts";
 
 export const createLeaseAndList = (
   db: PrismaClient,
@@ -143,22 +144,7 @@ export const createSubmission = (db: PrismaClient) => ({
       unavailable,
     ),
   canSendAs: (userId: string, address: string) =>
-    ResultAsync.fromPromise(
-      db.emailAlias.findFirst({
-        where: {
-          userId,
-          address,
-          enabled: true,
-          ready: true,
-          suspended: false,
-          detachedByDomain: false,
-          deletedAt: null,
-          domain: { status: "verified" },
-        },
-        select: { id: true },
-      }),
-      unavailable,
-    ),
+    ResultAsync.fromPromise(findAllowedAlias(db, userId, address), unavailable),
   auditSubmission: (userId: string, aliasId: string) =>
     ResultAsync.fromPromise(
       db.auditEvent

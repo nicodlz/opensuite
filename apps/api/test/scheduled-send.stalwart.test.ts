@@ -7,6 +7,7 @@ import { createMailWithInvitations } from "@opensuite/core/services/invitations"
 import { invitationProtocol } from "@opensuite/core/adapters/invitations";
 import {
   createAliasStore,
+  createAddressStore,
   createDatabase,
   createScheduledSendStore,
   type PrismaClient,
@@ -87,6 +88,7 @@ beforeAll(async () => {
     value(await admin.createAccount("bob", domain.id, password));
     value(await admin.createAccount("blind", domain.id, password));
     value(await admin.createAlias(accountId, "alias", domain.id));
+    value(await admin.createAlias(accountId, "secondary", domain.id));
     await run("docker", [
       "run",
       "-d",
@@ -150,6 +152,17 @@ beforeAll(async () => {
         isAlias: true,
       },
     });
+    await db.address.create({
+      data: {
+        userId: actor.id,
+        domainId: domainRow.id,
+        localPart: "secondary",
+        mailboxManaged: true,
+        lastAccountId: accountId,
+        active: true,
+        ready: true,
+      },
+    });
     await db.emailAlias.create({
       data: {
         userId: actor.id,
@@ -198,6 +211,8 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
   let cancellationAttempts = 0;
   let delayedMove: (() => Promise<Response>) | undefined;
   let afterQuery: (() => Promise<void>) | undefined;
+  let beforeHandoff: (() => Promise<void>) | undefined;
+  let beforeSubmission: (() => Promise<void>) | undefined;
   let afterQueryFor = "";
   let entitled = true;
   let quota: number | null = null;
@@ -211,7 +226,13 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
         (row) => row?.id ?? null,
       ),
   };
-  const addresses = { canSendAs: () => Promise.resolve(ok(null)) };
+  const addressStore = createAddressStore(database, ["example.test"]);
+  const addresses = {
+    canSendAs: async (userId: string, address: string) =>
+      (await addressStore.canSendAs(userId, address)).map(
+        (row) => row?.id ?? null,
+      ),
+  };
   const fetchMaybeLose: typeof fetch = async (input, init) => {
     const body = typeof init?.body === "string" ? init.body : "";
     const guardedMove =
@@ -221,8 +242,14 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     if (body.includes("HOLDFOR")) submissionAttempts++;
     if (body.includes('"EmailSubmission/set"') && body.includes('"canceled"'))
       cancellationAttempts++;
-    if (body.includes('"EmailSubmission/set"') && !body.includes("HOLDFOR"))
+    if (body.includes('"EmailSubmission/set"') && !body.includes("HOLDFOR")) {
       immediateAttempts++;
+      if (beforeSubmission) {
+        const hook = beforeSubmission;
+        beforeSubmission = undefined;
+        await hook();
+      }
+    }
     if (lostResponse === "missingCreate" && body.includes("HOLDFOR")) {
       lostResponse = null;
       throw new Error("submission request lost");
@@ -292,26 +319,38 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
           : err({ kind: "not_found" }),
       ),
   };
-  const createService = (domains = ["example.test"]) =>
-    createMailWithInvitations({
+  const createService = (domains = ["example.test"]) => {
+    const guards = createScheduledGuards(database, {
+      aliases,
+      addresses,
+      domains,
+      entitlements: {
+        get: () =>
+          Promise.resolve({ uploadsAllowed: entitled, quotaBytes: quota }),
+      },
+      storageMeter: {
+        measure: async () => {
+          await afterMeasure?.();
+          return { usedBytes: used, measured };
+        },
+      },
+    });
+    const begin = guards.scheduledStore.beginHandoff.bind(
+      guards.scheduledStore,
+    );
+    guards.scheduledStore.beginHandoff = async (...args) => {
+      if (beforeHandoff) {
+        const hook = beforeHandoff;
+        beforeHandoff = undefined;
+        await hook();
+      }
+      return begin(...args);
+    };
+    return createMailWithInvitations({
       origin: base,
       now: () => Date.now() + clockOffset,
       store: credentials,
-      ...createScheduledGuards(database, {
-        aliases,
-        addresses,
-        domains,
-        entitlements: {
-          get: () =>
-            Promise.resolve({ uploadsAllowed: entitled, quotaBytes: quota }),
-        },
-        storageMeter: {
-          measure: async () => {
-            await afterMeasure?.();
-            return { usedBytes: used, measured };
-          },
-        },
-      }),
+      ...guards,
       protocol: invitationProtocol,
       aliases,
       addresses,
@@ -323,6 +362,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
           rewriteSessionUrlsToOrigin: base,
         }),
     }).mail;
+  };
   let mail = createService();
   const app = await buildServer({
     config: { logLevel: "silent" },
@@ -813,11 +853,14 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     await createService().reconcileScheduled();
     expect(immediateAttempts).toBe(beforeLease + 1);
     expect(
-      await store.beginSubmission(
-        lease.id,
+      await store.beginHandoff(
+        await database.scheduledSend.findUniqueOrThrow({
+          where: { id: lease.id },
+        }),
         staleToken,
-        new Date(Date.now() + clockOffset),
+        () => Date.now() + clockOffset,
         [],
+        ["example.test"],
       ),
     ).toBe(false);
     expect(
@@ -1006,6 +1049,142 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       data: { enabled: true },
     });
 
+    // Reproduce revocation exactly between the final authorization and the
+    // durable handoff. Exercise both managed alias and secondary identity.
+    const aliasRow = await database.emailAlias.findUniqueOrThrow({
+      where: { address: "alias@example.test" },
+    });
+    const secondaryRow = await database.address.findFirstOrThrow({
+      where: { userId: actor.id, localPart: "secondary", isAlias: false },
+    });
+    const senderCases = [
+      {
+        email: "alias@example.test",
+        revoke: () => aliasStore.transition(actor.id, aliasRow.id, "disable"),
+        restore: () =>
+          database.emailAlias.update({
+            where: { id: aliasRow.id },
+            data: { enabled: true, ready: true },
+          }),
+      },
+      {
+        email: "secondary@example.test",
+        revoke: () => addressStore.remove(actor.id, secondaryRow.id),
+        restore: () =>
+          database.address.update({
+            where: { id: secondaryRow.id },
+            data: { removalPending: false, ready: true, active: true },
+          }),
+      },
+    ];
+    await senderCases.reduce<Promise<void>>(
+      (previous, senderCase) =>
+        previous.then(async () => {
+          clockOffset = 0;
+          const raceContent = {
+            ...content,
+            from: senderCase.email,
+            subject: `revocation-wins-${senderCase.email}`,
+          };
+          const revocationDraft = value(
+            await mail.createDraft(actor, "default", raceContent),
+          );
+          const item = value(
+            await mail.schedule(
+              actor,
+              "default",
+              revocationDraft.id,
+              randomUUID(),
+              {
+                type: "delay",
+                seconds: 1,
+              },
+            ),
+          );
+          beforeHandoff = async () => {
+            expect((await senderCase.revoke()).isOk()).toBe(true);
+          };
+          clockOffset = 2000;
+          const attempts = immediateAttempts;
+          await mail.reconcileScheduled();
+          expect(beforeHandoff).toBeUndefined();
+          expect(immediateAttempts).toBe(attempts);
+          expect(
+            value(await mail.scheduled(actor, "default")).scheduled.find(
+              (entry) => entry.id === item.id,
+            ),
+          ).toMatchObject({
+            state: "failed",
+            failure: { code: "sender_unavailable" },
+          });
+          expect(
+            await database.auditEvent.count({
+              where: {
+                action: "mail.scheduled.failed",
+                detail: { path: ["scheduledId"], equals: item.id },
+              },
+            }),
+          ).toBe(1);
+          await senderCase.restore();
+
+          clockOffset = 0;
+          const winningContent = {
+            ...raceContent,
+            subject: `handoff-wins-${senderCase.email}`,
+          };
+          const winningDraft = value(
+            await mail.createDraft(actor, "default", winningContent),
+          );
+          const winningItem = value(
+            await mail.schedule(
+              actor,
+              "default",
+              winningDraft.id,
+              randomUUID(),
+              { type: "delay", seconds: 1 },
+            ),
+          );
+          beforeSubmission = async () => {
+            const revocation = await senderCase.revoke();
+            expect(revocation).toMatchObject({
+              error: {
+                kind: "conflict",
+                message:
+                  "An earlier scheduled send has an unresolved outcome; try again after it is reconciled.",
+              },
+            });
+            expect(
+              await database.auditEvent.count({
+                where: {
+                  action: "mail.scheduled.handoff_started",
+                  detail: { path: ["scheduledId"], equals: winningItem.id },
+                },
+              }),
+            ).toBe(1);
+          };
+          clockOffset = 2000;
+          await mail.reconcileScheduled();
+          expect(beforeSubmission).toBeUndefined();
+          expect(
+            value(await mail.scheduled(actor, "default")).scheduled.find(
+              (entry) => entry.id === winningItem.id,
+            )?.state,
+          ).toBe("sent");
+          expect(
+            await database.auditEvent.count({
+              where: {
+                action: "mail.scheduled.handoff_accepted",
+                detail: { path: ["scheduledId"], equals: winningItem.id },
+              },
+            }),
+          ).toBe(1);
+          expect((await senderCase.revoke()).isOk()).toBe(true);
+          await senderCase.restore();
+          return undefined;
+        }),
+      Promise.resolve(),
+    );
+
     // Even if the application alias still exists, a missing provider identity
     // fails release and records why instead of handing off the draft.
     clockOffset = 0;
@@ -1164,7 +1343,34 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     const crashTime = new Date(Date.now() + clockOffset);
     expect(await store.claim(crash.id, crashTime, crashToken)).toBe(true);
     expect(
-      await store.beginSubmission(crash.id, crashToken, crashTime, []),
+      await store.beginHandoff(
+        await database.scheduledSend.findUniqueOrThrow({
+          where: { id: crash.id },
+        }),
+        crashToken,
+        () => crashTime.getTime(),
+        [],
+        ["example.test"],
+      ),
+    ).toBe(true);
+    const uncertainRevocation = await aliasStore.transition(
+      actor.id,
+      aliasRow.id,
+      "disable",
+    );
+    expect(uncertainRevocation).toMatchObject({
+      error: {
+        kind: "conflict",
+        message:
+          "An earlier scheduled send has an unresolved outcome; try again after it is reconciled.",
+      },
+    });
+    expect(
+      (
+        await database.emailAlias.findUniqueOrThrow({
+          where: { id: aliasRow.id },
+        })
+      ).enabled,
     ).toBe(true);
     const beforeCrashRecovery = immediateAttempts;
     await createService().reconcileScheduled();

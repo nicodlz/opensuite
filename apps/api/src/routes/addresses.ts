@@ -3,6 +3,7 @@ import { implement, ORPCError } from "@orpc/server";
 import type { Result } from "neverthrow";
 import type { ApiContext } from "./context.ts";
 import { requireSession } from "./session.ts";
+import { throwServiceError } from "./service-error.ts";
 
 const addresses = implement(contract.addresses).$context<ApiContext>();
 const service = (context: ApiContext) => {
@@ -11,7 +12,7 @@ const service = (context: ApiContext) => {
   return context.addresses;
 };
 async function value<T>(
-  promise: PromiseLike<Result<T, { kind: string }>>,
+  promise: PromiseLike<Result<T, { kind: string; message?: string }>>,
 ): Promise<T> {
   const result = await promise;
   if (result.isOk()) return result.value;
@@ -20,17 +21,7 @@ async function value<T>(
       status: 403,
       defined: true,
     });
-  const code =
-    result.error.kind === "invalid"
-      ? "BAD_REQUEST"
-      : result.error.kind === "reserved"
-        ? "RESERVED"
-        : result.error.kind === "not_found"
-          ? "NOT_FOUND"
-          : result.error.kind === "conflict"
-            ? "CONFLICT"
-            : "SERVICE_UNAVAILABLE";
-  throw new ORPCError(code, { defined: true });
+  return throwServiceError(result.error, { reserved: "RESERVED" });
 }
 export const addressesRouter = addresses.router({
   list: addresses.list

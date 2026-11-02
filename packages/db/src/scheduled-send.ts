@@ -1,4 +1,12 @@
-import type { Prisma, PrismaClient } from "./generated/index.js";
+import type { PrismaClient } from "./generated/index.js";
+import {
+  clearScheduledGuard,
+  failScheduled,
+} from "./scheduled-send-failure.ts";
+import {
+  acceptScheduledHandoff,
+  beginScheduledHandoff,
+} from "./scheduled-send-handoff.ts";
 
 export type DraftGuardWrite = "destroy" | "send" | "mutation";
 export type DraftGuardBegin = (
@@ -54,20 +62,6 @@ export type ScheduledReservation = Pick<
   | "releaseAt"
   | "requestDelivery"
 > & { leaseToken: string; leaseUntil: Date };
-
-async function clearScheduledGuard(
-  tx: Prisma.TransactionClient,
-  row: ScheduledRecord,
-) {
-  await tx.mailDraftGuard.deleteMany({
-    where: {
-      userId: row.userId,
-      accountId: row.accountId,
-      draftId: row.draftId,
-      token: row.id,
-    },
-  });
-}
 
 class Store {
   readonly #db: PrismaClient;
@@ -244,27 +238,24 @@ class Store {
       data: { state: "pending", leaseToken: null, leaseUntil: null },
     });
   }
-  async beginSubmission(
-    id: string,
+  beginHandoff(
+    row: ScheduledRecord,
     token: string,
-    now: Date,
+    now: () => number,
     previousIds: string[],
+    configured: readonly string[],
   ) {
-    const result = await this.#db.scheduledSend.updateMany({
-      where: {
-        id,
-        state: "preparing",
-        leaseToken: token,
-        leaseUntil: { gt: now },
-      },
-      data: {
-        state: "creating",
-        previousIds,
-        leaseToken: null,
-        leaseUntil: null,
-      },
-    });
-    return result.count === 1;
+    return beginScheduledHandoff(
+      this.#db,
+      row,
+      token,
+      now,
+      previousIds,
+      configured,
+    );
+  }
+  acceptHandoff(row: ScheduledRecord, submissionId: string) {
+    return acceptScheduledHandoff(this.#db, row, submissionId);
   }
   list(userId: string, accountId: string) {
     return this.#db.scheduledSend.findMany({
@@ -353,30 +344,8 @@ class Store {
       return true;
     });
   }
-  async fail(row: ScheduledRecord, reason: ScheduledFailure, token?: string) {
-    return this.#db.$transaction(async (tx) => {
-      const result = await tx.scheduledSend.updateMany({
-        where: token
-          ? { id: row.id, state: "preparing", leaseToken: token }
-          : { id: row.id, state: { in: ["creating", "unknown"] } },
-        data: {
-          state: "failed",
-          failureReason: reason,
-          leaseToken: null,
-          leaseUntil: null,
-        },
-      });
-      if (result.count !== 1) return false;
-      await clearScheduledGuard(tx, row);
-      await tx.auditEvent.create({
-        data: {
-          userId: row.userId,
-          action: "mail.scheduled.failed",
-          detail: { scheduledId: row.id, reason },
-        },
-      });
-      return true;
-    });
+  fail(row: ScheduledRecord, reason: ScheduledFailure, token?: string) {
+    return this.#db.$transaction((tx) => failScheduled(tx, row, reason, token));
   }
 }
 export const createScheduledSendStore = (db: PrismaClient) => new Store(db);

@@ -17,6 +17,16 @@ mode, measuring the shared mail and Drive quota requires both usage sources;
 an unavailable usage source therefore delays release rather than bypassing the
 quota check. Self-hosted accounts with no quota do not need a usage measurement.
 
+Final sender authorization and alias or secondary-address revocation share a
+database lock. The handoff is recorded before the provider request, and the
+provider's acceptance is recorded before revocation can succeed. If revocation
+wins first, the worker fails the scheduled item with `sender_unavailable`.
+While a handoff has an uncertain outcome, revoking that sender returns a
+conflict until reconciliation establishes acceptance or definite failure. This
+includes a crash immediately after recording the handoff: the application cannot
+prove whether the request reached the mail server, so it does not assume that
+revocation or cancellation succeeded.
+
 The database lease and state transition give cancellation and submission one
 winner. Cancellation succeeds while an item is still held, including when its
 deadline has passed but handoff has not begun. Once handoff begins, an unknown
