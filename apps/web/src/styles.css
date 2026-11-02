@@ -673,7 +673,30 @@ h1 {
 }
 @media (max-width: 900px) {
   .toast-viewport {
-    bottom: 90px;
+    bottom: calc(90px + env(safe-area-inset-bottom));
+  }
+}
+/* Dialogs stay within what an on-screen keyboard leaves visible. */
+.dialog-content {
+  top: calc(var(--viewport-top, 0px) + var(--viewport-height, 100dvh) / 2);
+  max-height: calc(var(--viewport-height, 100dvh) - 32px);
+}
+/* Fingers need larger targets than a mouse pointer, and text fields of at
+   least 16px so that phones do not zoom in on them. */
+@media (pointer: coarse) {
+  .button-normal,
+  .button-small,
+  .menu-item,
+  .field-input {
+    min-height: 44px;
+  }
+  .button-small {
+    min-width: 44px;
+  }
+  input:not([type="checkbox"], [type="radio"]),
+  select,
+  textarea {
+    font-size: 16px;
   }
 }
 @media (max-width: 760px) {

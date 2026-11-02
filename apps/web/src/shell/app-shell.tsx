@@ -29,6 +29,7 @@ import {
   type Product,
 } from "./navigation.tsx";
 import { setTheme, useTheme } from "./theme.ts";
+import { useVisualViewport } from "./viewport.ts";
 
 export type { Product } from "./navigation.tsx";
 
@@ -236,6 +237,12 @@ function ShellPrompts({ product }: { product: Product }) {
   );
 }
 
+/** Tab title, and the visible part of the window for full-screen panels. */
+function useFrame(product: Product, title: string | undefined) {
+  useDocumentTitle(shellTitle(product, title));
+  useVisualViewport();
+}
+
 export function AppShell({
   product,
   productLabel,
@@ -263,7 +270,7 @@ export function AppShell({
   children: ReactNode;
 }) {
   const { drawerRef, openerRef, ...drawer } = useNavigationDrawer();
-  useDocumentTitle(shellTitle(product, title));
+  useFrame(product, title);
   return (
     <div className={`shell ${drawer.open ? "nav-open" : ""}`}>
       <a href={`#${mainId}`} className="skip-link" inert={drawer.open}>

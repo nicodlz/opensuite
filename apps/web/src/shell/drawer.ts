@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-
-/** Width below which the sidebar becomes a drawer; matches shell.css. */
-const narrow = "(max-width: 900px)";
+import { drawerQuery } from "./media.ts";
 
 const tabbable =
   "a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]";
@@ -52,7 +50,7 @@ export function useNavigationDrawer() {
   }, []);
   useEffect(() => {
     // The drawer only exists on narrow screens; widening the window closes it.
-    const query = window.matchMedia(narrow);
+    const query = window.matchMedia(drawerQuery);
     function change() {
       if (!query.matches) setOpen(false);
     }

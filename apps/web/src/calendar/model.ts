@@ -7,13 +7,14 @@ import type {
 // Date math runs in the browser's local time zone. Grid positions use wall
 // clock minutes so 23- and 25-hour days still map to a 24-hour column.
 
-export type CalendarView = "day" | "week" | "month";
-export const calendarViews: CalendarView[] = ["day", "week", "month"];
+/** The agenda lists the events of one month, day by day. */
+export type CalendarView = "day" | "week" | "month" | "agenda";
+export const calendarViews: CalendarView[] = ["day", "week", "month", "agenda"];
 const MINUTES_PER_DAY = 1440;
 const DAY_MS = 86_400_000;
 
 export function isCalendarView(value: unknown): value is CalendarView {
-  return value === "day" || value === "week" || value === "month";
+  return calendarViews.some((view) => view === value);
 }
 
 export function startOfDay(date: Date): Date {
