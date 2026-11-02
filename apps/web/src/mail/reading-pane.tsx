@@ -6,6 +6,8 @@ import { aliasState } from "../aliases/model.ts";
 import { expireSession } from "../auth/components.tsx";
 import { Icon } from "../ui/icons.tsx";
 import { accountId, mailClient } from "./client.ts";
+import { InvitationCard } from "./invitation-card.tsx";
+import { mayHaveInvitation } from "./invitation-model.ts";
 import { formatDate, formatFullDate, initials } from "./model.ts";
 import { ReadingToolbar } from "./reading-toolbar.tsx";
 import { sanitizeEmail } from "./sanitize.ts";
@@ -39,6 +41,10 @@ function escapeHtml(value: string) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 }
+const recipientNames = (message: Message) =>
+  [...message.to, ...message.cc]
+    .map((address) => address.name ?? address.email)
+    .join(", ");
 function formatSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -187,9 +193,7 @@ function MessageView({
         <time dateTime={message.sentAt}>{formatDate(message.sentAt)}</time>
       </button>
     );
-  const recipients = [...message.to, ...message.cc]
-    .map((address) => address.name ?? address.email)
-    .join(", ");
+  const recipients = recipientNames(message);
   return (
     <article className="message" data-message-id={message.id}>
       <div className="message-header">
@@ -224,6 +228,7 @@ function MessageView({
           {formatFullDate(message.sentAt)}
         </time>
       </div>
+      {mayHaveInvitation(message) && <InvitationCard message={message} />}
       {sanitized.blockedImages && (
         <div className="image-notice">
           <Icon name="settings" size={16} />

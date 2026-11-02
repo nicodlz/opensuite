@@ -6,10 +6,16 @@ import {
 } from "@opensuite/contracts";
 import { ORPCError } from "@orpc/client";
 import { createRouterClient, implement } from "@orpc/server";
+import {
+  base64,
+  syntheticInvitations,
+  type InvitationFixture,
+} from "./invitations.ts";
 
 // Synthetic mailbox data lives only in the development bundle.
 const fixtureMarker = "OPENMAIL_SYNTHETIC_FIXTURE_ONLY";
 const account = { name: "You", email: "you@example.test" };
+const invitations = syntheticInvitations(account);
 const initial: Message[] = [
   {
     id: "m1",
@@ -82,7 +88,39 @@ const initial: Message[] = [
     labels: [],
   },
 ];
-const messages = structuredClone(initial);
+/** A Google Calendar style message carrying an invitation fixture. */
+const invitationMessage = (fixture: InvitationFixture): Message => ({
+  id: fixture.id,
+  threadId: `${fixture.id}-thread`,
+  mailboxIds: ["inbox"],
+  from: fixture.from,
+  to: [account],
+  cc: [],
+  bcc: [],
+  subject: fixture.subject,
+  sentAt: fixture.sentAt,
+  messageId: `<${fixture.id}@calendar.example.test>`,
+  references: [],
+  headers: [],
+  htmlBody: `<p>${fixture.intro}</p><p><a href="https://meet.google.com/abc-defg-hij">Join with Google Meet</a></p>`,
+  textBody: fixture.intro,
+  attachments: [
+    {
+      id: `${fixture.id}-ics`,
+      blobId: `${fixture.id}-ics`,
+      name: "invite.ics",
+      type: "text/calendar",
+      size: new TextEncoder().encode(fixture.calendar).length,
+    },
+  ],
+  unread: true,
+  starred: false,
+  labels: [],
+});
+const messages = structuredClone([
+  ...initial,
+  ...invitations.fixtures.map(invitationMessage),
+]);
 let drafts: Draft[] = [];
 const blobs = new Map<string, { name: string; type: string; base64: string }>([
   [
@@ -94,6 +132,17 @@ const blobs = new Map<string, { name: string; type: string; base64: string }>([
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a9sAAAAASUVORK5CYII=",
     },
   ],
+  ...invitations.fixtures.map(
+    (fixture) =>
+      [
+        `${fixture.id}-ics`,
+        {
+          name: "invite.ics",
+          type: "text/calendar",
+          base64: base64(fixture.calendar),
+        },
+      ] as const,
+  ),
 ]);
 const folders = [
   { id: "junk", name: "Junk Mail", role: "junk" },
@@ -340,5 +389,9 @@ const router = api.router({
     };
   }),
 });
-export const fakeMailClient = createRouterClient(router);
+// Replies to invitations go out through the same synthetic mailbox.
+export const fakeMailClient = createRouterClient({
+  ...router,
+  invitations: invitations.router(createRouterClient(router)),
+});
 export { fixtureMarker };

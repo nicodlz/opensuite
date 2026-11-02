@@ -1314,3 +1314,259 @@ body:has(.compose-dock .composer) .toast-viewport {
   font: inherit;
   padding: 8px 0;
 }
+
+/* Calendar invitations in the reader */
+.invite-card {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-muted);
+  font-size: 14px;
+}
+.invite-card[data-sender="unverified"] {
+  border-color: var(--warning);
+}
+.invite-loading,
+.invite-unavailable {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+}
+.invite-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+.invite-head h3 {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  font-size: 19px;
+  overflow-wrap: anywhere;
+}
+.invite-kind {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.invite-card[data-kind="cancel"] .invite-kind {
+  color: var(--danger);
+}
+.invite-sender {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.invite-sender[data-sender="verified"] {
+  color: var(--success);
+}
+.invite-sender[data-sender="unverified"] {
+  color: var(--warning);
+}
+.invite-warning {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-left: 4px solid var(--warning);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--foreground);
+}
+.invite-warning p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+.invite-details {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 0;
+}
+.invite-details > div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+}
+.invite-details dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+.invite-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.invite-muted {
+  color: var(--muted);
+}
+.invite-note {
+  display: block;
+  font-size: 13px;
+}
+.invite-cancelled {
+  text-decoration: line-through;
+}
+.invite-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+.invite-host {
+  font-weight: 400;
+}
+.invite-guests {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.invite-partstat {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.invite-partstat[data-partstat="ACCEPTED"] {
+  background: var(--success-soft);
+}
+.invite-partstat[data-partstat="DECLINED"] {
+  background: var(--danger-soft);
+}
+.invite-more {
+  margin: 4px 0 0;
+}
+.invite-description {
+  margin-top: 12px;
+}
+.invite-description summary {
+  width: fit-content;
+  color: var(--accent);
+  font-weight: 700;
+  cursor: pointer;
+}
+.invite-description p {
+  max-height: 240px;
+  margin: 8px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.invite-respond {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.invite-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.invite-calendar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.invite-calendar select {
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--foreground);
+  font: inherit;
+}
+.invite-replies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.invite-card .invite-reply,
+.invite-card .invite-apply {
+  border-color: var(--border);
+  background: var(--surface);
+}
+.invite-card .invite-reply[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.invite-card .button[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.invite-status {
+  margin: 12px 0 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.invite-status[data-tone="success"] {
+  border-color: var(--success);
+  color: var(--success);
+}
+.invite-status[data-tone="danger"] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.invite-status[data-tone="pending"] {
+  border-color: var(--warning);
+}
+.invite-followups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 10px;
+}
+.invite-dialog-text {
+  margin: 12px 0 0;
+}
+.invite-dialog-actions {
+  gap: 8px;
+}
+@media (max-width: 560px) {
+  .invite-card {
+    padding: 14px 12px;
+  }
+  .invite-details > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .invite-controls,
+  .invite-calendar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .invite-replies .button {
+    flex: 1 1 0;
+  }
+}
+@media (pointer: coarse) {
+  .invite-calendar select,
+  .invite-link,
+  .invite-description summary,
+  .invite-more {
+    min-height: 44px;
+  }
+  .invite-description summary {
+    display: flex;
+    align-items: center;
+  }
+}
