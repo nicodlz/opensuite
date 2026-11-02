@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { expect, it } from "vitest";
-import { register } from "../src/scheduled-send-job.ts";
+import { register } from "../src/adapters/scheduled-send-job.ts";
 
 it("waits for scheduled-send reconciliation before disconnecting the database", async () => {
   const app = Fastify();

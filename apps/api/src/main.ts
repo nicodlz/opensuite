@@ -36,7 +36,7 @@ import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
 import { configurePush, registerBackgroundJobs } from "./push-runtime.ts";
-import * as scheduledSend from "./scheduled-send-job.ts";
+import * as scheduledSend from "./adapters/scheduled-send-job.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
 import { createStorageMeter } from "./billing/storage.ts";
