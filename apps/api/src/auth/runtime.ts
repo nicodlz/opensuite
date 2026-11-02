@@ -16,7 +16,7 @@ import {
   type PrismaClient,
 } from "@opensuite/db";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
-import { err, ok } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { createIdentity } from "./identity.ts";
 
 interface RuntimeConfig {
@@ -35,6 +35,24 @@ interface RuntimeConfig {
 const failure = (): ProvisionFailure => ({
   kind: "unavailable",
   message: "mailbox provisioning failed",
+});
+
+/** An account read for the routes, which answer 503 when it fails. */
+const lookup =
+  <A extends unknown[], T, E>(
+    read: (...args: A) => PromiseLike<Result<T, E>>,
+  ) =>
+  async (...args: A): Promise<T> => {
+    const result = await read(...args);
+    if (result.isErr()) throw new Error("account lookup failed");
+    return result.value;
+  };
+// Enabled accounts by sign-in address, for sharing between accounts.
+const accountDirectory = (accounts: ReturnType<typeof createAccountStore>) => ({
+  resolve: lookup((email: string) => accounts.enabledUserIdForEmail(email)),
+  addresses: lookup((userIds: readonly string[]) =>
+    accounts.enabledEmails(userIds),
+  ),
 });
 
 export const createAuthRuntime = (
@@ -275,11 +293,8 @@ export const createAuthRuntime = (
           ? null
           : { ...result.value, sessionId: session.session.id };
       },
-      userIdForEmail: async (email: string) => {
-        const result = await accounts.userIdForEmail(email);
-        if (result.isErr()) throw new Error("account lookup failed");
-        return result.value;
-      },
+      userIdForEmail: lookup((email: string) => accounts.userIdForEmail(email)),
+      accountDirectory: accountDirectory(accounts),
       audit,
     },
     accounts: {

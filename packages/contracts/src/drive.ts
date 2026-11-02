@@ -23,6 +23,9 @@ const name = z
       !s.split("").some((c) => c.charCodeAt(0) < 32 || c === "/" || c === "\\"),
   );
 const parentId = id.nullable();
+// The sign-in address of another account on this server.
+const address = z.email().max(254);
+const access = z.enum(["read", "write"]);
 const checksum = z.string().regex(/^[a-f0-9]{64}$/);
 export const DRIVE_MIN_PART_SIZE = 5 * 1024 * 1024;
 export const DRIVE_MAX_PARTS = 10_000;
@@ -78,13 +81,9 @@ export const DriveCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("trash"), id }),
   z.object({ action: z.literal("restore"), id }),
   z.object({ action: z.literal("delete"), id }),
-  z.object({
-    action: z.literal("share"),
-    id,
-    userId: id,
-    access: z.enum(["read", "write"]),
-  }),
-  z.object({ action: z.literal("unshare"), id, userId: id }),
+  z.object({ action: z.literal("shares"), id }),
+  z.object({ action: z.literal("share"), id, address, access }),
+  z.object({ action: z.literal("unshare"), id, shareId: id }),
   z.object({
     action: z.literal("link"),
     id,
@@ -105,6 +104,20 @@ export const DriveEntrySchema = z.object({
   trashedAt: z.string().nullable(),
   createdAt: z.string(),
 });
+export const DriveShareSchema = z.object({
+  id,
+  // Null when the account no longer exists or is disabled.
+  address: z.string().nullable(),
+  access,
+});
+export const DriveLinkSchema = z.object({
+  id,
+  expiresAt: z.string(),
+  // Null when the link can be revoked but not shown again.
+  token: z.string().nullable(),
+});
+export type DriveShare = z.infer<typeof DriveShareSchema>;
+export type DriveLink = z.infer<typeof DriveLinkSchema>;
 export const DriveOutputSchema = z.union([
   DriveEntrySchema,
   z.object({ entries: z.array(DriveEntrySchema) }),
@@ -114,6 +127,10 @@ export const DriveOutputSchema = z.union([
   z.object({ shared: z.literal(true) }),
   z.object({ revoked: z.literal(true) }),
   z.object({ id, token: z.string(), expiresAt: z.string() }),
+  z.object({
+    shares: z.array(DriveShareSchema),
+    links: z.array(DriveLinkSchema),
+  }),
 ]);
 export type DriveOutput = z.infer<typeof DriveOutputSchema>;
 export const driveContract = {
@@ -121,6 +138,10 @@ export const driveContract = {
     .errors({
       NO_PLAN: { status: 403, message: "No active plan" },
       QUOTA_EXCEEDED: { status: 403, message: "Quota exceeded" },
+      RECIPIENT_NOT_FOUND: {
+        status: 404,
+        message: "No account on this server uses this address",
+      },
     })
     .route({
       method: "POST",

@@ -7,6 +7,23 @@ const tokenDigest = (value: string) =>
   createHash("sha256").update(value).digest();
 
 const userIdParams = z.object({ userId: z.string().min(1).max(200) });
+const resolveQuery = z.object({ address: z.email().max(254) });
+// A JSON array in the query string, as Drive's ZIP route takes item IDs.
+const addressesQuery = z.object({
+  userIds: z
+    .string()
+    .max(12_000)
+    .transform((value, context) => {
+      try {
+        const parsed: unknown = JSON.parse(value);
+        return parsed;
+      } catch {
+        context.addIssue({ code: "custom", message: "Invalid user IDs" });
+        return z.NEVER;
+      }
+    })
+    .pipe(z.array(userIdParams.shape.userId).min(1).max(50)),
+});
 
 export function registerInternal(
   app: FastifyInstance,
@@ -79,4 +96,53 @@ export function registerInternal(
       return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
     }
   });
+  registerAccountDirectory(app, dependencies, internalAuthorized);
+}
+
+// Drive shares items between accounts of this server by sign-in address.
+// These reads answer only for enabled accounts and never match aliases or
+// additional addresses. Addresses may appear in the query string: requests
+// come from Drive on the internal network and request URLs are not logged.
+function registerAccountDirectory(
+  app: FastifyInstance,
+  dependencies: ServerDependencies,
+  internalAuthorized: (authorization: string | undefined) => boolean,
+) {
+  type Directory = NonNullable<
+    NonNullable<ServerDependencies["identity"]>["accountDirectory"]
+  >;
+  const directoryRead = <T>(
+    path: string,
+    query: z.ZodType<T>,
+    read: (directory: Directory, input: T) => Promise<unknown>,
+  ) =>
+    app.get(path, async (request, reply) => {
+      if (!internalAuthorized(request.headers.authorization))
+        return reply.code(401).send({ code: "UNAUTHORIZED" });
+      void reply.header("cache-control", "no-store");
+      const directory = dependencies.identity?.accountDirectory;
+      if (directory === undefined)
+        return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+      const input = query.safeParse(request.query);
+      if (!input.success) return reply.code(400).send({ code: "BAD_REQUEST" });
+      try {
+        return await read(directory, input.data);
+      } catch {
+        return reply.code(503).send({ code: "SERVICE_UNAVAILABLE" });
+      }
+    });
+  directoryRead(
+    "/internal/accounts/resolve",
+    resolveQuery,
+    async (directory, { address }) => ({
+      userId: await directory.resolve(address),
+    }),
+  );
+  directoryRead(
+    "/internal/accounts/addresses",
+    addressesQuery,
+    async (directory, { userIds }) => ({
+      accounts: await directory.addresses(userIds),
+    }),
+  );
 }

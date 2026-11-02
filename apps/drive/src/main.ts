@@ -5,6 +5,8 @@ import { PrismaClient } from "./db/generated/index.js";
 import { createStorage } from "./adapters/storage.ts";
 import { httpSessionVerifier } from "./adapters/session.ts";
 import { httpEntitlements, httpQuotaRefresh } from "./adapters/entitlements.ts";
+import { httpAccountDirectory } from "./adapters/accounts.ts";
+import { linkKey } from "./sharing/tokens.ts";
 import { loadConfig } from "./config.ts";
 import { createDrive } from "./services/drive.ts";
 import { buildServer } from "./server.ts";
@@ -102,6 +104,13 @@ const drive = createDrive(
         config.DRIVE_ENTITLEMENTS_API ?? config.DRIVE_SESSION_API,
         token,
       ),
+  // Sharing by address and copyable links need the internal service token.
+  internalToken === undefined
+    ? {}
+    : {
+        accounts: httpAccountDirectory(config.DRIVE_SESSION_API, internalToken),
+        linkKey: linkKey(internalToken),
+      },
 );
 const app = buildServer(
   drive,

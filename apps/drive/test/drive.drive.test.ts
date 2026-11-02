@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
-import { okAsync } from "neverthrow";
+import { errAsync, okAsync } from "neverthrow";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { PrismaClient } from "../src/db/generated/index.js";
@@ -13,7 +13,13 @@ import { createDrive } from "../src/services/drive.ts";
 import { buildServer } from "../src/server.ts";
 import { createComposeNetworks } from "../../../test-support/compose-networks.js";
 import type { SessionVerifier } from "../src/domain/session.ts";
-import type { DriveCommand } from "@opensuite/contracts";
+import type { AccountDirectory } from "../src/domain/accounts.ts";
+import { linkKey } from "../src/sharing/tokens.ts";
+import {
+  DriveLinkSchema,
+  DriveShareSchema,
+  type DriveCommand,
+} from "@opensuite/contracts";
 import {
   S3Client,
   PutObjectCommand,
@@ -93,6 +99,42 @@ const sessions: SessionVerifier = {
   verify: (cookie) =>
     okAsync(cookie === "user=a" ? "a" : cookie === "user=b" ? "b" : null),
 };
+// Accounts of the application, by user ID.
+const accounts = new Map([
+  ["a", "alice@example.test"],
+  ["b", "bob@example.test"],
+  ["c", "carol@example.test"],
+  ["meter-writer", "writer@example.test"],
+]);
+const directoryState: { down: boolean; resolved: string[] } = {
+  down: false,
+  resolved: [],
+};
+const directory: AccountDirectory = {
+  resolve: (address) => {
+    directoryState.resolved.push(address);
+    if (directoryState.down) return errAsync("unavailable");
+    const match = [...accounts].find(
+      ([, known]) => known === address.toLowerCase(),
+    );
+    return okAsync(match?.[0] ?? null);
+  },
+  addresses: (userIds) =>
+    directoryState.down
+      ? errAsync("unavailable")
+      : okAsync(
+          new Map(
+            userIds.flatMap((userId) => {
+              const address = accounts.get(userId);
+              return address === undefined ? [] : [[userId, address] as const];
+            }),
+          ),
+        ),
+};
+const sharing = {
+  accounts: directory,
+  linkKey: linkKey("drive-test-internal-token-0123456789abcdef"),
+};
 const zipUrl = (ids: string[]) =>
   `/v1/zip?${new URLSearchParams({ ids: JSON.stringify(ids) }).toString()}`;
 const digest = (bytes: Buffer) =>
@@ -102,6 +144,13 @@ const signed = z.object({ id: z.string(), url: z.url().nullable() });
 const signedPart = z.object({ url: z.url() });
 const command = async (user: string, input: DriveCommand) =>
   drive.command(user, input);
+const sharesOf = (output: unknown) =>
+  z
+    .object({
+      shares: z.array(DriveShareSchema),
+      links: z.array(DriveLinkSchema),
+    })
+    .parse(output);
 
 beforeAll(async () => {
   try {
@@ -174,7 +223,7 @@ beforeAll(async () => {
       secretAccessKey: "test",
       forcePathStyle: true,
     });
-    drive = createDrive(db, storage, 7_000_000);
+    drive = createDrive(db, storage, 7_000_000, undefined, sharing);
     app = buildServer(drive, storage, sessions);
     await app.ready();
     closeResources = async () => {
@@ -259,7 +308,7 @@ it("uploads and protects files, shares, links and previews", async () => {
   await command("a", {
     action: "share",
     id: begin.id,
-    userId: "b",
+    address: "bob@example.test",
     access: "read",
   });
   await command("b", { action: "download", id: begin.id });
@@ -273,11 +322,21 @@ it("uploads and protects files, shares, links and previews", async () => {
   await command("a", {
     action: "share",
     id: begin.id,
-    userId: "b",
+    address: "Bob@Example.test",
     access: "write",
   });
   await command("b", { action: "rename", id: begin.id, name: "renamed.png" });
-  await command("a", { action: "unshare", id: begin.id, userId: "b" });
+  const granted = sharesOf(
+    await command("a", { action: "shares", id: begin.id }),
+  );
+  expect(granted.shares.map((share) => [share.address, share.access])).toEqual([
+    ["bob@example.test", "write"],
+  ]);
+  await command("a", {
+    action: "unshare",
+    id: begin.id,
+    shareId: granted.shares[0]?.id ?? "",
+  });
   await expect(
     command("b", { action: "download", id: begin.id }),
   ).rejects.toThrow(/Entry not found/);
@@ -569,16 +628,22 @@ it("serializes concurrent quota reservations", async () => {
 it("uses the owner's shared quota under the reservation lock and fails closed", async () => {
   const calls: string[] = [];
   let available = true;
-  const metered = createDrive(db, storage, async (owner) => {
-    await Promise.resolve();
-    calls.push(owner);
-    if (!available) throw new Error("offline");
-    return {
-      quotaBytes: 7_000_000,
-      mailBytes: 1_000_000,
-      uploadsAllowed: true,
-    };
-  });
+  const metered = createDrive(
+    db,
+    storage,
+    async (owner) => {
+      await Promise.resolve();
+      calls.push(owner);
+      if (!available) throw new Error("offline");
+      return {
+        quotaBytes: 7_000_000,
+        mailBytes: 1_000_000,
+        uploadsAllowed: true,
+      };
+    },
+    undefined,
+    sharing,
+  );
   const folder = resultId.parse(
     await metered.command("meter-owner", {
       action: "folder",
@@ -589,7 +654,7 @@ it("uses the owner's shared quota under the reservation lock and fails closed", 
   await metered.command("meter-owner", {
     action: "share",
     id: folder.id,
-    userId: "meter-writer",
+    address: "writer@example.test",
     access: "write",
   });
   const input: DriveCommand = {
@@ -852,7 +917,7 @@ it("allows a write share to create a file in the owner's folder", async () => {
   await command("a", {
     action: "share",
     id: folder.id,
-    userId: "b",
+    address: "bob@example.test",
     access: "write",
   });
   const bytes = Buffer.from("shared file");
@@ -891,7 +956,7 @@ it("allows a write share to create a file in the owner's folder", async () => {
   await command("a", {
     action: "share",
     id: destination.id,
-    userId: "b",
+    address: "bob@example.test",
     access: "write",
   });
   await command("b", {
@@ -913,6 +978,255 @@ it("allows a write share to create a file in the owner's folder", async () => {
   await command("a", { action: "delete", id: upload.id });
   await command("a", { action: "trash", id: folder.id });
   await command("a", { action: "delete", id: folder.id });
+}, 120_000);
+
+const readyFile = async (user: string, name: string) => {
+  const bytes = Buffer.from(name);
+  const begin = signed.parse(
+    await command(user, {
+      action: "upload",
+      name,
+      parentId: null,
+      size: bytes.length,
+      checksum: digest(bytes),
+      contentType: "text/plain",
+      multipart: false,
+    }),
+  );
+  if (begin.url === null) throw new Error("upload URL missing");
+  expect(
+    (
+      await fetch(begin.url, {
+        method: "PUT",
+        headers: { "content-type": "text/plain" },
+        body: bytes,
+      })
+    ).ok,
+  ).toBe(true);
+  await command(user, { action: "finish", id: begin.id });
+  return begin.id;
+};
+const publicStatus = async (token: string) =>
+  (await app.inject({ method: "GET", url: `/v1/public/${token}` })).statusCode;
+const inAMinute = () => new Date(Date.now() + 60_000).toISOString();
+
+it("shares by address and lists and revokes shares and links by ID", async () => {
+  const id = await readyFile("a", "plan.txt");
+  await expect(
+    command("a", {
+      action: "share",
+      id,
+      address: "nobody@example.test",
+      access: "read",
+    }),
+  ).rejects.toMatchObject({ code: "RECIPIENT_NOT_FOUND", status: 404 });
+  await expect(
+    command("a", {
+      action: "share",
+      id,
+      address: "alice@example.test",
+      access: "read",
+    }),
+  ).rejects.toMatchObject({ status: 400 });
+  const refused = await app.inject({
+    method: "POST",
+    url: "/v1/command",
+    headers: { cookie: "user=a" },
+    payload: {
+      action: "share",
+      id,
+      address: "nobody@example.test",
+      access: "read",
+    },
+  });
+  expect(refused.statusCode).toBe(404);
+  expect(refused.json()).toMatchObject({ code: "RECIPIENT_NOT_FOUND" });
+  await Promise.all(
+    ["carol@example.test", "bob@example.test"].map((address) =>
+      command("a", { action: "share", id, address, access: "read" }),
+    ),
+  );
+  // Sharing again with the same account changes its access.
+  await command("a", {
+    action: "share",
+    id,
+    address: "bob@example.test",
+    access: "write",
+  });
+  const link = z
+    .object({ id: z.string(), token: z.string() })
+    .parse(await command("a", { action: "link", id, expiresAt: inAMinute() }));
+  const listed = sharesOf(await command("a", { action: "shares", id }));
+  expect(listed.shares.map((share) => [share.address, share.access])).toEqual([
+    ["bob@example.test", "write"],
+    ["carol@example.test", "read"],
+  ]);
+  expect(listed.links.map((item) => [item.id, item.token])).toEqual([
+    [link.id, link.token],
+  ]);
+  const [bob, carol] = listed.shares;
+  if (bob === undefined || carol === undefined) throw new Error("no shares");
+
+  // Recipients and strangers get the same answer as for a missing item, and
+  // their attempts never look an address up.
+  const resolved = directoryState.resolved.length;
+  await Promise.all(
+    ["b", "c", "z"].flatMap((user) =>
+      [
+        command(user, { action: "shares", id }),
+        command(user, {
+          action: "share",
+          id,
+          address: "carol@example.test",
+          access: "write",
+        }),
+        command(user, { action: "unshare", id, shareId: bob.id }),
+        command(user, { action: "unlink", id, linkId: link.id }),
+      ].map((attempt) => expect(attempt).rejects.toThrow(/Entry not found/)),
+    ),
+  );
+  expect(directoryState.resolved).toHaveLength(resolved);
+  await command("b", { action: "rename", id, name: "plan.txt" });
+
+  // A share or link ID only acts on the item it belongs to.
+  const other = await readyFile("c", "carol.txt");
+  await command("c", {
+    action: "share",
+    id: other,
+    address: "bob@example.test",
+    access: "read",
+  });
+  const otherLink = z
+    .object({ id: z.string(), token: z.string() })
+    .parse(
+      await command("c", { action: "link", id: other, expiresAt: inAMinute() }),
+    );
+  const [carolsShare] = sharesOf(
+    await command("c", { action: "shares", id: other }),
+  ).shares;
+  if (carolsShare === undefined) throw new Error("no share");
+  await command("a", { action: "unshare", id, shareId: carolsShare.id });
+  await command("a", { action: "unlink", id, linkId: otherLink.id });
+  await command("b", { action: "download", id: other });
+  expect(await publicStatus(otherLink.token)).toBe(200);
+
+  await command("a", { action: "unshare", id, shareId: bob.id });
+  await expect(command("b", { action: "download", id })).rejects.toThrow(
+    /Entry not found/,
+  );
+  await command("c", { action: "download", id });
+  await command("a", { action: "unlink", id, linkId: link.id });
+  expect(await publicStatus(link.token)).toBe(404);
+  expect(sharesOf(await command("a", { action: "shares", id }))).toEqual({
+    shares: [{ id: carol.id, address: "carol@example.test", access: "read" }],
+    links: [],
+  });
+
+  // Links issued without the key, or under another one, keep working and can
+  // be revoked, but cannot be shown again. Expired links are not listed.
+  const keyless = createDrive(db, storage, 7_000_000);
+  const older = z.object({ id: z.string(), token: z.string() }).parse(
+    await keyless.command("a", {
+      action: "link",
+      id,
+      expiresAt: inAMinute(),
+    }),
+  );
+  const expired = z
+    .object({ id: z.string() })
+    .parse(await command("a", { action: "link", id, expiresAt: inAMinute() }));
+  await db.publicLink.update({
+    where: { id: expired.id },
+    data: { expiresAt: new Date(0) },
+  });
+  expect(
+    sharesOf(await command("a", { action: "shares", id })).links.map((item) => [
+      item.id,
+      item.token,
+    ]),
+  ).toEqual([[older.id, null]]);
+  expect(await publicStatus(older.token)).toBe(200);
+  await command("a", { action: "unlink", id, linkId: older.id });
+  expect(await publicStatus(older.token)).toBe(404);
+
+  // An account that no longer resolves stays listed and revocable.
+  accounts.delete("c");
+  try {
+    expect(
+      sharesOf(await command("a", { action: "shares", id })).shares,
+    ).toEqual([{ id: carol.id, address: null, access: "read" }]);
+  } finally {
+    accounts.set("c", "carol@example.test");
+  }
+
+  // Directory failures are errors, never "no account" or an empty list.
+  directoryState.down = true;
+  try {
+    await expect(
+      command("a", {
+        action: "share",
+        id,
+        address: "bob@example.test",
+        access: "read",
+      }),
+    ).rejects.toMatchObject({ status: 503 });
+    await expect(command("a", { action: "shares", id })).rejects.toMatchObject({
+      status: 503,
+    });
+  } finally {
+    directoryState.down = false;
+  }
+  await expect(
+    keyless.command("a", {
+      action: "share",
+      id,
+      address: "bob@example.test",
+      access: "read",
+    }),
+  ).rejects.toMatchObject({ status: 503 });
+  await command("a", { action: "unshare", id, shareId: carol.id });
+  await expect(command("c", { action: "download", id })).rejects.toThrow(
+    /Entry not found/,
+  );
+  await Promise.all(
+    [
+      ["a", id],
+      ["c", other],
+    ].map(async ([user = "", item = ""]) => {
+      await command(user, { action: "trash", id: item });
+      await command(user, { action: "delete", id: item });
+    }),
+  );
+}, 120_000);
+
+it("bounds address lookups per user", async () => {
+  const limited = createDrive(db, storage, 7_000_000, undefined, sharing);
+  const id = await readyFile("a", "limited.txt");
+  const attempt = () =>
+    limited.command("a", {
+      action: "share",
+      id,
+      address: "nobody@example.test",
+      access: "read",
+    });
+  await Promise.all(
+    Array.from({ length: 60 }, () =>
+      expect(attempt()).rejects.toMatchObject({ code: "RECIPIENT_NOT_FOUND" }),
+    ),
+  );
+  await expect(attempt()).rejects.toMatchObject({ status: 429 });
+  const before = directoryState.resolved.length;
+  await expect(
+    limited.command("a", {
+      action: "share",
+      id,
+      address: "bob@example.test",
+      access: "read",
+    }),
+  ).rejects.toMatchObject({ status: 429 });
+  expect(directoryState.resolved).toHaveLength(before);
+  await limited.command("a", { action: "trash", id });
+  await limited.command("a", { action: "delete", id });
 }, 120_000);
 
 it("isolates the Drive role from the main database", async () => {

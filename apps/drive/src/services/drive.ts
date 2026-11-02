@@ -8,15 +8,15 @@ import { UploadMismatchError, type Storage } from "../adapters/storage.ts";
 import { reserveQuota } from "./quota.ts";
 import { zip } from "./download-zip.ts";
 import { visible } from "./entry-view.ts";
-import { createLinkToken, hashLinkToken } from "../sharing/tokens.ts";
+import { hashLinkToken } from "../sharing/tokens.ts";
+import type { AccountDirectory } from "../domain/accounts.ts";
+import { invalid, missing } from "./errors.ts";
+import { createSharing, isSharingCommand } from "./sharing.ts";
 
-const missing = () =>
-  new ORPCError("NOT_FOUND", { message: "Entry not found" });
 const tooMany = () =>
   new ORPCError("TOO_MANY_REQUESTS", {
     message: "Too many upload finalizations",
   });
-const invalid = (message: string) => new ORPCError("BAD_REQUEST", { message });
 
 // Every item below a folder shares its owner, so the walk stays within one owner.
 const subtree = async (
@@ -89,6 +89,7 @@ export const createDrive = (
         uploadsAllowed: boolean;
       }>),
   refreshQuota?: (owner: string) => Promise<void>,
+  sharing: { accounts?: AccountDirectory; linkKey?: Buffer } = {},
 ) => {
   const notifyQuota = (owner: string) => {
     if (refreshQuota !== undefined)
@@ -269,10 +270,12 @@ export const createDrive = (
       throw missing();
     return entry;
   };
+  const sharingCommand = createSharing({ db, get, file, ...sharing });
   const command = async (
     user: string,
     input: DriveCommand,
   ): Promise<DriveOutput> => {
+    if (isSharingCommand(input)) return sharingCommand(user, input);
     switch (input.action) {
       case "list": {
         // The trash root shows each trashed batch once: items whose folder
@@ -674,56 +677,6 @@ export const createDrive = (
           return { deleted: true };
         }
         return result;
-      }
-      case "share": {
-        const entry = await get(user, input.id, "owner");
-        if (entry.state !== "ready" || entry.ownerId === input.userId)
-          throw invalid("Invalid share");
-        await db.share.upsert({
-          where: {
-            entryId_userId: { entryId: entry.id, userId: input.userId },
-          },
-          create: {
-            id: randomUUID(),
-            entryId: entry.id,
-            userId: input.userId,
-            access: input.access,
-          },
-          update: { access: input.access },
-        });
-        return { shared: true };
-      }
-      case "unshare": {
-        const entry = await get(user, input.id, "owner");
-        await db.share.deleteMany({
-          where: { entryId: entry.id, userId: input.userId },
-        });
-        return { revoked: true };
-      }
-      case "link": {
-        const entry = await file(user, input.id);
-        if (entry.ownerId !== user) throw missing();
-        const expiresAt = new Date(input.expiresAt);
-        if (expiresAt.getTime() <= Date.now())
-          throw invalid("Expiry must be in the future");
-        const token = createLinkToken();
-        const link = await db.publicLink.create({
-          data: {
-            id: randomUUID(),
-            tokenHash: hashLinkToken(token),
-            entryId: entry.id,
-            expiresAt,
-          },
-        });
-        return { id: link.id, token, expiresAt: expiresAt.toISOString() };
-      }
-      case "unlink": {
-        const entry = await get(user, input.id, "owner", true);
-        await db.publicLink.updateMany({
-          where: { id: input.linkId, entryId: entry.id },
-          data: { revokedAt: new Date() },
-        });
-        return { revoked: true };
       }
     }
     throw invalid("Unknown action");

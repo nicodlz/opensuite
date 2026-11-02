@@ -1,6 +1,6 @@
 import { err, errAsync, ok, ResultAsync } from "neverthrow";
 import { z } from "zod";
-import type { PrismaClient } from "./generated/index.js";
+import type { Prisma, PrismaClient } from "./generated/index.js";
 
 const Actor = z.object({
   id: z.string(),
@@ -11,6 +11,22 @@ const failed = (): { kind: "unavailable"; message: string } => ({
   kind: "unavailable",
   message: "account operation failed",
 });
+const userIdWhere = (db: PrismaClient, where: Prisma.UserWhereInput) =>
+  ResultAsync.fromPromise(
+    db.user.findFirst({ where, select: { id: true } }),
+    failed,
+  ).map((user) => user?.id ?? null);
+/** Sign-in addresses of the enabled accounts among `userIds`. */
+const enabledEmails = (db: PrismaClient, userIds: readonly string[]) =>
+  ResultAsync.fromPromise(
+    db.user.findMany({
+      where: { id: { in: [...userIds] }, disabled: false },
+      select: { id: true, email: true },
+    }),
+    failed,
+  ).map((users) =>
+    users.map((user) => ({ userId: user.id, address: user.email })),
+  );
 export const createAccountStore = (db: PrismaClient) => ({
   bootstrap(email: string) {
     return ResultAsync.fromPromise(
@@ -37,15 +53,11 @@ export const createAccountStore = (db: PrismaClient) => ({
       failed,
     );
   },
-  userIdForEmail(email: string) {
-    return ResultAsync.fromPromise(
-      db.user.findUnique({
-        where: { email: email.toLowerCase() },
-        select: { id: true },
-      }),
-      failed,
-    ).map((user) => user?.id ?? null);
-  },
+  userIdForEmail: (email: string) =>
+    userIdWhere(db, { email: email.toLowerCase() }),
+  enabledUserIdForEmail: (email: string) =>
+    userIdWhere(db, { email: email.toLowerCase(), disabled: false }),
+  enabledEmails: (userIds: readonly string[]) => enabledEmails(db, userIds),
   audit(event: { userId: string | null; action: string }) {
     return ResultAsync.fromPromise(
       db.auditEvent.create({
