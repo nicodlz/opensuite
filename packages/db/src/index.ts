@@ -27,3 +27,8 @@ export type { AddressStore } from "./addresses.ts";
 
 export { createInvitationStore } from "./invitations.ts";
 export type { InvitationStore } from "./invitations.ts";
+export { createCalendarImportStore } from "./migration-calendar.ts";
+export type {
+  CalendarImportStore,
+  CalendarImportRow,
+} from "./migration-calendar.ts";

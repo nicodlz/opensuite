@@ -2,6 +2,8 @@ import { contactsConfig } from "./adapters/contacts-config.ts";
 import { createContactsService } from "@opensuite/core/services/contacts";
 import { createMailWithInvitations } from "@opensuite/core/services/invitations";
 import { invitationProtocol } from "@opensuite/core/adapters/invitations";
+import * as calendarImportParser from "@opensuite/core/adapters/migration-calendar";
+import { createCalendarImportService } from "@opensuite/core/services/migration-calendar";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import {
   createAliasMail,
@@ -21,6 +23,7 @@ import {
   createAliasStore,
   createAddressStore,
   createInvitationStore,
+  createCalendarImportStore,
   createMailboxStore,
   createPushStore,
 } from "@opensuite/db";
@@ -306,6 +309,12 @@ const { mail, invitations } = createMailWithInvitations({
 const calendar = createCalendarService({
   store: credentialStore,
   origin: authConfig.value.stalwartOrigin,
+  migration: createCalendarImportService({
+    store: credentialStore,
+    origin: authConfig.value.stalwartOrigin,
+    imports: createCalendarImportStore(database.value),
+    parser: calendarImportParser,
+  }),
 });
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);

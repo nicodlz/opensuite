@@ -40,6 +40,8 @@ model User {
   mailPushState        MailPushState?
   calendarReminders    CalendarReminder[]
   calendarReminderSync CalendarReminderSync?
+  calendarImports      CalendarImportJob[]
+  calendarImportIdentities CalendarImportIdentity[]
   invitationSeries     InvitationSeries[]
   invitationOperations InvitationOperation[]
   pushShowDetails      Boolean               @default(false)
@@ -510,4 +512,54 @@ model InvitationOperation {
   updatedAt         DateTime         @updatedAt
 
   @@index([userId, seriesId])
+}
+
+model CalendarImportJob {
+  id         String               @id
+  userId     String
+  user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId  String
+  calendarId String
+  files      String
+  confirmed  Boolean              @default(false)
+  abandoned  Boolean              @default(false)
+  generation Int                  @default(0)
+  createdAt  DateTime             @default(now())
+  items      CalendarImportItem[]
+
+  @@index([userId, createdAt])
+}
+
+model CalendarImportItem {
+  id       String            @id
+  jobId    String
+  job      CalendarImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  index    Int
+  file     String
+  uid      String?
+  title    String
+  source   String
+  event    String?
+  issues   String
+  previewState String
+  previewReason String?
+  generation Int               @default(0)
+  state    String
+  error    String?
+  eventId  String?
+
+  @@unique([jobId, index])
+}
+
+model CalendarImportIdentity {
+  id         String @id
+  userId     String
+  user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId  String
+  calendarId String
+  uid        String
+  source     String
+  eventId    String?
+
+  @@unique([userId, accountId, calendarId, uid])
 }

@@ -1,3 +1,4 @@
+import { migrationCalendarRouter } from "./migration-calendar.ts";
 import { invitationsRouter } from "./invitations.ts";
 import { addressesRouter } from "./addresses.ts";
 import { pushRouter } from "./push.ts";
@@ -19,6 +20,7 @@ export const router = {
   admin: adminRouter,
   mail: mailRouter,
   calendar: calendarRouter,
+  migrationCalendar: migrationCalendarRouter,
   contacts: contactsRouter,
   invitations: invitationsRouter,
   push: pushRouter,
