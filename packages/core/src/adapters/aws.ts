@@ -17,6 +17,7 @@ import { ResultAsync } from "neverthrow";
 import { z } from "zod";
 import type { Queue, RecoveryStore, Storage } from "../ingest/contracts.ts";
 import { namedAfter } from "../ingest/recovery.ts";
+import { ensureRetained, statusOf } from "./retention.ts";
 
 const failure = (cause: unknown) => ({
   message: cause instanceof Error ? cause.message : String(cause),
@@ -196,8 +197,10 @@ export function awsStorage(
     },
     deleteBuffer(name, key) {
       return ResultAsync.fromPromise(
-        buffer
-          .send(new DeleteObjectCommand({ Bucket: name, Key: key }))
+        ensureRetained(buffer, name, key)
+          .then(() =>
+            buffer.send(new DeleteObjectCommand({ Bucket: name, Key: key })),
+          )
           .then(() => undefined),
         failure,
       );
@@ -205,12 +208,6 @@ export function awsStorage(
   };
 }
 
-const statusOf = (cause: unknown) => {
-  const parsed = z
-    .object({ $metadata: z.object({ httpStatusCode: z.number().optional() }) })
-    .safeParse(cause);
-  return parsed.success ? parsed.data.$metadata.httpStatusCode : undefined;
-};
 const exists = async (client: S3Client, name: string, key: string) => {
   try {
     await client.send(new HeadObjectCommand({ Bucket: name, Key: key }));

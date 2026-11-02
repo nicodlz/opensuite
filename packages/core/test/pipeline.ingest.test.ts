@@ -4,10 +4,12 @@ import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import {
   DeleteObjectCommand,
+  DeleteBucketLifecycleCommand,
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectVersionsCommand,
   PutBucketVersioningCommand,
+  PutBucketLifecycleConfigurationCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -271,6 +273,12 @@ describe("local ingestion pipeline", () => {
         credentials: { accessKeyId: "test", secretAccessKey: "test" },
       };
       s3 = new S3Client({ ...config, forcePathStyle: true });
+      await s3.send(
+        new PutBucketVersioningCommand({
+          Bucket: "inbound",
+          VersioningConfiguration: { Status: "Enabled" },
+        }),
+      );
       sqs = new SQSClient(config);
       const found = await sqs.send(
         new GetQueueUrlCommand({ QueueName: "inbound" }),
@@ -300,6 +308,57 @@ describe("local ingestion pipeline", () => {
     s3?.destroy();
     sqs?.destroy();
     await compose("down", "--volumes", "--remove-orphans");
+  }, 60_000);
+  it("retains the current MIME when an unsafe lifecycle is configured", async () => {
+    if (s3 === undefined) throw new Error("Clients not initialized");
+    const bytes = mime("Unsafe lifecycle");
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: "inbound",
+        Key: "unsafe-retention",
+        Body: bytes,
+      }),
+    );
+    await s3.send(
+      new PutBucketLifecycleConfigurationCommand({
+        Bucket: "inbound",
+        LifecycleConfiguration: {
+          Rules: [
+            {
+              ID: "unsafe",
+              Status: "Enabled",
+              Filter: { Prefix: "unsafe-" },
+              NoncurrentVersionExpiration: { NoncurrentDays: 30 },
+            },
+          ],
+        },
+      }),
+    );
+    try {
+      const storage = awsStorage(
+        s3,
+        s3,
+        "inbound",
+        "archive",
+        "notifications/",
+        "",
+      );
+      const result = await storage.deleteBuffer("inbound", "unsafe-retention");
+      expect(result.isErr() && result.error.code).toBe(
+        "UnsafeRetentionConfiguration",
+      );
+      const object = await s3.send(
+        new GetObjectCommand({ Bucket: "inbound", Key: "unsafe-retention" }),
+      );
+      expect(
+        Buffer.from((await object.Body?.transformToByteArray()) ?? []),
+      ).toEqual(bytes);
+    } finally {
+      await s3.send(new DeleteBucketLifecycleCommand({ Bucket: "inbound" }));
+      await s3.send(
+        new DeleteObjectCommand({ Bucket: "inbound", Key: "unsafe-retention" }),
+      );
+    }
   }, 60_000);
   it("imports envelope recipients and deduplicates SQS redelivery after a simulated crash", async () => {
     if (s3 === undefined || sqs === undefined)

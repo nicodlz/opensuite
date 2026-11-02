@@ -38,12 +38,13 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "buffer" {
   }
 }
 
+# Keep the existing rule disabled: an age alone cannot prove backup coverage.
 # S3 has one lifecycle configuration per bucket; reconcile all other required rules before adoption.
 resource "aws_s3_bucket_lifecycle_configuration" "buffer" {
   bucket = aws_s3_bucket.buffer.id
   rule {
     id     = "esuno-recover-deleted-messages"
-    status = "Enabled"
+    status = "Disabled"
     filter {
       prefix = var.esuno_message_prefix
     }
@@ -51,6 +52,20 @@ resource "aws_s3_bucket_lifecycle_configuration" "buffer" {
       noncurrent_days = 30
     }
   }
+}
+
+# The worker refuses to hide an original unless the bucket can retain it.
+resource "aws_iam_user_policy" "ingest_retention_check" {
+  name = "${var.name_prefix}-ingest-retention-check"
+  user = aws_iam_user.ingestion.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:GetBucketVersioning", "s3:GetLifecycleConfiguration"]
+      Resource = aws_s3_bucket.buffer.arn
+    }]
+  })
 }
 
 data "aws_iam_policy_document" "bucket" {

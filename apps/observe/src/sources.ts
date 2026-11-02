@@ -7,6 +7,50 @@ import { readFile, stat, statfs } from "node:fs/promises";
 import { connect } from "node:tls";
 import type { Config, QueueStats, Sources } from "./checks.ts";
 
+/** Age of the quiesced capture time; the file's mtime is not the capture. */
+export function captureAge(text: string, now: number): number {
+  const value = text.trim();
+  const at = Date.parse(value);
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) ||
+    !Number.isFinite(at) ||
+    new Date(at).toISOString().replace(".000Z", "Z") !== value
+  )
+    throw new Error("Invalid capture time");
+  return (now - at) / 1000;
+}
+
+const certificateDays = (
+  config: Config,
+  service: "https" | "submission" | "imaps",
+): Promise<number> => {
+  return new Promise<number>((resolve, reject) => {
+    const socket = connect({
+      host:
+        service === "https"
+          ? config.OBSERVE_CERT_CONNECT_HOST
+          : config.OBSERVE_MAIL_CERT_CONNECT_HOST,
+      port: service === "https" ? 443 : service === "submission" ? 465 : 993,
+      servername:
+        service === "https"
+          ? config.OBSERVE_CERT_HOST
+          : config.OBSERVE_MAIL_CERT_HOST,
+      rejectUnauthorized: false,
+    });
+    socket.setTimeout(config.OBSERVE_TIMEOUT_MS, () =>
+      socket.destroy(new Error("timeout")),
+    );
+    socket.once("error", reject);
+    socket.once("secureConnect", () => {
+      const certificate = socket.getPeerCertificate();
+      socket.destroy();
+      const expiry = Date.parse(certificate.valid_to);
+      if (!Number.isFinite(expiry)) reject(new Error("missing certificate"));
+      else resolve((expiry - Date.now()) / 86400000);
+    });
+  });
+};
+
 export const makeSources = (config: Config): Sources => {
   const options = {
     region: config.AWS_REGION,
@@ -33,6 +77,12 @@ export const makeSources = (config: Config): Sources => {
     async backupAge() {
       return (Date.now() - (await stat("/backup/last-success")).mtimeMs) / 1000;
     },
+    async ingestCaptureAge() {
+      return captureAge(
+        await readFile("/backup/last-ingest-capture", "utf8"),
+        Date.now(),
+      );
+    },
     async backupFailure() {
       try {
         const failure = (await readFile("/backup/last-failure", "utf8")).trim();
@@ -54,34 +104,8 @@ export const makeSources = (config: Config): Sources => {
     async setupOk() {
       return (await readFile("/setup-status/status", "utf8")).trim() === "ok";
     },
-    async certificateDays(service) {
-      return new Promise<number>((resolve, reject) => {
-        const socket = connect({
-          host:
-            service === "https"
-              ? config.OBSERVE_CERT_CONNECT_HOST
-              : config.OBSERVE_MAIL_CERT_CONNECT_HOST,
-          port:
-            service === "https" ? 443 : service === "submission" ? 465 : 993,
-          servername:
-            service === "https"
-              ? config.OBSERVE_CERT_HOST
-              : config.OBSERVE_MAIL_CERT_HOST,
-          rejectUnauthorized: false,
-        });
-        socket.setTimeout(config.OBSERVE_TIMEOUT_MS, () =>
-          socket.destroy(new Error("timeout")),
-        );
-        socket.once("error", reject);
-        socket.once("secureConnect", () => {
-          const certificate = socket.getPeerCertificate();
-          socket.destroy();
-          const expiry = Date.parse(certificate.valid_to);
-          if (!Number.isFinite(expiry))
-            reject(new Error("missing certificate"));
-          else resolve((expiry - Date.now()) / 86400000);
-        });
-      });
+    certificateDays(service) {
+      return certificateDays(config, service);
     },
     async queue(url): Promise<QueueStats> {
       const response = await sqs.send(
