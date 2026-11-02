@@ -834,6 +834,7 @@ function CalendarWorkspace() {
           content={popover.content}
           rect={popover.rect}
           calendars={calendarList}
+          fallbackCalendarId={defaultCalendarId}
           onClose={closePopover}
           onSave={createQuick}
           onMore={(content) => {
@@ -872,6 +873,7 @@ function CalendarWorkspace() {
             <EventEditor
               content={editor.content}
               calendars={calendarList}
+              fallbackCalendarId={defaultCalendarId}
               onCancel={() => setEditor(null)}
               onSave={saveEditor}
             />
@@ -2100,10 +2102,43 @@ function EventDetails({
   );
 }
 
+/** A labelled calendar picker; `children` is the label's visible content. */
+function CalendarSelect({
+  className,
+  children,
+  calendars,
+  value,
+  onChange,
+}: {
+  className: string;
+  children: ReactNode;
+  calendars: Calendar[];
+  value: string;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <label className={className}>
+      {children}
+      <select
+        className="field-input"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {calendars.map((calendar) => (
+          <option key={calendar.id} value={calendar.id}>
+            {calendar.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function QuickCreate({
   content,
   rect,
   calendars,
+  fallbackCalendarId,
   onClose,
   onSave,
   onMore,
@@ -2111,13 +2146,16 @@ function QuickCreate({
   content: EventContent;
   rect: DOMRect;
   calendars: Calendar[];
+  /** Used while no calendar was chosen, e.g. when calendars load late. */
+  fallbackCalendarId: string;
   onClose: () => void;
   onSave: (content: EventContent) => void;
   onMore: (content: EventContent) => void;
 }) {
   const titleId = useId();
   const [title, setTitle] = useState("");
-  const [calendarId, setCalendarId] = useState(content.calendarId);
+  const [picked, setPicked] = useState(content.calendarId);
+  const calendarId = picked || fallbackCalendarId;
   const current = { ...content, title: title.trim(), calendarId };
   return (
     <Popover
@@ -2158,21 +2196,15 @@ function QuickCreate({
           <Icon name="clock" />
           <span>{formatEventRange(content)}</span>
         </p>
-        <label className="cal-quick-calendar">
+        <CalendarSelect
+          className="cal-quick-calendar"
+          calendars={calendars}
+          value={calendarId}
+          onChange={setPicked}
+        >
           <Icon name="calendar" />
           <span className="visually-hidden">Calendar</span>
-          <select
-            className="field-input"
-            value={calendarId}
-            onChange={(event) => setCalendarId(event.target.value)}
-          >
-            {calendars.map((calendar) => (
-              <option key={calendar.id} value={calendar.id}>
-                {calendar.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        </CalendarSelect>
         <div className="cal-quick-actions">
           <Button
             type="button"
@@ -2262,11 +2294,14 @@ function DayPopover({
 function EventEditor({
   content,
   calendars,
+  fallbackCalendarId,
   onCancel,
   onSave,
 }: {
   content: EventContent;
   calendars: Calendar[];
+  /** Used while no calendar was chosen, e.g. when calendars load late. */
+  fallbackCalendarId: string;
   onCancel: () => void;
   onSave: (content: EventContent) => void;
 }) {
@@ -2276,6 +2311,7 @@ function EventEditor({
     content.reminder ?? "none",
   );
   const [error, setError] = useState("");
+  const calendarId = form.calendarId || fallbackCalendarId;
   const formRef = useRef<HTMLFormElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -2306,7 +2342,7 @@ function EventEditor({
       allDay: form.allDay,
       recurrence: form.recurrence,
       reminder,
-      calendarId: form.calendarId,
+      calendarId,
       location: form.location.trim(),
       description: form.description,
       // Keep the event's own zone: a different zone moves the series and
@@ -2447,20 +2483,14 @@ function EventEditor({
             ))}
           </select>
         </label>
-        <label className="field">
+        <CalendarSelect
+          className="field"
+          calendars={calendars}
+          value={calendarId}
+          onChange={(picked) => update({ calendarId: picked })}
+        >
           <span className="field-label">Calendar</span>
-          <select
-            className="field-input"
-            value={form.calendarId}
-            onChange={(event) => update({ calendarId: event.target.value })}
-          >
-            {calendars.map((calendar) => (
-              <option key={calendar.id} value={calendar.id}>
-                {calendar.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        </CalendarSelect>
       </div>
       <label className="field">
         <span className="field-label">Reminder</span>
@@ -2508,7 +2538,7 @@ function EventEditor({
         <Button type="button" variant="ghost" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="submit" disabled={!form.calendarId}>
+        <Button type="submit" disabled={!calendarId}>
           Save
         </Button>
       </div>

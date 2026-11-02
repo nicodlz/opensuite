@@ -72,6 +72,20 @@ async function failDeletions(page: Page) {
   });
 }
 
+/** The development calendar runs in the page; hold its calendar list. */
+async function holdCalendars(page: Page) {
+  await page.route("**/src/dev-data/calendar.ts*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const body = source.replace(
+      /calendars: api\.calendars\.handler\(\(\)\s*=>\s*\(\{\s*calendars\s*\}\)\)/,
+      "calendars: api.calendars.handler(() => new Promise((resolve) => { addEventListener('release-calendars', () => resolve({ calendars }), { once: true }); document.documentElement.dataset.calendarsHeld = 'true'; }))",
+    );
+    if (body === source) throw new Error("The calendar list could not be held");
+    await route.fulfill({ response, body });
+  });
+}
+
 test("a reminder link opens its event", async ({ page }) => {
   await page.clock.setFixedTime(now);
   await page.goto(
@@ -465,6 +479,28 @@ test("a creation from the Create button focuses the new event", async ({
   await page.keyboard.press("Enter");
   await expect(notice(page)).toHaveText("Event created");
   await expect(chip(page, "Offsite prep")).toBeFocused();
+});
+
+test("an editor opened before calendars load saves to the default one", async ({
+  page,
+}) => {
+  await holdCalendars(page);
+  await open(page);
+  await page
+    .getByRole("button", { name: "Create C", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog", { name: "New event" });
+  await expect(editor.getByRole("button", { name: "Save" })).toBeDisabled();
+  await page.waitForFunction(
+    () => document.documentElement.dataset["calendarsHeld"] === "true",
+  );
+  await page.evaluate(() => dispatchEvent(new Event("release-calendars")));
+  await expect(editor.getByLabel("Calendar")).toHaveValue("personal");
+  await editor.getByLabel("Title").fill("Late calendars");
+  await editor.getByRole("button", { name: "Save" }).click();
+  await expect(notice(page)).toHaveText("Event created");
+  await expect(chip(page, "Late calendars")).toBeVisible();
 });
 
 test("a saved event outside the shown period leaves focus on its trigger", async ({
