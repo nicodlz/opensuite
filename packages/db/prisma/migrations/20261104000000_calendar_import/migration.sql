@@ -3,7 +3,6 @@ CREATE TABLE "CalendarImportJob" (
   "userId" TEXT NOT NULL REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE,
   "accountId" TEXT NOT NULL,
   "calendarId" TEXT NOT NULL,
-  "files" TEXT NOT NULL,
   "confirmed" BOOLEAN NOT NULL DEFAULT false,
   "abandoned" BOOLEAN NOT NULL DEFAULT false,
   "generation" INTEGER NOT NULL DEFAULT 0,
@@ -15,9 +14,9 @@ CREATE TABLE "CalendarImportItem" (
   "jobId" TEXT NOT NULL REFERENCES "CalendarImportJob"("id") ON DELETE CASCADE ON UPDATE CASCADE,
   "index" INTEGER NOT NULL,
   "file" TEXT NOT NULL,
+  "sourceId" TEXT NOT NULL,
   "uid" TEXT,
   "title" TEXT NOT NULL,
-  "source" TEXT NOT NULL,
   "event" TEXT,
   "issues" TEXT NOT NULL,
   "previewState" TEXT NOT NULL,
@@ -25,7 +24,9 @@ CREATE TABLE "CalendarImportItem" (
   "generation" INTEGER NOT NULL DEFAULT 0,
   "state" TEXT NOT NULL,
   "error" TEXT,
-  "eventId" TEXT
+  "eventId" TEXT,
+  CONSTRAINT "CalendarImportItem_state_check" CHECK ("state" IN ('pending', 'processing', 'imported', 'duplicate', 'failed', 'abandoned')),
+  CONSTRAINT "CalendarImportItem_previewState_check" CHECK ("previewState" IN ('new', 'update', 'duplicate', 'conflict', 'invalid'))
 );
 CREATE UNIQUE INDEX "CalendarImportItem_jobId_index_key" ON "CalendarImportItem"("jobId", "index");
 

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.ts";
 
 const calls: string[] = [];
+const sources: string[] = [];
 const actions: unknown[] = [];
 const job = {
   id: "job",
@@ -25,14 +26,17 @@ const job = {
   items: [],
 };
 const migration: CalendarImportService = {
-  preview: (actor) => {
+  preview: (actor, input) => {
     calls.push(actor.id);
+    sources.push(input.files[0]?.sourceId ?? "");
     return Promise.resolve(ok(job));
   },
   list: () => Promise.resolve(ok({ jobs: [job] })),
   get: () => Promise.resolve(ok(job)),
   confirm: (actor, id) => {
     actions.push({ action: "confirm", actor: actor.id, id });
+    if (id === "missing-target")
+      return Promise.resolve(err({ kind: "target_missing" as const }));
     return Promise.resolve(ok({ ...job, confirmed: true }));
   },
   recover: (actor, id, input) => {
@@ -66,8 +70,8 @@ const start = () =>
     calendar: createCalendarService({
       origin: "http://example.test",
       store: { getForOwner: () => Promise.resolve(err({ kind: "forbidden" })) },
-      migration,
     }),
+    calendarImport: migration,
   });
 describe("calendar import API", () => {
   it("requires a same-origin session and rejects oversized requests before dispatch", async () => {
@@ -75,10 +79,13 @@ describe("calendar import API", () => {
     const input = {
       accountId: "default",
       calendarId: "calendar",
-      files: [{ name: "x.ics", content: "calendar" }],
+      files: [
+        { name: "x.ics", sourceId: "stable-calendar", content: "calendar" },
+      ],
     };
     try {
       calls.length = 0;
+      sources.length = 0;
       const send = (headers: Record<string, string>, payload: object) =>
         app.inject({
           method: "POST",
@@ -119,6 +126,7 @@ describe("calendar import API", () => {
         ).json(),
       ).toEqual(job);
       expect(calls).toEqual(["owner"]);
+      expect(sources).toEqual(["stable-calendar"]);
       const ownerHeaders = {
         origin: "https://suite.example.test",
         cookie: "owner",
@@ -190,6 +198,16 @@ describe("calendar import API", () => {
           input: { jobId: "job", action: "abandon" },
         },
       ]);
+      const missingTarget = await send("confirm", { jobId: "missing-target" });
+      expect(missingTarget.statusCode).toBe(404);
+      expect(missingTarget.json()).toMatchObject({ code: "TARGET_NOT_FOUND" });
+      const resumes = await Promise.all(
+        Array.from({ length: 20 }, () => send("resume", { jobId: "job" })),
+      );
+      expect(resumes.every((response) => response.statusCode === 200)).toBe(
+        true,
+      );
+      expect((await send("resume", { jobId: "job" })).statusCode).toBe(429);
     } finally {
       await app.close();
     }

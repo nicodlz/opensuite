@@ -8,6 +8,7 @@ import type { DomainService } from "./domains.ts";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
 import type { ContactsService } from "@opensuite/core/services/contacts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
+import type { CalendarImportService } from "@opensuite/core/services/migration-calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { FastifyBaseLogger } from "fastify";
@@ -52,6 +53,9 @@ export interface ApiContext {
   readonly vaultOrigin?: string | undefined;
   readonly productOrigins: Readonly<Record<string, string>>;
   readonly calendar: CalendarService | undefined;
+  readonly calendarImport: CalendarImportService | undefined;
+  readonly calendarImportPreviewLimit: (userId: string) => boolean;
+  readonly calendarImportResumeLimit: (userId: string) => boolean;
   readonly contacts: ContactsService | undefined;
   readonly invitations: InvitationService | undefined;
   readonly downloads: {

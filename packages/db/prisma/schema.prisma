@@ -10,47 +10,47 @@ datasource db {
 
 // Better Auth's core schema: https://better-auth.com/docs/concepts/database
 model User {
-  id                   String                @id
-  name                 String
-  email                String                @unique
-  emailVerified        Boolean               @default(false)
-  twoFactorEnabled     Boolean               @default(false)
-  role                 String                @default("user")
-  disabled             Boolean               @default(false)
-  image                String?
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
-  sessions             Session[]
-  accounts             Account[]
-  domains              Domain[]
-  addresses            Address[]
-  providers            ProviderConfig[]
-  ingestions           IngestionRecord[]
-  auditEvents          AuditEvent[]
-  twoFactor            TwoFactor?
-  securityKeys         SecurityKey[]
-  mailbox              MailboxLink?
-  mailboxProvision     MailboxProvision?
-  aliasSyncToken       String?
-  aliasSyncUntil       DateTime?
-  emailAliases         EmailAlias[]
-  aliasApiKeys         AliasApiKey[]
-  pushSubscriptions    PushSubscription[]
-  pushTags             PushTag[]
-  mailPushState        MailPushState?
-  calendarReminders    CalendarReminder[]
-  calendarReminderSync CalendarReminderSync?
-  calendarImports      CalendarImportJob[]
+  id                       String                   @id
+  name                     String
+  email                    String                   @unique
+  emailVerified            Boolean                  @default(false)
+  twoFactorEnabled         Boolean                  @default(false)
+  role                     String                   @default("user")
+  disabled                 Boolean                  @default(false)
+  image                    String?
+  createdAt                DateTime                 @default(now())
+  updatedAt                DateTime                 @updatedAt
+  sessions                 Session[]
+  accounts                 Account[]
+  domains                  Domain[]
+  addresses                Address[]
+  providers                ProviderConfig[]
+  ingestions               IngestionRecord[]
+  auditEvents              AuditEvent[]
+  twoFactor                TwoFactor?
+  securityKeys             SecurityKey[]
+  mailbox                  MailboxLink?
+  mailboxProvision         MailboxProvision?
+  aliasSyncToken           String?
+  aliasSyncUntil           DateTime?
+  emailAliases             EmailAlias[]
+  aliasApiKeys             AliasApiKey[]
+  pushSubscriptions        PushSubscription[]
+  pushTags                 PushTag[]
+  mailPushState            MailPushState?
+  calendarReminders        CalendarReminder[]
+  calendarReminderSync     CalendarReminderSync?
+  calendarImports          CalendarImportJob[]
   calendarImportIdentities CalendarImportIdentity[]
-  invitationSeries     InvitationSeries[]
-  invitationOperations InvitationOperation[]
-  pushShowDetails      Boolean               @default(false)
-  calendarTimeZone     String                @default("UTC")
-  defaultAliasDomainId String?
-  defaultAliasDomain   Domain?               @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
-  billingCustomer      BillingCustomer?
-  billingGrant         BillingGrant?
-  subscriptions        Subscription[]
+  invitationSeries         InvitationSeries[]
+  invitationOperations     InvitationOperation[]
+  pushShowDetails          Boolean                  @default(false)
+  calendarTimeZone         String                   @default("UTC")
+  defaultAliasDomainId     String?
+  defaultAliasDomain       Domain?                  @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
+  billingCustomer          BillingCustomer?
+  billingGrant             BillingGrant?
+  subscriptions            Subscription[]
 }
 
 model SecurityKey {
@@ -520,7 +520,6 @@ model CalendarImportJob {
   user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   accountId  String
   calendarId String
-  files      String
   confirmed  Boolean              @default(false)
   abandoned  Boolean              @default(false)
   generation Int                  @default(0)
@@ -531,30 +530,30 @@ model CalendarImportJob {
 }
 
 model CalendarImportItem {
-  id       String            @id
-  jobId    String
-  job      CalendarImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  index    Int
-  file     String
-  uid      String?
-  title    String
-  source   String
-  event    String?
-  issues   String
-  previewState String
+  id            String            @id
+  jobId         String
+  job           CalendarImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  index         Int
+  file          String
+  sourceId      String
+  uid           String?
+  title         String
+  event         String?
+  issues        String
+  previewState  String
   previewReason String?
-  generation Int               @default(0)
-  state    String
-  error    String?
-  eventId  String?
+  generation    Int               @default(0)
+  state         String
+  error         String?
+  eventId       String?
 
   @@unique([jobId, index])
 }
 
 model CalendarImportIdentity {
-  id         String @id
+  id         String  @id
   userId     String
-  user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   accountId  String
   calendarId String
   uid        String

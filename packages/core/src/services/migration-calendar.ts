@@ -2,62 +2,29 @@
 /* oxlint-disable eslint/no-await-in-loop */
 
 import type { CalendarImportFile } from "@opensuite/contracts";
-import type {
-  CalendarImportStore,
-  CalendarImportRow as Row,
-} from "@opensuite/db";
+import type { CalendarImportRow as Row } from "@opensuite/db";
 import { z } from "zod";
-import type { Result } from "neverthrow";
 import {
   publicJob,
   assertImportWritable,
   confirmCalendarImport,
   recoverCalendarImport,
-} from "./calendar.ts";
+  targetResult,
+  type ImportDependencies,
+  type ImportConnection,
+  type ImportJob,
+} from "./migration-calendar-recovery.ts";
+import {
+  planCalendarEvent,
+  type ImportEvent,
+} from "../domain/migration-calendar.ts";
 import type { Actor } from "./accounts.ts";
 import { createJmapAccess, fail, value } from "./jmap-access.ts";
 
-type CalendarStoredEvent = Parameters<
-  ImportConnection["client"]["previewCalendarEvent"]
->[1][number];
 const eventSchema = z.record(z.string(), z.unknown());
 
-export type ImportDependencies = Parameters<typeof createJmapAccess>[0] & {
-  imports: CalendarImportStore;
-  parser: {
-    splitCalendars(
-      files: CalendarImportFile[],
-    ): Result<Row[], { kind: "validation"; message: string }>;
-    applyParsed(row: Row, parsed: Record<string, unknown>[] | undefined): void;
-    previews(
-      c: ImportConnection,
-      store: CalendarImportStore,
-      userId: string,
-      accountId: string,
-      calendarId: string,
-      rows: readonly PreviewInput[],
-    ): Promise<PreviewResult>;
-  };
-};
-export type ImportConnection = Awaited<
-  ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
->;
-type JmapFailure =
-  Awaited<
-    ReturnType<ImportConnection["client"]["scanCalendarUids"]>
-  > extends Result<unknown, infer E>
-    ? E
-    : never;
-export type ImportJob = NonNullable<
-  Awaited<ReturnType<CalendarImportStore["get"]>>
->;
-type PreviewInput = Pick<Row, "uid" | "file" | "event" | "previewReason">;
-type PreviewResult = Result<
-  ReturnType<ImportConnection["client"]["previewCalendarEvent"]>[],
-  JmapFailure
->;
 type Item = ImportJob["items"][number];
-type Scan = { state: string; found: CalendarStoredEvent[] };
+type Scan = { state: string; found: ImportEvent[] };
 type Work = {
   actor: Actor;
   job: ImportJob;
@@ -118,7 +85,11 @@ class CalendarImporter {
     const result = value(
       await c.client.parseCalendar(c.session, c.id, blob.blobId),
     );
-    this.deps.parser.applyParsed(row, result.parsed?.[blob.blobId]);
+    const applied = this.deps.parser.applyParsed(
+      row,
+      result.parsed?.[blob.blobId],
+    );
+    if (applied.isErr()) fail(applied.error.kind);
   }
   preview(
     actor: Actor,
@@ -128,53 +99,53 @@ class CalendarImporter {
       files: CalendarImportFile[];
     },
   ) {
-    return this.access.run(async () => {
-      if (!(await this.deps.imports.hasCapacity(actor.id)))
-        return fail("rate_limited");
-      const parsed = this.deps.parser.splitCalendars(input.files);
-      if (parsed.isErr()) return fail(parsed.error.kind);
-      const rows = parsed.value;
-      const accountId = await this.resolve(actor, input.accountId);
-      const c = await this.connect(actor, accountId);
-      await assertImportWritable(c, input.calendarId);
-      for (const row of rows) await this.parseRow(c, row);
-      const previews = value(
-        await this.deps.parser.previews(
-          c,
-          this.deps.imports,
+    return this.access
+      .run(async () => {
+        if (!(await this.deps.imports.hasCapacity(actor.id)))
+          return fail("rate_limited");
+        const parsed = this.deps.parser.splitCalendars(input.files);
+        if (parsed.isErr()) return fail(parsed.error.kind);
+        const rows = parsed.value;
+        const accountId = await this.resolve(actor, input.accountId);
+        const c = await this.connect(actor, accountId);
+        if (!(await assertImportWritable(c, input.calendarId))) return null;
+        for (const row of rows) await this.parseRow(c, row);
+        const previews = value(
+          await this.deps.previews(
+            c,
+            this.deps.imports,
+            actor.id,
+            accountId,
+            input.calendarId,
+            rows,
+          ),
+        );
+        rows.forEach((row, index) => Object.assign(row, previews[index] ?? {}));
+        const saved = await this.deps.imports.create(
           actor.id,
           accountId,
           input.calendarId,
           rows,
-        ),
-      );
-      rows.forEach((row, index) => Object.assign(row, previews[index] ?? {}));
-      const saved = await this.deps.imports.create(
-        actor.id,
-        accountId,
-        input.calendarId,
-        rows,
-        JSON.stringify(input.files),
-      );
-      if (!saved) return fail("rate_limited");
-      return publicJob(this.deps.imports, saved);
-    });
+        );
+        if (!saved) return fail("rate_limited");
+        return publicJob(saved);
+      })
+      .then(targetResult);
   }
   list(actor: Actor, accountId: string) {
     return this.access.run(async () => {
-      const resolved = await this.resolve(actor, accountId);
-      await this.connect(actor, resolved);
-      const jobs = await this.deps.imports.list(actor.id, resolved);
+      const jobs = await this.deps.imports.list(
+        actor.id,
+        accountId === "default" ? undefined : accountId,
+      );
       return {
-        jobs: jobs.map((job) => publicJob(this.deps.imports, job)),
+        jobs: jobs.map((job) => publicJob(job)),
       };
     });
   }
   get(actor: Actor, id: string) {
     return this.access.run(async () => {
-      const stored = await this.job(actor, id);
-      await this.connect(actor, stored.accountId);
-      return publicJob(this.deps.imports, stored);
+      return publicJob(await this.job(actor, id));
     });
   }
   private finish(
@@ -184,47 +155,25 @@ class CalendarImporter {
     eventId: string | null,
     remember = false,
   ) {
-    return this.deps.imports.finish(
-      w.actor.id,
-      w.job.id,
-      w.item.id,
+    return this.deps.imports.finish({
+      userId: w.actor.id,
+      jobId: w.job.id,
+      itemId: w.item.id,
       state,
       error,
       eventId,
-      remember ? w.identity : undefined,
-      w.job.generation,
-    );
+      identity: remember ? w.identity : undefined,
+      generation: w.job.generation,
+    });
   }
   private conflict(w: Work, message: string) {
     return this.finish(w, "failed", message, null);
   }
-  private async merge(w: Work, match: CalendarStoredEvent) {
-    const incoming = eventSchema.safeParse(
-      w.desired["recurrenceOverrides"] ?? {},
-    );
-    const existing = eventSchema.safeParse(match.recurrenceOverrides ?? {});
-    if (!incoming.success || !existing.success) return fail("unavailable");
-    const changed = Object.keys(incoming.data).find(
-      (key) =>
-        key in existing.data &&
-        w.connection.client.calendarStable(incoming.data[key]) !==
-          w.connection.client.calendarStable(existing.data[key]),
-    );
-    const additions = Object.fromEntries(
-      Object.entries(incoming.data).filter(([key]) => !(key in existing.data)),
-    );
-    if (changed)
-      return this.conflict(
-        w,
-        `Occurrence conflicts with existing event: ${changed}`,
-      );
-    if (!Object.keys(additions).length)
-      return this.finish(
-        w,
-        w.wasPending ? "duplicate" : "imported",
-        null,
-        match.id,
-      );
+  private async merge(
+    w: Work,
+    match: ImportEvent,
+    additions: Record<string, unknown>,
+  ) {
     const c = w.connection;
     const updated = await c.client.importCalendarOverrides(
       c.session,
@@ -246,50 +195,44 @@ class CalendarImporter {
     return undefined;
   }
   private async existing(w: Work) {
-    const match = w.scan.found.length === 1 ? w.scan.found[0] : undefined;
     const prior = await this.deps.imports.identity(
       w.actor.id,
       w.job.accountId,
       w.job.calendarId,
       w.identity.uid,
     );
-    if (
-      !match ||
-      !match.calendarIds[w.job.calendarId] ||
-      (prior &&
-        ((prior.eventId !== null && prior.eventId !== match.id) ||
-          prior.source !== w.item.file))
-    )
-      return this.conflict(
+    const plan = planCalendarEvent(
+      w.desired,
+      w.scan.found,
+      prior ?? undefined,
+      w.job.calendarId,
+      w.item.sourceId,
+    );
+    if (plan.previewState === "conflict")
+      return this.conflict(w, plan.previewReason);
+    const match = w.scan.found[0] ?? fail("unavailable");
+    if (plan.previewState === "duplicate")
+      return this.finish(
         w,
-        "UID belongs to another calendar, source, or event",
+        w.wasPending ? "duplicate" : "imported",
+        null,
+        match.id,
+        !prior?.eventId,
       );
-    if (!prior)
-      return this.conflict(
-        w,
-        "UID already exists without a matching import identity",
-      );
-    if (!prior.eventId) {
-      if (
-        !w.wasPending &&
-        w.connection.client.calendarEquivalent(w.desired, match)
-      )
-        return this.finish(w, "imported", null, match.id, true);
-      return this.conflict(w, "Uncertain import conflicts with existing event");
-    }
-    if (!w.connection.client.calendarEquivalent(w.desired, match, false))
-      return this.conflict(w, "Existing series differs from the source");
-    return this.merge(w, match);
+    if (plan.previewState === "update")
+      return this.merge(w, match, plan.additions);
+    return fail("unavailable");
   }
+
   private async create(w: Work) {
     const reserved = await this.deps.imports.reserve(
       w.actor.id,
       w.job.accountId,
       w.job.calendarId,
       w.identity.uid,
-      w.item.file,
+      w.item.sourceId,
     );
-    if (!reserved || reserved.source !== w.item.file)
+    if (!reserved || reserved.source !== w.item.sourceId)
       return this.conflict(
         w,
         "UID was previously imported or reserved by another source",
@@ -307,9 +250,12 @@ class CalendarImporter {
       (created.error.kind === "set" || created.error.kind === "method") &&
       created.error.type !== "stateMismatch"
     )
-      return this.conflict(
+      return this.finish(
         w,
+        "failed",
         `Calendar server rejected the event: ${created.error.type}`,
+        null,
+        true,
       );
     return undefined;
   }
@@ -340,7 +286,7 @@ class CalendarImporter {
       accountId: stored.accountId,
       calendarId: stored.calendarId,
       uid,
-      source: item.file,
+      source: item.sourceId,
     };
     const w = {
       actor,
@@ -356,40 +302,44 @@ class CalendarImporter {
     else await this.create(w);
   }
   confirm(actor: Actor, id: string) {
-    return this.access.run(async () => {
-      const stored = await this.job(actor, id);
-      const c = await this.connect(actor, stored.accountId);
-      return confirmCalendarImport(this.deps, c, actor, stored);
-    });
+    return this.access
+      .run(async () => {
+        const stored = await this.job(actor, id);
+        const c = await this.connect(actor, stored.accountId);
+        return confirmCalendarImport(this.deps, c, actor, stored);
+      })
+      .then(targetResult);
   }
   recover(
     actor: Actor,
     id: string,
     input: { action: "retarget"; calendarId: string } | { action: "abandon" },
   ) {
-    return this.access.run(async () => {
-      const stored = await this.job(actor, id);
-      const c = await this.connect(actor, stored.accountId);
-      return recoverCalendarImport(this.deps, c, actor, stored, input);
-    });
+    return this.access
+      .run(async () => {
+        const stored = await this.job(actor, id);
+        const c = await this.connect(actor, stored.accountId);
+        return recoverCalendarImport(this.deps, c, actor, stored, input);
+      })
+      .then(targetResult);
   }
   resume(actor: Actor, id: string) {
-    return this.access.run(async () => {
-      const stored = await this.job(actor, id);
-      const c = await this.connect(actor, stored.accountId);
-      await assertImportWritable(c, stored.calendarId);
-      if (!stored.confirmed || stored.abandoned) return fail("conflict");
-      const item = stored.items.find(
-        (entry) => entry.state === "processing" || entry.state === "pending",
-      );
-      if (item) await this.process(actor, stored, c, item);
-      return publicJob(this.deps.imports, await this.job(actor, id));
-    });
+    return this.access
+      .run(async () => {
+        const stored = await this.job(actor, id);
+        const c = await this.connect(actor, stored.accountId);
+        if (!(await assertImportWritable(c, stored.calendarId))) return null;
+        if (!stored.confirmed || stored.abandoned) return fail("conflict");
+        const item = stored.items.find(
+          (entry) => entry.state === "processing" || entry.state === "pending",
+        );
+        if (item) await this.process(actor, stored, c, item);
+        return publicJob(await this.job(actor, id));
+      })
+      .then(targetResult);
   }
   delete(actor: Actor, id: string) {
     return this.access.run(async () => {
-      const stored = await this.job(actor, id);
-      await this.connect(actor, stored.accountId);
       if ((await this.deps.imports.delete(actor.id, id)).count !== 1)
         return fail("conflict");
       return { success: true as const };

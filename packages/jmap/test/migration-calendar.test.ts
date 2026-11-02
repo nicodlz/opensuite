@@ -1,11 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ok } from "neverthrow";
 import { z } from "zod";
-import {
-  JmapClient,
-  previewCalendarEvent,
-  type Session,
-} from "../src/index.ts";
+import { JmapClient, type Session } from "../src/index.ts";
 
 const session: Session = {
   capabilities: {},
@@ -18,24 +14,6 @@ const session: Session = {
   state: "a",
 };
 describe("calendar import writes", () => {
-  it("previews a conflicting source even after its imported event was deleted", () => {
-    const identity = { source: "original.ics", eventId: "deleted-event" };
-    expect(
-      previewCalendarEvent({ uid: "u" }, [], identity, "calendar", "other.ics"),
-    ).toMatchObject({
-      previewState: "conflict",
-      previewReason: "UID belongs to a different source",
-    });
-    expect(
-      previewCalendarEvent(
-        { uid: "u" },
-        [],
-        identity,
-        "calendar",
-        "original.ics",
-      ),
-    ).toMatchObject({ previewState: "new" });
-  });
   it("explicitly disables scheduling for creates and exception updates and passes the state guard", async () => {
     const fetcher = vi.fn<typeof fetch>((_input, init) => {
       const parsed: unknown = JSON.parse(z.string().parse(init?.body));

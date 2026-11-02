@@ -2,8 +2,6 @@ import { contactsConfig } from "./adapters/contacts-config.ts";
 import { createContactsService } from "@opensuite/core/services/contacts";
 import { createMailWithInvitations } from "@opensuite/core/services/invitations";
 import { invitationProtocol } from "@opensuite/core/adapters/invitations";
-import * as calendarImportParser from "@opensuite/core/adapters/migration-calendar";
-import { createCalendarImportService } from "@opensuite/core/services/migration-calendar";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import {
   createAliasMail,
@@ -23,7 +21,6 @@ import {
   createAliasStore,
   createAddressStore,
   createInvitationStore,
-  createCalendarImportStore,
   createMailboxStore,
   createPushStore,
 } from "@opensuite/db";
@@ -41,7 +38,7 @@ import {
 import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
-import { buildServer } from "./server.ts";
+import { buildServer, createCalendarImport } from "./server.ts";
 import { configurePush, registerBackgroundJobs } from "./push-runtime.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
@@ -309,12 +306,12 @@ const { mail, invitations } = createMailWithInvitations({
 const calendar = createCalendarService({
   store: credentialStore,
   origin: authConfig.value.stalwartOrigin,
-  migration: createCalendarImportService({
-    store: credentialStore,
-    origin: authConfig.value.stalwartOrigin,
-    imports: createCalendarImportStore(database.value),
-    parser: calendarImportParser,
-  }),
+});
+const calendarImport = createCalendarImport({
+  database: database.value,
+  encryptionKey: authConfig.value.mailboxKey,
+  origin: authConfig.value.stalwartOrigin,
+  credentials: credentialStore,
 });
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
@@ -350,6 +347,7 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   calendar,
+  calendarImport,
   contacts: createContactsService(
     contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
   ),

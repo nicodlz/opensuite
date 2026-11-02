@@ -5,9 +5,11 @@ import { promisify } from "node:util";
 import {
   createDatabase,
   createCalendarImportStore,
+  createSecretBox,
   type PrismaClient,
 } from "@opensuite/db";
 import { JmapCapability, JmapClient } from "@opensuite/jmap";
+import { calendarImportLimits } from "@opensuite/contracts";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, ok, type Result } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -16,8 +18,8 @@ import { createCalendarService } from "../src/services/calendar.ts";
 import {
   splitCalendars,
   applyParsed,
-  previews,
 } from "../src/adapters/migration-calendar.ts";
+import { previews } from "../src/adapters/migration-calendar-preview.ts";
 import { createCalendarImportService } from "../src/services/migration-calendar.ts";
 
 const run = promisify(execFile);
@@ -48,6 +50,7 @@ const unwrap = <T>(result: Result<T, { kind: string }>): T =>
       throw new Error(JSON.stringify(error));
     },
   );
+const importBox = unwrap(createSecretBox("ab".repeat(32)));
 const required = <T>(value: T | null | undefined): T => {
   if (value === null || value === undefined)
     throw new Error("Missing fixture value");
@@ -66,6 +69,8 @@ let service: ReturnType<typeof createCalendarImportService>;
 let calendarService: ReturnType<typeof createCalendarService>;
 let calendarId = "";
 let loseReply = false;
+let rejectNext = false;
+let credentialRevoked = false;
 let omitUid = false;
 let uploadCount = 0;
 const ready = async (
@@ -130,7 +135,8 @@ beforeAll(async () => {
     const store = {
       getForOwner: (userId: string, accountId: string) =>
         Promise.resolve(
-          userId === actor.id &&
+          !credentialRevoked &&
+            userId === actor.id &&
             (accountId === "default" || accountId === account.id)
             ? ok({
                 accountId: account.id,
@@ -147,8 +153,13 @@ beforeAll(async () => {
     service = createCalendarImportService({
       origin: base,
       store,
-      imports: createCalendarImportStore(db),
-      parser: { splitCalendars, applyParsed, previews },
+      imports: createCalendarImportStore(
+        db,
+        calendarImportLimits.jobs,
+        importBox,
+      ),
+      parser: { splitCalendars, applyParsed },
+      previews,
       client: () => {
         const wrapped = new JmapClient(base, {
           authorization: `Basic ${Buffer.from(`${actor.email}:${password}`).toString("base64")}`,
@@ -175,6 +186,15 @@ beforeAll(async () => {
         };
         const original = wrapped.importCalendarEvent.bind(wrapped);
         wrapped.importCalendarEvent = async (...args) => {
+          if (rejectNext) {
+            rejectNext = false;
+            return err({
+              kind: "set",
+              method: "CalendarEvent/set",
+              id: "item",
+              type: "invalidProperties",
+            });
+          }
           const result = await original(...args);
           if (loseReply && result.isOk()) {
             loseReply = false;
@@ -293,6 +313,11 @@ describe("calendar import with Stalwart", () => {
       calendarId,
       files: [{ name: "google.ics", content: file }],
     };
+    const missing = await service.preview(actor, {
+      ...input,
+      calendarId: "missing-calendar",
+    });
+    expect(missing.isErr() && missing.error.kind).toBe("target_missing");
     const preview = unwrap(await service.preview(actor, input));
     expect(preview.confirmed).toBe(false);
     expect(preview.previewCounts).toMatchObject({
@@ -372,6 +397,23 @@ describe("calendar import with Stalwart", () => {
     expect(
       unwrap(await service.resume(actor, withException.id)).items[0]?.state,
     ).toBe("imported");
+    const changed = unwrap(
+      await service.preview(actor, {
+        ...input,
+        files: [
+          {
+            name: "google.ics",
+            content: file.replace("SUMMARY:Moved", "SUMMARY:Changed"),
+          },
+        ],
+      }),
+    );
+    expect(changed.items[0]?.preview).toBe("conflict");
+    unwrap(await service.confirm(actor, changed.id));
+    const rejected = unwrap(await service.resume(actor, changed.id));
+    expect(rejected.items[0]?.state).toBe("failed");
+    expect(rejected.items[0]?.error).toContain("Occurrence conflicts");
+    unwrap(await service.delete(actor, changed.id));
     const foreign = unwrap(
       await service.preview(actor, {
         ...input,
@@ -379,6 +421,15 @@ describe("calendar import with Stalwart", () => {
       }),
     );
     expect(foreign.previewCounts.conflict).toBe(2);
+    const renamed = unwrap(
+      await service.preview(actor, {
+        ...input,
+        files: [{ name: "renamed.ics", sourceId: "google.ics", content: file }],
+      }),
+    );
+    expect(renamed.previewCounts.duplicate).toBe(2);
+    expect(renamed.items[0]?.sourceId).toBe("google.ics");
+    unwrap(await service.delete(actor, renamed.id));
     unwrap(await service.confirm(actor, foreign.id));
     expect(
       unwrap(await service.resume(actor, foreign.id)).items[0]?.state,
@@ -409,6 +460,11 @@ describe("calendar import with Stalwart", () => {
       timeZone: "Europe/Lisbon",
     });
     expect(Object.keys(event?.recurrenceOverrides ?? {})).toHaveLength(2);
+    expect(
+      Object.values(event?.recurrenceOverrides ?? {}).some(
+        (item) => item["title"] === "Moved",
+      ),
+    ).toBe(true);
     expect(event?.["participants"]).toBeTruthy();
     expect(event?.["organizerCalendarAddress"]).toBe(
       "mailto:alice@example.test",
@@ -572,7 +628,17 @@ describe("calendar import with Stalwart", () => {
       include: { items: { orderBy: { index: "asc" } } },
     });
     await removeCalendar(old.id);
-    expect((await service.resume(actor, preview.id)).isErr()).toBe(true);
+    const missingTarget = await service.resume(actor, preview.id);
+    expect(missingTarget.isErr() && missingTarget.error.kind).toBe(
+      "target_missing",
+    );
+    const missingReplacement = await service.recover(actor, preview.id, {
+      action: "retarget",
+      calendarId: "missing-calendar",
+    });
+    expect(missingReplacement.isErr() && missingReplacement.error.kind).toBe(
+      "target_missing",
+    );
     expect(
       (
         await service.recover({ ...actor, id: "other" }, preview.id, {
@@ -593,16 +659,20 @@ describe("calendar import with Stalwart", () => {
       abandoned: false,
       previewCounts: { new: 2 },
     });
-    const stale = await createCalendarImportStore(db).finish(
-      actor.id,
-      preview.id,
-      required(previous.items[0]).id,
-      "imported",
-      null,
-      "stale-id",
-      undefined,
-      previous.generation,
-    );
+    const stale = await createCalendarImportStore(
+      db,
+      calendarImportLimits.jobs,
+      importBox,
+    ).finish({
+      userId: actor.id,
+      jobId: preview.id,
+      itemId: required(previous.items[0]).id,
+      state: "imported",
+      error: null,
+      eventId: "stale-id",
+      identity: undefined,
+      generation: previous.generation,
+    });
     expect(stale.count).toBe(0);
     expect((await service.resume(actor, preview.id)).isErr()).toBe(true);
     unwrap(await service.confirm(actor, preview.id));
@@ -632,7 +702,11 @@ describe("calendar import with Stalwart", () => {
       where: { id: preview.id },
       include: { items: true },
     });
-    await createCalendarImportStore(db).processing(
+    await createCalendarImportStore(
+      db,
+      calendarImportLimits.jobs,
+      importBox,
+    ).processing(
       actor.id,
       preview.id,
       required(prior.items[0]).id,
@@ -665,7 +739,11 @@ describe("calendar import with Stalwart", () => {
       where: { id: preview.id },
       include: { items: { orderBy: { index: "asc" } } },
     });
-    const store = createCalendarImportStore(db);
+    const store = createCalendarImportStore(
+      db,
+      calendarImportLimits.jobs,
+      importBox,
+    );
     const item = required(prior.items[0]);
     expect(
       (await store.processing(actor.id, preview.id, item.id, prior.generation))
@@ -692,19 +770,234 @@ describe("calendar import with Stalwart", () => {
     ).toBe(0);
     expect(
       (
-        await store.finish(
-          actor.id,
-          preview.id,
-          item.id,
-          "imported",
-          null,
-          "stale",
-          undefined,
-          prior.generation,
-        )
+        await store.finish({
+          userId: actor.id,
+          jobId: preview.id,
+          itemId: item.id,
+          state: "imported",
+          error: null,
+          eventId: "stale",
+          identity: undefined,
+          generation: prior.generation,
+        })
       ).count,
     ).toBe(0);
     expect(unwrap(await service.delete(actor, preview.id)).success).toBe(true);
+  });
+  it("reconciles an abandoned uncertain write on a later import of the same source", async () => {
+    const content = file
+      .replaceAll("local-import@example.test", "reconcile@example.test")
+      .replaceAll("all-day@example.test", "reconcile-day@example.test");
+    const input = {
+      accountId: "default",
+      calendarId,
+      files: [{ name: "reconcile.ics", content }],
+    };
+    const first = unwrap(await service.preview(actor, input));
+    unwrap(await service.confirm(actor, first.id));
+    loseReply = true;
+    expect(unwrap(await service.resume(actor, first.id)).items[0]?.state).toBe(
+      "processing",
+    );
+    unwrap(await service.recover(actor, first.id, { action: "abandon" }));
+    unwrap(await service.delete(actor, first.id));
+    const retry = unwrap(await service.preview(actor, input));
+    expect(retry.items[0]?.preview).toBe("duplicate");
+    unwrap(await service.confirm(actor, retry.id));
+    expect(unwrap(await service.resume(actor, retry.id)).items[0]?.state).toBe(
+      "duplicate",
+    );
+    const identity = await createCalendarImportStore(
+      db,
+      calendarImportLimits.jobs,
+      importBox,
+    ).identity(actor.id, retry.accountId, calendarId, "reconcile@example.test");
+    expect(identity?.eventId).toBeTruthy();
+    unwrap(await service.delete(actor, retry.id));
+  });
+  it("releases the source reservation when the server definitively rejects the write", async () => {
+    const content = file
+      .replaceAll("local-import@example.test", "rejected@example.test")
+      .replaceAll("all-day@example.test", "rejected-day@example.test");
+    const first = unwrap(
+      await service.preview(actor, {
+        accountId: "default",
+        calendarId,
+        files: [{ name: "first.ics", content }],
+      }),
+    );
+    unwrap(await service.confirm(actor, first.id));
+    rejectNext = true;
+    expect(unwrap(await service.resume(actor, first.id)).items[0]?.state).toBe(
+      "failed",
+    );
+    expect(
+      await createCalendarImportStore(
+        db,
+        calendarImportLimits.jobs,
+        importBox,
+      ).identity(
+        actor.id,
+        first.accountId,
+        calendarId,
+        "rejected@example.test",
+      ),
+    ).toBeNull();
+    unwrap(await service.delete(actor, first.id));
+    const retry = unwrap(
+      await service.preview(actor, {
+        accountId: "default",
+        calendarId,
+        files: [{ name: "fixed.ics", content }],
+      }),
+    );
+    expect(retry.items[0]?.preview).toBe("new");
+    unwrap(await service.delete(actor, retry.id));
+  });
+  it("keeps a reservation while another job is processing the same UID", async () => {
+    const content = file
+      .replaceAll("local-import@example.test", "competing@example.test")
+      .replaceAll("all-day@example.test", "competing-day@example.test");
+    const input = {
+      accountId: "default",
+      calendarId,
+      files: [{ name: "competing.ics", content }],
+    };
+    const first = unwrap(await service.preview(actor, input));
+    const second = unwrap(await service.preview(actor, input));
+    unwrap(await service.confirm(actor, first.id));
+    unwrap(await service.confirm(actor, second.id));
+    const jobs = await Promise.all(
+      [first.id, second.id].map((id) =>
+        db.calendarImportJob.findUniqueOrThrow({
+          where: { id },
+          include: { items: { orderBy: { index: "asc" } } },
+        }),
+      ),
+    );
+    const a = required(jobs[0]);
+    const b = required(jobs[1]);
+    const firstItem = required(a.items[0]);
+    const secondItem = required(b.items[0]);
+    const store = createCalendarImportStore(
+      db,
+      calendarImportLimits.jobs,
+      importBox,
+    );
+    await store.processing(actor.id, a.id, firstItem.id, a.generation);
+    await store.processing(actor.id, b.id, secondItem.id, b.generation);
+    const identity = {
+      accountId: a.accountId,
+      calendarId,
+      uid: "competing@example.test",
+      source: "competing.ics",
+    };
+    await store.reserve(
+      actor.id,
+      identity.accountId,
+      calendarId,
+      identity.uid,
+      identity.source,
+    );
+    await store.finish({
+      userId: actor.id,
+      jobId: a.id,
+      itemId: firstItem.id,
+      state: "failed",
+      error: "rejected",
+      eventId: null,
+      identity,
+      generation: a.generation,
+    });
+    expect(
+      await store.identity(
+        actor.id,
+        identity.accountId,
+        calendarId,
+        identity.uid,
+      ),
+    ).not.toBeNull();
+    await store.finish({
+      userId: actor.id,
+      jobId: b.id,
+      itemId: secondItem.id,
+      state: "failed",
+      error: "rejected",
+      eventId: null,
+      identity,
+      generation: b.generation,
+    });
+    expect(
+      await store.identity(
+        actor.id,
+        identity.accountId,
+        calendarId,
+        identity.uid,
+      ),
+    ).toBeNull();
+    unwrap(await service.delete(actor, a.id));
+    unwrap(await service.delete(actor, b.id));
+  });
+  it("lets the owner inspect and erase a job after mailbox access is revoked", async () => {
+    const content = file
+      .replaceAll("local-import@example.test", "privacy@example.test")
+      .replaceAll("all-day@example.test", "privacy-day@example.test");
+    const job = unwrap(
+      await service.preview(actor, {
+        accountId: "default",
+        calendarId,
+        files: [{ name: "privacy.ics", content }],
+      }),
+    );
+    const stored = await db.calendarImportJob.findUniqueOrThrow({
+      where: { id: job.id },
+      include: { items: true },
+    });
+    expect(Object.hasOwn(required(stored.items[0]), "source")).toBe(false);
+    expect(required(stored.items[0]).event).toMatch(/^v1\./);
+    expect(required(stored.items[0]).title).toMatch(/^v1\./);
+    expect(required(stored.items[0]).event).not.toContain("Planning");
+    credentialRevoked = true;
+    try {
+      expect(
+        unwrap(await service.list(actor, "default")).jobs.some(
+          (item) => item.id === job.id,
+        ),
+      ).toBe(true);
+      expect(unwrap(await service.get(actor, job.id)).id).toBe(job.id);
+      expect((await service.confirm(actor, job.id)).isErr()).toBe(true);
+      expect(
+        (await service.delete({ ...actor, id: "other" }, job.id)).isErr(),
+      ).toBe(true);
+      expect(unwrap(await service.delete(actor, job.id)).success).toBe(true);
+    } finally {
+      credentialRevoked = false;
+    }
+  });
+  it("rejects swapped encrypted payloads while still allowing the owner to erase the job", async () => {
+    const content = file
+      .replaceAll("local-import@example.test", "tamper@example.test")
+      .replaceAll("all-day@example.test", "tamper-day@example.test");
+    const job = unwrap(
+      await service.preview(actor, {
+        accountId: "default",
+        calendarId,
+        files: [{ name: "tamper.ics", content }],
+      }),
+    );
+    const stored = await db.calendarImportJob.findUniqueOrThrow({
+      where: { id: job.id },
+      include: { items: { orderBy: { index: "asc" } } },
+    });
+    const first = required(stored.items[0]);
+    const second = required(stored.items[1]);
+    await db.calendarImportItem.update({
+      where: { id: first.id },
+      data: { event: required(second.event) },
+    });
+    const outcome = await service.get(actor, job.id);
+    expect(outcome.isErr() && outcome.error.kind).toBe("unavailable");
+    expect(unwrap(await service.delete(actor, job.id)).success).toBe(true);
   });
   it("checks the stored-job quota before uploading or parsing another file", async () => {
     const count = await db.calendarImportJob.count({
@@ -718,7 +1011,6 @@ describe("calendar import with Stalwart", () => {
             userId: actor.id,
             accountId: "fixture",
             calendarId,
-            files: "[]",
           },
         }),
       ),

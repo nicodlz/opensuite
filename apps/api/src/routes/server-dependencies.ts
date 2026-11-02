@@ -1,6 +1,7 @@
 import type { AddressService } from "@opensuite/core/services/addresses";
 import type { AliasService } from "@opensuite/core/services/aliases";
 import type { CalendarService } from "@opensuite/core/services/calendar";
+import type { CalendarImportService } from "@opensuite/core/services/migration-calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
@@ -56,6 +57,7 @@ export interface ServerDependencies {
   readonly accounts?: AccountService;
   readonly mail?: MailService;
   readonly calendar?: CalendarService;
+  readonly calendarImport?: CalendarImportService;
   readonly contacts?: NonNullable<ApiContext["contacts"]>;
   readonly invitations?: ApiContext["invitations"];
   readonly domains?: DomainService;

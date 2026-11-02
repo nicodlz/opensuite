@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   calendarIssues,
+  applyParsed,
   splitCalendars as parseFiles,
 } from "../src/adapters/migration-calendar.ts";
-import { unsafeSimpleEdit } from "@opensuite/jmap";
+import {
+  calendarWriteAccess,
+  unsafeSimpleEdit,
+} from "../src/domain/calendar-edit.ts";
+import { previewCalendarEvent } from "../src/domain/migration-calendar.ts";
 import type { CalendarEvent } from "@opensuite/jmap";
 
 const splitCalendars = (...files: Parameters<typeof parseFiles>) => {
@@ -15,6 +20,62 @@ const calendar = (events: string) =>
   `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\n${events}END:VCALENDAR\r\n`;
 const event = (uid: string, extra = "") =>
   `BEGIN:VEVENT\r\nUID:${uid}\r\nDTSTART;VALUE=DATE:20260101\r\nDTEND;VALUE=DATE:20260102\r\nSUMMARY:Title\r\n${extra}END:VEVENT\r\n`;
+describe("calendar import preview", () => {
+  it("reconciles an uncertain reservation only when the source and event match", () => {
+    const identity = { source: "original.ics", eventId: null };
+    const existing = {
+      id: "existing",
+      uid: "u",
+      title: "Title",
+      calendarIds: { calendar: true },
+    };
+    expect(
+      previewCalendarEvent(
+        { uid: "u", title: "Title" },
+        [existing],
+        identity,
+        "calendar",
+        "original.ics",
+      ),
+    ).toMatchObject({ previewState: "duplicate" });
+    expect(
+      previewCalendarEvent(
+        { uid: "u", title: "Changed" },
+        [existing],
+        identity,
+        "calendar",
+        "original.ics",
+      ),
+    ).toMatchObject({ previewState: "conflict" });
+    expect(
+      previewCalendarEvent(
+        { uid: "u", title: "Title" },
+        [existing],
+        identity,
+        "calendar",
+        "other.ics",
+      ),
+    ).toMatchObject({ previewState: "conflict" });
+  });
+  it("previews a conflicting source even after its imported event was deleted", () => {
+    const identity = { source: "original.ics", eventId: "deleted-event" };
+    expect(
+      previewCalendarEvent({ uid: "u" }, [], identity, "calendar", "other.ics"),
+    ).toMatchObject({
+      previewState: "conflict",
+      previewReason: "UID belongs to a different source",
+    });
+    expect(
+      previewCalendarEvent(
+        { uid: "u" },
+        [],
+        identity,
+        "calendar",
+        "original.ics",
+      ),
+    ).toMatchObject({ previewState: "new" });
+  });
+});
 describe("calendar import parsing", () => {
   it("groups exceptions, flags unsupported fields, and keeps invalid entries in the report", () => {
     const source = calendar(
@@ -38,6 +99,16 @@ describe("calendar import parsing", () => {
     expect(calendarIssues(rows[1]?.source ?? "", { uid: "a" })).toContain(
       "Verify exception property: SUMMARY",
     );
+  });
+  it("returns an unavailable error for corrupt stored parsing metadata", () => {
+    const row = splitCalendars([
+      { name: "fixture.ics", content: calendar(event("a")) },
+    ])[0];
+    if (!row) throw new Error("Missing row");
+    row.issues = "not-json";
+    const result = applyParsed(row, [{ uid: "a" }]);
+    expect(result.isErr() && result.error.kind).toBe("unavailable");
+    expect(row.event).toBeNull();
   });
   it("excludes email alarms and reports them while retaining display alarms", () => {
     const alarms =
@@ -107,6 +178,15 @@ describe("calendar import parsing", () => {
   });
 });
 describe("simple calendar editor", () => {
+  it("shares target write-rights decisions between editing and imports", () => {
+    const calendars = [
+      { id: "allowed", myRights: { mayWriteAll: true } },
+      { id: "denied", myRights: { mayWriteAll: false } },
+    ];
+    expect(calendarWriteAccess(calendars, "allowed")).toBe("allowed");
+    expect(calendarWriteAccess(calendars, "denied")).toBe("forbidden");
+    expect(calendarWriteAccess(calendars, "missing")).toBe("not_found");
+  });
   const rich = {
     id: "x",
     calendarIds: { x: true },

@@ -1,23 +1,14 @@
-import {
-  CalendarImportJobSchema,
-  type Calendar,
-  type CalendarImportJob,
-  type EventContent,
-} from "@opensuite/contracts";
-import type { CalendarImportStore } from "@opensuite/db";
+import type { Calendar, EventContent } from "@opensuite/contracts";
 import {
   JmapCapability,
-  unsafeSimpleEdit,
   type Calendar as JmapCalendar,
   type JmapClient,
 } from "@opensuite/jmap";
-import type {
-  CalendarImportService,
-  ImportDependencies,
-  ImportConnection,
-  ImportJob,
-} from "./migration-calendar.ts";
 import type { Actor } from "./accounts.ts";
+import {
+  calendarWriteAccess,
+  unsafeSimpleEdit,
+} from "../domain/calendar-edit.ts";
 import {
   createObject,
   expand,
@@ -85,99 +76,6 @@ export const toCalendars = (list: readonly JmapCalendar[]): Calendar[] => {
 const validated = (content: EventContent) =>
   timing(content) ?? fail("validation");
 
-type Job = NonNullable<Awaited<ReturnType<CalendarImportStore["get"]>>>;
-export const publicJob = (
-  store: CalendarImportStore,
-  job: Job,
-): CalendarImportJob => CalendarImportJobSchema.parse(store.project(job));
-
-export async function assertImportWritable(
-  c: ImportConnection,
-  calendarId: string,
-) {
-  const target =
-    value(await c.client.calendars(c.session, c.id)).list.find(
-      (item) => item.id === calendarId,
-    ) ?? fail("not_found");
-  if (target.myRights?.mayWriteAll === false) fail("forbidden");
-}
-export async function confirmCalendarImport(
-  deps: ImportDependencies,
-  c: ImportConnection,
-  actor: Actor,
-  job: ImportJob,
-) {
-  if (job.abandoned) return fail("conflict");
-  await assertImportWritable(c, job.calendarId);
-  if (
-    !job.confirmed &&
-    (await deps.imports.confirm(actor.id, job.id, job.generation)).count !== 1
-  )
-    return fail("conflict");
-  return publicJob(
-    deps.imports,
-    (await deps.imports.get(actor.id, job.id)) ?? fail("not_found"),
-  );
-}
-export async function recoverCalendarImport(
-  deps: ImportDependencies,
-  c: ImportConnection,
-  actor: Actor,
-  job: ImportJob,
-  input: { action: "retarget"; calendarId: string } | { action: "abandon" },
-) {
-  if (job.abandoned) return fail("conflict");
-  if (input.action === "retarget") {
-    const calendars = value(await c.client.calendars(c.session, c.id)).list;
-    if (calendars.some((calendar) => calendar.id === job.calendarId))
-      return fail("conflict");
-    const target =
-      calendars.find((calendar) => calendar.id === input.calendarId) ??
-      fail("not_found");
-    if (target.myRights?.mayWriteAll === false) return fail("forbidden");
-    const previews = value(
-      await deps.parser.previews(
-        c,
-        deps.imports,
-        actor.id,
-        job.accountId,
-        input.calendarId,
-        job.items,
-      ),
-    );
-    const preview = job.items.map((item, index) => ({
-      id: item.id,
-      ...(previews[index] ?? {
-        previewState: "invalid" as const,
-        previewReason: "Event could not be parsed",
-      }),
-    }));
-    if (
-      !(await deps.imports.recover(
-        actor.id,
-        job.id,
-        job.generation,
-        job.calendarId,
-        { action: "retarget", calendarId: input.calendarId, preview },
-      ))
-    )
-      return fail("conflict");
-  } else if (
-    !(await deps.imports.recover(
-      actor.id,
-      job.id,
-      job.generation,
-      job.calendarId,
-      input,
-    ))
-  )
-    return fail("conflict");
-  return publicJob(
-    deps.imports,
-    (await deps.imports.get(actor.id, job.id)) ?? fail("not_found"),
-  );
-}
-
 type CalendarConnection = Awaited<
   ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
 >;
@@ -226,7 +124,6 @@ export function createCalendarService(dependencies: {
   origin: string;
   client?: (credential: { address: string; secret: string }) => JmapClient;
   now?: () => number;
-  migration?: CalendarImportService;
 }) {
   const { run, connect: open } = createJmapAccess(dependencies);
   const connect = (actor: Actor, accountId: string) =>
@@ -237,9 +134,8 @@ export function createCalendarService(dependencies: {
     value(await c.client.calendars(c.session, c.id)).list;
   const writable = async (c: Connection, calendarId: string) => {
     const calendars = await list(c);
-    const calendar = calendars.find((item) => item.id === calendarId);
-    if (calendar === undefined) return fail("not_found");
-    if (calendar.myRights?.mayWriteAll === false) return fail("forbidden");
+    const access = calendarWriteAccess(calendars, calendarId);
+    if (access !== "allowed") return fail(access);
     return calendars.map((item) => item.id);
   };
   const series = async (c: Connection, id: string, calendars: string[]) => {
@@ -254,7 +150,6 @@ export function createCalendarService(dependencies: {
     return toContract(stored, locate(stored, stored.id) ?? fail("unavailable"));
   };
   return {
-    migration: dependencies.migration,
     calendars: (actor: Actor, accountId: string) =>
       run(async () => {
         const c = await connect(actor, accountId);
@@ -402,7 +297,4 @@ export function createCalendarService(dependencies: {
       }),
   };
 }
-export type CalendarService = Omit<
-  ReturnType<typeof createCalendarService>,
-  "migration"
-> & { migration?: CalendarImportService | undefined };
+export type CalendarService = ReturnType<typeof createCalendarService>;

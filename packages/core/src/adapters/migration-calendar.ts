@@ -1,12 +1,11 @@
 import ICAL from "ical.js";
 import { z } from "zod";
 import { err, ok, type Result } from "neverthrow";
-import type { JmapClient, Session, JmapResult } from "@opensuite/jmap";
 import {
   calendarImportLimits,
   type CalendarImportFile,
 } from "@opensuite/contracts";
-import type { CalendarImportRow, CalendarImportStore } from "@opensuite/db";
+import type { CalendarImportRow } from "@opensuite/db";
 import { occurrenceKey, stringValue } from "./invitations/common.ts";
 
 const maximumBytes = calendarImportLimits.bytes;
@@ -42,6 +41,7 @@ const bad = (
   title = "",
 ): CalendarImportRow => ({
   file,
+  sourceId: file,
   uid,
   title,
   source: "",
@@ -94,6 +94,7 @@ function groupedRow(
       calendar.addSubcomponent(withoutEmailAlarms(event, issues));
     return {
       file,
+      sourceId: file,
       uid,
       title,
       source: calendar.toString(),
@@ -183,7 +184,10 @@ export function splitCalendars(
 ): Result<CalendarImportRow[], { kind: "validation"; message: string }> {
   if (
     files.some(
-      (file) => file.name.includes("\0") || file.content.includes("\0"),
+      (file) =>
+        file.name.includes("\0") ||
+        file.content.includes("\0") ||
+        file.sourceId?.includes("\0"),
     )
   )
     return invalid("Calendar files contain invalid characters");
@@ -197,6 +201,7 @@ export function splitCalendars(
   let bytes = 0;
   for (const file of files) {
     const parsed = fileRows(file);
+    for (const row of parsed.rows) row.sourceId = file.sourceId ?? file.name;
     count += parsed.count;
     if (count > maximumEvents) return invalid("Too many events");
     bytes += parsed.rows.reduce(
@@ -315,7 +320,7 @@ const omitted = new Set([
 export function applyParsed(
   row: CalendarImportRow,
   parsed: Record<string, unknown>[] | undefined,
-) {
+): Result<void, { kind: "unavailable" }> {
   if (
     !parsed ||
     parsed.length !== 1 ||
@@ -326,84 +331,22 @@ export function applyParsed(
     row.previewState = "invalid";
     row.previewReason = "Calendar server could not parse this series";
     row.error = "Calendar server could not parse this series";
-    return;
+    return ok(undefined);
   }
-  const event = Object.fromEntries(
-    Object.entries(parsed[0]).filter(([key]) => !omitted.has(key)),
-  );
-  row.event = JSON.stringify(event);
-  row.issues = JSON.stringify([
-    ...new Set([
-      ...issuesSchema.parse(JSON.parse(row.issues)),
-      ...calendarIssues(row.source, event),
-    ]),
-  ]);
-}
-
-type PreviewInput = {
-  uid: string | null;
-  file: string;
-  event: string | null;
-  previewReason: string | null;
-};
-type PreviewOutcome = ReturnType<JmapClient["previewCalendarEvent"]>;
-export async function previews(
-  c: { client: JmapClient; session: Session; id: string },
-  store: CalendarImportStore,
-  userId: string,
-  accountId: string,
-  calendarId: string,
-  rows: readonly PreviewInput[],
-): Promise<JmapResult<PreviewOutcome[]>> {
-  const uids = [
-    ...new Set(rows.flatMap((row) => (row.uid && row.event ? [row.uid] : []))),
-  ];
-  if (!uids.length)
-    return ok(
-      rows.map((row) => ({
-        previewState: "invalid" as const,
-        previewReason: row.previewReason ?? "Event could not be parsed",
-      })),
-    );
-  const scanned = await c.client.scanCalendarUids(c.session, c.id, uids);
-  if (scanned.isErr()) return err(scanned.error);
-  const identities = await store.identities(
-    userId,
-    accountId,
-    calendarId,
-    uids,
-  );
-  const seen = new Set<string>();
   try {
-    return ok(
-      rows.map((row) => {
-        if (!row.uid || !row.event)
-          return {
-            previewState: "invalid" as const,
-            previewReason: row.previewReason ?? "Event could not be parsed",
-          };
-        if (seen.has(row.uid))
-          return {
-            previewState: "conflict" as const,
-            previewReason: "UID appears in multiple selected files",
-          };
-        seen.add(row.uid);
-        const desired = z
-          .record(z.string(), z.unknown())
-          .parse(JSON.parse(row.event));
-        return c.client.previewCalendarEvent(
-          desired,
-          scanned.value.found.filter((event) => event.uid === row.uid),
-          identities.find((identity) => identity.uid === row.uid),
-          calendarId,
-          row.file,
-        );
-      }),
+    const event = Object.fromEntries(
+      Object.entries(parsed[0]).filter(([key]) => !omitted.has(key)),
     );
+    const issues = [
+      ...new Set([
+        ...issuesSchema.parse(JSON.parse(row.issues)),
+        ...calendarIssues(row.source, event),
+      ]),
+    ];
+    row.event = JSON.stringify(event);
+    row.issues = JSON.stringify(issues);
+    return ok(undefined);
   } catch {
-    return err({
-      kind: "invalidResponse",
-      message: "Invalid saved calendar event",
-    });
+    return err({ kind: "unavailable" });
   }
 }

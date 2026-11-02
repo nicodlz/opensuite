@@ -12,11 +12,13 @@ export const calendarImportLimits = {
 
 export const CalendarImportFileSchema = z.object({
   name: z.string().min(1).max(255),
+  sourceId: z.string().min(1).max(255).optional(),
   content: z.string().min(1).max(calendarImportLimits.bytes),
 });
 export const CalendarImportItemSchema = z.object({
   index: z.number().int().nonnegative(),
   file: z.string(),
+  sourceId: z.string(),
   uid: z.string().nullable(),
   title: z.string(),
   state: z.enum([
@@ -57,11 +59,14 @@ export const CalendarImportJobSchema = z.object({
 });
 const procedure = oc.errors({
   NOT_FOUND: { status: 404, message: "Import not found" },
+  TARGET_NOT_FOUND: {
+    status: 404,
+    message: "Target calendar not found; choose another or abandon the import",
+  },
   FORBIDDEN: { status: 403, message: "Access denied" },
   VALIDATION: {
     status: 400,
-    message:
-      "Invalid calendar import or limits exceeded: 10 files, 750000 bytes, 200 events, and 2000000 expanded bytes",
+    message: `Invalid calendar import or limits exceeded: ${String(calendarImportLimits.files)} files, ${String(calendarImportLimits.bytes)} bytes, ${String(calendarImportLimits.events)} events, and ${String(calendarImportLimits.expandedBytes)} expanded bytes`,
   },
   CONFLICT: { status: 409, message: "Calendar import changed" },
   TOO_MANY_REQUESTS: { status: 429, message: "Too many calendar imports" },
