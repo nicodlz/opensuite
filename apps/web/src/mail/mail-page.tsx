@@ -21,7 +21,7 @@ import { AppShell, SidebarItem } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
 import { Icon, type IconName } from "../ui/icons.tsx";
 import { useMailBack } from "./back-navigation.ts";
-import { accountId, mailClient } from "./client.ts";
+import { accountId, mailClient, mailKey } from "./client.ts";
 import { Composer, type ComposerState } from "./composer.tsx";
 import { conversationFocus, restingFocus, useFocusAfter } from "./focus.ts";
 import { emptyDraft, plural, replyDraft } from "./model.ts";
@@ -38,7 +38,7 @@ const listSenders = () => aliasesClient.list({}).catch(() => []);
 const matchRecipients = (addresses: string[]) =>
   aliasesClient.match({ addresses }).catch(() => []);
 
-const key = ["mail", accountId] as const;
+const key = mailKey;
 const threadKey = (id: string) => [...key, "thread", id] as const;
 const folderIcons: Record<string, IconName> = {
   inbox: "inbox",
