@@ -27,19 +27,18 @@ import { registerDispatch } from "./routes/dispatch.ts";
 import type { ServerDependencies } from "./routes/server-dependencies.ts";
 export type { ServerDependencies } from "./routes/server-dependencies.ts";
 
-export function createCalendarImport(dependencies: {
-  database: PrismaClient;
-  encryptionKey: string;
-  origin: string;
-  credentials: MailCredentialStore;
-}) {
-  const box = createSecretBox(dependencies.encryptionKey);
+export function createCalendarImport(
+  database: PrismaClient,
+  config: { mailboxKey: string; stalwartOrigin: string },
+  credentials: MailCredentialStore,
+) {
+  const box = createSecretBox(config.mailboxKey);
   if (box.isErr()) throw new Error("Invalid calendar import encryption key");
   return createCalendarImportService({
-    store: dependencies.credentials,
-    origin: dependencies.origin,
+    store: credentials,
+    origin: config.stalwartOrigin,
     imports: createCalendarImportStore(
-      dependencies.database,
+      database,
       calendarImportLimits.jobs,
       box.value,
     ),

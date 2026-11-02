@@ -314,12 +314,11 @@ const migrationMail = createMailImport(
   authConfig.value,
   mailboxStore,
 );
-const calendarImport = createCalendarImport({
-  database: database.value,
-  encryptionKey: authConfig.value.mailboxKey,
-  origin: authConfig.value.stalwartOrigin,
-  credentials: credentialStore,
-});
+const calendarImport = createCalendarImport(
+  database.value,
+  authConfig.value,
+  credentialStore,
+);
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
 const app = await buildServer({
