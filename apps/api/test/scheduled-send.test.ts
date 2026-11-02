@@ -5,12 +5,10 @@ import { register } from "../src/adapters/scheduled-send-job.ts";
 it("waits for scheduled-send reconciliation before disconnecting the database", async () => {
   const app = Fastify();
   const events: string[] = [];
-  let release = () => {};
-  const pending = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  app.addHook("onClose", async () => {
+  const { promise: pending, resolve: release } = Promise.withResolvers<void>();
+  app.addHook("onClose", () => {
     events.push("disconnect");
+    return Promise.resolve();
   });
   register(app, {
     reconcileScheduled: async () => {
