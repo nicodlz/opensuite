@@ -23,9 +23,13 @@ import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { Icon, type IconName } from "../ui/icons.tsx";
 import { accountId, mailClient } from "./client.ts";
 import { Composer, type ComposerState } from "./composer.tsx";
-import { emptyDraft, replyDraft } from "./model.ts";
+import { conversationFocus, restingFocus, useFocusAfter } from "./focus.ts";
+import { emptyDraft, plural, replyDraft } from "./model.ts";
+import { Conversation } from "./conversation.tsx";
 import { ReadingPane } from "./reading-pane.tsx";
+import { SearchFilters } from "./search-filters.tsx";
 import { ThreadRow } from "./thread-list.tsx";
+import { useUndoOffer } from "./undo.ts";
 
 // Alias lookups are optional in Mail. Handle failures before they reach the
 // global query error handler, which otherwise redirects on a 401.
@@ -52,7 +56,6 @@ const folderOrder: Record<string, number> = {
   trash: 5,
 };
 type ThreadPage = { threads: ThreadSummary[]; nextCursor: string | null };
-type Undo = { threadIds: string[]; mailboxId: string };
 const removes = (change: MailAction) =>
   change.type === "archive" ||
   change.type === "trash" ||
@@ -75,6 +78,8 @@ const isTyping = (target: EventTarget | null) =>
     (target instanceof HTMLInputElement &&
       !["checkbox", "radio", "button"].includes(target.type)));
 const noSelection: ReadonlySet<string> = new Set();
+const without = (set: ReadonlySet<string>, item: string) =>
+  new Set([...set].filter((value) => value !== item));
 
 export function MailPage() {
   const queryClient = useQueryClient();
@@ -104,11 +109,17 @@ export function MailPage() {
   const lastChecked = useRef<string | null>(null);
   const [composers, setComposers] = useState<ComposerState[]>([]);
   const [minimized, setMinimized] = useState<Set<string>>(new Set());
+  // Composers hidden while discarding them can be undone.
+  const [discarded, setDiscarded] = useState<ReadonlySet<string>>(new Set());
   const [help, setHelp] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
-  const [notice, setNotice] = useState("");
-  const [undo, setUndo] = useState<Undo | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const searchWrap = useRef<HTMLDivElement>(null);
+  const filtersButton = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLElement>(null);
+  // Rows, and the heading of an empty list, follow the keyboard selection.
+  const focusAfter = useFocusAfter("[data-thread-id], .list-title h1");
+  const { notify, offer, undoLatest } = useUndoOffer();
 
   const identity = useQuery({
     queryKey: [...key, "identity"],
@@ -244,7 +255,6 @@ export function MailPage() {
     onError: (_error, variables, context) => {
       if (context?.previous)
         queryClient.setQueryData(listKey, context.previous);
-      setUndo(null);
       const first = variables.threadIds[0];
       if (
         removes(variables.change) &&
@@ -254,7 +264,9 @@ export function MailPage() {
         setSelected(first);
         setReading(true);
       }
-      setNotice("Could not update the conversation. Please try again.");
+      notify({
+        message: "Could not update the conversation. Please try again.",
+      });
     },
     onSettled: (_data, _error, { change }) => {
       void queryClient.invalidateQueries({ queryKey: [...key, "mailboxes"] });
@@ -265,33 +277,78 @@ export function MailPage() {
 
   function perform(threadIds: string[], change: MailAction) {
     if (!threadIds.length) return;
-    if (removes(change)) {
-      const label =
-        threadIds.length > 1
-          ? `${threadIds.length} conversations`
-          : "Conversation";
-      setUndo(
-        change.type === "delete" ? null : { threadIds, mailboxId: folder },
-      );
-      setNotice(
-        change.type === "archive"
-          ? `${label} archived.`
-          : change.type === "trash"
-            ? `${label} moved to trash.`
-            : change.type === "delete"
-              ? `${label} deleted.`
-              : `${label} moved.`,
-      );
-      if (selected && threadIds.includes(selected)) {
-        // Keep the keyboard position on the following conversation.
-        const index = list.findIndex((thread) => thread.id === selected);
-        const rest = list.filter((thread) => !threadIds.includes(thread.id));
-        setSelected(rest[Math.min(index, rest.length - 1)]?.id ?? null);
-        setReading(false);
-      }
-      setChecked(new Set());
+    if (!removes(change)) {
+      action.mutate({ threadIds, change });
+      return;
     }
-    action.mutate({ threadIds, change });
+    const settled = action.mutateAsync({ threadIds, change }).then(
+      () => true,
+      () => false,
+    );
+    const label =
+      threadIds.length > 1
+        ? `${threadIds.length} conversations`
+        : "Conversation";
+    const message =
+      change.type === "archive"
+        ? `${label} archived.`
+        : change.type === "trash"
+          ? `${label} moved to trash.`
+          : change.type === "delete"
+            ? `${label} deleted.`
+            : `${label} moved.`;
+    // The keyboard position moves to the following conversation.
+    const removedSelected = selected !== null && threadIds.includes(selected);
+    const anchor = removedSelected
+      ? selected
+      : list.find((thread) => threadIds.includes(thread.id))?.id;
+    const index = list.findIndex((thread) => thread.id === anchor);
+    const rest = list.filter((thread) => !threadIds.includes(thread.id));
+    const next = rest[Math.min(index, rest.length - 1)]?.id ?? null;
+    if (removedSelected) {
+      setSelected(next);
+      setReading(false);
+    }
+    setChecked(new Set());
+    focusAfter(
+      () =>
+        (next ? conversationFocus(listRef.current, next) : null) ??
+        restingFocus(listRef.current),
+      { follow: true },
+    );
+    if (change.type === "delete") {
+      notify({ message });
+      return;
+    }
+    const from = folder;
+    offer({
+      message,
+      undo: () => {
+        // Moving back only after the first request avoids reordering them.
+        void settled.then((ok) => {
+          if (ok)
+            action.mutate({
+              threadIds,
+              change: { type: "move", mailboxId: from },
+            });
+          return undefined;
+        });
+        notify({
+          message:
+            threadIds.length > 1
+              ? "Conversations restored."
+              : "Conversation restored.",
+        });
+        // Back in the list it left, the conversation becomes the current
+        // one, unless another is open in the reader.
+        const [first] = threadIds;
+        if (!first || onScreen.current.folder !== from) return;
+        if (!onScreen.current.reading) setSelected(first);
+        focusAfter(() => conversationFocus(listRef.current, first), {
+          follow: true,
+        });
+      },
+    });
   }
   function request(threadIds: string[], change: MailAction) {
     if (change.type === "delete") setConfirmDelete(threadIds);
@@ -300,6 +357,7 @@ export function MailPage() {
   function openThread(id: string) {
     setSelected(id);
     setReading(true);
+    focusAfter(() => conversationFocus(listRef.current, id), { follow: true });
     const thread = list.find((item) => item.id === id);
     if (thread?.unread) perform([id], { type: "read", value: true });
   }
@@ -316,7 +374,13 @@ export function MailPage() {
     else {
       setSelected(next.id);
       prefetch(next.id);
+      // In the list, focus moves with the selection.
+      conversationFocus(listRef.current, next.id)?.focus();
     }
+  }
+  function back() {
+    setReading(false);
+    focusAfter(() => restingFocus(listRef.current));
   }
   function compose(content: DraftContent = emptyDraft(), draftId?: string) {
     const existing = draftId
@@ -335,17 +399,40 @@ export function MailPage() {
       draftId: draftId ?? null,
       content,
     };
+    const open = composers.filter((item) => !discarded.has(item.key));
     // Keep at most two open windows; older ones collapse to their title bar.
     setMinimized(
       (value) =>
         new Set([
           ...value,
-          ...composers
-            .slice(0, Math.max(0, composers.length - 1))
+          ...open
+            .slice(0, Math.max(0, open.length - 1))
             .map((item) => item.key),
         ]),
     );
     setComposers((items) => [...items, state]);
+  }
+  /** A composer that goes away hands focus to the conversation or list. */
+  function leaveComposer() {
+    focusAfter(() => restingFocus(listRef.current));
+  }
+  function removeComposer(id: string) {
+    setComposers((items) => items.filter((item) => item.key !== id));
+    setMinimized((value) => without(value, id));
+    setDiscarded((value) => without(value, id));
+  }
+  function discardComposer(id: string, restore: () => Promise<void>) {
+    setDiscarded((value) => new Set([...value, id]));
+    leaveComposer();
+    // The hidden composer keeps the content until the offer ends.
+    offer({
+      message: "Draft discarded.",
+      undo: () => {
+        setDiscarded((value) => without(value, id));
+        void restore();
+      },
+      onExpire: () => removeComposer(id),
+    });
   }
   function reply(message: Message, mode: "reply" | "all" | "forward") {
     const addresses = recipientAddresses(message);
@@ -385,6 +472,7 @@ export function MailPage() {
     ]).then(open);
   }
   function selectFolder(id: string) {
+    setShowFilters(false);
     setFolder(id);
     setCursor(undefined);
     setSelected(null);
@@ -408,7 +496,16 @@ export function MailPage() {
   }
 
   const selectedThread = list.find((thread) => thread.id === selected);
+  const selectedLabels = selectedThread?.labels ?? [
+    ...new Set(messages.flatMap((message) => message.labels)),
+  ];
+  const drafts = draftList.data?.drafts ?? [];
   const targets = checked.size ? [...checked] : selected ? [selected] : [];
+  // What is on screen now, for an Undo chosen later.
+  const onScreen = useRef({ folder, reading });
+  useEffect(() => {
+    onScreen.current = { folder, reading };
+  });
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (
@@ -431,10 +528,10 @@ export function MailPage() {
         k: () => step("previous"),
         Enter: () => selected && !reading && openThread(selected),
         o: () => selected && openThread(selected),
-        u: () => setReading(false),
+        u: back,
         Escape: () => {
           if (checked.size) setChecked(new Set());
-          else setReading(false);
+          else back();
         },
         x: () =>
           selected && toggleCheck(selected, !checked.has(selected), false),
@@ -455,6 +552,7 @@ export function MailPage() {
         a: () => last && reading && reply(last, "all"),
         f: () => last && reading && reply(last, "forward"),
         c: () => compose(),
+        z: undoLatest,
         "/": () => searchRef.current?.focus(),
         "?": () => setHelp(true),
       };
@@ -472,18 +570,6 @@ export function MailPage() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   });
-  useEffect(() => {
-    if (!notice) return undefined;
-    // An undo offer expires with its notice.
-    const timer = window.setTimeout(
-      () => {
-        setNotice("");
-        setUndo(null);
-      },
-      undo ? 10_000 : 6000,
-    );
-    return () => window.clearTimeout(timer);
-  }, [notice, undo]);
   useEffect(() => {
     document.title = current
       ? `${current.name}${current.unread ? ` (${current.unread})` : ""} · Esuno Mail`
@@ -549,7 +635,7 @@ export function MailPage() {
         </nav>
       }
       search={
-        <div className="mail-search-wrap">
+        <div className="mail-search-wrap" ref={searchWrap}>
           <div className="shell-searchbox">
             <Icon name="search" />
             <label className="visually-hidden" htmlFor="mail-search">
@@ -565,10 +651,11 @@ export function MailPage() {
                 setCursor(undefined);
               }}
               onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  setSearch("");
-                  event.currentTarget.blur();
-                }
+                if (event.key !== "Escape" || event.defaultPrevented) return;
+                // Clearing the search also hands the keyboard back to the list.
+                setSearch("");
+                setCursor(undefined);
+                restingFocus(listRef.current)?.focus();
               }}
               placeholder="Search mail"
               autoComplete="off"
@@ -586,9 +673,11 @@ export function MailPage() {
               </button>
             )}
             <button
+              ref={filtersButton}
               type="button"
               aria-label="Search filters"
               aria-expanded={showFilters}
+              aria-controls={showFilters ? "mail-search-filters" : undefined}
               aria-pressed={filterCount > 0}
               onClick={() => setShowFilters(!showFilters)}
             >
@@ -596,104 +685,20 @@ export function MailPage() {
             </button>
           </div>
           {showFilters && (
-            <fieldset className="search-filters">
-              <legend className="visually-hidden">Search filters</legend>
-              <label>
-                From
-                <input
-                  value={filters.from ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      ...filters,
-                      from: event.target.value || undefined,
-                    })
-                  }
-                />
-              </label>
-              <label>
-                To
-                <input
-                  value={filters.to ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      ...filters,
-                      to: event.target.value || undefined,
-                    })
-                  }
-                />
-              </label>
-              <label>
-                After
-                <input
-                  type="date"
-                  value={filters.after?.slice(0, 10) ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      ...filters,
-                      after: event.target.value
-                        ? `${event.target.value}T00:00:00.000Z`
-                        : undefined,
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Before
-                <input
-                  type="date"
-                  value={filters.before?.slice(0, 10) ?? ""}
-                  onChange={(event) =>
-                    setFilters({
-                      ...filters,
-                      before: event.target.value
-                        ? `${event.target.value}T23:59:59.999Z`
-                        : undefined,
-                    })
-                  }
-                />
-              </label>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={filters.unread === true}
-                  onChange={(event) =>
-                    setFilters({
-                      ...filters,
-                      unread: event.target.checked ? true : undefined,
-                    })
-                  }
-                />
-                Unread only
-              </label>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={filters.hasAttachment === true}
-                  onChange={(event) =>
-                    setFilters({
-                      ...filters,
-                      hasAttachment: event.target.checked ? true : undefined,
-                    })
-                  }
-                />
-                Has attachment
-              </label>
-              <div className="search-filter-actions">
-                <Button
-                  variant="ghost"
-                  size="small"
-                  onClick={() => {
-                    setFilters({});
-                    setCursor(undefined);
-                  }}
-                >
-                  Clear filters
-                </Button>
-                <Button size="small" onClick={() => setShowFilters(false)}>
-                  Done
-                </Button>
-              </div>
-            </fieldset>
+            <SearchFilters
+              id="mail-search-filters"
+              container={searchWrap}
+              filters={filters}
+              onChange={(value) => {
+                setFilters(value);
+                setCursor(undefined);
+              }}
+              onClose={() => {
+                setShowFilters(false);
+                // Back to the button unless focus moved somewhere useful.
+                focusAfter(() => filtersButton.current);
+              }}
+            />
           )}
         </div>
       }
@@ -709,7 +714,11 @@ export function MailPage() {
       }
     >
       <div className={`mail-panes ${reading ? "show-reading" : ""}`}>
-        <section className="thread-list" aria-label="Conversations">
+        <section
+          ref={listRef}
+          className="thread-list"
+          aria-label="Conversations"
+        >
           <div className="list-heading">
             {!isDrafts && list.length > 0 && (
               <input
@@ -780,19 +789,19 @@ export function MailPage() {
               </div>
             ) : (
               <div className="list-title">
-                <h1>{current?.name ?? "Mail"}</h1>
+                <h1 tabIndex={-1}>{current?.name ?? "Mail"}</h1>
                 <span>
                   {isDrafts
-                    ? `${draftList.data?.drafts.length ?? 0} drafts`
+                    ? plural(drafts.length, "draft")
                     : query || filterCount
-                      ? `${list.length} results`
+                      ? plural(list.length, "result")
                       : current?.unread
                         ? `${current.unread} unread`
-                        : `${list.length} conversations`}
+                        : plural(list.length, "conversation")}
                 </span>
               </div>
             )}
-            {!isDrafts && (
+            {!isDrafts && checked.size === 0 && (
               <div className="list-tools">
                 <label>
                   <span className="visually-hidden">Sort conversations</span>
@@ -854,9 +863,9 @@ export function MailPage() {
             {isDrafts ? (
               draftList.isPending ? (
                 <ListSkeleton />
-              ) : draftList.data?.drafts.length ? (
+              ) : drafts.length ? (
                 <ul className="thread-items">
-                  {draftList.data.drafts.map((draft) => (
+                  {drafts.map((draft) => (
                     <li key={draft.id} className="draft-row">
                       <button
                         type="button"
@@ -975,57 +984,57 @@ export function MailPage() {
         </section>
         <section className="reading-pane" aria-label="Reading pane">
           {reading && selected ? (
-            detail.isPending ? (
-              <div
-                className="reading-loading"
-                aria-label="Loading conversation"
-              >
-                <span />
-                <span />
-                <span />
-              </div>
-            ) : detail.isError ? (
-              <div className="mail-empty" role="alert">
-                <strong>Could not load this conversation</strong>
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    void detail.refetch();
-                  }}
+            <ReadingPane
+              folder={current}
+              mailboxes={boxes}
+              labels={selectedLabels}
+              starred={
+                selectedThread?.starred ??
+                messages.some((message) => message.starred)
+              }
+              position={position}
+              onBack={back}
+              onAction={(change) => request([selected], change)}
+              onStep={step}
+            >
+              {detail.isPending ? (
+                <div
+                  className="reading-loading"
+                  aria-label="Loading conversation"
                 >
-                  Retry
-                </Button>
-              </div>
-            ) : (
-              <ReadingPane
-                key={selected}
-                messages={detail.data.messages}
-                focusMessageId={
-                  selected === notificationTarget.thread
-                    ? notificationTarget.message
-                    : null
-                }
-                aliasesByMessage={matchedByMessage}
-                folder={current}
-                mailboxes={boxes}
-                labels={
-                  selectedThread?.labels ?? [
-                    ...new Set(
-                      detail.data.messages.flatMap((message) => message.labels),
-                    ),
-                  ]
-                }
-                starred={
-                  selectedThread?.starred ??
-                  detail.data.messages.some((message) => message.starred)
-                }
-                position={position}
-                onBack={() => setReading(false)}
-                onAction={(change) => request([selected], change)}
-                onReply={reply}
-                onStep={step}
-              />
-            )
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              ) : detail.isError ? (
+                <div className="mail-empty" role="alert">
+                  <strong>Could not load this conversation</strong>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      void detail.refetch();
+                    }}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : (
+                <Conversation
+                  key={selected}
+                  messages={detail.data.messages}
+                  focusMessageId={
+                    selected === notificationTarget.thread
+                      ? notificationTarget.message
+                      : null
+                  }
+                  aliasesByMessage={matchedByMessage}
+                  folder={current}
+                  mailboxes={boxes}
+                  labels={selectedLabels}
+                  onReply={reply}
+                />
+              )}
+            </ReadingPane>
           ) : (
             <div className="reading-empty">
               <span className="reading-illustration" aria-hidden="true">
@@ -1033,7 +1042,7 @@ export function MailPage() {
               </span>
               <h2>
                 {checked.size
-                  ? `${checked.size} conversation${checked.size > 1 ? "s" : ""} selected`
+                  ? `${plural(checked.size, "conversation")} selected`
                   : "No conversation selected"}
               </h2>
               <p>
@@ -1048,41 +1057,6 @@ export function MailPage() {
           )}
         </section>
       </div>
-      {notice && (
-        <output className="mail-notice">
-          <span>{notice}</span>
-          {undo && (
-            <button
-              type="button"
-              disabled={action.isPending}
-              onClick={() => {
-                action.mutate({
-                  threadIds: undo.threadIds,
-                  change: { type: "move", mailboxId: undo.mailboxId },
-                });
-                setUndo(null);
-                setNotice(
-                  undo.threadIds.length > 1
-                    ? "Conversations restored."
-                    : "Conversation restored.",
-                );
-              }}
-            >
-              Undo
-            </button>
-          )}
-          <button
-            type="button"
-            aria-label="Dismiss notification"
-            onClick={() => {
-              setNotice("");
-              setUndo(null);
-            }}
-          >
-            <Icon name="close" size={16} />
-          </button>
-        </output>
-      )}
       <div className="compose-dock">
         {composers.map((state) => (
           <Composer
@@ -1096,23 +1070,21 @@ export function MailPage() {
               ),
             ]}
             minimized={minimized.has(state.key)}
-            onMinimize={(value) =>
-              setMinimized((previous) => {
-                const next = new Set(previous);
-                if (value) next.add(state.key);
-                else next.delete(state.key);
-                return next;
-              })
-            }
-            onClose={() =>
-              setComposers((items) =>
-                items.filter((item) => item.key !== state.key),
-              )
-            }
-            onNotice={(value) => {
-              setUndo(null);
-              setNotice(value);
+            discarded={discarded.has(state.key)}
+            onMinimize={(value) => {
+              setMinimized((previous) =>
+                value
+                  ? new Set([...previous, state.key])
+                  : without(previous, state.key),
+              );
+              if (value) leaveComposer();
             }}
+            onClose={() => {
+              leaveComposer();
+              removeComposer(state.key);
+            }}
+            onDiscard={(restore) => discardComposer(state.key, restore)}
+            onNotice={(message) => notify({ message })}
             onDraftId={(id) =>
               setComposers((items) =>
                 items.map((item) =>
@@ -1145,7 +1117,11 @@ export function MailPage() {
       >
         <DialogContent
           title="Delete permanently?"
-          description="These conversations will be deleted forever. This cannot be undone."
+          description={`${
+            confirmDelete && confirmDelete.length > 1
+              ? `These ${plural(confirmDelete.length, "conversation")}`
+              : "This conversation"
+          } will be deleted forever. This cannot be undone.`}
         >
           <div className="dialog-actions">
             <Button variant="ghost" onClick={() => setConfirmDelete(null)}>
@@ -1181,6 +1157,7 @@ export function MailPage() {
                 ["Mark read / unread", "Shift+I / Shift+U"],
                 ["Reply / reply all / forward", "R / A / F"],
                 ["New message", "C"],
+                ["Undo", "Z"],
                 ["Send message", "Ctrl+Enter"],
                 ["Search", "/"],
                 ["Show shortcuts", "?"],
