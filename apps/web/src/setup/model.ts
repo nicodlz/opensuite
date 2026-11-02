@@ -59,3 +59,13 @@ export function stepStatuses(
     steps.every((step) => step === "Complete") ? "Complete" : "Pending",
   ];
 }
+
+/** "2 hours ago": the age of a marker, in the largest whole unit. */
+export function formatAge(seconds: number) {
+  if (seconds < 60) return "less than a minute ago";
+  const format = new Intl.RelativeTimeFormat("en", { numeric: "always" });
+  if (seconds < 3600) return format.format(-Math.floor(seconds / 60), "minute");
+  if (seconds < 86_400)
+    return format.format(-Math.floor(seconds / 3600), "hour");
+  return format.format(-Math.floor(seconds / 86_400), "day");
+}

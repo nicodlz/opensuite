@@ -23,10 +23,17 @@ import {
 import { TextField } from "../ui/text-field.tsx";
 import { QRCodeSVG } from "qrcode.react";
 import {
+  BackupCodes,
   ChallengeInputs,
+  CredentialFields,
   FactorSummary,
+  authenticatorCode,
+  challengeHint,
   errorMessage,
 } from "./security-controls.tsx";
+// Vite injects the stylesheet.
+// oxlint-disable-next-line import/no-unassigned-import
+import "./auth.css";
 
 const sessionKey = ["auth", "session"];
 const sessionQuery = {
@@ -158,7 +165,8 @@ export function LoginPage() {
     setBusy(true);
     setError("");
     try {
-      if (challenge) await auth.verify(code, backup);
+      if (challenge)
+        await auth.verify(backup ? code : authenticatorCode(code), backup);
       else {
         const result = await auth.signIn(email, password);
         if (result.twoFactorRedirect) {
@@ -195,7 +203,7 @@ export function LoginPage() {
           {expired
             ? "Your session expired. Sign in again to continue."
             : challenge
-              ? "Choose a verification method."
+              ? challengeHint(methods, backup, methodsError)
               : "Welcome back to your workspace."}
         </p>
         <form
@@ -221,24 +229,12 @@ export function LoginPage() {
               }}
             />
           ) : (
-            <>
-              <TextField
-                label="Email address (any of your Esuno addresses)"
-                type="email"
-                autoComplete="username"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                required
-              />
-              <TextField
-                label="Password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-              />
-            </>
+            <CredentialFields
+              email={email}
+              password={password}
+              onEmail={setEmail}
+              onPassword={setPassword}
+            />
           )}
           {error && (
             <p role="alert" className="field-error">
@@ -256,7 +252,7 @@ export function LoginPage() {
               Retry loading verification methods
             </button>
           )}
-          {(challenge || error) && (
+          {challenge && (
             <button
               type="button"
               className="auth-link"
@@ -279,7 +275,7 @@ export function LoginPage() {
                   .catch((failure: unknown) => setError(errorMessage(failure)));
               }}
             >
-              Start over
+              Sign in with a different account
             </button>
           )}
           {(!challenge || methods.totp || methods.backup) && (
@@ -382,7 +378,7 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
         setPassword("");
       }
       if (action === "verify") {
-        await auth.verify(code, false);
+        await auth.verify(authenticatorCode(code), false);
         if (generation.current !== requestGeneration) return;
         setCode("");
         setNotice(
@@ -508,9 +504,7 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                 {enrollment.backupCodes.length > 0 ? (
                   <>
                     <p>Save these backup codes somewhere safe:</p>
-                    <code className="auth-secret">
-                      {enrollment.backupCodes.join("\n")}
-                    </code>
+                    <BackupCodes codes={enrollment.backupCodes} />
                   </>
                 ) : null}
                 {!factors.data?.totp ? (
@@ -520,6 +514,7 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                       value={code}
                       onChange={(event) => setCode(event.target.value)}
                       autoComplete="one-time-code"
+                      inputMode="numeric"
                     />
                     <Button
                       disabled={busy || !code}
@@ -541,7 +536,7 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                   {notice !== "Security key added." &&
                     "Your previous codes no longer work."}
                 </p>
-                <code className="auth-secret">{newBackupCodes.join("\n")}</code>
+                <BackupCodes codes={newBackupCodes} />
                 <Button onClick={() => setNewBackupCodes(null)}>Done</Button>
               </>
             ) : (
@@ -556,6 +551,7 @@ export function AccountMenu({ children }: { children?: ReactNode }) {
                   label="Current password"
                   type="password"
                   autoComplete="current-password"
+                  description="Enter your current password to change the settings below."
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                 />

@@ -1,7 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
-import { DomainName, SetupEmail } from "@opensuite/contracts";
+import { useState } from "react";
 import domainDoc from "../../../../docs/operations/domains.md?url";
 import outboundDoc from "../../../../docs/operations/outbound.md?url";
 import backupDoc from "../../../../docs/operations/backup.md?url";
@@ -9,9 +8,17 @@ import developmentDoc from "../../../../docs/development.md?url";
 import { domainsClient } from "../domains/client.ts";
 import { accountId, mailClient } from "../mail/client.ts";
 import { Button } from "../ui/button.tsx";
-import { TextField } from "../ui/text-field.tsx";
-import { setupClient } from "./client.ts";
-import { dkimStatus, stepStatuses } from "./model.ts";
+import { meQuery, setupClient } from "./client.ts";
+import { dkimStatus, formatAge, stepStatuses } from "./model.ts";
+import {
+  CreateUserForm,
+  DomainForm,
+  TestMessageForm,
+  emptyUser,
+} from "./setup-forms.tsx";
+// Vite injects the stylesheet.
+// oxlint-disable-next-line import/no-unassigned-import
+import "./setup.css";
 
 const titles = [
   "System check",
@@ -31,21 +38,22 @@ function initialStep() {
     ? value
     : 0;
 }
+/** Why accounts cannot be created yet: they need the system check. */
+function createUserBlocker(loaded: boolean, failed: boolean) {
+  if (loaded) return null;
+  return failed
+    ? "Unavailable while the system check cannot be loaded."
+    : "Available once the system check has loaded.";
+}
 export function SetupPage() {
   const queryClient = useQueryClient();
   const [step, setStep] = useState(initialStep);
   const [domainName, setDomainName] = useState("");
-  const [recipient, setRecipient] = useState("");
-  const [email, setEmail] = useState("");
-  const [name, setName] = useState("");
-  const [password, setPassword] = useState("");
+  const [testRecipient, setTestRecipient] = useState("");
+  const [newUser, setNewUser] = useState(emptyUser);
   const [message, setMessage] = useState("");
   const [sent, setSent] = useState(false);
-  const me = useQuery({
-    queryKey: ["setup-me"],
-    queryFn: () => setupClient.me({}),
-    retry: false,
-  });
+  const me = useQuery(meQuery);
   const authorized = me.data?.role === "admin";
   const status = useQuery({
     queryKey: ["setup-status"],
@@ -82,7 +90,6 @@ export function SetupPage() {
   const add = useMutation({
     mutationFn: (value: string) => domainsClient.add({ name: value }),
     onSuccess: async () => {
-      setDomainName("");
       setMessage("Domain added. Publish the records below.");
       await refreshDomains();
     },
@@ -126,23 +133,20 @@ export function SetupPage() {
     },
   });
   const create = useMutation({
-    mutationFn: () => setupClient.createUser({ email, name, password }),
+    mutationFn: (user: { email: string; name: string; password: string }) =>
+      setupClient.createUser(user),
     onSuccess: async () => {
-      setEmail("");
-      setName("");
-      setPassword("");
       setMessage("User created. Share the initial password securely.");
       await queryClient.invalidateQueries({ queryKey: ["setup-users"] });
     },
     onError: () => {
-      setPassword("");
       setMessage(
         "User creation did not finish. Check for an existing or partially provisioned account before retrying.",
       );
     },
   });
   const send = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (recipient: string) => {
       const draft = await mailClient.createDraft({
         accountId,
         draft: {
@@ -169,42 +173,6 @@ export function SetupPage() {
         "Test submission failed or its result is unknown. Check your drafts and queue before retrying.",
       ),
   });
-  function addDomain(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const parsed = DomainName.safeParse(domainName);
-    if (!parsed.success) {
-      setMessage("Enter a valid domain name.");
-      return;
-    }
-    add.mutate(parsed.data);
-  }
-  function createUser(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (
-      !SetupEmail.safeParse(email).success ||
-      !name.trim() ||
-      password.length < 12 ||
-      password.length > 128
-    ) {
-      setMessage(
-        "Enter a valid email, name and password of 12 to 128 characters.",
-      );
-      return;
-    }
-    if (!managedDomains.includes(email.toLowerCase().split("@")[1] ?? "")) {
-      setMessage("The address must use a managed domain.");
-      return;
-    }
-    create.mutate();
-  }
-  function sendTest(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!SetupEmail.safeParse(recipient).success) {
-      setMessage("Enter a valid test recipient.");
-      return;
-    }
-    send.mutate();
-  }
   if (me.isPending)
     return (
       <div className="content-wrap">
@@ -301,9 +269,8 @@ export function SetupPage() {
             {status.data?.backupAgeSeconds !== null &&
               status.data?.backupAgeSeconds !== undefined && (
                 <p>
-                  Last success marker:{" "}
-                  {Math.floor(status.data.backupAgeSeconds / 3600)} hours ago. A
-                  marker does not verify a restore.
+                  Last success marker: {formatAge(status.data.backupAgeSeconds)}
+                  . A marker does not verify a restore.
                 </p>
               )}
             <p>
@@ -344,19 +311,17 @@ export function SetupPage() {
             {domains.isPending && <p>Loading domains…</p>}
             {domains.isError && <p role="alert">Unable to load domains.</p>}
             {!domain && !domains.isPending && !domains.isError && (
-              <form onSubmit={addDomain}>
-                <TextField
-                  label="Domain name"
-                  value={domainName}
-                  onChange={(event) => setDomainName(event.target.value)}
-                  placeholder="example.com"
-                />
-                <div className="dialog-actions">
-                  <Button type="submit" disabled={add.isPending}>
-                    Add domain
-                  </Button>
-                </div>
-              </form>
+              <DomainForm
+                busy={add.isPending}
+                name={domainName}
+                onName={setDomainName}
+                onAdd={(name) =>
+                  add.mutateAsync(name).then(
+                    () => true,
+                    () => false,
+                  )
+                }
+              />
             )}
             {domain && (
               <>
@@ -469,20 +434,12 @@ export function SetupPage() {
               delivery or DKIM alignment.{" "}
               <a href={outboundDoc}>Outbound setup and rollback</a>
             </p>
-            <form onSubmit={sendTest}>
-              <TextField
-                label="Test recipient"
-                type="email"
-                value={recipient}
-                onChange={(event) => setRecipient(event.target.value)}
-                placeholder="you@example.com"
-              />
-              <div className="dialog-actions">
-                <Button type="submit" disabled={send.isPending}>
-                  Send test message
-                </Button>
-              </div>
-            </form>
+            <TestMessageForm
+              busy={send.isPending}
+              recipient={testRecipient}
+              onRecipient={setTestRecipient}
+              onSend={(recipient) => send.mutate(recipient)}
+            />
             <p>
               Submission queues a message from your own mailbox; confirm receipt
               and inspect delivery failures separately.
@@ -501,35 +458,22 @@ export function SetupPage() {
               </strong>
               . Add a domain first to use it. Public sign-up remains disabled.
             </p>
-            <form onSubmit={createUser}>
-              <TextField
-                label="Email address"
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-              />
-              <TextField
-                label="Display name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-              />
-              <TextField
-                label="Initial password"
-                type="password"
-                autoComplete="new-password"
-                description="At least 12 characters. Share it securely."
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-              <div className="dialog-actions">
-                <Button
-                  type="submit"
-                  disabled={create.isPending || !status.data}
-                >
-                  Create user
-                </Button>
-              </div>
-            </form>
+            <CreateUserForm
+              managedDomains={managedDomains}
+              blocker={createUserBlocker(
+                status.data !== undefined,
+                status.isError,
+              )}
+              busy={create.isPending}
+              user={newUser}
+              onUser={setNewUser}
+              onCreate={(user) =>
+                create.mutateAsync(user).then(
+                  () => true,
+                  () => false,
+                )
+              }
+            />
             {users.data && (
               <p>
                 {users.data.length} active account

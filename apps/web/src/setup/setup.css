@@ -1,0 +1,9 @@
+.setup-submit {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.setup-blocker {
+  color: var(--muted);
+  font-size: 13px;
+}
