@@ -54,12 +54,43 @@ else
   [ -z "$services" ] || { echo 'restore: stop all target services before --force' >&2; exit 1; }
 fi
 snapshot=${1:-latest}
-# Restore only the captured subtree directly into the private stage.
-compose run --rm --no-deps -T backup-restic 'exec restic restore "$1:/stage/data" --target /stage/data' sh "$snapshot" >&2
+# Pending streaming snapshots are never recovery points. Prefer the newest
+# verified snapshot; legacy snapshots remain selectable by ID.
+if [ "$snapshot" = latest ]; then
+  snapshots=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified --latest 1 --group-by paths')
+  count=$(printf '%s\n' "$snapshots" | grep -o '"id":' | wc -l)
+  [ "$count" -le 1 ] || { echo 'restore: multiple snapshot groups; select an explicit snapshot ID' >&2; exit 1; }
+  snapshot=$(printf '%s\n' "$snapshots" | sed -n 's/.*"id":"\([a-f0-9][a-f0-9]*\)".*/\1/p')
+  if [ -z "$snapshot" ]; then
+    # Preserve the old latest behavior when a repository only has legacy
+    # snapshots. A newer pending snapshot is refused by the check below.
+    snapshots=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --latest 1 --group-by paths')
+    count=$(printf '%s\n' "$snapshots" | grep -o '"id":' | wc -l)
+    [ "$count" -le 1 ] || { echo 'restore: multiple snapshot groups; select an explicit snapshot ID' >&2; exit 1; }
+    snapshot=$(printf '%s\n' "$snapshots" | sed -n 's/.*"id":"\([a-f0-9][a-f0-9]*\)".*/\1/p')
+  fi
+  [ "${#snapshot}" = 64 ] || { echo 'restore: cannot select a recovery snapshot' >&2; exit 1; }
+fi
+snapshot_info=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json "$1"' sh "$snapshot")
+case "$snapshot_info" in *'"opensuite-pending"'*) echo 'restore: snapshot is not verified' >&2; exit 1;; esac
+BACKUP_STREAM_SNAPSHOT=''
+case "$snapshot_info" in *'"opensuite-verified"'*) BACKUP_STREAM_SNAPSHOT=$snapshot; export BACKUP_STREAM_SNAPSHOT;; esac
+# Streamed snapshots omit object bytes from scratch; legacy snapshots still
+# restore their original staged object trees for compatibility.
+if [ -n "$BACKUP_STREAM_SNAPSHOT" ]; then
+  prepare_stream_tool
+  # Exclusions are relative to the selected /stage/data subtree.
+  compose run --rm --no-deps -T backup-restic 'exec restic restore "$1:/stage/data" --target /stage/data --exclude "/objects/**" --verify' sh "$snapshot" >&2
+else
+  compose run --rm --no-deps -T backup-restic 'exec restic restore "$1:/stage/data" --target /stage/data --verify' sh "$snapshot" >&2
+fi
 # Restic restores as container root. The invoking Docker operator must be able
 # to read the private stage; archive-internal ownership remains in volumes.tar.
 compose run --rm --no-deps -T backup-volumes 'chown -R "$1:$2" /stage/data' sh "$(id -u)" "$(id -g)" >&2
 [ -s "$BACKUP_STAGE/data/config/env" ] && [ -s "$BACKUP_STAGE/data/volumes.tar" ] || { echo 'restore: snapshot is missing required files' >&2; exit 1; }
+if [ -n "$BACKUP_STREAM_SNAPSHOT" ]; then
+  [ "$(cat "$BACKUP_STAGE/data/config/stream-version")" = 2 ] || { echo 'restore: invalid streamed snapshot' >&2; exit 1; }
+fi
 if [ "$force" = 1 ]; then
   saved_project=$(env_project "$BACKUP_STAGE/data/config/env")
   protect_project "$saved_project"

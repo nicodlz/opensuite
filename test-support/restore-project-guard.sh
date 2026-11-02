@@ -20,6 +20,13 @@ cat > "$work/bin/docker" <<'MOCK'
 #!/bin/sh
 case "$*" in
   *'ps --services'*) exit 0 ;;
+  *'restic snapshots'*)
+    if [ "${MULTI_SNAPSHOT:-0}" = 1 ]; then
+      printf '[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]\n'
+    else
+      printf '[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]\n'
+    fi
+    exit 0 ;;
   *'restic restore'*)
     mkdir -p "$BACKUP_STAGE/data/config"
     printf 'COMPOSE_PROJECT_NAME=savedprod\nDRIVE_S3_ENDPOINT=http://fixture\nDRIVE_S3_REGION=fixture\nDRIVE_S3_BUCKET=fixture\nDRIVE_S3_ACCESS_KEY=fixture\nDRIVE_S3_SECRET_FILE=/fixture\n' > "$BACKUP_STAGE/data/config/env"
@@ -58,4 +65,8 @@ if OMIT_SAVED_SECRET=1 DRIVE_S3_SECRET_FILE=/placeholder COMPOSE_PROJECT_NAME=is
   echo 'guard: missing saved Drive secret unexpectedly accepted' >&2; exit 1
 fi
 grep -Fq 'DRIVE_S3_SECRET_FILE' "$work/stderr"
-printf '%s\n' 'Restore project guard: 6 cases passed.'
+if MULTI_SNAPSHOT=1 COMPOSE_PROJECT_NAME=isolated ./deploy/backup/restore.sh --force --confirm-project isolated > "$work/stdout" 2> "$work/stderr"; then
+  echo 'guard: ambiguous latest snapshot unexpectedly accepted' >&2; exit 1
+fi
+grep -Fq 'multiple snapshot groups' "$work/stderr"
+printf '%s\n' 'Restore project guard: 7 cases passed.'

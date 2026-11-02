@@ -25,7 +25,8 @@ token separately as well as its backed-up hash. Protect the
 master passwords and user recovery factors separately: the server backup cannot
 recover a forgotten master password.
 Record each successful snapshot ID and capture time in an independently
-administered log; the restic JSON backup output includes the snapshot ID.
+administered log; the backup's `snapshot_verified` event includes both. Confirm
+the overall job also succeeds before treating it as a recovery point.
 
 Protect against compromise or deletion of the primary B2 account with a
 separately administered backup host. That host pulls snapshots from the primary
@@ -60,7 +61,7 @@ provider-specific retention and lock behavior before relying on it.
 
    ```sh
    export COMPOSE_PROJECT_NAME=recovery
-   deploy/backup/restore.sh                  # latest snapshot
+   deploy/backup/restore.sh                  # latest verified snapshot
    # Or select a known snapshot:
    deploy/backup/restore.sh SNAPSHOT_ID
    ```
