@@ -22,19 +22,19 @@ services:
       - "127.0.0.1::80"
   localstack:
     ports: !override []
-    # This suite uses the AWS CLI against MinIO, not LocalStack's S3/SQS fixtures.
+    # This suite uses the AWS CLI against SeaweedFS, not LocalStack's S3/SQS fixtures.
     volumes: !override
       - localstack-data:/var/lib/localstack
-  minio:
-    image: minio/minio:RELEASE.2025-07-23T15-54-02Z@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0
-    command: ["server", "/data"]
+  object-store:
+    image: chrislusf/seaweedfs:4.51@sha256:f7a49e3f3972ebed5be2ed4befa4a0c68eb7bdddba6e692d42729ceb545134b8
+    command: ["server", "-ip.bind=0.0.0.0", "-filer", "-s3"]
     environment:
-      MINIO_ROOT_USER: local-fixture-key
-      MINIO_ROOT_PASSWORD: local-fixture-secret
+      AWS_ACCESS_KEY_ID: local-fixture-key
+      AWS_SECRET_ACCESS_KEY: local-fixture-secret
     volumes:
       - mail-test-objects:/data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8333"]
       interval: 5s
       timeout: 5s
       retries: 30

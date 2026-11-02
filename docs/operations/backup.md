@@ -177,7 +177,7 @@ local disposable integration test is not a measurement of production RTO or
 proof of B2 compatibility.
 
 Run the isolated test with `./scripts/backup-integration.sh`; it creates a
-throwaway MinIO service and Compose projects, imports mail, captures, destroys
+throwaway SeaweedFS service and Compose projects, imports mail, captures, destroys
 and restores fresh volumes and object prefixes. It makes no AWS or B2 calls.
 
-Run the Vault recovery check with `node scripts/backup-restore-drill.mjs --report /tmp/vault-drill.xml` after installing dependencies. It uses disposable fixture credentials, a local MinIO S3 substitute, the pinned Bitwarden CLI, and isolated Compose projects; the report contains no vault export. This is not proof of real B2 behavior.
+Run the Vault recovery check with `node scripts/backup-restore-drill.mjs --report /tmp/vault-drill.xml` after installing dependencies. It uses disposable fixture credentials, a local SeaweedFS S3 substitute, the pinned Bitwarden CLI, and isolated Compose projects; the report contains no vault export. This is not proof of real B2 behavior.
