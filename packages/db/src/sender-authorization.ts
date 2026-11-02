@@ -1,6 +1,42 @@
 import type { Prisma, PrismaClient } from "./generated/index.js";
 
 type Client = PrismaClient | Prisma.TransactionClient;
+export async function activeSenderMailbox(
+  db: Client,
+  userId: string,
+  accountId: string,
+) {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: {
+      disabled: true,
+      mailbox: { select: { accountId: true, address: true, status: true } },
+    },
+  });
+  return user &&
+    !user.disabled &&
+    user.mailbox?.status === "active" &&
+    user.mailbox.accountId === accountId
+    ? user.mailbox
+    : null;
+}
+export async function usableSendDomain(
+  db: Client,
+  name: string,
+  configured: readonly string[],
+) {
+  const domain = await db.domain.findUnique({
+    where: { name },
+    select: { status: true, removalPending: true, stalwartId: true },
+  });
+  return Boolean(
+    domain &&
+    !domain.removalPending &&
+    domain.stalwartId &&
+    domain.status !== "failing" &&
+    (configured.includes(name) || domain.status === "verified"),
+  );
+}
 export const validMailboxLocalPart = (part: string) =>
   part.length <= 39 && /^[a-z0-9]+(?:[-.][a-z0-9]+)*$/.test(part);
 

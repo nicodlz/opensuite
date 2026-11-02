@@ -41,6 +41,23 @@ export type JmapError =
   | { kind: "invalidResponse"; message: string };
 export type JmapResult<T> = Result<T, JmapError>;
 
+async function responseResult(
+  response: Response,
+): Promise<JmapResult<Response>> {
+  if (response.ok) return ok(response);
+  const body = await response.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    data = undefined;
+  }
+  const problem = ErrorSchema.safeParse(data);
+  return problem.success
+    ? err({ kind: "request", status: response.status, ...problem.data })
+    : err({ kind: "http", status: response.status, body });
+}
+
 export interface TransportOptions {
   readonly authorization: string;
   readonly fetch?: typeof fetch;
@@ -75,6 +92,10 @@ const ResponseSchema = z.object({
   methodResponses: z.array(z.tuple([z.string(), z.unknown(), z.string()])),
   sessionState: z.string(),
 });
+
+function validCallCount(calls: readonly unknown[], followup?: "Email/set") {
+  return calls.length === 1 || (calls.length === 2 && followup !== undefined);
+}
 
 export class Transport {
   readonly #authorization: string;
@@ -136,6 +157,8 @@ export class Transport {
             kind: "invalidResponse",
             message: "Redirect has a different origin",
           });
+        if (signal.aborted)
+          return err({ kind: "network", message: "Request aborted" });
         requests++;
         response = await this.#fetch(next, {
           ...init,
@@ -144,24 +167,7 @@ export class Transport {
           redirect: "manual",
         });
       }
-      if (!response.ok) {
-        const body = await response.text();
-        let data: unknown;
-        try {
-          data = JSON.parse(body);
-        } catch {
-          data = undefined;
-        }
-        const problem = ErrorSchema.safeParse(data);
-        if (problem.success)
-          return err({
-            kind: "request",
-            status: response.status,
-            ...problem.data,
-          });
-        return err({ kind: "http", status: response.status, body });
-      }
-      return ok(response);
+      return await responseResult(response);
     } catch (cause) {
       const refused = z
         .object({ cause: z.object({ code: z.literal("ECONNREFUSED") }) })
@@ -200,17 +206,19 @@ export class Transport {
     using: readonly string[],
     schema: z.ZodType<T>,
     followup?: "Email/set",
+    signal: AbortSignal | null = null,
   ): Promise<JmapResult<T>> {
     const response = await this.json(apiUrl, ResponseSchema, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ using, methodCalls: [[method, args, "0"]] }),
+      signal,
     });
     if (response.isErr()) return err(response.error);
     const calls = response.value.methodResponses;
     const call = calls[0];
     if (
-      (calls.length !== 1 && !(followup !== undefined && calls.length === 2)) ||
+      !validCallCount(calls, followup) ||
       call === undefined ||
       call[2] !== "0"
     )

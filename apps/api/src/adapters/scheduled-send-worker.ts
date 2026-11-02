@@ -102,17 +102,31 @@ async function submit(
   ctx: WorkerContext,
   c: Connection,
   sender: Awaited<ReturnType<WorkerContext["sender"]>>,
+  token: string,
+  configured: readonly string[],
 ) {
+  let issued = false;
+  const requestIssued = () => issued;
   try {
-    const result = await c.client.submit(
-      c.session,
-      c.id,
-      row.draftId,
-      row.identityId,
-      { mailFrom: { email: sender.from }, rcptTo: sender.recipients },
-      undefined,
-      { requestId: row.id },
+    const handoff = await ctx.store.guardedHandoff(
+      row,
+      token,
+      configured,
+      (signal) => {
+        issued = true;
+        return c.client.submit(
+          c.session,
+          c.id,
+          row.draftId,
+          row.identityId,
+          { mailFrom: { email: sender.from }, rcptTo: sender.recipients },
+          undefined,
+          { requestId: row.id, signal },
+        );
+      },
     );
+    if (handoff.kind !== "completed") return;
+    const result = handoff.value;
     if (result.isOk()) {
       if (await ctx.store.acceptHandoff(row, result.value.id))
         await release(c, row, ctx);
@@ -123,9 +137,10 @@ async function submit(
     ) {
       await ctx.store.fail(row, "submission_rejected");
     } else await ctx.store.transition(row.id, ["creating"], "unknown");
-  } catch {
+  } catch (error) {
+    if (!requestIssued()) throw error;
     // Once the handoff starts, neither a crash nor a lost response is safe to retry.
-    await ctx.store.transition(row.id, ["creating"], "unknown");
+    await ctx.store.unknownHandoff(row.id, token);
   }
 }
 
@@ -186,16 +201,8 @@ async function prepare(
   // committing the handoff. Unknown authorization defers, never submits.
   const final = await authorize(row);
   if (final) return reject(final);
-  if (
-    await ctx.store.beginHandoff(
-      row,
-      token,
-      () => ctx.now(),
-      previous,
-      configured,
-    )
-  )
-    await submit(row, ctx, c, sender);
+  if (await ctx.store.beginHandoff(row, token, () => ctx.now(), previous))
+    await submit(row, ctx, c, sender, token, configured);
 }
 
 export function createScheduledWorker(

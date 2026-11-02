@@ -9,10 +9,13 @@ import {
   createAliasStore,
   createAddressStore,
   createDatabase,
+  createDomainStore,
+  createProvisioningStore,
   createScheduledSendStore,
   type PrismaClient,
 } from "@opensuite/db";
 import { createGuards as createScheduledGuards } from "../src/adapters/scheduled-send-job.ts";
+import { withRevocation } from "../../../packages/db/src/scheduled-send-guard.ts";
 import { JmapClient } from "@opensuite/jmap";
 import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, ok } from "neverthrow";
@@ -126,6 +129,14 @@ beforeAll(async () => {
     await db.user.create({
       data: { id: actor.id, email: actor.email, name: "Fixture" },
     });
+    await db.user.create({
+      data: {
+        id: "schedule-admin",
+        email: "admin@example.test",
+        name: "Admin",
+        role: "admin",
+      },
+    });
     await db.mailboxLink.create({
       data: {
         userId: actor.id,
@@ -199,6 +210,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     | "flag"
     | "send"
     | "missingSend"
+    | "holdResponse"
     | "missingCreate"
     | "move"
     | "delayedMove"
@@ -277,6 +289,19 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     }
     const response = await fetch(input, init);
     if (
+      lostResponse === "holdResponse" &&
+      body.includes('"EmailSubmission/set"')
+    ) {
+      lostResponse = null;
+      const signal = init?.signal;
+      if (!signal) throw new Error("Missing submission deadline");
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("submission response timed out");
+    }
+    if (
       afterQuery &&
       body.includes('"EmailSubmission/query"') &&
       body.includes(afterQueryFor)
@@ -339,12 +364,13 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       guards.scheduledStore,
     );
     guards.scheduledStore.beginHandoff = async (...args) => {
-      if (beforeHandoff) {
+      const started = await begin(...args);
+      if (started && beforeHandoff) {
         const hook = beforeHandoff;
         beforeHandoff = undefined;
         await hook();
       }
-      return begin(...args);
+      return started;
     };
     return createMailWithInvitations({
       origin: base,
@@ -860,7 +886,6 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
         staleToken,
         () => Date.now() + clockOffset,
         [],
-        ["example.test"],
       ),
     ).toBe(false);
     expect(
@@ -1049,17 +1074,42 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       data: { enabled: true },
     });
 
-    // Reproduce revocation exactly between the final authorization and the
-    // durable handoff. Exercise both managed alias and secondary identity.
+    // Revoke after the durable marker but before the worker takes its shared
+    // lock, for each kind of sender revocation.
     const aliasRow = await database.emailAlias.findUniqueOrThrow({
       where: { address: "alias@example.test" },
     });
     const secondaryRow = await database.address.findFirstOrThrow({
       where: { userId: actor.id, localPart: "secondary", isAlias: false },
     });
+    const domainStore = createDomainStore(database);
+    const provision = value(createProvisioningStore(database, "a".repeat(64)));
+    const restoreSender = async () => {
+      await database.user.update({
+        where: { id: actor.id },
+        data: { disabled: false },
+      });
+      await database.mailboxLink.update({
+        where: { userId: actor.id },
+        data: { status: "active" },
+      });
+      await database.domain.update({
+        where: { id: aliasRow.domainId },
+        data: { status: "verified" },
+      });
+      await database.emailAlias.update({
+        where: { id: aliasRow.id },
+        data: { enabled: true, ready: true },
+      });
+      await database.address.update({
+        where: { id: secondaryRow.id },
+        data: { removalPending: false, ready: true, active: true },
+      });
+    };
     const senderCases = [
       {
         email: "alias@example.test",
+        reason: "sender_unavailable",
         revoke: () => aliasStore.transition(actor.id, aliasRow.id, "disable"),
         restore: () =>
           database.emailAlias.update({
@@ -1069,12 +1119,31 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       },
       {
         email: "secondary@example.test",
+        reason: "sender_unavailable",
         revoke: () => addressStore.remove(actor.id, secondaryRow.id),
         restore: () =>
           database.address.update({
             where: { id: secondaryRow.id },
             data: { removalPending: false, ready: true, active: true },
           }),
+      },
+      {
+        email: actor.email,
+        reason: "domain_unavailable",
+        revoke: () =>
+          domainStore.save(
+            "schedule-admin",
+            aliasRow.domainId,
+            { status: "failing", records: [] },
+            "admin.domain.recheck.manual",
+          ),
+        restore: restoreSender,
+      },
+      {
+        email: "alias@example.test",
+        reason: "account_inactive",
+        revoke: () => provision.markDisabled(actor.id, "schedule-admin"),
+        restore: restoreSender,
       },
     ];
     await senderCases.reduce<Promise<void>>(
@@ -1115,7 +1184,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
             ),
           ).toMatchObject({
             state: "failed",
-            failure: { code: "sender_unavailable" },
+            failure: { code: senderCase.reason },
           });
           expect(
             await database.auditEvent.count({
@@ -1144,15 +1213,15 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
               { type: "delay", seconds: 1 },
             ),
           );
+          let revocation: Promise<boolean> | undefined;
+          let revokedWhileHeld = false;
           beforeSubmission = async () => {
-            const revocation = await senderCase.revoke();
-            expect(revocation).toMatchObject({
-              error: {
-                kind: "conflict",
-                message:
-                  "An earlier scheduled send has an unresolved outcome; try again after it is reconciled.",
-              },
+            revocation = Promise.resolve(senderCase.revoke()).then((result) => {
+              revokedWhileHeld = true;
+              return result.isOk();
             });
+            await pause(150);
+            expect(revokedWhileHeld).toBe(false);
             expect(
               await database.auditEvent.count({
                 where: {
@@ -1178,12 +1247,261 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
               },
             }),
           ).toBe(1);
-          expect((await senderCase.revoke()).isOk()).toBe(true);
+          expect(await revocation).toBe(true);
           await senderCase.restore();
           return undefined;
         }),
       Promise.resolve(),
     );
+
+    // A queued exclusive revocation must not strand a request that was never
+    // issued, even if another worker has already made the marker uncertain.
+    clockOffset = 0;
+    const waitingDraft = value(
+      await mail.createDraft(actor, "default", {
+        ...content,
+        subject: "revocation-lock-wait",
+      }),
+    );
+    const waitingItem = value(
+      await mail.schedule(actor, "default", waitingDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    const entered = Promise.withResolvers<void>();
+    const releaseLock = Promise.withResolvers<void>();
+    const holding = withRevocation(database, async () => {
+      entered.resolve();
+      await releaseLock.promise;
+    });
+    await entered.promise;
+    clockOffset = 2000;
+    const beforeWaiting = immediateAttempts;
+    try {
+      beforeHandoff = async () => {
+        await createService().reconcileScheduled();
+        expect(
+          (
+            await database.scheduledSend.findUniqueOrThrow({
+              where: { id: waitingItem.id },
+            })
+          ).state,
+        ).toBe("unknown");
+      };
+      await mail.reconcileScheduled();
+      expect(immediateAttempts).toBe(beforeWaiting);
+      expect(
+        await database.scheduledSend.findUniqueOrThrow({
+          where: { id: waitingItem.id },
+        }),
+      ).toMatchObject({ state: "pending", leaseToken: null });
+    } finally {
+      releaseLock.resolve();
+      await holding;
+    }
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(beforeWaiting + 1);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (entry) => entry.id === waitingItem.id,
+      )?.state,
+    ).toBe("sent");
+
+    // A database timeout before issue is also safe to retry. Holding an
+    // exclusive PostgreSQL table lock makes the final sender read wait.
+    clockOffset = 0;
+    const dbWaitDraft = value(
+      await mail.createDraft(actor, "default", {
+        ...content,
+        subject: "authorization-db-timeout",
+      }),
+    );
+    const dbWaitItem = value(
+      await mail.schedule(actor, "default", dbWaitDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    const lockedUser = Promise.withResolvers<void>();
+    const unlockUser = Promise.withResolvers<void>();
+    let tableLock: Promise<void> | undefined;
+    beforeHandoff = async () => {
+      tableLock = database.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`LOCK TABLE "User" IN ACCESS EXCLUSIVE MODE`;
+          lockedUser.resolve();
+          await unlockUser.promise;
+        },
+        { timeout: 10_000 },
+      );
+      await lockedUser.promise;
+    };
+    const releaseFallback = setTimeout(() => unlockUser.resolve(), 6_000);
+    clockOffset = 2000;
+    const beforeDbWait = immediateAttempts;
+    const dbWaitWork = mail.reconcileScheduled();
+    try {
+      await lockedUser.promise;
+      const waitForSharedLock = async (remaining: number): Promise<void> => {
+        const locks = await database.$queryRaw<
+          { count: number }[]
+        >`SELECT COUNT(*)::int AS count FROM pg_locks WHERE locktype = 'advisory' AND mode = 'ShareLock' AND granted AND objid = 1873943821`;
+        if (locks[0]?.count) return;
+        if (!remaining) throw new Error("Handoff did not acquire its lock");
+        await pause(25);
+        return waitForSharedLock(remaining - 1);
+      };
+      await waitForSharedLock(100);
+      const probeStart = performance.now();
+      await withRevocation(database, () => Promise.resolve());
+      expect(performance.now() - probeStart).toBeLessThan(5_000);
+    } finally {
+      clearTimeout(releaseFallback);
+      unlockUser.resolve();
+      await tableLock;
+    }
+    await dbWaitWork;
+    expect(immediateAttempts).toBe(beforeDbWait);
+    expect(
+      await database.scheduledSend.findUniqueOrThrow({
+        where: { id: dbWaitItem.id },
+      }),
+    ).toMatchObject({ state: "pending", leaseToken: null });
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(beforeDbWait + 1);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (entry) => entry.id === dbWaitItem.id,
+      )?.state,
+    ).toBe("sent");
+
+    // A delayed worker cannot requeue or submit a newer attempt.
+    clockOffset = 0;
+    const staleDraft = value(await mail.createDraft(actor, "default", content));
+    const staleItem = value(
+      await mail.schedule(actor, "default", staleDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    clockOffset = 2000;
+    const oldToken = randomUUID();
+    expect(
+      await store.claim(
+        staleItem.id,
+        new Date(Date.now() + clockOffset),
+        oldToken,
+      ),
+    ).toBe(true);
+    const staleRecord = await database.scheduledSend.findUniqueOrThrow({
+      where: { id: staleItem.id },
+    });
+    expect(
+      await store.beginHandoff(
+        staleRecord,
+        oldToken,
+        () => Date.now() + clockOffset,
+        [],
+      ),
+    ).toBe(true);
+    await database.scheduledSend.update({
+      where: { id: staleItem.id },
+      data: { state: "pending", leaseToken: null, leaseUntil: null },
+    });
+    const newToken = randomUUID();
+    expect(
+      await store.claim(
+        staleItem.id,
+        new Date(Date.now() + clockOffset),
+        newToken,
+      ),
+    ).toBe(true);
+    const newRecord = await database.scheduledSend.findUniqueOrThrow({
+      where: { id: staleItem.id },
+    });
+    expect(
+      await store.beginHandoff(
+        newRecord,
+        newToken,
+        () => Date.now() + clockOffset,
+        [],
+      ),
+    ).toBe(true);
+    let staleIssued = false;
+    const staleOutcome = await store.guardedHandoff(
+      staleRecord,
+      oldToken,
+      ["example.test"],
+      () => {
+        staleIssued = true;
+        return Promise.resolve("unexpected");
+      },
+    );
+    expect(staleOutcome.kind).toBe("stale");
+    expect(staleIssued).toBe(false);
+    expect(
+      (
+        await database.scheduledSend.findUniqueOrThrow({
+          where: { id: staleItem.id },
+        })
+      ).leaseToken,
+    ).toBe(newToken);
+    expect(await store.finish(newRecord, ["creating"], "canceled")).toBe(true);
+
+    // A provider response held past the deadline must not hold revocation;
+    // the item stays uncertain and is reconciled without another submission.
+    clockOffset = 0;
+    const timeoutDraft = value(
+      await mail.createDraft(actor, "default", {
+        ...content,
+        subject: "revocation-timeout",
+      }),
+    );
+    const timeoutItem = value(
+      await mail.schedule(actor, "default", timeoutDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 1,
+      }),
+    );
+    let timeoutRevocation: Promise<boolean> | undefined;
+    let timeoutRevoked = false;
+    beforeSubmission = async () => {
+      timeoutRevocation = Promise.resolve(
+        aliasStore.transition(actor.id, aliasRow.id, "disable"),
+      ).then((result) => {
+        timeoutRevoked = true;
+        return result.isOk();
+      });
+      await pause(150);
+      expect(timeoutRevoked).toBe(false);
+    };
+    lostResponse = "holdResponse";
+    clockOffset = 2000;
+    const timeoutStart = performance.now();
+    const attemptsAtTimeout = immediateAttempts;
+    await mail.reconcileScheduled();
+    expect(performance.now() - timeoutStart).toBeGreaterThanOrEqual(1_900);
+    expect(await timeoutRevocation).toBe(true);
+    expect(performance.now() - timeoutStart).toBeLessThan(6_000);
+    expect(immediateAttempts).toBe(attemptsAtTimeout + 1);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (entry) => entry.id === timeoutItem.id,
+      ),
+    ).toMatchObject({
+      state: "unknown",
+      uncertainty:
+        "This message may already have been submitted; revoking the sender cannot guarantee it will not be sent.",
+    });
+    await restoreSender();
+    await mail.reconcileScheduled();
+    expect(immediateAttempts).toBe(attemptsAtTimeout + 1);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (entry) => entry.id === timeoutItem.id,
+      )?.state,
+    ).toBe("sent");
 
     // Even if the application alias still exists, a missing provider identity
     // fails release and records why instead of handing off the draft.
@@ -1350,7 +1668,6 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
         crashToken,
         () => crashTime.getTime(),
         [],
-        ["example.test"],
       ),
     ).toBe(true);
     const uncertainRevocation = await aliasStore.transition(
@@ -1358,20 +1675,15 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       aliasRow.id,
       "disable",
     );
-    expect(uncertainRevocation).toMatchObject({
-      error: {
-        kind: "conflict",
-        message:
-          "An earlier scheduled send has an unresolved outcome; try again after it is reconciled.",
-      },
-    });
+    expect(uncertainRevocation.isOk()).toBe(true);
     expect(
       (
         await database.emailAlias.findUniqueOrThrow({
           where: { id: aliasRow.id },
         })
       ).enabled,
-    ).toBe(true);
+    ).toBe(false);
+    await restoreSender();
     const beforeCrashRecovery = immediateAttempts;
     await createService().reconcileScheduled();
     expect(immediateAttempts).toBe(beforeCrashRecovery);

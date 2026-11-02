@@ -9,10 +9,7 @@ import {
   usableAddressDomain,
   validMailboxLocalPart,
 } from "./sender-authorization.ts";
-import {
-  hasUnresolvedHandoff,
-  unresolvedHandoff,
-} from "./scheduled-send-guard.ts";
+import { lockRevocation, withRevocation } from "./scheduled-send-guard.ts";
 
 export { validMailboxLocalPart };
 /** Configured domains are usable even if DNS verification is not configured. */
@@ -160,13 +157,15 @@ export function createAddressStore(
               !row.user.disabled &&
               row.user.mailbox?.status === "active";
             if (row.active !== desired)
-              await db.address.updateMany({
-                where: { id: row.id, ready: true, revision: row.revision },
-                data: {
-                  ready: false,
-                  active: false,
-                  revision: { increment: 1 },
-                },
+              await withRevocation(db, async (tx) => {
+                await tx.address.updateMany({
+                  where: { id: row.id, ready: true, revision: row.revision },
+                  data: {
+                    ready: false,
+                    active: false,
+                    revision: { increment: 1 },
+                  },
+                });
               });
           }
           /* oxlint-enable eslint/no-await-in-loop */
@@ -342,18 +341,7 @@ export function createAddressStore(
             },
           });
           if (!row) return err({ kind: "not_found" });
-          const domain = await tx.domain.findUniqueOrThrow({
-            where: { id: row.domainId },
-            select: { name: true },
-          });
-          if (
-            await hasUnresolvedHandoff(
-              tx,
-              userId,
-              `${row.localPart}@${domain.name}`,
-            )
-          )
-            return err(unresolvedHandoff);
+          await lockRevocation(tx);
           await tx.address.update({
             where: { id },
             data: {
@@ -409,7 +397,7 @@ export function createAddressStore(
       enabled: boolean,
     ) =>
       ResultAsync.fromPromise(
-        db.$transaction(async (tx) => {
+        withRevocation(db, async (tx) => {
           const where = {
             id,
             userId,
@@ -465,12 +453,12 @@ export function createAddressStore(
       ),
     dirty: (userId: string, id: string) =>
       ResultAsync.fromPromise(
-        db.address
-          .updateMany({
+        withRevocation(db, async (tx) => {
+          await tx.address.updateMany({
             where: { id, userId },
             data: { ready: false, updatedAt: new Date() },
-          })
-          .then(() => undefined),
+          });
+        }),
         unavailable,
       ),
     pending: () =>

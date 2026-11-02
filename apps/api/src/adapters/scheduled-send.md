@@ -17,15 +17,22 @@ mode, measuring the shared mail and Drive quota requires both usage sources;
 an unavailable usage source therefore delays release rather than bypassing the
 quota check. Self-hosted accounts with no quota do not need a usage measurement.
 
-Final sender authorization and alias or secondary-address revocation share a
-database lock. The handoff is recorded before the provider request, and the
-provider's acceptance is recorded before revocation can succeed. If revocation
-wins first, the worker fails the scheduled item with `sender_unavailable`.
-While a handoff has an uncertain outcome, revoking that sender returns a
-conflict until reconciliation establishes acceptance or definite failure. This
-includes a crash immediately after recording the handoff: the application cannot
-prove whether the request reached the mail server, so it does not assume that
-revocation or cancellation succeeded.
+Final sender authorization and the provider request hold a shared database
+lock. Alias, secondary-address, domain, and account revocations take its
+exclusive counterpart, so a revocation waits for a request already issued and
+no request starts after a committed revocation. The final check, request and
+database transaction share a 3-second deadline. When the request expires, its
+outcome remains uncertain and the lock is released; the user can
+still revoke the sender. A request issued before
+revocation may already have been accepted, and is never replayed blindly.
+The durable handoff marker is committed before the request so a crash cannot
+cause a second submission.
+
+If the lock is busy or a database failure occurs before the request is issued,
+the same attempt is safely returned to the queue. An attempt token prevents an
+old worker from changing or submitting a newer attempt.
+The database enforces the transaction deadline with `transaction_timeout`;
+the deployed PostgreSQL image is version 18.
 
 The database lease and state transition give cancellation and submission one
 winner. Cancellation succeeds while an item is still held, including when its

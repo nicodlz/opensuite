@@ -1,24 +1,28 @@
-import type { Prisma } from "./generated/index.js";
+import type { Prisma, PrismaClient } from "./generated/index.js";
 
-export const unresolvedHandoff = {
-  kind: "conflict" as const,
-  message:
-    "An earlier scheduled send has an unresolved outcome; try again after it is reconciled.",
-};
+// Shared for a submission, exclusive for changes that revoke its sender.
+const HANDOFF_LOCK = 1873943821;
+export const HANDOFF_TIMEOUT_MS = 3_000;
 
-/** A handoff without a proven outcome must not be overtaken by revocation. */
-export async function hasUnresolvedHandoff(
-  tx: Prisma.TransactionClient,
-  userId: string,
-  address: string,
+export async function tryLockHandoff(tx: Prisma.TransactionClient) {
+  const result = await tx.$queryRaw<
+    { acquired: boolean }[]
+  >`SELECT pg_try_advisory_xact_lock_shared(${HANDOFF_LOCK}::bigint) AS acquired`;
+  return result[0]?.acquired === true;
+}
+export async function lockRevocation(tx: Prisma.TransactionClient) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(${HANDOFF_LOCK}::bigint)`;
+}
+
+export function withRevocation<T>(
+  db: PrismaClient,
+  work: (tx: Prisma.TransactionClient) => Promise<T>,
 ) {
-  return (
-    (await tx.scheduledSend.count({
-      where: {
-        userId,
-        senderAddress: address.toLowerCase(),
-        state: { in: ["creating", "unknown", "canceling"] },
-      },
-    })) > 0
+  return db.$transaction(
+    async (tx) => {
+      await lockRevocation(tx);
+      return work(tx);
+    },
+    { timeout: 10_000, maxWait: 5_000 },
   );
 }

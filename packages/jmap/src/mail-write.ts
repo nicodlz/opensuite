@@ -202,6 +202,7 @@ export class MailWriteClient extends MailReadClient {
     options?: {
       requestId?: string | undefined;
       uncertainFollowup?: boolean | undefined;
+      signal?: AbortSignal | undefined;
     },
   ): Promise<JmapResult<{ id: string }>> {
     const method = "EmailSubmission/set";
@@ -240,6 +241,7 @@ export class MailWriteClient extends MailReadClient {
       [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
       SetSchema(z.object({ id: z.string() })),
       sentMailboxId === undefined ? undefined : "Email/set",
+      options?.signal,
     );
     if (
       options?.uncertainFollowup &&

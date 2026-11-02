@@ -36,3 +36,8 @@ export type {
 
 export { createInvitationStore } from "./invitations.ts";
 export type { InvitationStore } from "./invitations.ts";
+
+export {
+  activeSenderMailbox,
+  usableSendDomain,
+} from "./sender-authorization.ts";

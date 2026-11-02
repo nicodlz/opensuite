@@ -135,6 +135,7 @@ export const ScheduledSchema = z.object({
     .object({ code: ScheduledFailureCodeSchema, message: z.string().min(1) })
     .nullable()
     .default(null),
+  uncertainty: z.string().min(1).nullable().default(null),
 });
 export function scheduledDto(row: {
   id: string;
@@ -147,20 +148,25 @@ export function scheduledDto(row: {
   const reason = ScheduledFailureCodeSchema.nullable().parse(
     row.failureReason ?? null,
   );
+  const state =
+    row.state === "preparing"
+      ? "pending"
+      : row.state === "canceling" || row.state === "creating"
+        ? "unknown"
+        : row.state;
   return ScheduledSchema.parse({
     id: row.id,
     draftId: row.draftId,
     threadId: row.threadId,
     releaseAt: row.releaseAt.toISOString(),
-    state:
-      row.state === "preparing"
-        ? "pending"
-        : row.state === "canceling" || row.state === "creating"
-          ? "unknown"
-          : row.state,
+    state,
     failure: reason
       ? { code: reason, message: scheduledFailureMessages[reason] }
       : null,
+    uncertainty:
+      state === "unknown"
+        ? "This message may already have been submitted; revoking the sender cannot guarantee it will not be sent."
+        : null,
   });
 }
 export type Scheduled = z.infer<typeof ScheduledSchema>;

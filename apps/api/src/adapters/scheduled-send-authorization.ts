@@ -1,3 +1,4 @@
+import { activeSenderMailbox, usableSendDomain } from "@opensuite/db";
 import type {
   ScheduledFailure,
   ScheduledRecord,
@@ -29,22 +30,6 @@ type ReleaseDependencies = {
   domains: readonly string[];
 };
 
-async function activeMailbox(db: PrismaClient, row: ScheduledRecord) {
-  const user = await db.user.findUnique({
-    where: { id: row.userId },
-    select: {
-      disabled: true,
-      mailbox: { select: { accountId: true, address: true, status: true } },
-    },
-  });
-  return user &&
-    !user.disabled &&
-    user.mailbox?.status === "active" &&
-    user.mailbox.accountId === row.accountId
-    ? user.mailbox
-    : null;
-}
-
 async function quota(
   deps: ReleaseDependencies,
   row: ScheduledRecord,
@@ -74,24 +59,20 @@ export function createReleaseAuthorization(
   deps: ReleaseDependencies,
 ): ReleaseAuthorization {
   return async (row) => {
-    if (!(await activeMailbox(deps.db, row))) return "account_inactive";
+    if (!(await activeSenderMailbox(deps.db, row.userId, row.accountId)))
+      return "account_inactive";
     const quotaFailure = await quota(deps, row);
     if (quotaFailure) return quotaFailure;
     // Re-read account and sender after potentially slow storage I/O.
-    const mailbox = await activeMailbox(deps.db, row);
+    const mailbox = await activeSenderMailbox(
+      deps.db,
+      row.userId,
+      row.accountId,
+    );
     if (!mailbox) return "account_inactive";
     const domainName = row.senderAddress.split("@")[1];
     if (!domainName) return "sender_unavailable";
-    const domain = await deps.db.domain.findUnique({
-      where: { name: domainName },
-      select: { status: true, removalPending: true, stalwartId: true },
-    });
-    if (
-      !domain ||
-      domain.removalPending ||
-      !domain.stalwartId ||
-      !(deps.domains.includes(domainName) || domain.status === "verified")
-    )
+    if (!(await usableSendDomain(deps.db, domainName, deps.domains)))
       return "domain_unavailable";
     if (mailbox.address.toLowerCase() !== row.senderAddress) {
       const alias = await deps.aliases.canSendAs(row.userId, row.senderAddress);

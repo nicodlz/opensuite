@@ -6,6 +6,7 @@ import {
 import {
   acceptScheduledHandoff,
   beginScheduledHandoff,
+  guardedScheduledHandoff,
 } from "./scheduled-send-handoff.ts";
 
 export type DraftGuardWrite = "destroy" | "send" | "mutation";
@@ -243,19 +244,25 @@ class Store {
     token: string,
     now: () => number,
     previousIds: string[],
-    configured: readonly string[],
   ) {
-    return beginScheduledHandoff(
-      this.#db,
-      row,
-      token,
-      now,
-      previousIds,
-      configured,
-    );
+    return beginScheduledHandoff(this.#db, row, token, now, previousIds);
+  }
+  guardedHandoff<T>(
+    row: ScheduledRecord,
+    token: string,
+    configured: readonly string[],
+    submit: (signal: AbortSignal) => Promise<T>,
+  ) {
+    return guardedScheduledHandoff(this.#db, row, token, configured, submit);
   }
   acceptHandoff(row: ScheduledRecord, submissionId: string) {
     return acceptScheduledHandoff(this.#db, row, submissionId);
+  }
+  async unknownHandoff(id: string, token: string) {
+    await this.#db.scheduledSend.updateMany({
+      where: { id, leaseToken: token, state: { in: ["creating", "unknown"] } },
+      data: { state: "unknown", leaseToken: null, leaseUntil: null },
+    });
   }
   list(userId: string, accountId: string) {
     return this.#db.scheduledSend.findMany({

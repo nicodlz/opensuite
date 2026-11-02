@@ -4,7 +4,7 @@ import { ALIAS_USER_LOCK_SEED } from "./alias-locks.ts";
 
 type Kind =
   "invalid" | "not_found" | "conflict" | "limit" | "key_limit" | "unavailable";
-export type AliasStoreFailure = { kind: Kind; message?: string };
+export type AliasStoreFailure = { kind: Kind };
 export const unavailable = (): AliasStoreFailure => ({ kind: "unavailable" });
 export const wrap = <T>(promise: Promise<Result<T, AliasStoreFailure>>) =>
   ResultAsync.fromPromise(promise, unavailable).andThen((result) => result);

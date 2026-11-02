@@ -4,7 +4,6 @@ import { implement, ORPCError } from "@orpc/server";
 import type { Result } from "neverthrow";
 import type { ApiContext } from "./context.ts";
 import { requireSession } from "./session.ts";
-import { throwServiceError } from "./service-error.ts";
 
 const aliases = implement(contract.aliases).$context<ApiContext>();
 const service = (context: ApiContext): AliasService => {
@@ -13,7 +12,7 @@ const service = (context: ApiContext): AliasService => {
   return context.aliases;
 };
 const value = async <T>(
-  promise: Promise<Result<T, { kind: string; message?: string }>>,
+  promise: Promise<Result<T, { kind: string }>>,
 ): Promise<T> => {
   const result = await promise;
   if (result.isOk()) return result.value;
@@ -29,7 +28,15 @@ const value = async <T>(
       defined: true,
       message: "Alias cap reached",
     });
-  return throwServiceError(result.error);
+  const code =
+    result.error.kind === "invalid"
+      ? "BAD_REQUEST"
+      : result.error.kind === "not_found"
+        ? "NOT_FOUND"
+        : result.error.kind === "conflict"
+          ? "CONFLICT"
+          : "SERVICE_UNAVAILABLE";
+  throw new ORPCError(code, { defined: true });
 };
 export const aliasesRouter = aliases.router({
   domains: aliases.domains
