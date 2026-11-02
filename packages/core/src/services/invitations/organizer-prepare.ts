@@ -86,21 +86,38 @@ async function snapshot(
   }
   return { previous, changes, event };
 }
-async function reserve(
-  ctx: OrganizerContext,
-  actor: Actor,
-  input: OrganizerAction,
-  accountId: string,
-  organizer: string,
-  attendees: string[],
-  fingerprint: string,
-  prior: Prior,
-  previous: string | null,
-  changes: OrganizerEdit["changes"],
-  event: OrganizerAction["event"],
-  baseSnapshot: string | null,
-  sequenceBase: number,
-) {
+type Reservation = {
+  ctx: OrganizerContext;
+  actor: Actor;
+  input: OrganizerAction;
+  accountId: string;
+  organizer: string;
+  attendees: string[];
+  fingerprint: string;
+  prior: Prior;
+  previous: string | null;
+  changes: OrganizerEdit["changes"];
+  event: OrganizerAction["event"];
+  baseSnapshot: string | null;
+  sequenceBase: number;
+  identityId: string;
+};
+async function reserve({
+  ctx,
+  actor,
+  input,
+  accountId,
+  organizer,
+  attendees,
+  fingerprint,
+  prior,
+  previous,
+  changes,
+  event,
+  baseSnapshot,
+  sequenceBase,
+  identityId,
+}: Reservation) {
   const uid = prior?.uid ?? `${randomUUID()}@esuno.local`;
   const sequence = prior ? sequenceBase + 1 : 0;
   const planned = protocolValue(
@@ -132,6 +149,7 @@ async function reserve(
       baseSnapshot,
       sequence,
       cancelled: input.cancel,
+      identityId,
       deliveries: planned.deliveries,
     },
     prior?.revision ?? null,
@@ -216,7 +234,6 @@ export async function prepareOrganizer(
   const organizer = input.organizer.toLowerCase();
   const attendees = input.attendees.map((item) => item.toLowerCase());
   if (new Set(attendees).size !== attendees.length) return fail("validation");
-  await ctx.authorizedSender(actor, input.accountId, organizer);
   const c = await ctx.calendar(actor, input.accountId);
   const fingerprint = digest([actor.id, c.id, input]);
   const existing = await ctx.organized.operation(actor.id, input.requestId);
@@ -228,6 +245,7 @@ export async function prepareOrganizer(
       return fail("conflict");
     return existing;
   }
+  const sender = await ctx.authorizedSender(actor, input.accountId, organizer);
   const target = await targetSeries(ctx, actor, input, c, organizer);
   const prior = target.prior;
   const { baseSnapshot, sequenceBase } = await externalBaseline(
@@ -253,19 +271,20 @@ export async function prepareOrganizer(
     baseSnapshot,
     prepared,
   );
-  return reserve(
+  return reserve({
     ctx,
     actor,
     input,
-    c.id,
+    accountId: c.id,
     organizer,
     attendees,
     fingerprint,
     prior,
     previous,
-    prepared.changes,
-    prepared.event,
+    changes: prepared.changes,
+    event: prepared.event,
     baseSnapshot,
     sequenceBase,
-  );
+    identityId: sender.identity.id,
+  });
 }

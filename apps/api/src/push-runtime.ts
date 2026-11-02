@@ -276,6 +276,21 @@ export function registerBackgroundJobs(dependencies: JobDependencies) {
   });
 }
 
+/** Keep lookup failures distinct from a confirmed loss of send authorization. */
+export function createOrganizerAuthorization(
+  aliases: Pick<AliasService, "canSendAs">,
+  addresses: Pick<AddressService, "canSendAs">,
+) {
+  return async (userId: string, address: string) => {
+    const alias = await aliases.canSendAs(userId, address);
+    if (alias.isErr()) throw new Error("Alias authorization unavailable");
+    if (alias.value) return `alias:${alias.value}`;
+    const found = await addresses.canSendAs(userId, address);
+    if (found.isErr()) throw new Error("Address authorization unavailable");
+    return found.value ? `address:${found.value}` : null;
+  };
+}
+
 export function createInvitationServices(input: {
   db: PrismaClient;
   store: MailCredentialStore;
@@ -288,7 +303,7 @@ export function createInvitationServices(input: {
   const intentions = createInvitationStore(db);
   const organized = createOrganizedInvitationStore(db);
   const scans = createOrganizedReplyScanStore(db);
-  const { mail, invitations, canSendAs } = createMailWithInvitations({
+  const { mail, invitations } = createMailWithInvitations({
     aliases,
     addresses,
     store,
@@ -297,6 +312,7 @@ export function createInvitationServices(input: {
     intentions,
     beforeAliasSend,
   });
+  const canSendOrganizer = createOrganizerAuthorization(aliases, addresses);
   const organizer = createOrganizerService({
     store,
     origin,
@@ -305,7 +321,7 @@ export function createInvitationServices(input: {
     scans,
     intentions,
     organized,
-    canSendAs,
+    canSendAs: canSendOrganizer,
     beforeAliasSend,
   });
   const calendar = guardOrganizedCalendar(

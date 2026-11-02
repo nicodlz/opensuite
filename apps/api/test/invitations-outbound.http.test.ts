@@ -3,6 +3,7 @@ import type { OrganizerService } from "@opensuite/core/services/invitations-outb
 import { ok, err } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { buildServer } from "../src/server.ts";
+import { createOrganizerAuthorization } from "../src/push-runtime.ts";
 
 const id = "a1cc9eb1-0203-4949-9b2f-d6fe7768ce02";
 const organize = vi.fn<OrganizerService["organize"]>((actor, input) =>
@@ -15,8 +16,19 @@ const organize = vi.fn<OrganizerService["organize"]>((actor, input) =>
 const service: OrganizerService = {
   organize,
   unverified: () => Promise.resolve(ok({ messageIds: [], nextCursor: null })),
-  reconcile: (_actor, _account, operationId) =>
-    Promise.resolve(ok({ operationId, state: "pending", eventId: null })),
+  reconcile: (actor, accountId, operationId) =>
+    Promise.resolve(
+      actor.id === "owner" && accountId === "default"
+        ? ok({
+            operationId,
+            state: "failed",
+            eventId: "event",
+            failedRecipients: [
+              { email: "alice@example.test", reason: "sender_unavailable" },
+            ],
+          })
+        : err({ kind: "forbidden" }),
+    ),
   status: (actor, accountId) =>
     Promise.resolve(
       actor.id === "owner" && accountId === "default"
@@ -81,6 +93,30 @@ const input = {
 };
 
 describe("organizer invitation HTTP boundary", () => {
+  it("does not confuse sender lookup failures with revocation", async () => {
+    const absent = { canSendAs: () => Promise.resolve(ok(null)) };
+    const unavailable = {
+      canSendAs: () => Promise.resolve(err({ kind: "unavailable" as const })),
+    };
+    await expect(
+      createOrganizerAuthorization(unavailable, absent)(
+        "owner",
+        "alias@example.test",
+      ),
+    ).rejects.toThrow("Alias authorization unavailable");
+    await expect(
+      createOrganizerAuthorization(absent, unavailable)(
+        "owner",
+        "alias@example.test",
+      ),
+    ).rejects.toThrow("Address authorization unavailable");
+    await expect(
+      createOrganizerAuthorization(absent, absent)(
+        "owner",
+        "alias@example.test",
+      ),
+    ).resolves.toBeNull();
+  });
   it("requires a session and same origin, validates input and scopes the account", async () => {
     const app = await buildServer({
       config: { logLevel: "silent" },
@@ -183,6 +219,18 @@ describe("organizer invitation HTTP boundary", () => {
         (await status("default", { origin, cookie: "owner" })).json(),
       ).toMatchObject({
         pendingOperationId: id,
+      });
+      const reconciliation = await app.inject({
+        method: "POST",
+        url: "/invitations/organized/reconcile",
+        headers: { origin, cookie: "owner" },
+        payload: { accountId: "default", operationId: id },
+      });
+      expect(reconciliation.json()).toMatchObject({
+        state: "failed",
+        failedRecipients: [
+          { email: "alice@example.test", reason: "sender_unavailable" },
+        ],
       });
     } finally {
       await app.close();

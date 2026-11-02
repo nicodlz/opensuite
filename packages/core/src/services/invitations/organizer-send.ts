@@ -7,6 +7,21 @@ import type {
 } from "./organizer-context.ts";
 
 type Delivery = OrganizerOperation["deliveries"][number];
+const senderForDelivery = (
+  ctx: OrganizerContext,
+  actor: Actor,
+  accountId: string,
+  op: OrganizerOperation,
+  item: Delivery,
+) =>
+  item.identityId
+    ? ctx.senderIfAuthorized(
+        actor,
+        accountId,
+        op.series.organizer,
+        item.identityId,
+      )
+    : null;
 async function draft(
   ctx: OrganizerContext,
   actor: Actor,
@@ -14,11 +29,18 @@ async function draft(
   op: OrganizerOperation,
   item: Delivery,
 ) {
-  const { mail, identity } = await ctx.authorizedSender(
-    actor,
-    accountId,
-    op.series.organizer,
-  );
+  const sender = await senderForDelivery(ctx, actor, accountId, op, item);
+  if (!sender) {
+    await ctx.organized.delivery(
+      actor.id,
+      op.id,
+      item.id,
+      item.phase,
+      "rejected:sender",
+    );
+    return;
+  }
+  const { mail, identity } = sender;
   const boxes = value(await mail.client.mailboxes(mail.session, mail.id)).list;
   const drafts =
     boxes.find((box) => box.role === "drafts") ?? fail("unavailable");
@@ -99,6 +121,50 @@ function submissionPhase(result: Parameters<typeof value<{ id: string }>>[0]) {
     return "rejected" as const;
   return null;
 }
+async function confirmSenderBeforeSubmit(
+  ctx: OrganizerContext,
+  actor: Actor,
+  accountId: string,
+  op: OrganizerOperation,
+  item: Delivery,
+  generation: string,
+  original: NonNullable<
+    Awaited<ReturnType<OrganizerContext["senderIfAuthorized"]>>
+  >,
+) {
+  try {
+    const sender = await ctx.senderIfAuthorized(
+      actor,
+      accountId,
+      op.series.organizer,
+      original.identity.id,
+    );
+    if (
+      sender &&
+      sender.identity.id === original.identity.id &&
+      sender.alias === original.alias
+    )
+      return true;
+    await ctx.organized.delivery(
+      actor.id,
+      op.id,
+      item.id,
+      generation,
+      "rejected:sender",
+    );
+    return false;
+  } catch (error) {
+    // This worker has not called submit, so its claim is safe to retry.
+    await ctx.organized.delivery(
+      actor.id,
+      op.id,
+      item.id,
+      generation,
+      "prepared",
+    );
+    throw error;
+  }
+}
 async function submit(
   ctx: OrganizerContext,
   actor: Actor,
@@ -106,27 +172,50 @@ async function submit(
   op: OrganizerOperation,
   item: Delivery,
 ) {
-  const draftId = item.draftId ?? fail("conflict");
-  const identityId = item.identityId ?? fail("conflict");
-  const { mail, identity, alias } = await ctx.authorizedSender(
-    actor,
-    accountId,
-    op.series.organizer,
-  );
-  if (identity.id !== identityId) fail("conflict");
+  const sender = await senderForDelivery(ctx, actor, accountId, op, item);
+  if (
+    !sender ||
+    !item.draftId ||
+    !item.identityId ||
+    sender.identity.id !== item.identityId
+  ) {
+    await ctx.organized.delivery(
+      actor.id,
+      op.id,
+      item.id,
+      "prepared",
+      "rejected:sender",
+    );
+    return;
+  }
+  const { mail, identity, alias } = sender;
+  const draftId = item.draftId;
   if (alias && !(await ctx.dependencies.beforeAliasSend?.(actor.id, alias)))
     fail("rate_limited");
   const sent =
     value(await mail.client.mailboxes(mail.session, mail.id)).list.find(
       (box) => box.role === "sent",
     ) ?? fail("unavailable");
+  const generation = `sending:${randomUUID()}`;
   if (
     !(await ctx.organized.delivery(
       actor.id,
       op.id,
       item.id,
       "prepared",
-      "sending",
+      generation,
+    ))
+  )
+    return;
+  if (
+    !(await confirmSenderBeforeSubmit(
+      ctx,
+      actor,
+      accountId,
+      op,
+      item,
+      generation,
+      sender,
     ))
   )
     return;
@@ -143,7 +232,7 @@ async function submit(
   );
   const phase = submissionPhase(submitted);
   if (phase)
-    await ctx.organized.delivery(actor.id, op.id, item.id, "sending", phase);
+    await ctx.organized.delivery(actor.id, op.id, item.id, generation, phase);
 }
 async function reconcileSending(
   ctx: OrganizerContext,
@@ -153,11 +242,8 @@ async function reconcileSending(
   item: Delivery,
 ) {
   if (!item.draftId || !item.identityId) return;
-  const { mail } = await ctx.authorizedSender(
-    actor,
-    accountId,
-    op.series.organizer,
-  );
+  // Reading an existing submission remains safe after an alias is revoked.
+  const mail = await ctx.mail(actor, accountId);
   const found = value(
     await mail.client.submissionQuery(mail.session, mail.id, item.draftId),
   );
@@ -178,7 +264,7 @@ async function reconcileSending(
         submission.envelope.rcptTo[0]?.email.toLowerCase() === item.recipient,
     );
   if (match)
-    await ctx.organized.delivery(actor.id, op.id, item.id, "sending", "sent");
+    await ctx.organized.delivery(actor.id, op.id, item.id, item.phase, "sent");
 }
 export async function sendOrganizerDeliveries(
   ctx: OrganizerContext,
@@ -199,7 +285,10 @@ export async function sendOrganizerDeliveries(
       fail("conflict");
     if (current.phase === "prepared")
       await submit(ctx, actor, accountId, refreshed, current);
-    else if (current.phase === "sending")
+    else if (
+      current.phase === "sending" ||
+      current.phase.startsWith("sending:")
+    )
       await reconcileSending(ctx, actor, accountId, refreshed, current);
     await sendAt(index + 1);
   };

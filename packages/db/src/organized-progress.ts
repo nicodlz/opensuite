@@ -116,11 +116,16 @@ export function finishOrganized(db: PrismaClient, userId: string, id: string) {
     if (
       !current ||
       current.deliveries.some(
-        (item) => item.phase !== "sent" && item.phase !== "rejected",
+        (item) =>
+          item.phase !== "sent" &&
+          item.phase !== "rejected" &&
+          item.phase !== "rejected:sender",
       )
     )
       return false;
-    const phase = current.deliveries.some((item) => item.phase === "rejected")
+    const phase = current.deliveries.some((item) =>
+      item.phase.startsWith("rejected"),
+    )
       ? "failed"
       : "sent";
     const op = await claim(tx, userId, id, "calendarApplied", phase);

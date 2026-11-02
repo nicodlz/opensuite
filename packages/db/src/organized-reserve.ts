@@ -16,6 +16,7 @@ export type OperationInput = {
   baseSnapshot: string | null;
   sequence: number;
   cancelled: boolean;
+  identityId: string;
   deliveries: { recipient: string; method: string; calendar: string }[];
 };
 const full = { series: true, deliveries: true } as const;
@@ -66,6 +67,7 @@ export function reserveOrganized(
             ...item,
             id: randomUUID(),
             phase: "reserved",
+            identityId: input.identityId,
           })),
         },
       },

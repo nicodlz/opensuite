@@ -51,6 +51,16 @@ const InvitationResultSchema = z.object({
   state: z.enum(["pending", "sent", "applied", "failed"]),
   eventId: IdSchema.nullable(),
 });
+const OrganizerResultSchema = InvitationResultSchema.extend({
+  failedRecipients: z
+    .array(
+      z.object({
+        email: z.email(),
+        reason: z.enum(["sender_unavailable", "submission_rejected"]),
+      }),
+    )
+    .optional(),
+});
 
 export const OrganizerActionSchema = z.object({
   accountId: IdSchema,
@@ -67,7 +77,7 @@ export const invitationsContract = {
   organize: procedure
     .route({ method: "POST", path: "/invitations/organize" })
     .input(OrganizerActionSchema)
-    .output(InvitationResultSchema),
+    .output(OrganizerResultSchema),
   organizedStatus: procedure
     .route({ method: "POST", path: "/invitations/organized/status" })
     .input(z.object({ accountId: IdSchema, eventId: IdSchema }))
@@ -118,7 +128,7 @@ export const invitationsContract = {
   reconcileOrganized: procedure
     .route({ method: "POST", path: "/invitations/organized/reconcile" })
     .input(z.object({ accountId: IdSchema, operationId: z.uuid() }))
-    .output(InvitationResultSchema),
+    .output(OrganizerResultSchema),
   read: procedure
     .route({ method: "POST", path: "/invitations/read" })
     .input(z.object({ accountId: IdSchema, messageId: IdSchema }))
