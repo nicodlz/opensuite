@@ -1,0 +1,21 @@
+.auth-password {
+  display: grid;
+  gap: 6px;
+}
+.auth-reveal {
+  justify-self: start;
+  font-size: 13px;
+}
+.auth-hint {
+  color: var(--muted);
+  font-size: 13px;
+}
+.auth-backup {
+  display: grid;
+  gap: 10px;
+}
+.auth-backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

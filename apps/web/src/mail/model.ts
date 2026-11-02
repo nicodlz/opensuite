@@ -27,6 +27,11 @@ export function formatFullDate(value: string) {
     minute: "2-digit",
   }).format(new Date(value));
 }
+const plurals = new Intl.PluralRules("en-US");
+/** A count with its noun in the right form, such as "1 draft" or "2 drafts". */
+export function plural(count: number, one: string, other = `${one}s`) {
+  return `${String(count)} ${plurals.select(count) === "one" ? one : other}`;
+}
 const emailPattern = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 /** Split a comma or semicolon separated recipient field. */
 export function parseAddresses(value: string) {

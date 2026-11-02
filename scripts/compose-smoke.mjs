@@ -5,8 +5,11 @@
 //   OPENSUITE_RUN_ID=local-1 node scripts/compose-smoke.mjs --report smoke.xml
 import { execFile } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import https from "node:https";
 import net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import process from "node:process";
 import { parseArgs, promisify } from "node:util";
 
@@ -25,6 +28,16 @@ const runId = (process.env["OPENSUITE_RUN_ID"] ?? `local-${String(Date.now())}`)
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-");
 const project = `opensuite-smoke-${runId}`;
+let driveSecretDir = "";
+const composeEnv = {
+  ...process.env,
+  DRIVE_S3_ENDPOINT: "http://localstack:4566",
+  DRIVE_S3_PUBLIC_ENDPOINT: "http://localhost:4566",
+  DRIVE_S3_BUCKET: "opensuite-drive",
+  DRIVE_S3_REGION: "us-east-1",
+  DRIVE_S3_ACCESS_KEY: "test",
+  DRIVE_S3_SECRET_FILE: "",
+};
 const composeArgs = [
   "compose",
   "--profile",
@@ -42,6 +55,7 @@ const composeArgs = [
 /** @param {...string} args */
 const compose = async (...args) => {
   const { stdout } = await run("docker", [...composeArgs, ...args], {
+    env: composeEnv,
     maxBuffer: 16 * 1024 * 1024,
   });
   return stdout;
@@ -59,7 +73,7 @@ const bootstrap = async (...args) => {
       "bootstrap",
       ...args,
     ],
-    { maxBuffer: 16 * 1024 * 1024 },
+    { env: composeEnv, maxBuffer: 16 * 1024 * 1024 },
   );
   return stdout;
 };
@@ -213,7 +227,7 @@ const writeReport = () => {
 const cleanup = async () => {
   if (values.keep === true) {
     process.stdout.write(
-      `kept project ${project}; remove with docker compose -p ${project} down -v\n`,
+      `kept project ${project}; Drive fixture secret: ${composeEnv.DRIVE_S3_SECRET_FILE}\n`,
     );
     return 0;
   }
@@ -227,6 +241,7 @@ const cleanup = async () => {
     ]);
     if (leftovers.some((result) => result.stdout.trim().length > 0))
       throw new Error(`resources remain for ${project}`);
+    await rm(driveSecretDir, { recursive: true, force: true });
     return 0;
   } catch (error) {
     process.stderr.write(`cleanup failed: ${String(error)}\n`);
@@ -237,6 +252,11 @@ const cleanup = async () => {
 /** @type {number} */
 let failures;
 try {
+  driveSecretDir = await mkdtemp(join(tmpdir(), "opensuite-smoke-"));
+  await chmod(driveSecretDir, 0o755);
+  composeEnv.DRIVE_S3_SECRET_FILE = join(driveSecretDir, "drive-s3-secret");
+  await writeFile(composeEnv.DRIVE_S3_SECRET_FILE, "test", { mode: 0o644 });
+  await chmod(composeEnv.DRIVE_S3_SECRET_FILE, 0o644);
   await test("stack starts and every service reports healthy", async () => {
     // `--wait` treats finished one-shot jobs as failures, so wait for the
     // long-running services first, then run the settings job to completion.
@@ -448,6 +468,7 @@ try {
   cases.push({ name: "smoke setup", seconds: 0, failure: message });
   process.stdout.write(`FAIL smoke setup: ${message}\n`);
 } finally {
-  failures = writeReport() + (await cleanup());
+  const cleanupFailures = await cleanup();
+  failures = writeReport() + cleanupFailures;
 }
 process.exitCode = failures === 0 ? 0 : 1;

@@ -4,6 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../ui/button.tsx";
 import { Icon } from "../ui/icons.tsx";
 import { accountId, mailClient } from "./client.ts";
+import {
+  AttachmentList,
+  MinimizedComposer,
+  formatSize,
+  type Attachment,
+} from "./composer-parts.tsx";
 import { parseAddresses } from "./model.ts";
 
 export type ComposerState = {
@@ -11,7 +17,6 @@ export type ComposerState = {
   draftId: string | null;
   content: DraftContent;
 };
-type Attachment = { blobId: string; name: string; size?: number };
 type Fields = {
   from: string;
   to: string;
@@ -69,19 +74,16 @@ function readBase64(file: File) {
 }
 const hasFiles = (event: DragEvent) =>
   event.dataTransfer?.types.includes("Files") ?? false;
-function formatSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
 
 export function Composer({
   state,
   from,
   aliases,
   minimized,
+  discarded,
   onMinimize,
   onClose,
+  onDiscard,
   onNotice,
   onSaved,
   onDraftId,
@@ -90,8 +92,15 @@ export function Composer({
   from: string | undefined;
   aliases: { id: string; address: string }[];
   minimized: boolean;
+  /** Hidden while its discarding can still be undone. */
+  discarded: boolean;
   onMinimize: (value: boolean) => void;
   onClose: () => void;
+  /**
+   * A draft with content was discarded and its saved copy deleted. To undo,
+   * clear `discarded` and call `restore`, which saves the content again.
+   */
+  onDiscard: (restore: () => Promise<void>) => void;
   onNotice: (value: string) => void;
   onSaved: () => void;
   /** Reports the id each save gives the draft (JMAP recreates it). */
@@ -117,8 +126,11 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(0);
   const [dragging, setDragging] = useState(false);
-  const [status, setStatus] = useState<"" | "saving" | "saved">("");
+  const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  // The fields a "send without text" warning was shown for; any edit is a
+  // new object, so the warning applies to this exact message only.
+  const [emptyWarning, setEmptyWarning] = useState<Fields | null>(null);
   // Compare in the form the composer saves, so opening a draft or a reply
   // without changing it writes nothing.
   const saved = useRef({
@@ -134,18 +146,23 @@ export function Composer({
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const toRef = useRef<HTMLInputElement>(null);
 
+  const shown = !minimized && !discarded;
+  const hasRecipients = useRef(Boolean(fields.to.trim()));
   useEffect(() => {
-    // Replies start in the body; new messages start with recipients.
-    if (state.content.to.length) bodyRef.current?.focus();
-    else toRef.current?.focus();
-  }, [state.content.to.length]);
+    hasRecipients.current = Boolean(fields.to.trim());
+  });
+  useEffect(() => {
+    // Opening, restoring or undoing a discard: replies continue in the body,
+    // new messages start with recipients.
+    if (shown) (hasRecipients.current ? bodyRef : toRef).current?.focus();
+  }, [shown]);
 
   const persist = useCallback((value: DraftContent) => {
     const run = queue.current.then(async () => {
       const snapshot = JSON.stringify(value);
       if (saved.current.id && snapshot === saved.current.snapshot)
         return undefined;
-      setStatus("saving");
+      setStatus("Saving…");
       const result = saved.current.id
         ? await mailClient.updateDraft({
             accountId,
@@ -155,7 +172,7 @@ export function Composer({
         : await mailClient.createDraft({ accountId, draft: value });
       saved.current = { id: result.id, snapshot };
       draftIdListener.current?.(result.id);
-      setStatus("saved");
+      setStatus("Draft saved");
       setError((current) =>
         current.startsWith("Could not save") ? "" : current,
       );
@@ -166,7 +183,7 @@ export function Composer({
   }, []);
 
   useEffect(() => {
-    if (busy) return undefined;
+    if (busy || discarded) return undefined;
     const value = toContent(state.content, fields);
     if (JSON.stringify(value) === saved.current.snapshot) return undefined;
     if (!saved.current.id && isEmpty(fields)) return undefined;
@@ -177,7 +194,7 @@ export function Composer({
       });
     }, 1500);
     return () => window.clearTimeout(timer);
-  }, [fields, busy, state.content, persist]);
+  }, [fields, busy, discarded, state.content, persist]);
 
   async function close() {
     if (working.current) return;
@@ -216,6 +233,14 @@ export function Composer({
       setError("Wait for attachments to finish uploading.");
       return;
     }
+    if (
+      !fields.textBody.trim() &&
+      !fields.attachments.length &&
+      emptyWarning !== fields
+    ) {
+      setEmptyWarning(fields);
+      return;
+    }
     // One send per draft, whatever triggers it (button, Ctrl+Enter, repeat).
     if (working.current) return;
     working.current = true;
@@ -240,20 +265,40 @@ export function Composer({
       setBusy(false);
     }
   }
+  /** Deletes the saved copy once any save in progress has finished. */
+  async function removeSaved() {
+    await queue.current;
+    if (saved.current.id)
+      await mailClient.deleteDraft({ accountId, draftId: saved.current.id });
+    onSaved();
+  }
+  /** Saves a discarded draft again, as a new copy, after Undo. */
+  function restore() {
+    working.current = false;
+    setBusy(false);
+    return persist(toContent(state.content, latest.current.fields)).then(
+      onSaved,
+      () => {
+        setStatus("");
+        setError("Could not save this draft. Try again.");
+      },
+    );
+  }
   async function discard() {
     if (working.current) return;
     working.current = true;
     setBusy(true);
     try {
-      await queue.current;
-      if (saved.current.id)
-        await mailClient.deleteDraft({
-          accountId,
-          draftId: saved.current.id,
-        });
-      onNotice("Draft discarded.");
-      onSaved();
-      onClose();
+      // Deleted now, so closing the page cannot keep it; Undo saves the
+      // content, which stays here, again.
+      await removeSaved();
+      if (isEmpty(fields)) {
+        onNotice("Draft discarded.");
+        onClose();
+        return;
+      }
+      saved.current = { id: null, snapshot: "" };
+      onDiscard(restore);
     } catch {
       working.current = false;
       setError("Could not discard this draft.");
@@ -276,6 +321,7 @@ export function Composer({
           { blobId: attachment.blobId, name: file.name, size: file.size },
         ],
       }));
+      setStatus(`${file.name} attached (${formatSize(file.size)})`);
     } catch {
       setError(`Could not upload ${file.name}.`);
     } finally {
@@ -284,9 +330,9 @@ export function Composer({
   }
   const upload = (files: Iterable<File>) =>
     Promise.all(Array.from(files, uploadOne));
-  const latest = useRef({ send, upload, onMinimize, expanded });
+  const latest = useRef({ send, upload, onMinimize, expanded, fields });
   useEffect(() => {
-    latest.current = { send, upload, onMinimize, expanded };
+    latest.current = { send, upload, onMinimize, expanded, fields };
   });
   // Native listeners keep the section a plain landmark for assistive tech.
   const sectionRef = useCallback((section: HTMLElement | null) => {
@@ -347,39 +393,18 @@ export function Composer({
     return () => controller.abort();
   }, []);
 
+  if (discarded) return null;
+  const title = fields.subject || "New message";
   if (minimized)
     return (
-      <section className="composer minimized" aria-label="Compose message">
-        <div className="compose-header">
-          <button
-            type="button"
-            className="compose-title"
-
-            onClick={() => onMinimize(false)}
-          >
-            {fields.subject || "New message"}
-          </button>
-          <div>
-            <button
-              type="button"
-              aria-label="Restore draft"
-              onClick={() => onMinimize(false)}
-            >
-              <Icon name="maximize" size={16} />
-            </button>
-            <button
-              type="button"
-              aria-label="Save and close draft"
-              disabled={busy}
-              onClick={() => {
-                void close();
-              }}
-            >
-              <Icon name="close" size={16} />
-            </button>
-          </div>
-        </div>
-      </section>
+      <MinimizedComposer
+        title={title}
+        busy={busy}
+        onRestore={() => onMinimize(false)}
+        onClose={() => {
+          void close();
+        }}
+      />
     );
   return (
     <>
@@ -396,9 +421,7 @@ export function Composer({
         ref={sectionRef}
       >
         <div className="compose-header">
-          <strong className="compose-title">
-            {fields.subject || "New message"}
-          </strong>
+          <strong className="compose-title">{title}</strong>
           <div>
             <button
               type="button"
@@ -524,41 +547,26 @@ export function Composer({
             }
             placeholder="Write your message…"
           />
-          {(fields.attachments.length > 0 || uploading > 0) && (
-            <ul className="compose-attachments" aria-label="Attachments">
-              {fields.attachments.map((item) => (
-                <li key={item.blobId}>
-                  <Icon name="paperclip" size={14} />
-                  <span>{item.name}</span>
-                  {item.size !== undefined && (
-                    <small>{formatSize(item.size)}</small>
-                  )}
-                  <button
-                    type="button"
-                    aria-label={`Remove ${item.name}`}
-                    onClick={() =>
-                      setFields({
-                        ...fields,
-                        attachments: fields.attachments.filter(
-                          (other) => other.blobId !== item.blobId,
-                        ),
-                      })
-                    }
-                  >
-                    <Icon name="close" size={14} />
-                  </button>
-                </li>
-              ))}
-              {uploading > 0 && (
-                <li className="uploading" aria-live="polite">
-                  Uploading {uploading} file{uploading > 1 ? "s" : ""}…
-                </li>
-              )}
-            </ul>
-          )}
+          <AttachmentList
+            attachments={fields.attachments}
+            uploading={uploading}
+            onRemove={(blobId) =>
+              setFields({
+                ...fields,
+                attachments: fields.attachments.filter(
+                  (item) => item.blobId !== blobId,
+                ),
+              })
+            }
+          />
           {error && (
             <p className="compose-error" role="alert">
               {error}
+            </p>
+          )}
+          {emptyWarning === fields && (
+            <p className="compose-error" role="alert">
+              This message has no text. Send it anyway?
             </p>
           )}
         </div>
@@ -570,7 +578,8 @@ export function Composer({
             }}
             aria-keyshortcuts="Control+Enter Meta+Enter"
           >
-            Send <Icon name="send" size={16} />
+            {emptyWarning === fields ? "Send anyway" : "Send"}{" "}
+            <Icon name="send" size={16} />
           </Button>
           <label className="compose-tool" title="Attach files">
             <Icon name="paperclip" />
@@ -586,11 +595,7 @@ export function Composer({
             />
           </label>
           <span className="compose-status" aria-live="polite">
-            {status === "saving"
-              ? "Saving…"
-              : status === "saved"
-                ? "Draft saved"
-                : ""}
+            {status}
           </span>
           <button
             type="button"

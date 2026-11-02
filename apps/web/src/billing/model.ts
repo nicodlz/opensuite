@@ -60,6 +60,28 @@ export function statusText(status: string) {
       return "Subscription status unavailable — manage billing for details.";
   }
 }
+/** Heading of the page reached after checkout. */
+export function welcomeTitle(email: string, validLink: boolean) {
+  if (email) return "Your account is ready";
+  return validLink ? "Welcome to Esuno" : "This link is not valid";
+}
+/**
+ * How urgent a subscription status is: "ok" needs nothing, "payment" asks
+ * for a new payment method, "attention" for a visit to the billing portal.
+ */
+export function statusUrgency(status: string): "ok" | "payment" | "attention" {
+  switch (status) {
+    case "active":
+    case "trialing":
+      return "ok";
+    case "past_due":
+    case "unpaid":
+    case "incomplete":
+      return "payment";
+    default:
+      return "attention";
+  }
+}
 export function billingError(error: unknown) {
   if (error instanceof ORPCError) {
     switch (error.code) {

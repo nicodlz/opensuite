@@ -12,7 +12,7 @@ import {
 import { Button } from "../ui/button.tsx";
 import { TextField } from "../ui/text-field.tsx";
 import { billing } from "./client.ts";
-import { billingError, price } from "./model.ts";
+import { billingError, price, welcomeTitle } from "./model.ts";
 // Vite injects the stylesheet.
 // oxlint-disable-next-line import/no-unassigned-import
 import "./billing.css";
@@ -272,7 +272,7 @@ export function WelcomePage() {
     }
   }
   return (
-    <Frame title={email ? "Your account is ready" : "Welcome to Esuno"}>
+    <Frame title={welcomeTitle(email, valid)}>
       {email ? (
         <>
           <p>Your account {email} is ready.</p>
@@ -281,9 +281,7 @@ export function WelcomePage() {
           </Button>
         </>
       ) : !valid ? (
-        <p role="alert">
-          This checkout link is invalid. Contact support for help.
-        </p>
+        <InvalidCheckout />
       ) : status.isError ? (
         <div role="alert">
           <p>We could not check your payment. Please try again.</p>
@@ -391,5 +389,17 @@ export function WelcomePage() {
         </>
       )}
     </Frame>
+  );
+}
+/** Shown when the welcome page was opened without a checkout session. */
+function InvalidCheckout() {
+  return (
+    <>
+      <p>This checkout link is incomplete. Contact support for help.</p>
+      <p className="billing-links">
+        <a href="/login">Sign in</a>
+        <a href="/subscribe">Choose a plan</a>
+      </p>
+    </>
   );
 }

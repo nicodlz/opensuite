@@ -11,6 +11,7 @@ import { configureDriveRole } from "../src/db/role.ts";
 import { createStorage } from "../src/adapters/storage.ts";
 import { createDrive } from "../src/services/drive.ts";
 import { buildServer } from "../src/server.ts";
+import { createComposeNetworks } from "../../../test-support/compose-networks.js";
 import type { SessionVerifier } from "../src/domain/session.ts";
 import type { DriveCommand } from "@opensuite/contracts";
 import {
@@ -34,6 +35,7 @@ const runId =
     .replace(/[^a-z0-9-]/g, "-")
     .slice(0, 30) || "local";
 const project = `opensuite-drive-${runId}-${randomUUID().slice(0, 8)}`;
+const networks = createComposeNetworks(project);
 const args = [
   "compose",
   "--profile",
@@ -53,11 +55,25 @@ const compose = async (...cmd: string[]) =>
   (
     await run("docker", [...args, ...cmd], {
       cwd: root,
+      env: {
+        ...process.env,
+        ...networks.env,
+        DRIVE_S3_ENDPOINT: "http://localstack:4566",
+        DRIVE_S3_PUBLIC_ENDPOINT: "http://localhost:4566",
+        DRIVE_S3_BUCKET: "opensuite-drive",
+        DRIVE_S3_REGION: "us-east-1",
+        DRIVE_S3_ACCESS_KEY: "test",
+        DRIVE_S3_SECRET_FILE: "/dev/null",
+      },
       maxBuffer: 16 * 1024 * 1024,
     })
   ).stdout;
 const cleanup = async () => {
-  await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+  try {
+    await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+  } finally {
+    await networks.release();
+  }
   const filter = `label=com.docker.compose.project=${project}`;
   const leftovers = await Promise.all([
     run("docker", ["ps", "-aq", "--filter", filter]),
@@ -87,6 +103,7 @@ const command = async (user: string, input: DriveCommand) =>
 
 beforeAll(async () => {
   try {
+    await networks.reserve();
     await compose(
       "up",
       "--detach",

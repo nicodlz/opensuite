@@ -10,7 +10,7 @@ import { z } from "zod";
 import { createVaultFixture } from "./vault-fixture.js";
 
 const run = promisify(execFile);
-const { project, env, args, compose, chooseSubnets } =
+const { project, env, args, compose, chooseSubnets, releaseSubnets } =
   createVaultFixture("vault");
 Object.assign(env, {
   VAULT_LOGIN_RATELIMIT_SECONDS: "3600",
@@ -98,6 +98,7 @@ const cleanup = async () => {
   try {
     await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
   } finally {
+    await releaseSubnets();
     if (fixtureDirectory)
       await rm(fixtureDirectory, { recursive: true, force: true });
   }

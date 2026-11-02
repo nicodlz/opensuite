@@ -36,6 +36,7 @@ const {
   args: composeArgs,
   compose,
   chooseSubnets,
+  releaseSubnets,
 } = createVaultFixture("bw");
 const secret = () => randomBytes(24).toString("base64url");
 const b64 = (b: Uint8Array) =>
@@ -185,6 +186,7 @@ async function cleanup() {
     try {
       await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
     } finally {
+      await releaseSubnets();
       await smtp?.close();
       smtp = undefined;
       if (temp) {

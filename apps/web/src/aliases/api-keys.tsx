@@ -6,12 +6,15 @@ import { aliasesClient } from "./client.ts";
 import type { AliasPageState } from "./use-alias-page.ts";
 
 export function ApiKeysPanel({ state }: { state: AliasPageState }) {
-  const { setKeyDialog, busy, setError, setNotice, keys, run } = state;
+  const { setKeyDialog, busy, setError, notify, keys, run, keysHeading } =
+    state;
   return (
-    <section className="vault-card">
+    <section className="vault-card" aria-labelledby="alias-keys-heading">
       <div className="alias-section-heading">
         <div>
-          <h2>Alias API keys</h2>
+          <h2 id="alias-keys-heading" ref={keysHeading} tabIndex={-1}>
+            Alias API keys
+          </h2>
           <p>Keys allow a generator to create aliases for your account.</p>
         </div>
         <Button
@@ -44,14 +47,22 @@ export function ApiKeysPanel({ state }: { state: AliasPageState }) {
               </div>
               {!key.revokedAt && (
                 <Button
-                  variant="secondary"
+                  variant="ghost"
                   size="small"
-                  disabled={busy}
+                  className="alias-action alias-action-danger"
+                  aria-disabled={busy}
+                  aria-label={`Revoke ${key.name}`}
                   onClick={() => {
+                    // The button goes away with the key's active state.
                     void run(
                       () => aliasesClient.revokeKey({ id: key.id }),
-                      () => setNotice("API key revoked."),
-                    );
+                      () =>
+                        notify({ message: `API key “${key.name}” revoked.` }),
+                      "notify",
+                    ).then((done) => {
+                      if (done) keysHeading.current?.focus();
+                      return undefined;
+                    });
                   }}
                 >
                   Revoke
@@ -102,23 +113,24 @@ export function ApiKeyDialog({ state }: { state: AliasPageState }) {
 }
 
 function KeySecret({ state }: { state: AliasPageState }) {
-  const { setKeyDialog, secret, setSecret, notice, setNotice, copy } = state;
+  const { setKeyDialog, secret, setSecret, copy } = state;
   return (
     <div className="alias-form">
       <label>
         API key
         <textarea readOnly value={secret} rows={3} />
       </label>
-      <Button variant="secondary" onClick={() => copy(secret)}>
+      <Button
+        variant="secondary"
+        onClick={() => copy(secret, "API key copied to clipboard.")}
+      >
         Copy API key
       </Button>
-      {notice && <output>{notice}</output>}
       <div className="dialog-actions">
         <Button
           onClick={() => {
             setKeyDialog(false);
             setSecret("");
-            setNotice("");
           }}
         >
           Done

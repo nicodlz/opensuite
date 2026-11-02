@@ -4,6 +4,51 @@ import { useEffect, useRef } from "react";
 import { Icon } from "../ui/icons.tsx";
 import { formatDate, initials } from "./model.ts";
 
+type QuickAction =
+  | { type: "archive" }
+  | { type: "trash" }
+  | { type: "read"; value: boolean }
+  | { type: "star"; value: boolean };
+
+/** Buttons shown on a row when it is hovered or focused. */
+function QuickActions({
+  unread,
+  onQuick,
+}: {
+  unread: boolean;
+  onQuick: (change: QuickAction) => void;
+}) {
+  const read = unread ? "Mark as read" : "Mark as unread";
+  return (
+    <span className="thread-actions">
+      <button
+        type="button"
+        aria-label="Archive conversation"
+        title="Archive"
+        onClick={() => onQuick({ type: "archive" })}
+      >
+        <Icon name="archive" size={16} />
+      </button>
+      <button
+        type="button"
+        aria-label="Move conversation to trash"
+        title="Move to trash"
+        onClick={() => onQuick({ type: "trash" })}
+      >
+        <Icon name="trash" size={16} />
+      </button>
+      <button
+        type="button"
+        aria-label={read}
+        title={read}
+        onClick={() => onQuick({ type: "read", value: unread })}
+      >
+        <Icon name="unread" size={16} />
+      </button>
+    </span>
+  );
+}
+
 export function ThreadRow({
   thread,
   selected,
@@ -21,13 +66,7 @@ export function ThreadRow({
   onOpen: () => void;
   onCheck: (value: boolean, range: boolean) => void;
   onPrefetch: () => void;
-  onQuick: (
-    change:
-      | { type: "archive" }
-      | { type: "trash" }
-      | { type: "read"; value: boolean }
-      | { type: "star"; value: boolean },
-  ) => void;
+  onQuick: (change: QuickAction) => void;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -58,6 +97,7 @@ export function ThreadRow({
         ref={ref}
         type="button"
         className="thread-open"
+        data-thread-id={thread.id}
         aria-current={selected ? "true" : undefined}
         onClick={onOpen}
         onPointerEnter={onPrefetch}
@@ -99,32 +139,7 @@ export function ThreadRow({
       >
         <Icon name="star" size={16} filled={thread.starred} />
       </button>
-      <span className="thread-actions">
-        <button
-          type="button"
-          aria-label="Archive conversation"
-          title="Archive"
-          onClick={() => onQuick({ type: "archive" })}
-        >
-          <Icon name="archive" size={16} />
-        </button>
-        <button
-          type="button"
-          aria-label="Move conversation to trash"
-          title="Move to trash"
-          onClick={() => onQuick({ type: "trash" })}
-        >
-          <Icon name="trash" size={16} />
-        </button>
-        <button
-          type="button"
-          aria-label={thread.unread ? "Mark as read" : "Mark as unread"}
-          title={thread.unread ? "Mark as read" : "Mark as unread"}
-          onClick={() => onQuick({ type: "read", value: thread.unread })}
-        >
-          <Icon name="unread" size={16} />
-        </button>
-      </span>
+      <QuickActions unread={thread.unread} onQuick={onQuick} />
     </li>
   );
 }

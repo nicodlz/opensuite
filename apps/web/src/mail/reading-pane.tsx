@@ -1,10 +1,9 @@
 import * as React from "react";
-import type { Mailbox, Message } from "@opensuite/contracts";
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { MailAction, Mailbox, Message } from "@opensuite/contracts";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Alias } from "../aliases/client.ts";
 import { aliasState } from "../aliases/model.ts";
 import { expireSession } from "../auth/components.tsx";
-import { Button } from "../ui/button.tsx";
 import {
   DropdownContent,
   DropdownItem,
@@ -274,10 +273,12 @@ function MessageView({
   );
 }
 
+/**
+ * The open conversation's actions above its content (`children`). It stays
+ * mounted while the reader moves between conversations or waits for one to
+ * load, so a focused button keeps focus.
+ */
 export function ReadingPane({
-  messages,
-  focusMessageId,
-  aliasesByMessage,
   folder,
   mailboxes,
   labels,
@@ -285,57 +286,24 @@ export function ReadingPane({
   position,
   onBack,
   onAction,
-  onReply,
   onStep,
+  children,
 }: {
-  messages: Message[];
-  focusMessageId: string | null;
-  aliasesByMessage: Record<string, Alias[]>;
   folder: Mailbox | undefined;
   mailboxes: Mailbox[];
   labels: string[];
   starred: boolean;
   position: { index: number; total: number };
   onBack: () => void;
-  onAction: (
-    change:
-      | { type: "archive" }
-      | { type: "trash" }
-      | { type: "delete" }
-      | { type: "move"; mailboxId: string }
-      | { type: "read"; value: boolean }
-      | { type: "star"; value: boolean }
-      | { type: "labels"; labels: string[] },
-  ) => void;
-  onReply: (message: Message, mode: "reply" | "all" | "forward") => void;
+  onAction: (change: MailAction) => void;
   onStep: (direction: "next" | "previous") => void;
+  children: ReactNode;
 }) {
-  const last = messages.at(-1);
-  const [open, setOpen] = useState<Set<string>>(
-    () =>
-      new Set(
-        messages
-          .filter(
-            (message, index) =>
-              index === messages.length - 1 ||
-              message.id === focusMessageId ||
-              message.unread,
-          )
-          .map((message) => message.id),
-      ),
-  );
-  const messageStack = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (focusMessageId) {
-      const target = Array.from(messageStack.current?.children ?? []).find(
-        (element) => element.getAttribute("data-message-id") === focusMessageId,
-      );
-      target?.scrollIntoView({ block: "start" });
-    }
-  }, [focusMessageId]);
   const inTrash = folder?.role === "trash";
+  // Labels are the account's custom mailboxes. The mail contract can list and
+  // apply them but has no procedure to create one, so this menu offers no
+  // "New label" entry.
   const custom = mailboxes.filter((item) => item.role === "custom");
-  const subject = messages[0]?.subject || "(No subject)";
   return (
     <>
       <div className="reading-toolbar">
@@ -485,61 +453,9 @@ export function ReadingPane({
           </div>
         )}
       </div>
-      <div className="reading-scroll">
-        <header className="reading-subject">
-          <h2>{subject}</h2>
-          <div className="reading-tags">
-            {folder && <span className="folder-pill">{folder.name}</span>}
-            {labels.map((id) => (
-              <span className="folder-pill label" key={id}>
-                {mailboxes.find((item) => item.id === id)?.name ?? id}
-              </span>
-            ))}
-            {messages.length > 1 && (
-              <button
-                type="button"
-                className="link-button"
-                onClick={() =>
-                  setOpen(
-                    open.size === messages.length
-                      ? new Set(last ? [last.id] : [])
-                      : new Set(messages.map((message) => message.id)),
-                  )
-                }
-              >
-                {open.size === messages.length ? "Collapse all" : "Expand all"}
-              </button>
-            )}
-          </div>
-        </header>
-        <div className="message-stack" ref={messageStack}>
-          {messages.map((message) => (
-            <MessageView
-              key={message.id}
-              message={message}
-              aliases={aliasesByMessage[message.id] ?? []}
-              expanded={open.has(message.id) || message.id === last?.id}
-              onToggle={() => setOpen(new Set([...open, message.id]))}
-            />
-          ))}
-        </div>
-        {last && (
-          <div className="reply-actions">
-            <Button variant="secondary" onClick={() => onReply(last, "reply")}>
-              <Icon name="reply" size={16} /> Reply
-            </Button>
-            <Button variant="secondary" onClick={() => onReply(last, "all")}>
-              <Icon name="replyAll" size={16} /> Reply all
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => onReply(last, "forward")}
-            >
-              <Icon name="forward" size={16} /> Forward
-            </Button>
-          </div>
-        )}
-      </div>
+      {children}
     </>
   );
 }
+
+export { MessageView };

@@ -131,11 +131,18 @@
   background: var(--surface);
   box-shadow: 0 1px 2px rgba(10, 7, 16, 0.04);
 }
+/* Focus lands here after a deletion. */
+.cal-surface:focus-visible {
+  outline-offset: 2px;
+}
 .cal-empty {
   position: absolute;
   z-index: 6;
   bottom: 20px;
   left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   max-width: calc(100% - 32px);
   padding: 8px 16px;
   border-radius: 999px;
@@ -147,6 +154,100 @@
   text-align: center;
   transform: translateX(-50%);
   pointer-events: none;
+}
+/* Notifications use the same spot on wide screens; phones show them higher. */
+@media (min-width: 901px) {
+  body:has(.toast[data-state="open"]) .cal-empty {
+    bottom: 84px;
+  }
+}
+.cal-empty button {
+  flex: none;
+  padding: 4px 12px;
+  border: 1px solid color-mix(in srgb, var(--surface) 45%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-weight: 700;
+  pointer-events: auto;
+}
+.cal-empty button:hover {
+  background: color-mix(in srgb, var(--surface) 16%, transparent);
+}
+
+/* Search results from nearby months, shown in place of the grid. */
+.cal-results {
+  flex: 1;
+  min-height: 0;
+  padding: 16px 20px 24px;
+  overflow-y: auto;
+}
+.cal-results:focus-visible {
+  outline-offset: -3px;
+}
+.cal-results-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.cal-results-head > div {
+  flex: 1;
+  min-width: 0;
+}
+.cal-results-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+.cal-results-status {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.cal-results-month h3 {
+  margin: 18px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.cal-results-month ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cal-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--foreground);
+  text-align: left;
+}
+.cal-result:hover {
+  background: var(--accent-soft);
+}
+.cal-result-title {
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cal-result-when {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 13px;
 }
 .cal-skeleton {
   position: absolute;
@@ -178,6 +279,10 @@
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
+}
+/* The surface clips outer outlines. */
+.cal-scroll:focus-visible {
+  outline-offset: -3px;
 }
 .cal-head {
   position: sticky;
@@ -1077,6 +1182,21 @@ button.cal-dayhead[data-today]:hover .cal-dayhead-number {
   .cal-more-word {
     display: none;
   }
+  .cal-results {
+    padding: 12px 12px 20px;
+  }
+}
+/* Touch screens: no keyboard hints. */
+@media (hover: none) {
+  .cal-key-hint,
+  .cal-editor-hint {
+    display: none;
+  }
+}
+/* The search field has its own Clear button. */
+#calendar-search::-webkit-search-cancel-button {
+  appearance: none;
+  display: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .cal-sync,
