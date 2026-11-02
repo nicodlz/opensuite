@@ -11,7 +11,14 @@ import {
 import { AppShell, SidebarLink } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
 import { billing, billingQuery } from "./client.ts";
-import { billingError, bytes, price, statusText, usageState } from "./model.ts";
+import {
+  billingError,
+  bytes,
+  price,
+  statusText,
+  statusUrgency,
+  usageState,
+} from "./model.ts";
 // Vite injects the stylesheet.
 // oxlint-disable-next-line import/no-unassigned-import
 import "./billing.css";
@@ -52,7 +59,7 @@ function StorageUsage({ storage }: { storage: BillingOverview["storage"] }) {
         </p>
       )}
       {state === "over" && (
-        <output className="billing-warning">
+        <output className="billing-warning billing-danger">
           Storage quota reached: new uploads and incoming mail are paused;
           nothing is deleted.
         </output>
@@ -65,6 +72,61 @@ function date(value: string | null) {
   if (!value || Number.isNaN(Date.parse(value))) return null;
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(
     new Date(value),
+  );
+}
+/**
+ * Price, renewal and status of a subscription. A status that needs action is
+ * an alert whose button opens the billing portal.
+ */
+function SubscriptionSummary({
+  subscription,
+  busy,
+  onPortal,
+}: {
+  subscription: NonNullable<BillingOverview["subscription"]>;
+  busy: boolean;
+  onPortal: () => void;
+}) {
+  const end = date(subscription.currentPeriodEnd);
+  const ended = date(subscription.endedAt);
+  const urgency = statusUrgency(subscription.status);
+  return (
+    <>
+      <p className="billing-price">
+        {price(subscription.amount, subscription.interval)}
+      </p>
+      {urgency === "ok" ? (
+        <p>{statusText(subscription.status)}</p>
+      ) : (
+        <div className="billing-alert" role="alert">
+          <p>{statusText(subscription.status)}</p>
+          <Button disabled={busy} onClick={onPortal}>
+            {urgency === "payment" ? "Update payment method" : "Manage billing"}
+          </Button>
+        </div>
+      )}
+      {ended && !subscription.cancelAtPeriodEnd && <p>Ended: {ended}</p>}
+      {subscription.cancelAtPeriodEnd ? (
+        <p>
+          Cancellation scheduled
+          {end
+            ? ` — your plan ends ${end}`
+            : " at the end of the billing period"}
+          .
+        </p>
+      ) : (
+        end && !ended && <p>Next renewal: {end}</p>
+      )}
+      {urgency !== "attention" && (
+        <Button variant="secondary" disabled={busy} onClick={onPortal}>
+          Manage billing
+        </Button>
+      )}
+      <p className="billing-muted">
+        Update your payment method, view invoices, or cancel in the billing
+        portal.
+      </p>
+    </>
   );
 }
 export function BillingSettings() {
@@ -114,8 +176,6 @@ export function BillingSettings() {
   }
   const data = overview.data;
   const subscription = data?.subscription;
-  const end = date(subscription?.currentPeriodEnd ?? null);
-  const ended = date(subscription?.endedAt ?? null);
   const entitled =
     subscription !== null &&
     subscription !== undefined &&
@@ -129,6 +189,7 @@ export function BillingSettings() {
   return (
     <AppShell
       product="mail"
+      title="Plan & storage"
       sidebar={
         <>
           <p className="shell-nav-heading">Workspace settings</p>
@@ -204,43 +265,13 @@ export function BillingSettings() {
               ) : (
                 <>
                   {subscription ? (
-                    <>
-                      <p className="billing-price">
-                        {price(subscription.amount, subscription.interval)}
-                      </p>
-                      <p>{statusText(subscription.status)}</p>
-                      {ended && !subscription.cancelAtPeriodEnd && (
-                        <p>Ended: {ended}</p>
-                      )}
-                      {subscription.cancelAtPeriodEnd ? (
-                        <p>
-                          Cancellation scheduled
-                          {end
-                            ? ` — your plan ends ${end}`
-                            : " at the end of the billing period"}
-                          .
-                        </p>
-                      ) : (
-                        end && !ended && <p>Next renewal: {end}</p>
-                      )}
-                    </>
+                    <SubscriptionSummary
+                      subscription={subscription}
+                      busy={busy}
+                      onPortal={() => void redirect("portal")}
+                    />
                   ) : (
                     <p>Choose a plan to activate your Cloud account.</p>
-                  )}
-                  {subscription && (
-                    <Button
-                      variant="secondary"
-                      disabled={busy}
-                      onClick={() => void redirect("portal")}
-                    >
-                      Manage billing
-                    </Button>
-                  )}
-                  {subscription && (
-                    <p className="billing-muted">
-                      Update your payment method, view invoices, or cancel in
-                      the billing portal.
-                    </p>
                   )}
                 </>
               )}

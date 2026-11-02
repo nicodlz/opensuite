@@ -1,5 +1,5 @@
 import { AxeBuilder } from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 // Wednesday 28 October 2026, 10:00 in Paris. The synthetic calendar places
 // its events relative to the current week, so the clock fixes the layout.
@@ -32,6 +32,45 @@ function period(title: string) {
 
 const chip = (page: Page, title: string) =>
   page.getByRole("button", { name: new RegExp(`^${title},`) });
+
+/** Text of the shared notification region. */
+const notice = (page: Page) =>
+  page.locator(".toast-viewport [aria-live='polite']");
+
+/** Drags from 20 × 10 px inside `target` by `x` and `y` pixels. */
+async function drag(page: Page, target: Locator, x: number, y: number) {
+  const box = await target.boundingBox();
+  if (!box) throw new Error("The event is not visible");
+  await page.mouse.move(box.x + 20, box.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 20 + x / 2, box.y + 10 + y / 2, { steps: 4 });
+  await page.mouse.move(box.x + 20 + x, box.y + 10 + y, { steps: 4 });
+  await page.mouse.up();
+}
+
+async function deleteEvent(page: Page, title: string) {
+  await chip(page, title).click();
+  await page
+    .getByRole("dialog", { name: title })
+    .getByRole("button", { name: "Delete event" })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Delete event?" })
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+}
+
+/** The development calendar runs in the page; make its deletions fail. */
+async function failDeletions(page: Page) {
+  await page.route("**/src/dev-data/calendar.ts*", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace(
+      /deleteEvent: api\.deleteEvent\.handler\(\(\{\s*input,\s*errors\s*\}\)\s*=>\s*\{/,
+      (start) => `${start} throw errors.NOT_FOUND();`,
+    );
+    await route.fulfill({ response, body });
+  });
+}
 
 test("a reminder link opens its event", async ({ page }) => {
   await page.clock.setFixedTime(now);
@@ -351,3 +390,313 @@ test("navigation from the month grid, mini month and empty weeks", async ({
   await page.getByRole("checkbox", { name: "Work" }).uncheck();
   await expect(page.getByText(/Nothing scheduled this week/)).toBeVisible();
 });
+
+test("keyboard changes are announced and focus stays on the event", async ({
+  page,
+}) => {
+  await open(page);
+  await page.keyboard.press("c");
+  const editor = page.getByRole("dialog", { name: "New event" });
+  await expect(editor.getByLabel("Title")).toBeFocused();
+  await page.keyboard.type("Planning");
+  await page.keyboard.press("Control+Enter");
+  await expect(notice(page)).toHaveText("Event created");
+  await expect(chip(page, "Planning")).toBeFocused();
+
+  await page.keyboard.press("Enter");
+  await expect(
+    page
+      .getByRole("dialog", { name: "Planning" })
+      .getByRole("button", { name: "Edit event" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("dialog", { name: "Edit event" }).getByLabel("Title"),
+  ).toBeFocused();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" review");
+  await page.keyboard.press("Control+Enter");
+  await expect(notice(page)).toHaveText("Event saved");
+  const saved = chip(page, "Planning review");
+  await expect(saved).toBeFocused();
+
+  // Details, then Delete event and the Delete button of the confirmation.
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
+  await expect(
+    page.getByRole("button", { name: "Delete event" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  const confirm = page.getByRole("dialog", { name: "Delete event?" });
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(
+    confirm.getByRole("button", { name: "Close dialog" }),
+  ).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(
+    confirm.getByRole("button", { name: "Delete", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(notice(page)).toHaveText("Event deleted");
+  await expect(saved).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: period("Week of 26 Oct – 1 Nov 2026") }),
+  ).toBeFocused();
+
+  await page.keyboard.press("F8");
+  await expect(page.getByRole("button", { name: "Undo" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(saved).toBeFocused();
+  await expect(notice(page)).toBeEmpty();
+});
+
+test("a creation from the Create button focuses the new event", async ({
+  page,
+}) => {
+  await open(page);
+  await page
+    .getByRole("button", { name: "Create C", exact: true })
+    .first()
+    .click();
+  await page.keyboard.type("Offsite prep");
+  await page.keyboard.press("Enter");
+  await expect(notice(page)).toHaveText("Event created");
+  await expect(chip(page, "Offsite prep")).toBeFocused();
+});
+
+test("a saved event outside the shown period leaves focus on its trigger", async ({
+  page,
+}) => {
+  await open(page);
+  const create = page
+    .getByRole("button", { name: "Create C", exact: true })
+    .first();
+  await create.click();
+  const editor = page.getByRole("dialog", { name: "New event" });
+  await editor.getByLabel("Title").fill("Next week plan");
+  await editor.getByLabel("Start date").fill("2026-11-04");
+  await editor.getByRole("button", { name: "Save" }).click();
+  await expect(notice(page)).toHaveText("Event created");
+  await expect(create).toBeFocused();
+  await expect(chip(page, "Next week plan")).toHaveCount(0);
+});
+
+test("a deletion is sent only when its notification closes", async ({
+  page,
+}) => {
+  await failDeletions(page);
+  await open(page);
+  const review = chip(page, "Design review");
+  // Undo shows the original event again; nothing reaches the server.
+  await deleteEvent(page, "Design review");
+  await expect(notice(page)).toHaveText("Event deleted");
+  await expect(review).toHaveCount(0);
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(review).toBeFocused();
+  await review.click();
+  await expect(
+    page
+      .getByRole("dialog", { name: "Design review" })
+      .getByText("Walk through the new calendar views."),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(notice(page)).toBeEmpty();
+  // Dismissing the notification sends it; the failure brings it back.
+  await deleteEvent(page, "Design review");
+  await expect(notice(page)).toHaveText("Event deleted");
+  await page.getByRole("button", { name: "Dismiss notification" }).click();
+  await expect(notice(page)).toHaveText(
+    "The event could not be deleted. Your change was undone.",
+  );
+  await expect(review).toBeVisible();
+});
+
+test("leaving Calendar sends a waiting deletion", async ({ page }) => {
+  await open(page);
+  await deleteEvent(page, "Lunch with Sam");
+  await expect(notice(page)).toHaveText("Event deleted");
+  const products = page.getByRole("navigation", { name: "Products" });
+  await products.getByRole("link", { name: "Drive" }).click();
+  await expect(page).toHaveURL(/\/drive$/);
+  // Its Undo would no longer be true.
+  await expect(notice(page)).toBeEmpty();
+  await products.getByRole("link", { name: "Calendar" }).click();
+  await expect(chip(page, "Design review")).toBeVisible();
+  await expect(chip(page, "Lunch with Sam")).toHaveCount(0);
+});
+
+test("moves are announced and can be undone", async ({ page }) => {
+  await open(page);
+  const review = chip(page, "Design review");
+  const box = await review.boundingBox();
+  if (!box) throw new Error("Design review is not visible");
+  // One column to the right and half an hour later.
+  await drag(page, review, box.width + 3, 24);
+  await expect(notice(page)).toHaveText(
+    /^Event moved to Tuesday,? 27 October · 10:30\s?–\s?11:30$/,
+  );
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(review).toHaveAccessibleName(
+    /Monday,? 26 October · 10:00\s?–\s?11:00/,
+  );
+  await expect(review).toBeFocused();
+  await expect(notice(page)).toBeEmpty();
+
+  const resized = await review.boundingBox();
+  if (!resized) throw new Error("Design review is not visible");
+  await page.mouse.move(resized.x + 20, resized.y + resized.height - 3);
+  await page.mouse.down();
+  await page.mouse.move(resized.x + 20, resized.y + resized.height + 24, {
+    steps: 4,
+  });
+  await page.mouse.up();
+  await expect(notice(page)).toHaveText("Event now ends at 11:30");
+
+  // A series moves back as a whole.
+  const standUp = chip(page, "Team stand-up");
+  await drag(page, standUp, 0, 48);
+  await page
+    .getByRole("dialog", { name: "Change recurring event?" })
+    .getByRole("button", { name: "Change all occurrences" })
+    .click();
+  await expect(notice(page)).toHaveText("All occurrences moved");
+  await expect(standUp).toHaveAccessibleName(/10:30\s?–\s?10:45/);
+  await page.keyboard.press("F8");
+  await page.keyboard.press("Enter");
+  await expect(standUp).toHaveAccessibleName(
+    /Wednesday,? 28 October · 09:30\s?–\s?09:45/,
+  );
+  await expect(standUp).toBeFocused();
+  await page.keyboard.press("j");
+  await expect(chip(page, "Team stand-up")).toHaveAccessibleName(
+    /Wednesday,? 4 November · 09:30\s?–\s?09:45/,
+  );
+});
+
+test("search lists matches from nearby months", async ({ page }) => {
+  await open(page);
+  const search = page.getByLabel("Search events");
+  await search.fill("roadmap");
+  await expect(
+    page.getByText("No events match “roadmap” this week."),
+  ).toBeVisible();
+  await search.press("Enter");
+  const results = page.getByRole("region", { name: "Results for “roadmap”" });
+  await expect(results).toBeFocused();
+  await expect(results.getByRole("status")).toHaveText(
+    "1 event between April 2026 and April 2027.",
+  );
+  await page.keyboard.press("Escape");
+  await expect(results).toHaveCount(0);
+  await expect(search).toBeFocused();
+
+  await page.getByRole("button", { name: "Search nearby months" }).click();
+  await expect(results).toBeFocused();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(
+    results.getByRole("button", { name: /^Roadmap workshop, Monday,? 2/ }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("heading", { name: period("2 – 8 Nov 2026") }),
+  ).toBeVisible();
+  await expect(chip(page, "Roadmap workshop")).toBeFocused();
+});
+
+test("a cleared search does not interrupt typing the next one", async ({
+  page,
+}) => {
+  await open(page);
+  const search = page.getByLabel("Search events");
+  const results = page.locator(".cal-results");
+  await search.fill("design");
+  await search.press("Enter");
+  await expect(results).toBeFocused();
+  await search.focus();
+  await page.getByRole("button", { name: "Clear search" }).click();
+  await expect(search).toBeFocused();
+  await page.keyboard.type("roadmap");
+  await expect(search).toHaveValue("roadmap");
+  await expect(search).toBeFocused();
+  await expect(results).toHaveCount(0);
+  // Escape in the field clears it too.
+  await search.press("Enter");
+  await expect(results).toBeFocused();
+  await search.focus();
+  await search.press("Escape");
+  await expect(search).toHaveValue("");
+  await page.keyboard.type("lunch");
+  await expect(search).toHaveValue("lunch");
+  await expect(results).toHaveCount(0);
+});
+
+test.describe("on a phone", () => {
+  // Touch emulation also makes the browser report that it cannot hover.
+  test.use({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+
+  test("the week shows three days and no keyboard hints", async ({ page }) => {
+    await page.clock.setFixedTime(now);
+    await page.goto("/calendar");
+    expect(await page.evaluate(() => matchMedia("(hover: none)").matches)).toBe(
+      true,
+    );
+    await page.getByRole("button", { name: "3 days", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: period("28 – 30 Oct 2026") }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /Open day view$/ }),
+    ).toHaveCount(3);
+    await page.getByRole("button", { name: "Next 3 days" }).click();
+    await expect(
+      page.getByRole("heading", { name: period("31 Oct – 2 Nov 2026") }),
+    ).toBeVisible();
+    await expect(chip(page, "Roadmap workshop")).toBeVisible();
+
+    await page.getByRole("button", { name: "Day", exact: true }).click();
+    await page.getByRole("button", { name: "Next day" }).click();
+    await expect(
+      page.getByRole("heading", { name: /Sunday,? 1 November 2026/ }),
+    ).toBeVisible();
+    await expect(page.locator(".cal-empty output")).toHaveText(
+      "Nothing scheduled this day. Select a time to add an event.",
+      { useInnerText: true },
+    );
+    // The empty day still has a keyboard stop to scroll the hours.
+    await axe(page);
+  });
+});
+
+for (const theme of ["light", "dark"] as const) {
+  test(`${theme} notifications and search results are accessible`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      if (!localStorage.getItem("opensuite-theme"))
+        localStorage.setItem("opensuite-theme", "system");
+    });
+    await page.emulateMedia({ colorScheme: theme });
+    await open(page);
+    await deleteEvent(page, "Lunch with Sam");
+    await expect(page.getByRole("button", { name: "Undo" })).toBeVisible();
+    await axe(page);
+    await page.getByLabel("Search events").fill("design");
+    await page.getByLabel("Search events").press("Enter");
+    const results = page.getByRole("region", { name: "Results for “design”" });
+    await expect(
+      results.getByRole("button", { name: /^Design conference,/ }),
+    ).toBeVisible();
+    await axe(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(results).toBeVisible();
+    await axe(page);
+  });
+}

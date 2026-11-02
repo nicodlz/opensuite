@@ -5,6 +5,10 @@ import { OpenAPILink } from "@orpc/openapi-client/fetch";
 
 const link = new OpenAPILink(calendarContract, {
   url: `${window.location.origin}/api`,
+  // A deletion waiting for its Undo period is sent when the page closes;
+  // keepalive lets it finish. Its small body fits the keepalive limit.
+  fetch: (request, init, _options, path) =>
+    fetch(request, { ...init, keepalive: path.at(-1) === "deleteEvent" }),
 });
 const productionClient: ContractRouterClient<typeof calendarContract> =
   createORPCClient(link);

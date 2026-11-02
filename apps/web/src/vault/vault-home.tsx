@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { z } from "zod";
+import { isAdministrator, meQuery } from "../setup/client.ts";
 import { Button } from "../ui/button.tsx";
 
 const Status = z.object({
@@ -51,22 +52,7 @@ function VaultStatus({ origin }: { origin: string | undefined }) {
   return (
     <>
       {origin === undefined || status.data?.enabled === false ? (
-        <section className="empty-card">
-          <div className="check-icon" aria-hidden="true">
-            ◇
-          </div>
-          <h2>Vault is not enabled</h2>
-          <p>
-            Ask your administrator to configure the Vault origin and start the
-            optional Vault profile. The generator is available on this device.
-          </p>
-          <p>
-            Operators: set VAULT_PUBLIC_HOST and add the matching HTTPS origin
-            as vault= in AUTH_PRODUCT_ORIGINS, then start the Compose vault
-            profile and recreate the API. See docs/operations/vault.md on the
-            server for setup.
-          </p>
-        </section>
+        <VaultDisabled />
       ) : (
         <>
           <section className="vault-hero">
@@ -92,17 +78,57 @@ function VaultStatus({ origin }: { origin: string | undefined }) {
   );
 }
 
+/** Setup steps are shown only to administrators; others are told whom to ask. */
+function VaultDisabled() {
+  const administrator = isAdministrator(useQuery(meQuery));
+  return (
+    <section className="empty-card" aria-labelledby="vault-disabled-heading">
+      <div className="check-icon" aria-hidden="true">
+        ◇
+      </div>
+      <h2 id="vault-disabled-heading">Vault is not enabled</h2>
+      {administrator ? (
+        <>
+          <p>
+            Vault is not set up on this server yet. The password generator works
+            on this device in the meantime.
+          </p>
+          <div className="vault-operator">
+            <h3>For administrators</h3>
+            <p>
+              Set VAULT_PUBLIC_HOST and add the matching HTTPS origin as vault=
+              in AUTH_PRODUCT_ORIGINS, then start the Compose vault profile and
+              recreate the API. See docs/operations/vault.md on the server for
+              setup.
+            </p>
+          </div>
+        </>
+      ) : (
+        <p>
+          Vault is not available on this server yet. Contact your administrator
+          to turn it on. The password generator works on this device in the
+          meantime.
+        </p>
+      )}
+      <Link className="vault-link" to="/vault/generator">
+        Open the generator →
+      </Link>
+    </section>
+  );
+}
+
 function ConnectionStatus({
   status,
 }: {
   status: ReturnType<typeof useVaultStatus>;
 }) {
+  const refreshing = status.isFetching;
   return (
-    <section className="vault-card">
+    <section className="vault-card" aria-labelledby="vault-connection-heading">
       <div className="vault-status-head">
         <div>
           <p className="eyebrow">CONNECTION STATUS</p>
-          <h2 aria-live="polite">
+          <h2 id="vault-connection-heading" aria-live="polite">
             {status.isPending
               ? "Checking connection"
               : status.isError
@@ -112,28 +138,39 @@ function ConnectionStatus({
                   : "Not reachable"}
           </h2>
         </div>
-        <span
-          className={`status-badge ${status.data?.reachable ? "status-ok" : "status-degraded"}`}
-        >
-          {status.data?.reachable ? "Online" : "Check connection"}
-        </span>
+        {status.isSuccess && (
+          <span
+            className={`status-badge ${status.data.reachable ? "status-ok" : "status-degraded"}`}
+          >
+            {status.data.reachable ? "Online" : "Check connection"}
+          </span>
+        )}
       </div>
-      <p>Version: {status.data?.version ?? "Unknown"}</p>
-      <p>
-        Last checked:{" "}
-        {status.data?.checkedAt
-          ? new Date(status.data.checkedAt).toLocaleString()
-          : "Not checked"}
-      </p>
+      {status.isError ? (
+        <p>
+          Could not check the vault server. Your vault may still work; try again
+          in a moment.
+        </p>
+      ) : status.isSuccess ? (
+        <>
+          <p>Version: {status.data.version ?? "Unknown"}</p>
+          <p>
+            Last checked:{" "}
+            {status.data.checkedAt
+              ? new Date(status.data.checkedAt).toLocaleString()
+              : "Not checked"}
+          </p>
+        </>
+      ) : null}
       <Button
         variant="secondary"
         size="small"
+        aria-disabled={refreshing}
         onClick={() => {
-          void status.refetch();
+          if (!refreshing) void status.refetch();
         }}
-        disabled={status.isFetching}
       >
-        Refresh status
+        {refreshing ? "Checking…" : "Refresh status"}
       </Button>
     </section>
   );

@@ -69,9 +69,21 @@ function useGenerator() {
 
 type GeneratorState = ReturnType<typeof useGenerator>;
 
+/** Why Generate is unavailable with the current options, or null. */
+function generateBlocker({ mode, classes, length, count }: GeneratorState) {
+  if (mode === "passphrase")
+    return Number.isInteger(count) && count >= 3 && count <= 12
+      ? null
+      : "Choose between 3 and 12 words.";
+  if (!Number.isInteger(length) || length < 8 || length > 128)
+    return "Choose a length between 8 and 128.";
+  return classes.length === 0 ? "Select at least one character class." : null;
+}
+
 export function Generator() {
   const state = useGenerator();
-  const { mode, classes, length, count, generate } = state;
+  const { generate } = state;
+  const blocker = generateBlocker(state);
   return (
     <div className="content-wrap vault-content">
       <div className="page-breadcrumb">
@@ -89,19 +101,20 @@ export function Generator() {
       <section className="vault-card vault-generator">
         <GeneratorMode state={state} />
         <GeneratorOptions state={state} />
-        <Button
-          onClick={generate}
-          disabled={
-            mode === "password"
-              ? classes.length === 0 ||
-                !Number.isInteger(length) ||
-                length < 8 ||
-                length > 128
-              : !Number.isInteger(count) || count < 3 || count > 12
-          }
-        >
-          Generate
-        </Button>
+        <div className="vault-generate">
+          <Button
+            onClick={generate}
+            disabled={blocker !== null}
+            aria-describedby={blocker ? "vault-generate-blocker" : undefined}
+          >
+            Generate
+          </Button>
+          {blocker && (
+            <p id="vault-generate-blocker" className="vault-generate-blocker">
+              {blocker}
+            </p>
+          )}
+        </div>
         <GeneratorResult state={state} />
         <p className="vault-note">
           Generated values stay in this page. Clipboard clearing after 30

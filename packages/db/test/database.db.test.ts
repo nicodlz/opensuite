@@ -22,6 +22,7 @@ import {
   createSecretBox,
   loadDatabaseConfig,
 } from "../src/index.ts";
+import { createComposeNetworks } from "../../../test-support/compose-networks.js";
 import type { PrismaClient } from "../src/generated/index.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -33,6 +34,7 @@ const runId =
     .replace(/[^a-z0-9-]/g, "-")
     .slice(0, 30) || "local";
 const project = `opensuite-db-${runId}-${randomUUID().slice(0, 8)}`;
+const networks = createComposeNetworks(project);
 const migrationImage = `${project}-migrate:local`;
 const overrideFile = join(tmpdir(), `${project}-compose.yaml`);
 const composeArgs = [
@@ -54,6 +56,7 @@ const compose = async (...args: string[]) =>
       cwd: root,
       env: {
         ...process.env,
+        ...networks.env,
         // Compose interpolates Drive settings even though this suite does not start it.
         DRIVE_S3_ENDPOINT: "http://fixture.invalid",
         DRIVE_S3_PUBLIC_ENDPOINT: "http://fixture.invalid",
@@ -72,6 +75,7 @@ const cleanup = async () => {
   try {
     await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
   } finally {
+    await networks.release();
     await rm(overrideFile, { force: true });
     await run("docker", ["image", "rm", migrationImage], {
       timeout: 15_000,
@@ -89,6 +93,7 @@ beforeAll(async () => {
     `services:\n  migrate:\n    image: ${migrationImage}\n`,
   );
   try {
+    await networks.reserve();
     await compose(
       "up",
       "--detach",
