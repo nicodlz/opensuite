@@ -2,13 +2,22 @@ import { oc } from "@orpc/contract";
 import { z } from "zod";
 import { IdSchema } from "./mail.ts";
 
+const contactEmail = z.email({ pattern: z.regexes.unicodeEmail }).max(320);
 export const ContactContentSchema = z.object({
   name: z.string().trim().min(1).max(500),
-  emails: z.array(z.email().max(320)).max(20),
+  emails: z.array(contactEmail).max(1000),
 });
-export const ContactSchema = ContactContentSchema.extend({
+// Contacts can also be written by CardDAV clients with fields outside our
+// create/import limits. Return those values without treating them as an outage.
+export const ContactSchema = z.object({
+  name: z.string(),
+  emails: z.array(z.string()),
   id: IdSchema,
   addressBookIds: z.array(IdSchema),
+});
+const ContactUpdateSchema = z.object({
+  name: z.string().max(250_000),
+  emails: z.array(contactEmail).max(1000),
 });
 const account = z.object({ accountId: IdSchema });
 const state = z.string().min(1).max(256);
@@ -18,6 +27,7 @@ const errors = {
   FORBIDDEN: { status: 403, message: "Access denied" },
   VALIDATION: { status: 400, message: "Invalid contact data" },
   CONFLICT: { status: 409, message: "Address book changed" },
+  TOO_MANY_REQUESTS: { status: 429, message: "Too many contacts requests" },
   UPSTREAM_UNAVAILABLE: {
     status: 503,
     message: "Contacts service unavailable",
@@ -80,7 +90,7 @@ export const contactsContract = {
     .input(
       account.extend({
         contactId: IdSchema,
-        contact: ContactContentSchema,
+        contact: ContactUpdateSchema,
         state,
       }),
     )
@@ -100,6 +110,14 @@ export const contactsContract = {
       z.object({
         imported: z.number().int().nonnegative(),
         skipped: z.number().int().nonnegative(),
+        failed: z
+          .array(
+            z.object({
+              index: z.number().int().nonnegative(),
+              reason: z.string(),
+            }),
+          )
+          .optional(),
       }),
     ),
   export: p
@@ -119,7 +137,7 @@ export const contactsContract = {
         suggestions: z.array(
           z.object({
             name: z.string(),
-            email: z.email(),
+            email: z.string(),
             source: z.enum(["contact", "recent"]),
           }),
         ),
@@ -128,7 +146,7 @@ export const contactsContract = {
 };
 export type ContactContent = z.infer<typeof ContactContentSchema>;
 export type Contact = z.infer<typeof ContactSchema>;
-
+export const contactEmailKey = (email: string) => email.trim().toLowerCase();
 export type ContactRecord = {
   id: string;
   addressBookIds: Record<string, boolean>;
@@ -141,16 +159,16 @@ export type ContactRecord = {
     | null
     | undefined;
 } & Record<string, unknown>;
-
 export interface ContactCodec {
-  parse(
-    input: string,
-  ): { contact: ContactContent | null; warnings: string[] }[];
+  parse(input: string):
+    | {
+        ok: true;
+        cards: { contact: ContactContent | null; warnings: string[] }[];
+      }
+    | { ok: false; reason: "limit" };
   serialize(contacts: readonly ContactContent[]): string;
-  content(card: ContactRecord): ContactContent | null;
-  project(
-    card: ContactRecord,
-  ): (ContactContent & { id: string; addressBookIds: string[] }) | null;
+  content(card: ContactRecord): ContactContent;
+  project(card: ContactRecord): Contact;
   create(contact: ContactContent, bookId: string): object;
   patch(card: ContactRecord, contact: ContactContent): Record<string, unknown>;
   warnings(card: ContactRecord): string[];

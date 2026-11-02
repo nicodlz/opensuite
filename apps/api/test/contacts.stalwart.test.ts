@@ -293,6 +293,143 @@ describe("pinned Stalwart Contacts with an inherited-permission app password", (
         .statusCode,
     ).toBe(200);
   });
+  it("keeps per-email metadata with its address through reorder and removal", async () => {
+    const session = value(await alice.discover());
+    const bookId =
+      read(await post("alice", "books", {}), booksSchema).books[0]?.id ?? "";
+    const created = value(
+      await alice.contacts.setContact(session, aliceId, {
+        create: {
+          item: {
+            "@type": "Card",
+            name: { full: "Metadata" },
+            addressBookIds: { [bookId]: true },
+            emails: {
+              work: { address: "work@example.test", contexts: { work: true } },
+              home: {
+                address: "home@example.test",
+                contexts: { private: true },
+                pref: 1,
+              },
+            },
+          },
+        },
+      }),
+    );
+    const id = created.created?.["item"]?.id ?? "";
+    expect(id).not.toBe("");
+    const state = read(await post("alice", "list", {}), listSchema).state;
+    expect(
+      (
+        await post("alice", "update", {
+          contactId: id,
+          state,
+          contact: {
+            name: "Metadata",
+            emails: ["home@example.test", "work@example.test"],
+          },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const reordered = value(
+      await alice.contacts.contactCards(session, aliceId, [id]),
+    ).list[0];
+    expect(Object.values(reordered?.emails ?? {})).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          address: "work@example.test",
+          contexts: { work: true },
+        }),
+        expect.objectContaining({
+          address: "home@example.test",
+          contexts: { private: true },
+          pref: 1,
+        }),
+      ]),
+    );
+    const nextState = read(await post("alice", "list", {}), listSchema).state;
+    expect(
+      (
+        await post("alice", "update", {
+          contactId: id,
+          state: nextState,
+          contact: { name: "Metadata", emails: ["home@example.test"] },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const remaining = value(
+      await alice.contacts.contactCards(session, aliceId, [id]),
+    ).list[0];
+    expect(Object.values(remaining?.emails ?? {})).toEqual([
+      expect.objectContaining({
+        address: "home@example.test",
+        contexts: { private: true },
+        pref: 1,
+      }),
+    ]);
+    const finalState = read(await post("alice", "list", {}), listSchema).state;
+    expect(
+      (await post("alice", "delete", { contactId: id, state: finalState }))
+        .statusCode,
+    ).toBe(200);
+  });
+  it("lists, suggests and exports contacts written by other clients with non-TLD and many email addresses", async () => {
+    const session = value(await alice.discover());
+    const bookId =
+      read(await post("alice", "books", {}), booksSchema).books[0]?.id ?? "";
+    const addresses = [
+      "ops@localhost",
+      ...Array.from(
+        { length: 21 },
+        (_, i) => `external${String(i)}@example.test`,
+      ),
+    ];
+    const created = value(
+      await alice.contacts.setContact(session, aliceId, {
+        create: {
+          item: {
+            "@type": "Card",
+            name: { full: "External Ops" },
+            addressBookIds: { [bookId]: true },
+            emails: Object.fromEntries(
+              addresses.map((address, i) => [`e${String(i)}`, { address }]),
+            ),
+          },
+        },
+      }),
+    );
+    const id = created.created?.["item"]?.id ?? "";
+    expect(id).not.toBe("");
+    const listed = await post("alice", "list", {});
+    expect(listed.statusCode).toBe(200);
+    const card = read(listed, listSchema).contacts.find(
+      (item) => item.id === id,
+    );
+    expect(card?.emails).toHaveLength(addresses.length);
+    expect(card?.emails).toContain("ops@localhost");
+    const suggestions = read(
+      await post("alice", "suggest", { query: "External Ops", limit: 30 }),
+      suggestionSchema,
+    );
+    expect(suggestions.suggestions).toContainEqual({
+      name: "External Ops",
+      email: "ops@localhost",
+      source: "contact",
+    });
+    const exported = await post("alice", "export", { ids: [id, id] });
+    expect(exported.statusCode).toBe(200);
+    const vcard = read(exported, exportSchema).vcard;
+    expect(vcard).toContain("EMAIL:ops@localhost");
+    const preview = read(
+      await post("bob", "import/preview", { vcard }),
+      previewSchema,
+    );
+    expect(preview.entries[0]?.contact?.emails).toHaveLength(addresses.length);
+    const state = read(await post("alice", "list", {}), listSchema).state;
+    expect(
+      (await post("alice", "delete", { contactId: id, state })).statusCode,
+    ).toBe(200);
+  });
   it("previews and imports multiple vCards, reports loss and duplicates, and exports a round trip", async () => {
     const bookId =
       read(await post("alice", "books", {}), booksSchema).books[0]?.id ?? "";
@@ -327,6 +464,18 @@ describe("pinned Stalwart Contacts with an inherited-permission app password", (
         .map((e) => e.contact?.name)
         .toSorted((a, b) => (a ?? "").localeCompare(b ?? "")),
     ).toEqual(["One, Person", "Two"]);
+  });
+  it("reports large malformed vCard framing without blocking the HTTP service", async () => {
+    const responses = await Promise.all(
+      [
+        "BEGIN:VCARD\n".repeat(20_000),
+        `BEGIN:VCARD${"\n".repeat(249_000)}`,
+      ].map((vcard) => post("alice", "import/preview", { vcard })),
+    );
+    for (const response of responses) {
+      expect(response.statusCode).toBe(200);
+      expect(read(response, previewSchema).entries[0]?.contact).toBeNull();
+    }
   });
   it("uses only the owner's sent recipients, including Bcc, and deduplicates contacts", async () => {
     const session = value(await alice.discover());

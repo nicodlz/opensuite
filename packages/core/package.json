@@ -21,7 +21,7 @@
     "@opensuite/contracts": "workspace:*",
     "@opensuite/db": "workspace:*",
     "@opensuite/jmap": "workspace:*",
-    "ical.js": "2.2.1",
+    "ical.js": "catalog:",
     "neverthrow": "catalog:",
     "web-push": "catalog:",
     "zod": "catalog:"

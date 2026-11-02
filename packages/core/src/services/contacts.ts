@@ -1,9 +1,10 @@
 import {
-  ContactContentSchema,
+  contactEmailKey,
   type ContactContent,
   type ContactRecord,
   type ContactCodec,
 } from "@opensuite/contracts";
+import { err } from "neverthrow";
 import type { Actor } from "./accounts.ts";
 import {
   createJmapAccess,
@@ -13,21 +14,33 @@ import {
 } from "./jmap-access.ts";
 
 export type ContactsFailure = { kind: AccessFailureKind };
-export const contactsCapability = "urn:ietf:params:jmap:contacts";
+const contactsCapability = "urn:ietf:params:jmap:contacts";
 const mailCapability = "urn:ietf:params:jmap:mail";
-export const emailKey = (email: string) => email.trim().toLowerCase();
 export type ContactsDependencies = Parameters<typeof createJmapAccess>[0];
 type Connection = Awaited<
   ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
 >;
 
-export class ContactsAccess {
-  readonly run: ReturnType<typeof createJmapAccess>["run"];
+class ContactsAccess {
+  readonly #run: ReturnType<typeof createJmapAccess>["run"];
   readonly #open: ReturnType<typeof createJmapAccess>["connect"];
+  readonly #active = new Map<string, number>();
   constructor(dependencies: ContactsDependencies) {
     const access = createJmapAccess(dependencies);
-    this.run = access.run;
+    this.#run = access.run;
     this.#open = access.connect;
+  }
+  async run<T>(actor: Actor, work: () => Promise<T>) {
+    const active = this.#active.get(actor.id) ?? 0;
+    if (active >= 2) return err({ kind: "rate_limited" as const });
+    this.#active.set(actor.id, active + 1);
+    try {
+      return await this.#run(work);
+    } finally {
+      const remaining = (this.#active.get(actor.id) ?? 1) - 1;
+      if (remaining === 0) this.#active.delete(actor.id);
+      else this.#active.set(actor.id, remaining);
+    }
   }
   async connect(actor: Actor, accountId: string) {
     const c = await this.#open(actor, accountId, contactsCapability);
@@ -95,35 +108,9 @@ export class ContactsAccess {
       }),
     );
   }
-  async all(c: Connection, max = 5000) {
-    const ids: string[] = [];
-    const nextPage = async (position: number): Promise<void> => {
-      const limit = Math.min(100, max + 1 - position);
-      const page = value(
-        await c.client.contacts.queryContacts(c.session, c.id, {
-          position,
-          limit,
-        }),
-      );
-      ids.push(...page.ids);
-      if (ids.length > max) fail("validation");
-      if (page.ids.length === limit) await nextPage(position + limit);
-    };
-    await nextPage(0);
-    const cards: ContactRecord[] = [];
-    const load = async (position: number): Promise<void> => {
-      if (position >= ids.length) return;
-      cards.push(
-        ...(await this.get(c, ids.slice(position, position + 100))).list,
-      );
-      await load(position + 100);
-    };
-    await load(0);
-    return cards;
-  }
 }
 
-export class ContactsCore {
+class ContactsCore {
   readonly access: ContactsAccess;
   readonly codec: ContactCodec;
   constructor(access: ContactsAccess, codec: ContactCodec) {
@@ -131,7 +118,7 @@ export class ContactsCore {
     this.codec = codec;
   }
   books(actor: Actor, accountId: string) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const c = await this.access.connect(actor, accountId);
       return {
         books: (await this.access.books(c)).map((book) => ({
@@ -150,7 +137,7 @@ export class ContactsCore {
     accountId: string,
     input: { query: string; position: number; limit: number },
   ) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const c = await this.access.connect(actor, accountId);
       const page = value(
         await c.client.contacts.queryContacts(c.session, c.id, {
@@ -164,10 +151,8 @@ export class ContactsCore {
       const result = await this.access.get(c, page.ids);
       const byId = new Map(result.list.map((card) => [card.id, card]));
       return {
-        contacts: page.ids.map(
-          (id) =>
-            this.codec.project(byId.get(id) ?? fail("unavailable")) ??
-            fail("unavailable"),
+        contacts: page.ids.map((id) =>
+          this.codec.project(byId.get(id) ?? fail("unavailable")),
         ),
         state: result.state,
         position: page.position,
@@ -180,7 +165,7 @@ export class ContactsCore {
     accountId: string,
     input: { bookId: string; contact: ContactContent; state: string },
   ) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const c = await this.access.writeConnection(
         actor,
         accountId,
@@ -199,7 +184,7 @@ export class ContactsCore {
     accountId: string,
     input: { contactId: string; contact: ContactContent; state: string },
   ) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const { connection: c, card } = await this.access.item(
         actor,
         accountId,
@@ -222,7 +207,7 @@ export class ContactsCore {
     accountId: string,
     input: { contactId: string; state: string },
   ) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const { connection: c, card } = await this.access.item(
         actor,
         accountId,
@@ -244,11 +229,14 @@ export class ContactsCore {
     accountId: string,
     input: { query: string; limit: number },
   ) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const c = await this.access.connect(actor, accountId);
       if (c.session.primaryAccounts[mailCapability] !== c.id)
         return fail("unavailable");
-      const matches = await this.access.all(c);
+      const ids = value(
+        await c.client.contacts.suggestionIds(c.session, c.id, input.query),
+      );
+      const matches = (await this.access.get(c, ids)).list;
       const suggestions: {
         name: string;
         email: string;
@@ -261,11 +249,9 @@ export class ContactsCore {
         email: string,
         source: "contact" | "recent",
       ) => {
-        const parsed =
-          ContactContentSchema.shape.emails.element.safeParse(email);
-        const key = emailKey(email);
+        const key = contactEmailKey(email);
         if (
-          !parsed.success ||
+          !key ||
           seen.has(key) ||
           !(name.toLowerCase().includes(needle) || key.includes(needle))
         )
@@ -274,7 +260,7 @@ export class ContactsCore {
         suggestions.push({ name, email, source });
       };
       for (const card of matches) {
-        const contact = this.codec.content(card) ?? fail("unavailable");
+        const contact = this.codec.content(card);
         for (const email of contact.emails) add(contact.name, email, "contact");
       }
       const sent = value(await c.client.mailboxes(c.session, c.id)).list.find(
@@ -315,17 +301,13 @@ class ContactTransfers {
     this.codec = codec;
   }
   async preview(c: Connection, text: string) {
-    let parsed: ReturnType<ContactCodec["parse"]>;
-    try {
-      parsed = this.codec.parse(text);
-    } catch {
-      return fail("validation");
-    }
-    const stored = await this.access.all(c);
-    return this.codec.preview(parsed, stored);
+    const parsed = this.codec.parse(text);
+    if (!parsed.ok) return fail("validation");
+    const stored = value(await c.client.contacts.allCards(c.session, c.id));
+    return this.codec.preview(parsed.cards, stored);
   }
   previewImport(actor: Actor, accountId: string, input: { vcard: string }) {
-    return this.access.run(async () => ({
+    return this.access.run(actor, async () => ({
       entries: await this.preview(
         await this.access.connect(actor, accountId),
         input.vcard,
@@ -337,7 +319,7 @@ class ContactTransfers {
     accountId: string,
     input: { bookId: string; vcard: string; state: string },
   ) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const c = await this.access.writeConnection(
         actor,
         accountId,
@@ -349,30 +331,44 @@ class ContactTransfers {
       );
       const current = await this.access.get(c, []);
       if (current.state !== input.state) return fail("conflict");
-      const save = async (index: number, state: string): Promise<number> => {
-        const entry = valid[index];
-        if (entry === undefined) return 0;
-        if (entry.contact === null) return save(index + 1, state);
-        const result = await this.access.createCard(
-          c,
-          state,
-          this.codec.create(entry.contact, input.bookId),
-        );
-        if (!result.created?.["item"]?.id || !result.newState)
-          return fail("unavailable");
-        return 1 + (await save(index + 1, result.newState));
+      if (!valid.length) return { imported: 0, skipped: entries.length };
+      const create = Object.fromEntries(
+        valid.map((entry, index) => [
+          `item${String(index)}`,
+          this.codec.create(entry.contact ?? fail("unavailable"), input.bookId),
+        ]),
+      );
+      const result = value(
+        await c.client.contacts.setContactBatch(c.session, c.id, {
+          ifInState: input.state,
+          create,
+        }),
+      );
+      const failed: { index: number; reason: string }[] = [];
+      let imported = 0;
+      for (const [index, entry] of valid.entries()) {
+        const key = `item${String(index)}`;
+        if (result.created?.[key]?.id) imported++;
+        else
+          failed.push({
+            index: entry.index,
+            reason: result.notCreated?.[key]?.type ?? "unknown",
+          });
+      }
+      return {
+        imported,
+        skipped: entries.length - valid.length,
+        ...(failed.length ? { failed } : {}),
       };
-      const imported = await save(0, input.state);
-      return { imported, skipped: entries.length - imported };
     });
   }
   export(actor: Actor, accountId: string, input: { ids: string[] }) {
-    return this.access.run(async () => {
+    return this.access.run(actor, async () => {
       const c = await this.access.connect(actor, accountId);
-      const cards = (await this.access.get(c, input.ids)).list;
+      const cards = (await this.access.get(c, [...new Set(input.ids)])).list;
       return {
         vcard: this.codec.serialize(
-          cards.map((card) => this.codec.content(card) ?? fail("unavailable")),
+          cards.map((card) => this.codec.content(card)),
         ),
         warnings: cards.flatMap((card) => this.codec.warnings(card)),
       };

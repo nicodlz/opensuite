@@ -11,7 +11,10 @@ export const JmapCapability = {
   management: "urn:stalwart:jmap",
 } as const;
 
-const JErr = z.object({ type: z.string(), description: z.string().optional() });
+const ErrorSchema = z.object({
+  type: z.string(),
+  description: z.string().optional(),
+});
 export type JmapError =
   | { kind: "invalidInput"; message: string }
   | { kind: "network"; message: string; beforeRequest?: boolean }
@@ -149,7 +152,7 @@ export class Transport {
         } catch {
           data = undefined;
         }
-        const problem = JErr.safeParse(data);
+        const problem = ErrorSchema.safeParse(data);
         if (problem.success)
           return err({
             kind: "request",
@@ -216,7 +219,7 @@ export class Transport {
         message: "Unexpected method response count or call id",
       });
     if (call[0] === "error") {
-      const parsed = JErr.safeParse(call[1]);
+      const parsed = ErrorSchema.safeParse(call[1]);
       return parsed.success
         ? err({ kind: "method", method, ...parsed.data })
         : err({ kind: "invalidResponse", message: "Invalid method error" });
@@ -256,7 +259,7 @@ export class Transport {
   }
 }
 
-export const SetErrorSchema = JErr;
+export const SetErrorSchema = ErrorSchema;
 export const setFailure = (
   method: string,
   errors: Record<string, z.infer<typeof SetErrorSchema>> | null | undefined,

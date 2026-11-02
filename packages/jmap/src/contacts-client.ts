@@ -1,14 +1,20 @@
 import { CalendarClient } from "./calendar-client.ts";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { z } from "zod";
 import {
   JmapCapability,
   type Transport,
-  SetErrorSchema,
+  type JmapResult,
   setFailure,
   type Session,
 } from "./protocol.ts";
-import { GetSchema, QuerySchema } from "./schemas.ts";
+import {
+  AddressSchema,
+  GetSchema,
+  QuerySchema,
+  SetSchema,
+  usingMail,
+} from "./schemas.ts";
 
 const ContactBookSchema = z.object({
   id: z.string(),
@@ -28,45 +34,22 @@ const ContactCardSchema = z.looseObject({
     .record(z.string(), z.looseObject({ address: z.string() }))
     .nullish(),
 });
-const ContactSetSchema = z.object({
-  accountId: z.string(),
+const ContactSetSchema = SetSchema(z.object({ id: z.string() })).extend({
   newState: z.string().optional(),
-  created: z.record(z.string(), z.object({ id: z.string() })).nullish(),
-  updated: z.record(z.string(), z.unknown()).nullish(),
-  destroyed: z.array(z.string()).nullish(),
-  notCreated: z.record(z.string(), SetErrorSchema).nullish(),
-  notUpdated: z.record(z.string(), SetErrorSchema).nullish(),
-  notDestroyed: z.record(z.string(), SetErrorSchema).nullish(),
 });
-type GetFactory = <T>(item: z.ZodType<T>) => z.ZodType<{
-  accountId: string;
-  state: string;
-  list: T[];
-  notFound: string[];
-}>;
-type ContactQuery = {
-  accountId: string;
-  queryState: string;
-  canCalculateChanges: boolean;
-  position: number;
-  ids: string[];
-  total?: number | undefined;
-};
 const contactCapabilities = [JmapCapability.core, JmapCapability.contacts];
+type ContactChange = {
+  create?: Record<string, object>;
+  update?: Record<string, object>;
+  destroy?: string[];
+  ifInState?: string;
+};
 
 /** User-scoped contacts and sent-recipient operations on the JMAP transport. */
 export class ContactsApi {
   readonly #transport: Transport;
-  readonly #get: GetFactory;
-  readonly #query: z.ZodType<ContactQuery>;
-  constructor(
-    transport: Transport,
-    get: GetFactory,
-    query: z.ZodType<ContactQuery>,
-  ) {
+  constructor(transport: Transport) {
     this.#transport = transport;
-    this.#get = get;
-    this.#query = query;
   }
   addressBooks(session: Session, accountId: string) {
     return this.#transport.call(
@@ -74,7 +57,7 @@ export class ContactsApi {
       "AddressBook/get",
       { accountId },
       contactCapabilities,
-      this.#get(ContactBookSchema),
+      GetSchema(ContactBookSchema),
     );
   }
   queryContacts(
@@ -92,7 +75,7 @@ export class ContactsApi {
       "ContactCard/query",
       { accountId, ...options },
       contactCapabilities,
-      this.#query,
+      QuerySchema,
     );
   }
   contactCards(session: Session, accountId: string, ids: readonly string[]) {
@@ -101,27 +84,88 @@ export class ContactsApi {
       "ContactCard/get",
       { accountId, ids },
       contactCapabilities,
-      this.#get(ContactCardSchema),
+      GetSchema(ContactCardSchema),
     );
   }
-  async setContact(
+  async suggestionIds(
     session: Session,
     accountId: string,
-    change: {
-      create?: Record<string, object>;
-      update?: Record<string, object>;
-      destroy?: string[];
-      ifInState?: string;
-    },
-  ) {
-    const method = "ContactCard/set";
-    const result = await this.#transport.call(
+    query: string,
+  ): Promise<JmapResult<string[]>> {
+    const filtered = await this.queryContacts(session, accountId, {
+      filter: { text: query.split(/\s+/)[0] ?? query },
+      position: 0,
+      limit: 100,
+    });
+    if (filtered.isErr()) return err(filtered.error);
+    // Recently written cards may not have reached the text index yet.
+    const first = await this.queryContacts(session, accountId, {
+      position: 0,
+      limit: 100,
+    });
+    if (first.isErr()) return err(first.error);
+    return ok(
+      [...new Set([...filtered.value.ids, ...first.value.ids])].slice(0, 100),
+    );
+  }
+  async allCards(
+    session: Session,
+    accountId: string,
+    max = 5000,
+  ): Promise<JmapResult<z.infer<typeof ContactCardSchema>[]>> {
+    const ids: string[] = [];
+    const loadIds = async (position: number): Promise<JmapResult<string[]>> => {
+      const limit = Math.min(100, max + 1 - position);
+      const page = await this.queryContacts(session, accountId, {
+        position,
+        limit,
+      });
+      if (page.isErr()) return err(page.error);
+      ids.push(...page.value.ids);
+      if (ids.length > max)
+        return err({
+          kind: "method",
+          method: "ContactCard/query",
+          type: "invalidArguments",
+        });
+      return page.value.ids.length >= limit ? loadIds(ids.length) : ok(ids);
+    };
+    const allIds = await loadIds(0);
+    if (allIds.isErr()) return err(allIds.error);
+    const cards: z.infer<typeof ContactCardSchema>[] = [];
+    const loadCards = async (
+      offset: number,
+    ): Promise<JmapResult<z.infer<typeof ContactCardSchema>[]>> => {
+      if (offset >= ids.length) return ok(cards);
+      const requested = ids.slice(offset, offset + 100);
+      const batch = await this.contactCards(session, accountId, requested);
+      if (batch.isErr()) return err(batch.error);
+      if (
+        batch.value.notFound.length ||
+        batch.value.list.length !== requested.length
+      )
+        return err({
+          kind: "method",
+          method: "ContactCard/get",
+          type: "notFound",
+        });
+      cards.push(...batch.value.list);
+      return loadCards(offset + 100);
+    };
+    return loadCards(0);
+  }
+  setContactBatch(session: Session, accountId: string, change: ContactChange) {
+    return this.#transport.call(
       session.apiUrl,
-      method,
+      "ContactCard/set",
       { accountId, ...change },
       contactCapabilities,
       ContactSetSchema,
     );
+  }
+  async setContact(session: Session, accountId: string, change: ContactChange) {
+    const method = "ContactCard/set";
+    const result = await this.setContactBatch(session, accountId, change);
     if (result.isErr()) return result;
     const failure =
       setFailure(method, result.value.notCreated) ??
@@ -134,27 +178,23 @@ export class ContactsApi {
     accountId: string,
     ids: readonly string[],
   ) {
-    const address = z.object({
-      name: z.string().nullable(),
-      email: z.string(),
-    });
     const message = z.object({
       id: z.string(),
-      to: z.array(address).nullable(),
-      cc: z.array(address).nullable(),
-      bcc: z.array(address).nullable(),
+      to: z.array(AddressSchema).nullable(),
+      cc: z.array(AddressSchema).nullable(),
+      bcc: z.array(AddressSchema).nullable(),
     });
     return this.#transport.call(
       session.apiUrl,
       "Email/get",
       { accountId, ids, properties: ["id", "to", "cc", "bcc"] },
-      [JmapCapability.core, JmapCapability.mail],
-      this.#get(message),
+      usingMail,
+      GetSchema(message),
     );
   }
 }
 
 /** Contact operations use the same user-scoped transport as mail and calendar. */
 export class ContactsClient extends CalendarClient {
-  readonly contacts = new ContactsApi(this.transport, GetSchema, QuerySchema);
+  readonly contacts = new ContactsApi(this.transport);
 }

@@ -293,6 +293,9 @@ catalogs:
     fastify:
       specifier: 5.12.7
       version: 5.12.7
+    ical.js:
+      specifier: 2.2.1
+      version: 2.2.1
     jsdom:
       specifier: 27.4.0
       version: 27.4.0
@@ -744,7 +747,7 @@ importers:
         specifier: workspace:*
         version: link:../jmap
       ical.js:
-        specifier: 2.2.1
+        specifier: 'catalog:'
         version: 2.2.1
       neverthrow:
         specifier: 'catalog:'

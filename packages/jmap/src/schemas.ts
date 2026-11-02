@@ -9,7 +9,7 @@ export const MailboxSchema = z.object({
   totalEmails: z.number().default(0),
   unreadEmails: z.number().default(0),
 });
-const AddressSchema = z.object({
+export const AddressSchema = z.object({
   name: z.string().nullable(),
   email: z.string(),
 });
