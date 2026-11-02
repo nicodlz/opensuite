@@ -442,6 +442,81 @@
     gap: 8px;
     padding: 0 10px;
   }
+  .shell-body {
+    padding-right: env(safe-area-inset-right);
+    padding-left: env(safe-area-inset-left);
+  }
+  .shell-sidebar {
+    padding-top: calc(14px + env(safe-area-inset-top));
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left));
+  }
+}
+/* Phones held sideways keep more room for content. */
+@media (max-height: 500px) {
+  .shell {
+    --topbar-height: 52px;
+  }
+  .shell-fab {
+    width: 48px;
+    height: 48px;
+    border-radius: 16px;
+  }
+}
+/* Clear of a notch or rounded corner when the page covers the whole screen. */
+.shell-topbar {
+  height: calc(var(--topbar-height) + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+}
+.shell-rail {
+  padding-top: calc(12px + env(safe-area-inset-top));
+  padding-left: env(safe-area-inset-left);
+}
+.shell-fab {
+  margin: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) 0;
+}
+/* The on-screen keyboard is up: the button would float above it. */
+:root[data-keyboard] .shell-fab {
+  display: none;
+}
+/* Fingers need larger targets than a mouse pointer. */
+@media (pointer: coarse) {
+  .shell-nav-item {
+    min-height: 44px;
+  }
+  .shell-nav-heading button {
+    width: 44px;
+    height: 44px;
+    margin: -10px -10px -10px 0;
+  }
+  .shell-icon-button,
+  .shell-avatar-button.button,
+  .shell-menu-button,
+  .shell-drawer-close {
+    width: 44px;
+    height: 44px;
+  }
+  /* The field inside the border is 44px high. */
+  .shell-searchbox {
+    height: 46px;
+    padding-right: 0;
+  }
+  .shell-searchbox button {
+    width: 44px;
+    height: 44px;
+  }
+  .shell-mobile-products a {
+    justify-content: center;
+    min-height: 52px;
+    font-size: 12px;
+  }
+}
+/* Touch screens without a keyboard get no keyboard hints. */
+@media (hover: none) and (pointer: coarse) {
+  .shell-primary kbd,
+  .shell-keyboard-help {
+    display: none;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .shell-sidebar,

@@ -107,16 +107,19 @@ export function useSearch(anchor: Date, view: CalendarView) {
 
 /**
  * Message over an empty period, unless `hidden` (when loading failed). A
- * search offers nearby months; touch screens get no key hint.
+ * search offers nearby months; touch screens get no key hint. Without a
+ * `grid` of times to select, the message points to Create instead.
  */
 export function PeriodEmpty({
   query,
   period,
+  grid,
   hidden,
   onSearch,
 }: {
   query: string;
   period: string;
+  grid: boolean;
   hidden: boolean;
   onSearch: () => void;
 }) {
@@ -129,7 +132,7 @@ export function PeriodEmpty({
           `No events match “${term}” ${period}.`
         ) : (
           <>
-            Nothing scheduled {period}. Select a time
+            Nothing scheduled {period}. {grid ? "Select a time" : "Use Create"}
             <span className="cal-key-hint"> or press C</span> to add an event.
           </>
         )}

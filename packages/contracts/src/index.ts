@@ -1,9 +1,11 @@
+import { invitationsContract } from "./invitations.ts";
 import { addressesContract } from "./addresses.ts";
 import { billingContract } from "./billing.ts";
 import { pushContract } from "./push.ts";
 import { aliasesContract } from "./aliases.ts";
 import { domainsContract } from "./domains.ts";
 import { accountContract, adminContract } from "./account.ts";
+import { contactsContract } from "./contacts.ts";
 import { calendarContract } from "./calendar.ts";
 import { driveContract } from "./drive.ts";
 import { mailContract } from "./mail.ts";
@@ -18,6 +20,8 @@ export * from "./addresses.ts";
 export * from "./mail.ts";
 export * from "./drive.ts";
 export * from "./calendar.ts";
+export * from "./contacts.ts";
+export * from "./invitations.ts";
 export * from "./push.ts";
 export * from "./billing.ts";
 
@@ -29,6 +33,8 @@ export const contract = {
   admin: { ...adminContract, domains: domainsContract, setup: setupContract },
   mail: mailContract,
   calendar: calendarContract,
+  contacts: contactsContract,
+  invitations: invitationsContract,
   push: pushContract,
   billing: billingContract,
   drive: driveContract,

@@ -1,4 +1,4 @@
-import { CalendarClient } from "./calendar-client.ts";
+import { ContactsClient } from "./contacts-client.ts";
 import { fenceDraftMutation } from "./draft-mutation.ts";
 import { mailMapping } from "./mail-content.ts";
 import { ScheduledSubmissions } from "./scheduled-send.ts";
@@ -22,7 +22,7 @@ export type {
 } from "./schemas.ts";
 
 /** The authorization value is supplied by the caller; keep user credentials server-side. */
-export class JmapClient extends CalendarClient {
+export class JmapClient extends ContactsClient {
   readonly mailMapping = mailMapping;
   readonly scheduled = new ScheduledSubmissions(this.transport);
   fenceDraftMutation(input: Parameters<typeof fenceDraftMutation>[1]) {

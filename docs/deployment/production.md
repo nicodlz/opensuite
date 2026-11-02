@@ -63,6 +63,16 @@ overlap other Docker/host networks and distinct free addresses within it for
 all services listed in `deploy/env.example`. If changing the subnet later,
 also update the management account's IP restriction.
 
+The Drive values in `deploy/env.example` are placeholders for Compose
+configuration validation, not usable storage settings. Replace both Drive S3
+endpoints, bucket, region, access key and `DRIVE_S3_SECRET_FILE` before starting
+Drive. Drive rejects the placeholders and the empty `/dev/null` secret at
+startup. Use a dedicated private bucket and credentials; the public endpoint
+must be reachable by browsers and refer to the same storage as the service
+endpoint. `docker compose config` checks the Compose configuration but does
+not validate these values. After starting the stack, check `docker compose ps`
+and `docker compose logs drive` for Drive's status and configuration errors.
+
 ```dotenv
 OPENSUITE_SITE_ADDRESS=mail.example.com
 OPENSUITE_PUBLIC_HOST=mail.example.com

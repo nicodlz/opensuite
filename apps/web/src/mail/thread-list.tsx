@@ -78,7 +78,7 @@ export function ThreadRow({
     <li
       className={`thread-row ${selected ? "selected" : ""} ${thread.unread ? "unread" : ""} ${checked ? "checked" : ""}`}
     >
-      <span className="thread-select">
+      <label className="thread-select">
         <span className="thread-avatar" aria-hidden="true">
           {initials(name)}
         </span>
@@ -92,7 +92,7 @@ export function ThreadRow({
           }}
           onChange={() => undefined}
         />
-      </span>
+      </label>
       <button
         ref={ref}
         type="button"

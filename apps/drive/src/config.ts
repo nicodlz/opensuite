@@ -1,6 +1,10 @@
 import { err, ok } from "neverthrow";
 import { z } from "zod";
 
+// These values in deploy/env.example are reserved for configuration validation.
+const exampleEndpoint = "https://change-me.invalid";
+const exampleValue = "CHANGE_ME";
+
 const Env = z.object({
   ESUNO_DEPLOYMENT_MODE: z
     .enum(["self-hosted", "cloud"])
@@ -13,13 +17,43 @@ const Env = z.object({
   DRIVE_SESSION_API: z
     .url()
     .refine((s) => ["http:", "https:"].includes(new URL(s).protocol)),
-  DRIVE_S3_ENDPOINT: z.url(),
-  DRIVE_S3_PUBLIC_ENDPOINT: z.url(),
-  DRIVE_S3_REGION: z.string().min(1),
-  DRIVE_S3_BUCKET: z.string().min(3),
+  DRIVE_S3_ENDPOINT: z
+    .url()
+    .refine(
+      (value) => value !== exampleEndpoint,
+      "Replace the Drive endpoint placeholder",
+    ),
+  DRIVE_S3_PUBLIC_ENDPOINT: z
+    .url()
+    .refine(
+      (value) => value !== exampleEndpoint,
+      "Replace the Drive public endpoint placeholder",
+    ),
+  DRIVE_S3_REGION: z
+    .string()
+    .min(1)
+    .refine(
+      (value) => value !== exampleValue,
+      "Replace the Drive region placeholder",
+    ),
+  DRIVE_S3_BUCKET: z
+    .string()
+    .min(3)
+    .refine(
+      (value) => value !== exampleValue,
+      "Replace the Drive bucket placeholder",
+    ),
   DRIVE_S3_PREFIX: z.string().regex(/^(?:[a-zA-Z0-9_-]+\/)*$/),
-  DRIVE_S3_ACCESS_KEY: z.string().min(1),
-  DRIVE_S3_SECRET_KEY: z.string().min(1),
+  DRIVE_S3_ACCESS_KEY: z
+    .string()
+    .min(1)
+    .refine(
+      (value) => value !== exampleValue,
+      "Replace the Drive access key placeholder",
+    ),
+  DRIVE_S3_SECRET_KEY: z
+    .string()
+    .min(1, "Set DRIVE_S3_SECRET_FILE to a non-empty secret file"),
   DRIVE_S3_PATH_STYLE: z.enum(["true", "false"]).default("true"),
   // Exact origins whose pages may send state-changing requests.
   DRIVE_TRUSTED_ORIGINS: z

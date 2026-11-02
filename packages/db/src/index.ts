@@ -31,3 +31,6 @@ export type {
   ScheduledRecord,
   ScheduledSendStore,
 } from "./scheduled-send.ts";
+
+export { createInvitationStore } from "./invitations.ts";
+export type { InvitationStore } from "./invitations.ts";

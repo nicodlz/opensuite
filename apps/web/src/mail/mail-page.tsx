@@ -19,13 +19,14 @@ import { aliasesClient } from "../aliases/client.ts";
 import { canSendFrom, recipientAddresses } from "../aliases/model.ts";
 import { AppShell, SidebarItem } from "../shell/app-shell.tsx";
 import { Button } from "../ui/button.tsx";
-import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { Icon, type IconName } from "../ui/icons.tsx";
+import { useMailBack } from "./back-navigation.ts";
 import { accountId, mailClient } from "./client.ts";
 import { Composer, type ComposerState } from "./composer.tsx";
 import { conversationFocus, restingFocus, useFocusAfter } from "./focus.ts";
 import { emptyDraft, plural, replyDraft } from "./model.ts";
 import { Conversation } from "./conversation.tsx";
+import { ConfirmDelete, ShortcutHelp } from "./mail-dialogs.tsx";
 import { ReadingPane } from "./reading-pane.tsx";
 import { SearchFilters } from "./search-filters.tsx";
 import { ThreadRow } from "./thread-list.tsx";
@@ -501,6 +502,17 @@ export function MailPage() {
   ];
   const drafts = draftList.data?.drafts ?? [];
   const targets = checked.size ? [...checked] : selected ? [selected] : [];
+  useMailBack({
+    reading,
+    drafting: composers.some(
+      (item) => !minimized.has(item.key) && !discarded.has(item.key),
+    ),
+    onCloseDraft: () => {
+      setMinimized(new Set(composers.map((item) => item.key)));
+      leaveComposer();
+    },
+    onCloseReader: back,
+  });
   // What is on screen now, for an Undo chosen later.
   const onScreen = useRef({ folder, reading });
   useEffect(() => {
@@ -705,7 +717,7 @@ export function MailPage() {
       actions={
         <button
           type="button"
-          className="shell-icon-button"
+          className="shell-icon-button shell-keyboard-help"
           aria-label="Keyboard shortcuts"
           onClick={() => setHelp(true)}
         >
@@ -721,23 +733,25 @@ export function MailPage() {
         >
           <div className="list-heading">
             {!isDrafts && list.length > 0 && (
-              <input
-                type="checkbox"
-                className="list-check"
-                aria-label="Select all conversations"
-                checked={allChecked}
-                ref={(element) => {
-                  if (element)
-                    element.indeterminate = checked.size > 0 && !allChecked;
-                }}
-                onChange={() =>
-                  setChecked(
-                    allChecked
-                      ? new Set()
-                      : new Set(list.map((thread) => thread.id)),
-                  )
-                }
-              />
+              <label className="list-check-target">
+                <input
+                  type="checkbox"
+                  className="list-check"
+                  aria-label="Select all conversations"
+                  checked={allChecked}
+                  ref={(element) => {
+                    if (element)
+                      element.indeterminate = checked.size > 0 && !allChecked;
+                  }}
+                  onChange={() =>
+                    setChecked(
+                      allChecked
+                        ? new Set()
+                        : new Set(list.map((thread) => thread.id)),
+                    )
+                  }
+                />
+              </label>
             )}
             {checked.size > 0 ? (
               <div className="bulk-actions">
@@ -1109,68 +1123,12 @@ export function MailPage() {
           />
         ))}
       </div>
-      <Dialog
-        open={confirmDelete !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirmDelete(null);
-        }}
-      >
-        <DialogContent
-          title="Delete permanently?"
-          description={`${
-            confirmDelete && confirmDelete.length > 1
-              ? `These ${plural(confirmDelete.length, "conversation")}`
-              : "This conversation"
-          } will be deleted forever. This cannot be undone.`}
-        >
-          <div className="dialog-actions">
-            <Button variant="ghost" onClick={() => setConfirmDelete(null)}>
-              Cancel
-            </Button>
-            <Button
-              className="button-danger"
-              onClick={() => {
-                if (confirmDelete) perform(confirmDelete, { type: "delete" });
-                setConfirmDelete(null);
-              }}
-            >
-              Delete forever
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={help} onOpenChange={setHelp}>
-        <DialogContent
-          title="Keyboard shortcuts"
-          description="Use these shortcuts when you are not typing."
-        >
-          <div className="shortcut-grid">
-            {(
-              [
-                ["Next / previous conversation", "J / K"],
-                ["Open conversation", "Enter or O"],
-                ["Back to list", "U"],
-                ["Select conversation", "X"],
-                ["Archive", "E"],
-                ["Move to trash", "#"],
-                ["Star", "S"],
-                ["Mark read / unread", "Shift+I / Shift+U"],
-                ["Reply / reply all / forward", "R / A / F"],
-                ["New message", "C"],
-                ["Undo", "Z"],
-                ["Send message", "Ctrl+Enter"],
-                ["Search", "/"],
-                ["Show shortcuts", "?"],
-              ] as const
-            ).map(([label, keys]) => (
-              <React.Fragment key={label}>
-                <span>{label}</span>
-                <kbd>{keys}</kbd>
-              </React.Fragment>
-            ))}
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDelete
+        threadIds={confirmDelete}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={(ids) => perform(ids, { type: "delete" })}
+      />
+      <ShortcutHelp open={help} onOpenChange={setHelp} />
     </AppShell>
   );
 }

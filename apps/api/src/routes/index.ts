@@ -1,7 +1,9 @@
+import { invitationsRouter } from "./invitations.ts";
 import { addressesRouter } from "./addresses.ts";
 import { pushRouter } from "./push.ts";
 import { aliasesRouter } from "./aliases.ts";
 import { accountRouter, adminRouter } from "./account.ts";
+import { contactsRouter } from "./contacts.ts";
 import { calendarRouter } from "./calendar.ts";
 import { mailRouter } from "./mail.ts";
 import { systemRouter } from "./system.ts";
@@ -17,6 +19,8 @@ export const router = {
   admin: adminRouter,
   mail: mailRouter,
   calendar: calendarRouter,
+  contacts: contactsRouter,
+  invitations: invitationsRouter,
   push: pushRouter,
   billing: billingRouter,
 };

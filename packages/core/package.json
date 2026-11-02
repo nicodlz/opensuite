@@ -21,14 +21,19 @@
     "@opensuite/contracts": "workspace:*",
     "@opensuite/db": "workspace:*",
     "@opensuite/jmap": "workspace:*",
+    "ical.js": "catalog:",
+    "mailparser": "catalog:",
     "neverthrow": "catalog:",
-    "zod": "catalog:",
-    "web-push": "catalog:"
+    "tldts": "catalog:",
+    "tsdav": "catalog:",
+    "web-push": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@opensuite/typescript-config": "workspace:*",
     "@types/node": "catalog:",
     "@types/web-push": "catalog:",
+    "mailauth": "catalog:",
     "typescript": "catalog:"
   }
 }

@@ -3,7 +3,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { RecoveredDraftSchema } from "@opensuite/contracts";
 import { createReadinessService } from "@opensuite/core";
-import { createMailService } from "@opensuite/core/services/mail";
+import { createMailWithInvitations } from "@opensuite/core/services/invitations";
+import { invitationProtocol } from "@opensuite/core/adapters/invitations";
 import { createGuards } from "@opensuite/core/adapters/scheduled-send";
 import { createDatabase, type PrismaClient } from "@opensuite/db";
 import { JmapClient } from "@opensuite/jmap";
@@ -218,13 +219,19 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       ),
   };
   const createService = () =>
-    createMailService({
+    createMailWithInvitations({
       origin: base,
       now: () => Date.now() + clockOffset,
       store: credentials,
       ...createGuards(database),
-      canSendAs: (_user, address) =>
-        Promise.resolve(address === "alias@example.test" ? "alias" : null),
+      protocol: invitationProtocol,
+      aliases: {
+        canSendAs: (_user, address) =>
+          Promise.resolve(
+            ok(address === "alias@example.test" ? "alias" : null),
+          ),
+      },
+      addresses: { canSendAs: () => Promise.resolve(ok(null)) },
       beforeAliasSend: () => Promise.resolve(true),
       client: ({ address, secret }) =>
         new JmapClient(base, {
@@ -232,7 +239,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
           fetch: fetchMaybeLose,
           rewriteSessionUrlsToOrigin: base,
         }),
-    });
+    }).mail;
   let mail = createService();
   const app = await buildServer({
     config: { logLevel: "silent" },
