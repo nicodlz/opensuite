@@ -493,6 +493,7 @@ model MailDraftGuard {
   token String
   createdAt DateTime @default(now())
   phase String @default("legacy")
+  mutationState String?
   updatedAt DateTime @default(now()) @updatedAt
 
   @@id([userId, accountId, draftId])

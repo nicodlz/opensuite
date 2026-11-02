@@ -5,7 +5,7 @@ import {
   type Scheduled,
 } from "@opensuite/contracts";
 import type {
-  DraftGuardWrite,
+  DraftGuardBegin as BeginWrite,
   ScheduledRecord,
   ScheduledSendStore,
 } from "@opensuite/db";
@@ -15,7 +15,6 @@ import { fail, value, type createJmapAccess } from "./jmap-access.ts";
 type Access = ReturnType<typeof createJmapAccess>;
 type Connection = Awaited<ReturnType<Access["connect"]>>;
 type Connect = (actor: Actor, accountId: string) => Promise<Connection>;
-type BeginWrite = (phase: DraftGuardWrite) => Promise<string | undefined>;
 type Sweep = (
   store: ScheduledSendStore,
   connect: Connect,

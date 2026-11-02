@@ -1,6 +1,10 @@
 import type { PrismaClient } from "./generated/index.js";
 
 export type DraftGuardWrite = "destroy" | "send" | "mutation";
+export type DraftGuardBegin = (
+  phase: DraftGuardWrite,
+  mutationState?: string,
+) => Promise<string | undefined>;
 type ScheduledState =
   | "preparing"
   | "creating"
@@ -70,7 +74,10 @@ class Store {
     ids: string[],
     token: string,
     phase: DraftGuardWrite,
+    mutationState?: string,
   ) {
+    if (phase === "mutation" && ids.length && !mutationState)
+      throw new Error("draft mutation state required");
     await this.#db.$transaction(async (tx) => {
       const result = await tx.mailDraftGuard.updateMany({
         where: {
@@ -80,7 +87,7 @@ class Store {
           token,
           phase: "preparing",
         },
-        data: { phase },
+        data: { phase, mutationState: mutationState ?? null },
       });
       if (result.count !== ids.length) throw new Error("draft guard changed");
     });
@@ -88,7 +95,7 @@ class Store {
   staleGuards(before: Date) {
     return this.#db.mailDraftGuard.findMany({
       where: {
-        phase: { in: ["preparing", "destroy", "send"] },
+        phase: { in: ["preparing", "destroy", "send", "mutation"] },
         updatedAt: { lt: before },
       },
       orderBy: { updatedAt: "asc" },

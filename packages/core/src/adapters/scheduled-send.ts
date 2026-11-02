@@ -7,12 +7,17 @@ import {
 } from "@opensuite/contracts";
 import {
   createScheduledSendStore,
-  type DraftGuardWrite,
+  type DraftGuardBegin,
   type PrismaClient,
   type ScheduledRecord,
   type ScheduledSendStore,
 } from "@opensuite/db";
-import type { JmapClient, Session } from "@opensuite/jmap";
+import {
+  delayedSendTiming,
+  matchesSubmission,
+  type JmapClient,
+  type Session,
+} from "@opensuite/jmap";
 
 type MailConnection = {
   client: JmapClient;
@@ -34,9 +39,7 @@ async function guardDraft<T>(
   store: ScheduledSendStore,
   c: MailConnection,
   ids: string[],
-  work: (
-    beginWrite: (phase: DraftGuardWrite) => Promise<string | undefined>,
-  ) => Promise<T>,
+  work: (beginWrite: DraftGuardBegin) => Promise<T>,
   conflict: () => never,
 ): Promise<T> {
   const token = randomUUID();
@@ -54,8 +57,15 @@ async function guardDraft<T>(
         }),
       Promise.resolve(),
     );
-    const result = await work(async (phase) => {
-      await store.beginWrite(c.owner, c.id, acquired, token, phase);
+    const result = await work(async (phase, mutationState) => {
+      await store.beginWrite(
+        c.owner,
+        c.id,
+        acquired,
+        token,
+        phase,
+        mutationState,
+      );
       state.writing = true;
       return acquired.length ? token : undefined;
     });
@@ -72,24 +82,6 @@ async function guardDraft<T>(
   }
 }
 
-function matchesSubmission(
-  submission: {
-    emailId: string;
-    identityId: string;
-    sendAt: string;
-    envelope: { mailFrom: { parameters: Record<string, string> | null } };
-  },
-  row: ScheduledRecord,
-) {
-  return (
-    submission.emailId === row.draftId &&
-    submission.identityId === row.identityId &&
-    submission.envelope.mailFrom.parameters?.["ENVID"] === row.id &&
-    (row.submissionId !== null ||
-      Math.abs(Date.parse(submission.sendAt) - row.releaseAt.getTime()) <=
-        120_000)
-  );
-}
 async function findSubmission(
   c: MailConnection,
   row: ScheduledRecord,
@@ -125,38 +117,16 @@ async function findSubmission(
   return submission;
 }
 
-const Capability = z.object({
-  maxDelayedSend: z.number().int().nonnegative(),
-  submissionExtensions: z.record(z.string(), z.unknown()),
-});
 function delaySeconds(
   c: MailConnection,
   delivery: ScheduleDelivery,
   now: number,
   reject: (kind: "validation" | "unavailable") => never,
 ) {
-  const releaseTime =
-    delivery.type === "delay"
-      ? now + delivery.seconds * 1000
-      : Date.parse(delivery.at);
-  const seconds = Math.ceil((releaseTime - now) / 1000);
-  const capability = Capability.safeParse(
-    c.session.accounts[c.id]?.accountCapabilities[
-      "urn:ietf:params:jmap:submission"
-    ],
+  return delayedSendTiming(
+    { session: c.session, accountId: c.id, delivery, now },
+    reject,
   );
-  if (
-    !capability.success ||
-    !("FUTURERELEASE" in capability.data.submissionExtensions) ||
-    !("DSN" in capability.data.submissionExtensions)
-  )
-    return reject("unavailable");
-  if (!(
-    seconds >= 1 &&
-    seconds <= Math.min(2_592_000, capability.data.maxDelayedSend)
-  ))
-    return reject("validation");
-  return { release: releaseTime, seconds, max: capability.data.maxDelayedSend };
 }
 async function submit(
   c: MailConnection,
@@ -290,6 +260,25 @@ async function recoverSentGuard(
     throw new Error("draft reconciliation incomplete");
   await store.clearStaleGuard(guard, before);
 }
+async function recoverMutationGuard(
+  c: MailConnection,
+  store: ScheduledSendStore,
+  guard: Awaited<ReturnType<ScheduledSendStore["staleGuards"]>>[number],
+  before: Date,
+) {
+  if (
+    !guard.mutationState ||
+    !(await c.client.fenceDraftMutation({
+      session: c.session,
+      accountId: c.id,
+      draftId: guard.draftId,
+      token: guard.token,
+      state: guard.mutationState,
+    }))
+  )
+    throw new Error("draft mutation unresolved");
+  await store.clearStaleGuard(guard, before);
+}
 async function sweep(
   store: ScheduledSendStore,
   connect: (
@@ -315,6 +304,8 @@ async function sweep(
             if (c.id !== guard.accountId) throw new Error("mailbox changed");
             if (guard.phase === "send")
               await recoverSentGuard(c, store, guard, before);
+            else if (guard.phase === "mutation")
+              await recoverMutationGuard(c, store, guard, before);
             else {
               const result = await c.client.destroyEmail(
                 c.session,
@@ -367,9 +358,7 @@ export function createGuards(db: PrismaClient) {
     guardDraft: <T>(
       c: MailConnection,
       ids: string[],
-      work: (
-        beginWrite: (phase: DraftGuardWrite) => Promise<string | undefined>,
-      ) => Promise<T>,
+      work: (beginWrite: DraftGuardBegin) => Promise<T>,
       conflict: () => never,
     ) => guardDraft(store, c, ids, work, conflict),
     findSubmission,

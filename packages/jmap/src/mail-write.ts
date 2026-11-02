@@ -162,16 +162,35 @@ export class MailWriteClient extends MailReadClient {
     accountId: string,
     id: string,
     patch: Record<string, unknown>,
+    ifInState?: string,
   ): Promise<JmapResult<void>> {
+    return this.updateEmails(session, accountId, { [id]: patch }, ifInState);
+  }
+  async updateEmails(
+    session: Session,
+    accountId: string,
+    updates: Record<string, Record<string, unknown>>,
+    ifInState?: string,
+  ): Promise<JmapResult<void>> {
+    const ids = Object.keys(updates);
+    if (!ids.length) return ok(undefined);
     const method = "Email/set";
     const result = await this.transport.call(
       session.apiUrl,
       method,
-      { accountId, update: { [id]: patch } },
+      {
+        accountId,
+        update: updates,
+        ...(ifInState === undefined ? {} : { ifInState }),
+      },
       usingMail,
       SetSchema(z.unknown()),
     );
-    return updatedItem(method, result, id);
+    for (const id of ids) {
+      const updated = updatedItem(method, result, id);
+      if (updated.isErr()) return updated;
+    }
+    return ok(undefined);
   }
   async submit(
     session: Session,

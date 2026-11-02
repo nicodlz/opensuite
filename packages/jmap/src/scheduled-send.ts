@@ -10,6 +10,68 @@ import {
 } from "./protocol.ts";
 import { GetSchema, QuerySchema, SetSchema } from "./schemas.ts";
 
+export function matchesSubmission(
+  submission: {
+    emailId: string;
+    identityId: string;
+    sendAt: string;
+    envelope: { mailFrom: { parameters: Record<string, string> | null } };
+  },
+  row: {
+    id: string;
+    draftId: string;
+    identityId: string;
+    submissionId: string | null;
+    releaseAt: Date;
+  },
+) {
+  return (
+    submission.emailId === row.draftId &&
+    submission.identityId === row.identityId &&
+    submission.envelope.mailFrom.parameters?.["ENVID"] === row.id &&
+    (row.submissionId !== null ||
+      Math.abs(Date.parse(submission.sendAt) - row.releaseAt.getTime()) <=
+        120_000)
+  );
+}
+
+const DelayedCapability = z.object({
+  maxDelayedSend: z.number().int().nonnegative(),
+  submissionExtensions: z.record(z.string(), z.unknown()),
+});
+export function delayedSendTiming(
+  input: {
+    session: Session;
+    accountId: string;
+    delivery: { type: "delay"; seconds: number } | { type: "at"; at: string };
+    now: number;
+  },
+  reject: (kind: "validation" | "unavailable") => never,
+) {
+  const release =
+    input.delivery.type === "delay"
+      ? input.now + input.delivery.seconds * 1000
+      : Date.parse(input.delivery.at);
+  const seconds = Math.ceil((release - input.now) / 1000);
+  const capability = DelayedCapability.safeParse(
+    input.session.accounts[input.accountId]?.accountCapabilities[
+      JmapCapability.submission
+    ],
+  );
+  if (
+    !capability.success ||
+    !("FUTURERELEASE" in capability.data.submissionExtensions) ||
+    !("DSN" in capability.data.submissionExtensions)
+  )
+    return reject("unavailable");
+  if (!(
+    seconds >= 1 &&
+    seconds <= Math.min(2_592_000, capability.data.maxDelayedSend)
+  ))
+    return reject("validation");
+  return { release, seconds, max: capability.data.maxDelayedSend };
+}
+
 export class ScheduledSubmissions {
   readonly #transport: Transport;
   constructor(transport: Transport) {

@@ -3,7 +3,6 @@ import {
   type MailAction,
   type Mailbox,
   type MailSearch,
-  type Message,
   type ThreadSummary,
 } from "@opensuite/contracts";
 import { JmapCapability, type Email, type JmapClient } from "@opensuite/jmap";
@@ -12,7 +11,6 @@ import {
   createScheduledSend,
   draftGuard,
   draftOperations,
-  getDraft,
   senderFor,
   type ScheduledAdapters,
 } from "./scheduled-send.ts";
@@ -35,117 +33,106 @@ export interface ThreadOptions {
   search?: MailSearch | undefined;
   sort: "newest" | "oldest";
 }
-const date = (timestamp: string) => new Date(timestamp).toISOString();
 const customIds = (boxes: Mailbox[]) =>
   new Set(boxes.filter((box) => box.role === "custom").map((box) => box.id));
-function message(
-  email: Email,
-  boxes: Mailbox[],
-  fallback: string,
-  mapping: JmapClient["mailMapping"],
-): Message {
-  const { mailAddresses, mailboxMemberships, mailBody, mailAttachments } =
-    mapping;
-  const from = mailAddresses(email.from)[0] ?? { email: fallback };
-  const mailboxIds = mailboxMemberships(email);
-  const custom = customIds(boxes);
-  return {
-    id: email.id,
-    threadId: email.threadId,
-    mailboxIds,
-    from,
-    replyTo: mailAddresses(email.replyTo),
-    to: mailAddresses(email.to),
-    cc: mailAddresses(email.cc),
-    bcc: mailAddresses(email.bcc),
-    subject: email.subject ?? "",
-    sentAt: date(email.sentAt ?? email.receivedAt),
-    ...(email.messageId?.[0] ? { messageId: email.messageId[0] } : {}),
-    ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
-    references: email.references ?? [],
-    headers: email.headers,
-    htmlBody: mailBody(email, email.htmlBody, "text/html"),
-    textBody: mailBody(email, email.textBody, "text/plain"),
-    attachments: mailAttachments(email),
-    unread: !email.keywords["$seen"],
-    starred: Boolean(email.keywords["$flagged"]),
-    labels: mailboxIds.filter((id) => custom.has(id)),
-  };
-}
 function summary(
   emails: Email[],
   boxes: Mailbox[],
   fallback: string,
   mapping: JmapClient["mailMapping"],
 ): ThreadSummary {
-  const ordered = emails.toSorted((a, b) =>
-    a.receivedAt.localeCompare(b.receivedAt),
-  );
-  const last = ordered.at(-1);
-  if (last === undefined) return fail("not_found");
-  const mapped = ordered.map((email) =>
-    message(email, boxes, fallback, mapping),
-  );
-  const participants = new Map<string, Message["from"]>();
-  for (const item of mapped)
-    for (const person of [item.from, ...item.to, ...item.cc])
-      participants.set(person.email.toLowerCase(), person);
-  return {
-    id: last.threadId,
-    subject: last.subject ?? "",
-    participants: [...participants.values()],
-    preview: last.preview,
-    updatedAt: date(last.receivedAt),
-    messageCount: emails.length,
-    unread: mapped.some((item) => item.unread),
-    starred: mapped.some((item) => item.starred),
-    hasAttachment: emails.some(
-      (item) => item.hasAttachment || item.attachments.length > 0,
-    ),
-    mailboxIds: [...new Set(mapped.flatMap((item) => item.mailboxIds))],
-    labels: [...new Set(mapped.flatMap((item) => item.labels))],
-  };
+  return mapping.mailSummary(emails, boxes, fallback) ?? fail("not_found");
 }
 const role = (list: Mailbox[], name: Mailbox["role"]) =>
   list.find((box) => box.role === name)?.id ?? fail("not_found");
-async function applyAction(
+function actionPatch(
   c: MailConnection,
   email: Email,
-  action: MailAction,
+  action: Exclude<MailAction, { type: "delete" }>,
   list: Mailbox[],
 ) {
-  if (action.type === "delete") {
-    value(await c.client.destroyEmail(c.session, c.id, email.id));
-    return;
-  }
-  let patch: Record<string, unknown>;
   if (action.type === "read" || action.type === "star") {
-    patch = {
+    return {
       [`keywords/${action.type === "read" ? "$seen" : "$flagged"}`]:
         action.value ? true : null,
     };
-  } else {
-    const custom = customIds(list);
-    const retained = c.client.mailMapping
-      .mailboxMemberships(email)
-      .filter((id) =>
-        action.type === "labels" ? !custom.has(id) : custom.has(id),
-      );
-    const additions =
-      action.type === "labels"
-        ? action.labels
-        : [
-            action.type === "move"
-              ? action.mailboxId
-              : role(list, action.type === "archive" ? "archive" : "trash"),
-          ];
-    patch = {
-      mailboxIds: Object.fromEntries(
-        [...retained, ...additions].map((id) => [id, true]),
-      ),
-    };
   }
-  value(await c.client.updateEmail(c.session, c.id, email.id, patch));
+  const custom = customIds(list);
+  const retained = c.client.mailMapping
+    .mailboxMemberships(email)
+    .filter((id) =>
+      action.type === "labels" ? !custom.has(id) : custom.has(id),
+    );
+  const additions =
+    action.type === "labels"
+      ? action.labels
+      : [
+          action.type === "move"
+            ? action.mailboxId
+            : role(list, action.type === "archive" ? "archive" : "trash"),
+        ];
+  return {
+    mailboxIds: Object.fromEntries(
+      [...retained, ...additions].map((id) => [id, true]),
+    ),
+  };
+}
+async function executeAction(
+  c: MailConnection,
+  input: {
+    targets: Email[];
+    action: MailAction;
+    list: Mailbox[];
+    guarded: boolean;
+  },
+  beginWrite: (
+    phase: "destroy" | "mutation",
+    state?: string,
+  ) => Promise<unknown>,
+) {
+  const { targets, action, list } = input;
+  const current =
+    action.type !== "delete" && input.guarded
+      ? value(
+          await c.client.emails(
+            c.session,
+            c.id,
+            targets.map((item) => item.id),
+          ),
+        )
+      : undefined;
+  if (
+    current &&
+    (current.notFound.length || current.list.length !== targets.length)
+  )
+    return fail("conflict");
+  const updates =
+    action.type === "delete"
+      ? undefined
+      : Object.fromEntries(
+          (current?.list ?? targets).map((email) => [
+            email.id,
+            actionPatch(c, email, action, list),
+          ]),
+        );
+  await beginWrite(
+    action.type === "delete" ? "destroy" : "mutation",
+    current?.state,
+  );
+  if (updates)
+    value(
+      await c.client.updateEmails(c.session, c.id, updates, current?.state),
+    );
+  else
+    await targets.reduce<Promise<void>>(
+      (previous, email) =>
+        previous.then(async () => {
+          value(await c.client.destroyEmail(c.session, c.id, email.id));
+          return undefined;
+        }),
+      Promise.resolve(),
+    );
+  return { success: true } satisfies { success: true };
 }
 type DraftAccess = Omit<Parameters<typeof draftOperations>[0], "guard">;
 function draftRecovery(
@@ -166,7 +153,9 @@ function draftRecovery(
       if ((await deps.store.guardStatus(actor.id, c.id, id)) !== "unknown")
         return fail("conflict");
       const list = await deps.boxes(c);
-      const original = await getDraft(c, id, list);
+      const original = value(await c.client.emails(c.session, c.id, [id]))
+        .list[0];
+      if (!original?.keywords["$draft"]) return fail("not_found");
       const content = c.client.mailMapping.mailDraft(original);
       const created = await deps.create(c, content, list, original);
       return {
@@ -404,7 +393,7 @@ export function createMailService(dependencies: {
           messages: emails
             .toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt))
             .map((item) =>
-              message(item, list, c.address, c.client.mailMapping),
+              c.client.mailMapping.mailMessage(item, list, c.address),
             ),
         };
       }),
@@ -438,24 +427,19 @@ export function createMailService(dependencies: {
         const targets = messageIds
           ? all.filter((item) => messageIds.includes(item.id))
           : all;
-        return guard(
-          c,
-          targets
-            .filter(
-              (item) =>
-                item.keywords["$draft"] &&
-                !["read", "star", "labels"].includes(action.type),
-            )
-            .map((item) => item.id),
-          async (beginWrite) => {
-            await beginWrite(action.type === "delete" ? "destroy" : "mutation");
-            await targets.reduce<Promise<void>>(
-              (previous, email) =>
-                previous.then(() => applyAction(c, email, action, list)),
-              Promise.resolve(),
-            );
-            return { success: true } satisfies { success: true };
-          },
+        const guardedIds = targets
+          .filter(
+            (item) =>
+              item.keywords["$draft"] &&
+              !["read", "star", "labels"].includes(action.type),
+          )
+          .map((item) => item.id);
+        return guard(c, guardedIds, (beginWrite) =>
+          executeAction(
+            c,
+            { targets, action, list, guarded: guardedIds.length > 0 },
+            beginWrite,
+          ),
         );
       }),
     drafts: (actor: Actor, accountId: string) =>

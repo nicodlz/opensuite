@@ -26,6 +26,7 @@ export { createAddressStore, validMailboxLocalPart } from "./addresses.ts";
 export type { AddressStore } from "./addresses.ts";
 export { createScheduledSendStore } from "./scheduled-send.ts";
 export type {
+  DraftGuardBegin,
   DraftGuardWrite,
   ScheduledRecord,
   ScheduledSendStore,

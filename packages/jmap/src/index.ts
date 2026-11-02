@@ -1,9 +1,11 @@
 import { CalendarClient } from "./calendar-client.ts";
+import { fenceDraftMutation } from "./draft-mutation.ts";
 import { mailMapping } from "./mail-content.ts";
 import { ScheduledSubmissions } from "./scheduled-send.ts";
 import { threadPage } from "./thread-page.ts";
 
 export { JmapCapability } from "./protocol.ts";
+export { delayedSendTiming, matchesSubmission } from "./scheduled-send.ts";
 export type {
   JmapError,
   JmapResult,
@@ -23,6 +25,9 @@ export type {
 export class JmapClient extends CalendarClient {
   readonly mailMapping = mailMapping;
   readonly scheduled = new ScheduledSubmissions(this.transport);
+  fenceDraftMutation(input: Parameters<typeof fenceDraftMutation>[1]) {
+    return fenceDraftMutation(this, input);
+  }
   threadPage(
     ...args: Parameters<typeof threadPage> extends [unknown, ...infer Rest]
       ? Rest
