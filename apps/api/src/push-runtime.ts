@@ -7,6 +7,7 @@ import {
   organizerProtocol,
 } from "@opensuite/core/adapters/invitations";
 import { createMailWithInvitations } from "@opensuite/core/services/invitations";
+import type { createMailService } from "@opensuite/core/services/mail";
 import {
   createOrganizerService,
   type OrganizerService,
@@ -320,12 +321,14 @@ export function createInvitationServices(input: {
   aliases: Pick<AliasService, "canSendAs">;
   addresses: Pick<AddressService, "canSendAs">;
   beforeAliasSend: (userId: string, aliasId: string) => Promise<boolean>;
+  mailGuards?: Partial<Parameters<typeof createMailService>[0]>;
 }) {
   const { db, store, origin, aliases, addresses, beforeAliasSend } = input;
   const intentions = createInvitationStore(db);
   const organized = createOrganizedInvitationStore(db);
   const scans = createOrganizedReplyScanStore(db);
   const { mail, invitations } = createMailWithInvitations({
+    ...input.mailGuards,
     aliases,
     addresses,
     store,

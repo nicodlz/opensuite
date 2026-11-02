@@ -17,6 +17,30 @@ const expand = (template: string, values: Record<string, string>) =>
   template.replace(/\{([^}]+)\}/g, (_match, key: string) =>
     encodeURIComponent(values[key] ?? ""),
   );
+type Envelope = { mailFrom: { email: string }; rcptTo: { email: string }[] };
+function tagEnvelope(
+  session: Session,
+  accountId: string,
+  envelope: Envelope | undefined,
+  requestId: string | undefined,
+) {
+  const capability = z
+    .object({ submissionExtensions: z.record(z.string(), z.unknown()) })
+    .safeParse(
+      session.accounts[accountId]?.accountCapabilities[
+        JmapCapability.submission
+      ],
+    );
+  return envelope &&
+    requestId &&
+    capability.success &&
+    "DSN" in capability.data.submissionExtensions
+    ? {
+        ...envelope,
+        mailFrom: { ...envelope.mailFrom, parameters: { ENVID: requestId } },
+      }
+    : envelope;
+}
 
 export class MailWriteClient extends MailReadClient {
   async createEmail(
@@ -138,26 +162,56 @@ export class MailWriteClient extends MailReadClient {
     accountId: string,
     id: string,
     patch: Record<string, unknown>,
+    ifInState?: string,
   ): Promise<JmapResult<void>> {
+    return this.updateEmails(session, accountId, { [id]: patch }, ifInState);
+  }
+  async updateEmails(
+    session: Session,
+    accountId: string,
+    updates: Record<string, Record<string, unknown>>,
+    ifInState?: string,
+  ): Promise<JmapResult<void>> {
+    const ids = Object.keys(updates);
+    if (!ids.length) return ok(undefined);
     const method = "Email/set";
     const result = await this.transport.call(
       session.apiUrl,
       method,
-      { accountId, update: { [id]: patch } },
+      {
+        accountId,
+        update: updates,
+        ...(ifInState === undefined ? {} : { ifInState }),
+      },
       usingMail,
       SetSchema(z.unknown()),
     );
-    return updatedItem(method, result, id);
+    for (const id of ids) {
+      const updated = updatedItem(method, result, id);
+      if (updated.isErr()) return updated;
+    }
+    return ok(undefined);
   }
   async submit(
     session: Session,
     accountId: string,
     emailId: string,
     identityId: string,
-    envelope?: { mailFrom: { email: string }; rcptTo: { email: string }[] },
+    envelope?: Envelope,
     sentMailboxId?: string,
+    options?: {
+      requestId?: string | undefined;
+      uncertainFollowup?: boolean | undefined;
+      signal?: AbortSignal | undefined;
+    },
   ): Promise<JmapResult<{ id: string }>> {
     const method = "EmailSubmission/set";
+    const taggedEnvelope = tagEnvelope(
+      session,
+      accountId,
+      envelope,
+      options?.requestId,
+    );
     const result = await this.transport.call(
       session.apiUrl,
       method,
@@ -178,14 +232,27 @@ export class MailWriteClient extends MailReadClient {
           item: {
             emailId,
             identityId,
-            ...(envelope === undefined ? {} : { envelope }),
+            ...(taggedEnvelope === undefined
+              ? {}
+              : { envelope: taggedEnvelope }),
           },
         },
       },
       [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
       SetSchema(z.object({ id: z.string() })),
       sentMailboxId === undefined ? undefined : "Email/set",
+      options?.signal,
     );
+    if (
+      options?.uncertainFollowup &&
+      result.isErr() &&
+      result.error.kind === "set" &&
+      result.error.method === "Email/set"
+    )
+      return err({
+        kind: "invalidResponse",
+        message: "Submission may have succeeded; mailbox update failed",
+      });
     return createdItem(method, result);
   }
 }

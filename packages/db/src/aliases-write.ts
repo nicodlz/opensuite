@@ -9,6 +9,7 @@ import {
   type Locked,
 } from "./aliases-shared.ts";
 import { ALIAS_DOMAIN_LOCK_SEED } from "./alias-locks.ts";
+import { lockRevocation } from "./scheduled-send-guard.ts";
 
 export const createReserve = (
   locked: Locked,
@@ -176,6 +177,7 @@ export const createMutations = (db: PrismaClient, locked: Locked) => ({
         const row = await tx.emailAlias.findFirst({ where: { id, userId } });
         if (!row || (row.deletedAt && desired !== "delete"))
           return err({ kind: "not_found" });
+        await lockRevocation(tx);
         if (desired === "enable" && !(await validDomain(tx, row.domainId)))
           return err({ kind: "invalid" });
         await tx.emailAlias.update({

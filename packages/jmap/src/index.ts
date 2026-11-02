@@ -1,4 +1,7 @@
 import { MigrationMailClient } from "./migration-mail.ts";
+import { fenceDraftMutation } from "./draft-mutation.ts";
+import { mailMapping } from "./mail-content.ts";
+import { ScheduledSubmissions } from "./scheduled-send.ts";
 import { threadPage } from "./thread-page.ts";
 
 export { inspectMigrationCandidates } from "./migration-candidates.ts";
@@ -22,6 +25,7 @@ export type {
   MigrationSnapshot,
 } from "./migration-snapshot.ts";
 export { JmapCapability } from "./protocol.ts";
+export { delayedSendTiming, matchesSubmission } from "./scheduled-send.ts";
 export type {
   JmapError,
   JmapResult,
@@ -39,6 +43,11 @@ export type {
 
 /** The authorization value is supplied by the caller; keep user credentials server-side. */
 export class JmapClient extends MigrationMailClient {
+  readonly mailMapping = mailMapping;
+  readonly scheduled = new ScheduledSubmissions(this.transport);
+  fenceDraftMutation(input: Parameters<typeof fenceDraftMutation>[1]) {
+    return fenceDraftMutation(this, input);
+  }
   threadPage(
     ...args: Parameters<typeof threadPage> extends [unknown, ...infer Rest]
       ? Rest

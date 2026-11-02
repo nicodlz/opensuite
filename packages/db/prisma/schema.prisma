@@ -54,6 +54,8 @@ model User {
   billingGrant             BillingGrant?
   subscriptions            Subscription[]
   mailImports              MailImportJob[]
+  scheduledSends           ScheduledSend[]
+  mailDraftGuards          MailDraftGuard[]
 }
 
 model MailImportJob {
@@ -87,13 +89,13 @@ model MailImportJob {
 }
 
 model MailImportItem {
-  jobId    String
-  job      MailImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  index    Int
-  marker   String
-  status   String        @default("pending")
-  error    String?
-  remoteId String?
+  jobId     String
+  job       MailImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  index     Int
+  marker    String
+  status    String        @default("pending")
+  error     String?
+  remoteId  String?
   sourceRef Json?
   sourceRaw String?
 
@@ -687,4 +689,44 @@ model OrganizedReplyScan {
 
   @@id([userId, accountId, messageId])
   @@index([userId, accountId, outcome, messageId])
+}
+
+model ScheduledSend {
+  id              String    @id
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId       String
+  draftId         String
+  threadId        String
+  identityId      String
+  senderAddress   String
+  releaseAt       DateTime
+  submissionId    String?
+  previousIds     String[]
+  requestDelivery String
+  state           String
+  failureReason   String?
+  leaseToken      String?
+  leaseUntil      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([userId, id])
+  @@index([userId, accountId, state])
+  @@index([state, releaseAt])
+}
+
+model MailDraftGuard {
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId     String
+  draftId       String
+  token         String
+  createdAt     DateTime @default(now())
+  phase         String   @default("legacy")
+  mutationState String?
+  updatedAt     DateTime @default(now()) @updatedAt
+
+  @@id([userId, accountId, draftId])
+  @@index([phase, updatedAt])
 }

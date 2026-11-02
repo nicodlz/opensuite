@@ -2,6 +2,8 @@ import { ResultAsync } from "neverthrow";
 import { ALIAS_DOMAIN_LOCK_SEED, withUserLease } from "./alias-locks.ts";
 import { z } from "zod";
 import type { PrismaClient } from "./generated/index.js";
+import { withRevocation } from "./scheduled-send-guard.ts";
+import { markDomainSendersDirty, withLockedDomain } from "./domain-senders.ts";
 
 const records = z.array(
   z.object({
@@ -47,8 +49,7 @@ export const createDomainStore = (db: PrismaClient) => ({
   },
   beginRemoval(domainId: string) {
     return ResultAsync.fromPromise(
-      db.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${domainId}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+      withLockedDomain(db, domainId, async (tx) => {
         const { name } = await tx.domain.findUniqueOrThrow({
           where: { id: domainId },
           select: { name: true },
@@ -170,26 +171,14 @@ export const createDomainStore = (db: PrismaClient) => ({
     action: string,
   ) {
     return ResultAsync.fromPromise(
-      db.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${id}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+      withLockedDomain(db, id, async (tx) => {
         const previous = await tx.domain.findUniqueOrThrow({
           where: { id },
           select: { status: true },
         });
         const row = await tx.domain.update({ where: { id }, data, include });
         if (previous.status !== data.status) {
-          await tx.address.updateMany({
-            where: { domainId: id, mailboxManaged: true },
-            data: { ready: false, revision: { increment: 1 } },
-          });
-          await tx.emailAlias.updateMany({
-            where: { domainId: id, deletedAt: null, enabled: true },
-            data: {
-              ready: false,
-              detachedByDomain: false,
-              revision: { increment: 1 },
-            },
-          });
+          await markDomainSendersDirty(tx, id);
         }
         await tx.auditEvent.create({
           data: {
@@ -212,8 +201,7 @@ export const createDomainStore = (db: PrismaClient) => ({
     source: "manual" | "scheduled",
   ) {
     return ResultAsync.fromPromise(
-      db.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${id}, ${ALIAS_DOMAIN_LOCK_SEED}))`;
+      withLockedDomain(db, id, async (tx) => {
         const previous = await tx.domain.findUniqueOrThrow({
           where: { id },
           select: { status: true, adoptionFailureCount: true },
@@ -241,18 +229,7 @@ export const createDomainStore = (db: PrismaClient) => ({
           include,
         });
         if (previous.status !== nextStatus) {
-          await tx.address.updateMany({
-            where: { domainId: id, mailboxManaged: true },
-            data: { ready: false, revision: { increment: 1 } },
-          });
-          await tx.emailAlias.updateMany({
-            where: { domainId: id, deletedAt: null, enabled: true },
-            data: {
-              ready: false,
-              detachedByDomain: false,
-              revision: { increment: 1 },
-            },
-          });
+          await markDomainSendersDirty(tx, id);
         }
         await tx.auditEvent.create({
           data: {
@@ -273,7 +250,7 @@ export const createDomainStore = (db: PrismaClient) => ({
   },
   remove(actor: string, id: string) {
     return ResultAsync.fromPromise(
-      db.$transaction(async (tx) => {
+      withRevocation(db, async (tx) => {
         await tx.domain.delete({ where: { id } });
         await tx.auditEvent.create({
           data: {
@@ -344,7 +321,7 @@ export const createDomainStore = (db: PrismaClient) => ({
   },
   removeAddress(actor: string, domainId: string, addressId: string) {
     return ResultAsync.fromPromise(
-      db.$transaction(async (tx) => {
+      withRevocation(db, async (tx) => {
         const deleted = await tx.address.deleteMany({
           where: { id: addressId, domainId },
         });

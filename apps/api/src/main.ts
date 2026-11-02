@@ -33,10 +33,7 @@ import {
 } from "./config.ts";
 import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
-import {
-  createSetupStatus,
-  relayManagementFromEnv,
-} from "./routes/setup-status.ts";
+import { setupStatusFromEnv } from "./routes/setup-status.ts";
 import {
   buildServer,
   configureMailImports,
@@ -49,6 +46,7 @@ import {
   registerBackgroundJobs,
 } from "./push-runtime.ts";
 import { registerMailImport } from "./routes/migration-mail-job.ts";
+import * as scheduledSend from "./adapters/scheduled-send-job.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
 import { createStorageMeter } from "./billing/storage.ts";
@@ -311,6 +309,13 @@ const { mail, invitations, organizer, calendar, scans, organized } =
     aliases,
     addresses,
     beforeAliasSend: createAliasGuard,
+    mailGuards: scheduledSend.createGuards(database.value, {
+      aliases,
+      addresses,
+      entitlements,
+      storageMeter,
+      domains: authConfig.value.mailDomains,
+    }),
   });
 const { migrationMail, migrationDirect, calendarImport } = configureMailImports(
   database.value,
@@ -323,15 +328,11 @@ const app = await buildServer({
   config: { ...config.value, trustProxy: authConfig.value.trustedProxyIp },
   readiness,
   monotonicMs,
-  setupStatus: createSetupStatus({
+  setupStatus: setupStatusFromEnv(
     readiness,
-    mailDomain: authConfig.value.mailDomain,
-    ...relayManagementFromEnv(process.env),
-    ...(process.env["SETUP_BACKUP_MARKER"] === undefined
-      ? {}
-      : { backupMarker: process.env["SETUP_BACKUP_MARKER"] }),
-    backupMaxAgeSeconds: 93600,
-  }),
+    authConfig.value.mailDomain,
+    process.env,
+  ),
   ...(authConfig.value.vaultOrigin === undefined
     ? {}
     : { vaultOrigin: authConfig.value.vaultOrigin }),
@@ -396,6 +397,7 @@ registerBackgroundJobs({
 });
 registerMailImport(app, migrationMail);
 registerMailImport(app, migrationDirect);
+scheduledSend.register(app, mail);
 registerShutdown(app);
 
 await app.listen({ host: config.value.host, port: config.value.port });

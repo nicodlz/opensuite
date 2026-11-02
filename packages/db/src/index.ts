@@ -27,6 +27,15 @@ export type { PlannedCalendarReminder } from "./calendar-reminders.ts";
 
 export { createAddressStore, validMailboxLocalPart } from "./addresses.ts";
 export type { AddressStore } from "./addresses.ts";
+export { createScheduledSendStore } from "./scheduled-send.ts";
+export type {
+  DraftGuardBegin,
+  DraftGuardWrite,
+  ScheduledRecord,
+  ScheduledFailure,
+  ScheduledReservation,
+  ScheduledSendStore,
+} from "./scheduled-send.ts";
 
 export { createInvitationStore } from "./invitations.ts";
 export type { InvitationStore } from "./invitations.ts";
@@ -39,3 +48,8 @@ export { createOrganizedInvitationStore } from "./organized-invitations.ts";
 export type { OrganizedInvitationStore } from "./organized-invitations.ts";
 export { createOrganizedReplyScanStore } from "./organized-reply-scan.ts";
 export type { OrganizedReplyScanStore } from "./organized-reply-scan.ts";
+
+export {
+  activeSenderMailbox,
+  usableSendDomain,
+} from "./sender-authorization.ts";

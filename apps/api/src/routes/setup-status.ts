@@ -104,8 +104,24 @@ export function createSetupStatus(options: {
   };
 }
 
+// The setup checklist as configured by the API environment.
+export function setupStatusFromEnv(
+  readiness: ReadinessService,
+  mailDomain: string,
+  env: NodeJS.ProcessEnv,
+) {
+  return createSetupStatus({
+    readiness,
+    mailDomain,
+    ...relayManagementFromEnv(env),
+    ...(env["SETUP_BACKUP_MARKER"] === undefined
+      ? {}
+      : { backupMarker: env["SETUP_BACKUP_MARKER"] }),
+    backupMaxAgeSeconds: 93600,
+  });
+}
 // Stalwart relay management for the setup checklist, when SES domains are enabled.
-export function relayManagementFromEnv(env: NodeJS.ProcessEnv) {
+function relayManagementFromEnv(env: NodeJS.ProcessEnv) {
   const origin = env["DOMAINS_STALWART_ORIGIN"];
   const username = env["DOMAINS_STALWART_USER"];
   const passwordFile = env["DOMAINS_STALWART_PASSWORD_FILE"];

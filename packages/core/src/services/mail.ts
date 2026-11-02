@@ -1,14 +1,19 @@
-import type {
-  Draft,
-  DraftContent,
-  MailAction,
-  Mailbox,
-  MailSearch,
-  Message,
-  ThreadSummary,
+import {
+  type DraftContent,
+  type MailAction,
+  type Mailbox,
+  type MailSearch,
+  type ThreadSummary,
 } from "@opensuite/contracts";
 import { JmapCapability, type Email, type JmapClient } from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
+import {
+  createScheduledSend,
+  draftGuard,
+  draftOperations,
+  senderFor,
+  type ScheduledAdapters,
+} from "./scheduled-send.ts";
 import {
   createJmapAccess,
   fail,
@@ -17,10 +22,9 @@ import {
   type MailCredentialStore,
 } from "./jmap-access.ts";
 
+type MailConnection = Parameters<typeof senderFor>[0];
 export type MailFailureKind = AccessFailureKind;
-export interface MailFailure {
-  kind: MailFailureKind;
-}
+export type MailFailure = { kind: MailFailureKind };
 export type { MailCredentialStore } from "./jmap-access.ts";
 export interface ThreadOptions {
   mailboxId: string;
@@ -29,135 +33,138 @@ export interface ThreadOptions {
   search?: MailSearch | undefined;
   sort: "newest" | "oldest";
 }
-const address = (item: { name: string | null; email: string }) => ({
-  email: item.email,
-  ...(item.name ? { name: item.name } : {}),
-});
-const addresses = (items: Email["from"]) => (items ?? []).map(address);
-const body = (email: Email, parts: Email["textBody"], type: string) =>
-  parts
-    .filter((part) => part.type.toLowerCase() === type)
-    .map((part) =>
-      part.partId === null ? "" : (email.bodyValues[part.partId]?.value ?? ""),
-    )
-    .join("\n");
-const memberships = (email: Email) =>
-  Object.keys(email.mailboxIds).filter((id) => email.mailboxIds[id]);
-const attachments = (email: Email) =>
-  email.attachments.flatMap((part) =>
-    part.blobId === null
-      ? []
-      : [
-          {
-            id: part.partId ?? part.blobId,
-            blobId: part.blobId,
-            ...(part.cid ? { cid: part.cid } : {}),
-            name: part.name ?? "attachment",
-            type: part.type,
-            size: part.size,
-          },
-        ],
-  );
-const date = (timestamp: string) => new Date(timestamp).toISOString();
 const customIds = (boxes: Mailbox[]) =>
   new Set(boxes.filter((box) => box.role === "custom").map((box) => box.id));
-function message(email: Email, boxes: Mailbox[], fallback: string): Message {
-  const from = addresses(email.from)[0] ?? { email: fallback };
-  const mailboxIds = memberships(email);
-  const custom = customIds(boxes);
-  return {
-    id: email.id,
-    threadId: email.threadId,
-    mailboxIds,
-    from,
-    replyTo: addresses(email.replyTo),
-    to: addresses(email.to),
-    cc: addresses(email.cc),
-    bcc: addresses(email.bcc),
-    subject: email.subject ?? "",
-    sentAt: date(email.sentAt ?? email.receivedAt),
-    ...(email.messageId?.[0] ? { messageId: email.messageId[0] } : {}),
-    ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
-    references: email.references ?? [],
-    headers: email.headers,
-    htmlBody: body(email, email.htmlBody, "text/html"),
-    textBody: body(email, email.textBody, "text/plain"),
-    attachments: attachments(email),
-    unread: !email.keywords["$seen"],
-    starred: Boolean(email.keywords["$flagged"]),
-    labels: mailboxIds.filter((id) => custom.has(id)),
-  };
-}
-function draft(email: Email): Draft {
-  return {
-    id: email.id,
-    ...(email.from?.[0]?.email ? { from: email.from[0].email } : {}),
-    to: addresses(email.to),
-    cc: addresses(email.cc),
-    bcc: addresses(email.bcc),
-    subject: email.subject ?? "",
-    htmlBody: body(email, email.htmlBody, "text/html"),
-    textBody: body(email, email.textBody, "text/plain"),
-    attachmentBlobIds: attachments(email).map((part) => part.blobId),
-    ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
-    references: email.references ?? [],
-    threadId: email.threadId,
-  };
-}
 function summary(
   emails: Email[],
   boxes: Mailbox[],
   fallback: string,
+  mapping: JmapClient["mailMapping"],
 ): ThreadSummary {
-  const ordered = emails.toSorted((a, b) =>
-    a.receivedAt.localeCompare(b.receivedAt),
-  );
-  const last = ordered.at(-1);
-  if (last === undefined) return fail("not_found");
-  const mapped = ordered.map((email) => message(email, boxes, fallback));
-  const participants = new Map<string, Message["from"]>();
-  for (const item of mapped)
-    for (const person of [item.from, ...item.to, ...item.cc])
-      participants.set(person.email.toLowerCase(), person);
-  return {
-    id: last.threadId,
-    subject: last.subject ?? "",
-    participants: [...participants.values()],
-    preview: last.preview,
-    updatedAt: date(last.receivedAt),
-    messageCount: emails.length,
-    unread: mapped.some((item) => item.unread),
-    starred: mapped.some((item) => item.starred),
-    hasAttachment: emails.some(
-      (item) => item.hasAttachment || item.attachments.length > 0,
-    ),
-    mailboxIds: [...new Set(mapped.flatMap((item) => item.mailboxIds))],
-    labels: [...new Set(mapped.flatMap((item) => item.labels))],
-  };
+  return mapping.mailSummary(emails, boxes, fallback) ?? fail("not_found");
 }
-const filterFor = (options: ThreadOptions) => {
-  const search = options.search;
-  return {
-    inMailbox: options.mailboxId,
-    ...(search?.query ? { text: search.query } : {}),
-    ...(search?.from ? { from: search.from } : {}),
-    ...(search?.to ? { to: search.to } : {}),
-    ...(search?.hasAttachment === undefined
-      ? {}
-      : { hasAttachment: search.hasAttachment }),
-    ...(search?.unread === undefined
-      ? {}
-      : search.unread
-        ? { notKeyword: "$seen" }
-        : { hasKeyword: "$seen" }),
-    ...(search?.after ? { after: search.after } : {}),
-    ...(search?.before ? { before: search.before } : {}),
-  };
-};
-
 const role = (list: Mailbox[], name: Mailbox["role"]) =>
   list.find((box) => box.role === name)?.id ?? fail("not_found");
-
+function actionPatch(
+  c: MailConnection,
+  email: Email,
+  action: Exclude<MailAction, { type: "delete" }>,
+  list: Mailbox[],
+) {
+  if (action.type === "read" || action.type === "star") {
+    return {
+      [`keywords/${action.type === "read" ? "$seen" : "$flagged"}`]:
+        action.value ? true : null,
+    };
+  }
+  const custom = customIds(list);
+  const retained = c.client.mailMapping
+    .mailboxMemberships(email)
+    .filter((id) =>
+      action.type === "labels" ? !custom.has(id) : custom.has(id),
+    );
+  const additions =
+    action.type === "labels"
+      ? action.labels
+      : [
+          action.type === "move"
+            ? action.mailboxId
+            : role(list, action.type === "archive" ? "archive" : "trash"),
+        ];
+  return {
+    mailboxIds: Object.fromEntries(
+      [...retained, ...additions].map((id) => [id, true]),
+    ),
+  };
+}
+async function executeAction(
+  c: MailConnection,
+  input: {
+    targets: Email[];
+    action: MailAction;
+    list: Mailbox[];
+    guarded: boolean;
+  },
+  beginWrite: (
+    phase: "destroy" | "mutation",
+    state?: string,
+  ) => Promise<unknown>,
+) {
+  const { targets, action, list } = input;
+  const current =
+    action.type !== "delete" && input.guarded
+      ? value(
+          await c.client.emails(
+            c.session,
+            c.id,
+            targets.map((item) => item.id),
+          ),
+        )
+      : undefined;
+  if (
+    current &&
+    (current.notFound.length || current.list.length !== targets.length)
+  )
+    return fail("conflict");
+  const updates =
+    action.type === "delete"
+      ? undefined
+      : Object.fromEntries(
+          (current?.list ?? targets).map((email) => [
+            email.id,
+            actionPatch(c, email, action, list),
+          ]),
+        );
+  await beginWrite(
+    action.type === "delete" ? "destroy" : "mutation",
+    current?.state,
+  );
+  if (updates)
+    value(
+      await c.client.updateEmails(c.session, c.id, updates, current?.state),
+    );
+  else
+    await targets.reduce<Promise<void>>(
+      (previous, email) =>
+        previous.then(async () => {
+          value(await c.client.destroyEmail(c.session, c.id, email.id));
+          return undefined;
+        }),
+      Promise.resolve(),
+    );
+  return { success: true } satisfies { success: true };
+}
+type DraftAccess = Omit<Parameters<typeof draftOperations>[0], "guard">;
+function draftRecovery(
+  deps: DraftAccess & {
+    store: ScheduledAdapters["scheduledStore"];
+    create: (
+      c: MailConnection,
+      content: DraftContent,
+      boxes: Mailbox[],
+      prior: Email,
+    ) => Promise<{ id: string; threadId: string }>;
+  },
+) {
+  return (actor: Actor, accountId: string, id: string) =>
+    deps.run(async () => {
+      const c = await deps.connect(actor, accountId);
+      if (!deps.store) return fail("unavailable");
+      if ((await deps.store.guardStatus(actor.id, c.id, id)) !== "unknown")
+        return fail("conflict");
+      const list = await deps.boxes(c);
+      const original = value(await c.client.emails(c.session, c.id, [id]))
+        .list[0];
+      if (!original?.keywords["$draft"]) return fail("not_found");
+      const content = c.client.mailMapping.mailDraft(original);
+      const created = await deps.create(c, content, list, original);
+      return {
+        draft: { ...content, id: created.id, threadId: created.threadId },
+        state: "unknown" as const,
+        originalMayStillSend: true as const,
+      };
+    });
+}
 /** One instance per server; credentials and client instances never leave this service. */
 export function createMailService(dependencies: {
   store: MailCredentialStore;
@@ -166,6 +173,11 @@ export function createMailService(dependencies: {
   now?: () => number;
   canSendAs?: (userId: string, address: string) => Promise<string | null>;
   beforeAliasSend?: (userId: string, aliasId: string) => Promise<boolean>;
+  scheduledStore?: ScheduledAdapters["scheduledStore"];
+  guardDraft?: ScheduledAdapters["guardDraft"];
+  reconcileSubmission?: ScheduledAdapters["reconcileSubmission"];
+  processRow?: ScheduledAdapters["processRow"];
+  sweep?: ScheduledAdapters["sweep"];
 }) {
   const { run, connect: open, now } = createJmapAccess(dependencies);
   const uploads = new Map<
@@ -202,16 +214,6 @@ export function createMailService(dependencies: {
       return fail("conflict");
     return result.list;
   };
-  const getDraft = async (c: Connection, id: string, list: Mailbox[]) => {
-    const email = value(await c.client.emails(c.session, c.id, [id])).list[0];
-    if (
-      email === undefined ||
-      !email.keywords["$draft"] ||
-      !email.mailboxIds[role(list, "drafts")]
-    )
-      return fail("not_found");
-    return email;
-  };
   const create = async (
     c: Connection,
     content: DraftContent,
@@ -219,7 +221,10 @@ export function createMailService(dependencies: {
     prior?: Email,
   ) => {
     const existing = new Map(
-      (prior ? attachments(prior) : []).map((item) => [item.blobId, item]),
+      (prior ? c.client.mailMapping.mailAttachments(prior) : []).map((item) => [
+        item.blobId,
+        item,
+      ]),
     );
     const parts = content.attachmentBlobIds.map((blobId) => {
       const key = `${c.owner}:${blobId}`;
@@ -271,6 +276,29 @@ export function createMailService(dependencies: {
       }),
     );
   };
+  const store = dependencies.scheduledStore;
+  const scheduled = createScheduledSend({
+    store,
+    connect,
+    boxes,
+    now,
+    run,
+    sender: (c, email, forRelease) =>
+      senderFor(
+        c,
+        email,
+        forRelease
+          ? dependencies
+          : { ...dependencies, beforeAliasSend: () => Promise.resolve(true) },
+      ),
+    processRow: dependencies.processRow,
+    sweep:
+      dependencies.sweep ?? (() => Promise.reject(new Error("unavailable"))),
+    reconcileSubmission:
+      dependencies.reconcileSubmission ?? (() => Promise.resolve(undefined)),
+  });
+  const guard = draftGuard(store, dependencies.guardDraft);
+  const withDraft = draftOperations({ connect, run, boxes, guard });
   return {
     identity: (actor: Actor, accountId: string) =>
       run(async () => {
@@ -309,7 +337,7 @@ export function createMailService(dependencies: {
         if (!Number.isSafeInteger(position)) return fail("validation");
         const pageResult = value(
           await c.client.threadPage(c.session, c.id, {
-            filter: filterFor(options),
+            filter: c.client.mailMapping.mailFilterFor(options),
             sort: [
               {
                 property: "receivedAt",
@@ -347,7 +375,9 @@ export function createMailService(dependencies: {
           );
         });
         return {
-          threads: groups.map((group) => summary(group, list, c.address)),
+          threads: groups.map((group) =>
+            summary(group, list, c.address, c.client.mailMapping),
+          ),
           nextCursor:
             pageResult.query.ids.length > options.limit
               ? String(position + options.limit)
@@ -363,7 +393,9 @@ export function createMailService(dependencies: {
           id: threadId,
           messages: emails
             .toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt))
-            .map((item) => message(item, list, c.address)),
+            .map((item) =>
+              c.client.mailMapping.mailMessage(item, list, c.address),
+            ),
         };
       }),
     action: (
@@ -396,53 +428,20 @@ export function createMailService(dependencies: {
         const targets = messageIds
           ? all.filter((item) => messageIds.includes(item.id))
           : all;
-        await targets.reduce<Promise<void>>(
-          (previous, email) =>
-            previous.then(async () => {
-              if (action.type === "delete") {
-                value(await c.client.destroyEmail(c.session, c.id, email.id));
-                return undefined;
-              }
-              let patch: Record<string, unknown>;
-              if (action.type === "read" || action.type === "star")
-                patch = {
-                  [`keywords/${action.type === "read" ? "$seen" : "$flagged"}`]:
-                    action.value ? true : null,
-                };
-              else if (action.type === "labels") {
-                const custom = customIds(list);
-                const ids = [
-                  ...memberships(email).filter((id) => !custom.has(id)),
-                  ...action.labels,
-                ];
-                patch = {
-                  mailboxIds: Object.fromEntries(ids.map((id) => [id, true])),
-                };
-              } else {
-                const dest =
-                  action.type === "move"
-                    ? action.mailboxId
-                    : role(
-                        list,
-                        action.type === "archive" ? "archive" : "trash",
-                      );
-                const custom = customIds(list);
-                const ids = [
-                  ...memberships(email).filter((id) => custom.has(id)),
-                  dest,
-                ];
-                patch = {
-                  mailboxIds: Object.fromEntries(ids.map((id) => [id, true])),
-                };
-              }
-              value(
-                await c.client.updateEmail(c.session, c.id, email.id, patch),
-              );
-              return undefined;
-            }),
-          Promise.resolve(),
+        const guardedIds = targets
+          .filter(
+            (item) =>
+              item.keywords["$draft"] &&
+              !["read", "star", "labels"].includes(action.type),
+          )
+          .map((item) => item.id);
+        return guard(c, guardedIds, (beginWrite) =>
+          executeAction(
+            c,
+            { targets, action, list, guarded: guardedIds.length > 0 },
+            beginWrite,
+          ),
         );
-        return { success: true } satisfies { success: true };
       }),
     drafts: (actor: Actor, accountId: string) =>
       run(async () => {
@@ -454,7 +453,7 @@ export function createMailService(dependencies: {
           }),
         ).ids;
         const emails = value(await c.client.emails(c.session, c.id, ids)).list;
-        return { drafts: emails.map(draft) };
+        return { drafts: emails.map(c.client.mailMapping.mailDraft) };
       }),
     createDraft: (actor: Actor, accountId: string, content: DraftContent) =>
       run(async () => {
@@ -469,65 +468,42 @@ export function createMailService(dependencies: {
       id: string,
       content: DraftContent,
     ) =>
-      run(async () => {
-        const c = await connect(actor, accountId);
-        const list = await boxes(c);
-        const previous = await getDraft(c, id, list);
+      withDraft(actor, accountId, id, async (c, list, previous, beginWrite) => {
         const created = await create(c, content, list, previous);
-        await c.client.destroyEmail(c.session, c.id, id);
+        await beginWrite("destroy");
+        const removed = await c.client.destroyEmail(c.session, c.id, id);
+        if (store) value(removed);
         return { ...content, id: created.id };
       }),
     deleteDraft: (actor: Actor, accountId: string, id: string) =>
-      run(async () => {
-        const c = await connect(actor, accountId);
-        const list = await boxes(c);
-        await getDraft(c, id, list);
+      withDraft(actor, accountId, id, async (c, _list, _email, beginWrite) => {
+        await beginWrite("destroy");
         value(await c.client.destroyEmail(c.session, c.id, id));
         return { success: true } satisfies { success: true };
       }),
+    recoverDraftCopy: draftRecovery({ connect, run, boxes, store, create }),
     send: (actor: Actor, accountId: string, id: string) =>
-      run(async () => {
-        const c = await connect(actor, accountId);
-        const list = await boxes(c);
-        const email = await getDraft(c, id, list);
-        const recipients = [
-          ...addresses(email.to),
-          ...addresses(email.cc),
-          ...addresses(email.bcc),
-        ];
-        if (!recipients.length) return fail("validation");
-        const from =
-          email.from?.[0]?.email.toLowerCase() ?? c.address.toLowerCase();
-        const aliasId =
-          from === c.address.toLowerCase()
-            ? null
-            : await dependencies.canSendAs?.(c.owner, from);
-        if (from !== c.address.toLowerCase() && !aliasId)
-          return fail("forbidden");
-        const identity = value(
-          await c.client.identities(c.session, c.id),
-        ).list.find((item) => item.email.toLowerCase() === from);
-        if (!identity) return fail("unavailable");
-        if (
-          aliasId &&
-          !(await dependencies.beforeAliasSend?.(c.owner, aliasId))
-        )
-          return fail("rate_limited");
+      withDraft(actor, accountId, id, async (c, list, email, beginWrite) => {
+        const { from, identityId, recipients } = await senderFor(
+          c,
+          email,
+          dependencies,
+        );
+        const requestId = await beginWrite("send");
         value(
           await c.client.submit(
             c.session,
             c.id,
             id,
-            identity.id,
-            {
-              mailFrom: { email: from },
-              rcptTo: recipients.map((item) => ({ email: item.email })),
-            },
+            identityId,
+            { mailFrom: { email: from }, rcptTo: recipients },
             role(list, "sent"),
+            { requestId, uncertainFollowup: true },
           ),
         );
         return { messageId: id, threadId: email.threadId };
       }),
+    ...scheduled,
     upload: (
       actor: Actor,
       accountId: string,

@@ -2,9 +2,16 @@ import { err, ok, ResultAsync } from "neverthrow";
 import type { PrismaClient } from "./generated/index.js";
 import { createLocked, unavailable, wrap } from "./aliases-shared.ts";
 import { ALIAS_DOMAIN_LOCK_SEED, withUserLease } from "./alias-locks.ts";
+import {
+  addressIds,
+  allowedAddressWhere,
+  findAllowedAddress,
+  usableAddressDomain,
+  validMailboxLocalPart,
+} from "./sender-authorization.ts";
+import { lockRevocation, withRevocation } from "./scheduled-send-guard.ts";
 
-export const validMailboxLocalPart = (part: string) =>
-  part.length <= 39 && /^[a-z0-9]+(?:[-.][a-z0-9]+)*$/.test(part);
+export { validMailboxLocalPart };
 /** Configured domains are usable even if DNS verification is not configured. */
 export function createAddressStore(
   db: PrismaClient,
@@ -12,14 +19,7 @@ export function createAddressStore(
   subscriberDomains?: readonly string[],
 ) {
   const locked = createLocked(db);
-  const usable = {
-    removalPending: false,
-    stalwartId: { not: null },
-    OR: [
-      { status: "verified", user: { role: "admin", disabled: false } },
-      { name: { in: [...configured] } },
-    ],
-  };
+  const usable = usableAddressDomain(configured);
   return {
     withPrimaryReservation: async <T>(
       email: string,
@@ -157,13 +157,15 @@ export function createAddressStore(
               !row.user.disabled &&
               row.user.mailbox?.status === "active";
             if (row.active !== desired)
-              await db.address.updateMany({
-                where: { id: row.id, ready: true, revision: row.revision },
-                data: {
-                  ready: false,
-                  active: false,
-                  revision: { increment: 1 },
-                },
+              await withRevocation(db, async (tx) => {
+                await tx.address.updateMany({
+                  where: { id: row.id, ready: true, revision: row.revision },
+                  data: {
+                    ready: false,
+                    active: false,
+                    revision: { increment: 1 },
+                  },
+                });
               });
           }
           /* oxlint-enable eslint/no-await-in-loop */
@@ -339,6 +341,7 @@ export function createAddressStore(
             },
           });
           if (!row) return err({ kind: "not_found" });
+          await lockRevocation(tx);
           await tx.address.update({
             where: { id },
             data: {
@@ -394,7 +397,7 @@ export function createAddressStore(
       enabled: boolean,
     ) =>
       ResultAsync.fromPromise(
-        db.$transaction(async (tx) => {
+        withRevocation(db, async (tx) => {
           const where = {
             id,
             userId,
@@ -450,12 +453,12 @@ export function createAddressStore(
       ),
     dirty: (userId: string, id: string) =>
       ResultAsync.fromPromise(
-        db.address
-          .updateMany({
+        withRevocation(db, async (tx) => {
+          await tx.address.updateMany({
             where: { id, userId },
             data: { ready: false, updatedAt: new Date() },
-          })
-          .then(() => undefined),
+          });
+        }),
         unavailable,
       ),
     pending: () =>
@@ -470,34 +473,7 @@ export function createAddressStore(
       ),
     canSendAs: (userId: string, email: string) =>
       ResultAsync.fromPromise(
-        (async () => {
-          const [localPart, domain, extra] = email.toLowerCase().split("@");
-          if (
-            !localPart ||
-            !validMailboxLocalPart(localPart) ||
-            !domain ||
-            extra !== undefined
-          )
-            return null;
-          const ids = await db.$queryRaw<
-            { id: string }[]
-          >`SELECT a."id" FROM "Address" a JOIN "Domain" d ON d."id" = a."domainId" WHERE lower(a."localPart") = ${localPart} AND d."name" = ${domain}`;
-          return db.address.findFirst({
-            where: {
-              userId,
-              id: { in: ids.map((row) => row.id) },
-              isAlias: false,
-              mailboxManaged: true,
-              ready: true,
-              active: true,
-              removedAt: null,
-              removalPending: false,
-              domain: { name: domain, ...usable },
-              user: { disabled: false, mailbox: { status: "active" } },
-            },
-            select: { id: true },
-          });
-        })(),
+        findAllowedAddress(db, userId, email, usable),
         unavailable,
       ),
     resolveLogin: async (email: string) => {
@@ -507,21 +483,9 @@ export function createAddressStore(
       >`SELECT "id" FROM "User" WHERE lower("email") = ${normalized} LIMIT 1`;
       const [localPart, domain, extra] = normalized.split("@");
       if (!localPart || !domain || extra !== undefined) return null;
-      const ids = await db.$queryRaw<
-        { id: string }[]
-      >`SELECT a."id" FROM "Address" a JOIN "Domain" d ON d."id" = a."domainId" WHERE lower(a."localPart") = ${localPart} AND d."name" = ${domain}`;
+      const ids = await addressIds(db, localPart, domain);
       const row = await db.address.findFirst({
-        where: {
-          id: { in: ids.map((item) => item.id) },
-          isAlias: false,
-          mailboxManaged: true,
-          ready: true,
-          active: true,
-          removedAt: null,
-          removalPending: false,
-          domain: { name: domain, ...usable },
-          user: { disabled: false, mailbox: { status: "active" } },
-        },
+        where: allowedAddressWhere(ids, domain, usable),
         select: { user: { select: { id: true, email: true } } },
       });
       return primary.length || !validMailboxLocalPart(localPart)

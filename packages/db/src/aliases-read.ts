@@ -2,6 +2,8 @@ import { ResultAsync } from "neverthrow";
 import type { PrismaClient } from "./generated/index.js";
 import { unavailable } from "./aliases-shared.ts";
 import { withUserLease } from "./alias-locks.ts";
+import { findAllowedAlias } from "./sender-authorization.ts";
+import { withRevocation } from "./scheduled-send-guard.ts";
 
 export const createLeaseAndList = (
   db: PrismaClient,
@@ -96,32 +98,37 @@ export const createSnapshot = (db: PrismaClient) => ({
     },
   ) =>
     ResultAsync.fromPromise(
-      db.emailAlias
-        .updateMany({
-          where: {
-            id,
-            userId,
-            revision: row.revision,
-            domain: { status: row.domain.status },
-            user: {
-              aliasSyncToken: token,
-              disabled: row.user.disabled,
-              mailbox:
-                row.user.mailbox === null
-                  ? { is: null }
-                  : { is: { status: row.user.mailbox.status } },
+      withRevocation(db, async (tx) => {
+        return tx.emailAlias
+          .updateMany({
+            where: {
+              id,
+              userId,
+              revision: row.revision,
+              domain: { status: row.domain.status },
+              user: {
+                aliasSyncToken: token,
+                disabled: row.user.disabled,
+                mailbox:
+                  row.user.mailbox === null
+                    ? { is: null }
+                    : { is: { status: row.user.mailbox.status } },
+              },
             },
-          },
-          data,
-        })
-        .then((result) => result.count === 1),
+            data,
+          })
+          .then((result) => result.count === 1);
+      }),
       unavailable,
     ),
   dirty: (userId: string, id: string) =>
     ResultAsync.fromPromise(
-      db.emailAlias
-        .updateMany({ where: { id, userId }, data: { ready: false } })
-        .then(() => undefined),
+      withRevocation(db, async (tx) => {
+        await tx.emailAlias.updateMany({
+          where: { id, userId },
+          data: { ready: false },
+        });
+      }),
       unavailable,
     ),
   get: (userId: string, id: string) =>
@@ -143,22 +150,7 @@ export const createSubmission = (db: PrismaClient) => ({
       unavailable,
     ),
   canSendAs: (userId: string, address: string) =>
-    ResultAsync.fromPromise(
-      db.emailAlias.findFirst({
-        where: {
-          userId,
-          address,
-          enabled: true,
-          ready: true,
-          suspended: false,
-          detachedByDomain: false,
-          deletedAt: null,
-          domain: { status: "verified" },
-        },
-        select: { id: true },
-      }),
-      unavailable,
-    ),
+    ResultAsync.fromPromise(findAllowedAlias(db, userId, address), unavailable),
   auditSubmission: (userId: string, aliasId: string) =>
     ResultAsync.fromPromise(
       db.auditEvent

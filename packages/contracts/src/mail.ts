@@ -79,6 +79,11 @@ export const DraftContentSchema = z.object({
   threadId: IdSchema.optional(),
 });
 export const DraftSchema = DraftContentSchema.extend({ id: IdSchema });
+export const RecoveredDraftSchema = z.object({
+  draft: DraftSchema,
+  state: z.literal("unknown"),
+  originalMayStillSend: z.literal(true),
+});
 export const SearchSchema = z.object({
   query: z.string().optional(),
   from: z.string().optional(),
@@ -88,6 +93,91 @@ export const SearchSchema = z.object({
   after: z.iso.datetime().optional(),
   before: z.iso.datetime().optional(),
 });
+export const ScheduledFailureCodeSchema = z.enum([
+  "account_inactive",
+  "sender_unavailable",
+  "domain_unavailable",
+  "entitlement_required",
+  "quota_exceeded",
+  "draft_unavailable",
+  "submission_rejected",
+]);
+const scheduledFailureMessages: Record<
+  z.infer<typeof ScheduledFailureCodeSchema>,
+  string
+> = {
+  account_inactive: "The sending account is no longer active.",
+  sender_unavailable:
+    "The sending identity is no longer available or authorized.",
+  domain_unavailable:
+    "The sending domain is no longer configured or available.",
+  entitlement_required: "The account no longer has an entitlement to send.",
+  quota_exceeded: "The account's storage quota has been exceeded.",
+  draft_unavailable: "The original draft is no longer available for sending.",
+  submission_rejected: "The mail server rejected the submission.",
+};
+export const ScheduledSchema = z.object({
+  id: z.uuid(),
+  draftId: IdSchema,
+  threadId: IdSchema,
+  releaseAt: z.iso.datetime(),
+  state: z.enum([
+    "creating",
+    "pending",
+    "canceling",
+    "unknown",
+    "releasing",
+    "sent",
+    "canceled",
+    "failed",
+  ]),
+  failure: z
+    .object({ code: ScheduledFailureCodeSchema, message: z.string().min(1) })
+    .nullable()
+    .default(null),
+  uncertainty: z.string().min(1).nullable().default(null),
+});
+export function scheduledDto(row: {
+  id: string;
+  draftId: string;
+  threadId: string;
+  releaseAt: Date;
+  state: string;
+  failureReason?: string | null | undefined;
+}) {
+  const reason = ScheduledFailureCodeSchema.nullable().parse(
+    row.failureReason ?? null,
+  );
+  const state =
+    row.state === "preparing"
+      ? "pending"
+      : row.state === "canceling" || row.state === "creating"
+        ? "unknown"
+        : row.state;
+  return ScheduledSchema.parse({
+    id: row.id,
+    draftId: row.draftId,
+    threadId: row.threadId,
+    releaseAt: row.releaseAt.toISOString(),
+    state,
+    failure: reason
+      ? { code: reason, message: scheduledFailureMessages[reason] }
+      : null,
+    uncertainty:
+      state === "unknown"
+        ? "This message may already have been submitted; revoking the sender cannot guarantee it will not be sent."
+        : null,
+  });
+}
+export type Scheduled = z.infer<typeof ScheduledSchema>;
+export const ScheduleDeliverySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("delay"),
+    seconds: z.number().int().min(1).max(2592000),
+  }),
+  z.object({ type: z.literal("at"), at: z.iso.datetime() }),
+]);
+export type ScheduleDelivery = z.infer<typeof ScheduleDeliverySchema>;
 const AccountSchema = z.object({ accountId: IdSchema });
 const ThreadInputSchema = AccountSchema.extend({ threadId: IdSchema });
 const DraftInputSchema = AccountSchema.extend({ draftId: IdSchema });
@@ -183,6 +273,37 @@ export const mailContract = {
     .route({ method: "POST", path: "/mail/attachments/download" })
     .input(AccountSchema.extend({ blobId: IdSchema }))
     .output(z.object({ url: z.url(), expiresAt: z.iso.datetime() })),
+};
+export const scheduledMailContract = {
+  draftGuardStatus: procedure
+    .route({ method: "POST", path: "/mail/drafts/guard-status" })
+    .input(DraftInputSchema)
+    .output(z.object({ state: z.enum(["clear", "scheduled", "unknown"]) })),
+  recoverDraftCopy: procedure
+    .route({ method: "POST", path: "/mail/drafts/recover-copy" })
+    .input(
+      DraftInputSchema.extend({
+        acknowledgeOriginalMayStillSend: z.literal(true),
+      }),
+    )
+    .output(RecoveredDraftSchema),
+  schedule: procedure
+    .route({ method: "POST", path: "/mail/scheduled/create" })
+    .input(
+      DraftInputSchema.extend({
+        requestId: z.uuid(),
+        delivery: ScheduleDeliverySchema,
+      }),
+    )
+    .output(ScheduledSchema),
+  scheduled: procedure
+    .route({ method: "POST", path: "/mail/scheduled/list" })
+    .input(AccountSchema)
+    .output(z.object({ scheduled: z.array(ScheduledSchema) })),
+  cancelScheduled: procedure
+    .route({ method: "POST", path: "/mail/scheduled/cancel" })
+    .input(AccountSchema.extend({ id: z.uuid() }))
+    .output(ScheduledSchema),
 };
 export type Mailbox = z.infer<typeof MailboxSchema>;
 export type Message = z.infer<typeof MessageSchema>;

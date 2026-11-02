@@ -2,6 +2,7 @@ import { err, errAsync, ok, ResultAsync } from "neverthrow";
 import { z } from "zod";
 import { createSecretBox } from "./secrets.ts";
 import type { PrismaClient } from "./generated/index.js";
+import { withRevocation } from "./scheduled-send-guard.ts";
 
 const Account = z.object({ accountId: z.string().min(1), address: z.email() });
 const Credential = z.object({
@@ -71,7 +72,7 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
     },
     finishDisabled(userId: string) {
       return ResultAsync.fromPromise(
-        db.$transaction(async (tx) => {
+        withRevocation(db, async (tx) => {
           await tx.mailboxLink.updateMany({
             where: { userId },
             data: { status: "disabled" },
@@ -86,7 +87,7 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
     },
     markDisabled(userId: string, actorId: string) {
       return ResultAsync.fromPromise(
-        db.$transaction(async (tx) => {
+        withRevocation(db, async (tx) => {
           await tx.$queryRaw`SELECT pg_advisory_xact_lock(1984327101)::text`;
           const actor = await tx.user.findFirst({
             where: { id: actorId, role: "admin", disabled: false },
@@ -218,7 +219,7 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
       });
       if (encrypted.isErr()) return errAsync(failure());
       return ResultAsync.fromPromise(
-        db.$transaction(async (tx) => {
+        withRevocation(db, async (tx) => {
           const user = await tx.user.findUniqueOrThrow({
             where: { id: userId },
             select: { disabled: true },
