@@ -2,7 +2,6 @@ import * as React from "react";
 import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { TextField } from "../ui/text-field.tsx";
-import { aliasesClient } from "./client.ts";
 import type { AliasPageState } from "./use-alias-page.ts";
 
 export function AliasCreateDialog({ state }: { state: AliasPageState }) {
@@ -149,8 +148,7 @@ function AliasDetailsFields({ state }: { state: AliasPageState }) {
 }
 
 export function AliasDeleteDialog({ state }: { state: AliasPageState }) {
-  const { deleting, setDeleting, busy, error, setError, setNotice, run } =
-    state;
+  const { deleting, setDeleting, busy, error, setError, remove } = state;
   return (
     <Dialog
       open={deleting !== null}
@@ -165,7 +163,7 @@ export function AliasDeleteDialog({ state }: { state: AliasPageState }) {
         title="Delete alias?"
         description="This address will never be reused. Existing messages remain in your mailbox."
       >
-        <p className="alias-confirm-address">{deleting?.address}</p>
+        <p className="alias-confirm-address">{deleting?.alias.address}</p>
         {error && (
           <p className="field-error" role="alert">
             {error}
@@ -175,6 +173,7 @@ export function AliasDeleteDialog({ state }: { state: AliasPageState }) {
           <Button
             variant="ghost"
             disabled={busy}
+            data-autofocus
             onClick={() => setDeleting(null)}
           >
             Cancel
@@ -183,14 +182,7 @@ export function AliasDeleteDialog({ state }: { state: AliasPageState }) {
             className="button-danger"
             disabled={busy}
             onClick={() => {
-              if (deleting)
-                void run(
-                  () => aliasesClient.delete({ id: deleting.id }),
-                  () => {
-                    setDeleting(null);
-                    setNotice("Alias deleted.");
-                  },
-                );
+              if (deleting) void remove(deleting.alias, deleting.index);
             }}
           >
             Delete alias

@@ -37,6 +37,9 @@
   color: var(--foreground);
   font: inherit;
 }
+.alias-list-heading {
+  margin-bottom: 14px;
+}
 .alias-toolbar label:first-child {
   flex: 1 1 220px;
 }
@@ -58,10 +61,38 @@
   font-size: 14px;
   white-space: pre-wrap;
 }
+/* The Addresses settings page shares these list styles. */
 .alias-badges {
   justify-content: flex-start;
   flex-wrap: wrap;
   margin-top: 8px;
+}
+.alias-notice {
+  display: block;
+  margin: 12px 0;
+}
+.alias-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 8px;
+}
+.alias-status .status-badge {
+  font-size: 12px;
+}
+.alias-status-disabled {
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  color: var(--muted);
+}
+.alias-status-detail {
+  color: var(--muted);
+  font-size: 13px;
+}
+.alias-row-disabled .alias-address,
+.alias-row-suspended .alias-address {
+  color: var(--muted);
 }
 .alias-actions {
   justify-content: flex-start;
@@ -89,13 +120,49 @@
   resize: vertical;
   overflow-wrap: anywhere;
 }
-.alias-notice,
-.alias-error {
-  display: block;
-  margin: 12px 0;
+.alias-action.button {
+  border-color: var(--border);
+  background: var(--surface);
+}
+.alias-action.button:hover {
+  background: var(--surface-muted);
+}
+.alias-action-danger.button {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+.alias-action-danger.button:hover {
+  background: var(--danger-soft);
+}
+.alias-action[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: progress;
+}
+.alias-create {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  max-width: 260px;
+}
+.alias-create-blocker {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: right;
 }
 .alias-error {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: var(--radius-card);
+  background: var(--danger-soft);
   color: var(--foreground);
+}
+.alias-error h2 {
+  color: var(--danger);
+  font-size: 18px;
 }
 .alias-instructions {
   padding-left: 22px;
@@ -118,5 +185,12 @@
   .alias-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .alias-create {
+    justify-items: start;
+    max-width: none;
+  }
+  .alias-create-blocker {
+    text-align: left;
   }
 }

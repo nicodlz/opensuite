@@ -29,7 +29,9 @@ const template: {
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
-async function mockAliases(page: Page) {
+/** Paths answered with a 503 while listed, to exercise load failures. */
+type Failing = { paths: string[] };
+async function mockAliases(page: Page, failing: Failing = { paths: [] }) {
   let aliases = [
     { ...template },
     {
@@ -45,6 +47,12 @@ async function mockAliases(page: Page) {
       address: "suspended@example.test",
       suspended: true,
     },
+    {
+      ...template,
+      id: "a4",
+      address: "waiting@example.test",
+      ready: false,
+    },
   ];
   let keys: {
     id: string;
@@ -59,6 +67,16 @@ async function mockAliases(page: Page) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const method = request.method();
+    if (failing.paths.includes(path))
+      return route.fulfill({
+        status: 503,
+        json: {
+          defined: false,
+          code: "SERVICE_UNAVAILABLE",
+          status: 503,
+          message: "Unavailable",
+        },
+      });
     let result: unknown;
     if (path === "/api/aliases/domains")
       result = [
@@ -167,9 +185,9 @@ test("manage aliases, default domain and one-time keys", async ({
     "shop-xyz@example.test",
   );
   await row.getByRole("button", { name: "Disable" }).click();
-  await expect(row.getByText("Disabled")).toBeVisible();
+  await expect(row.getByText("Disabled", { exact: true })).toBeVisible();
   await row.getByRole("button", { name: "Enable" }).click();
-  await expect(row.getByText("Enabled", { exact: true })).toBeVisible();
+  await expect(row.getByText("Active", { exact: true })).toBeVisible();
   await row.getByRole("button", { name: "Delete" }).click();
   const confirmation = page.getByRole("dialog", { name: "Delete alias?" });
   await expect(confirmation.getByText(/never be reused/)).toBeVisible();
@@ -194,6 +212,259 @@ test("manage aliases, default domain and one-time keys", async ({
   await keyRow.getByRole("button", { name: "Revoke" }).click();
   await expect(keyRow).toContainText("Revoked");
 });
+test("each alias shows one explicit, visually distinct status", async ({
+  page,
+}) => {
+  await mockAliases(page);
+  await page.goto("/vault/aliases");
+  const expected = [
+    ["friday@example.test", "Active", "Receiving mail."],
+    ["waiting@example.test", "Pending", "Being set up."],
+    ["pending@example.test", "Disabled", "Setup is still pending."],
+    ["suspended@example.test", "Suspended", "Suspended by your administrator."],
+  ] as const;
+  const colours = await Promise.all(
+    expected.map(async ([address, label, detail]) => {
+      const row = page.getByRole("listitem").filter({ hasText: address });
+      const badge = row.getByText(label, { exact: true });
+      await expect(badge).toBeVisible();
+      await expect(row).toContainText(detail);
+      return badge.evaluate((node) => {
+        const style = getComputedStyle(node);
+        return `${style.backgroundColor}/${style.color}`;
+      });
+    }),
+  );
+  expect(new Set(colours).size).toBe(expected.length);
+  // Row actions share one style; only Delete is marked as destructive.
+  const row = page
+    .getByRole("listitem")
+    .filter({ hasText: "friday@example.test" });
+  const background = (name: string) =>
+    row
+      .getByRole("button", { name })
+      .evaluate((node) => getComputedStyle(node).backgroundColor);
+  expect(await background("Copy friday")).toBe(
+    await background("Disable friday"),
+  );
+  const colour = (name: string) =>
+    row
+      .getByRole("button", { name })
+      .evaluate((node) => getComputedStyle(node).color);
+  expect(await colour("Delete friday")).not.toBe(
+    await colour("Disable friday"),
+  );
+});
+
+test("keyboard focus follows alias create, disable, undo and delete", async ({
+  page,
+}) => {
+  await mockAliases(page);
+  await page.goto("/vault/aliases");
+  const rowOf = (address: string) =>
+    page.getByRole("listitem").filter({ hasText: address });
+  await expect(rowOf("friday@example.test")).toBeVisible();
+
+  // Create: focus lands on the new alias's Copy button.
+  await page.getByRole("button", { name: "Create alias", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Create alias" });
+  await expect(dialog.getByLabel("Random")).toBeFocused();
+  await dialog.getByLabel("Website (optional)").fill("kbd.example.com");
+  await page.keyboard.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByText("Alias created: random-xyz@example.test"),
+  ).toBeVisible();
+  await expect(
+    rowOf("random-xyz@example.test").getByRole("button", { name: /^Copy/ }),
+  ).toBeFocused();
+
+  // Disable: the same row keeps focus, and the notification offers Undo.
+  const toggle = rowOf("friday@example.test").getByRole("button", {
+    name: "Disable friday@example.test",
+  });
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  const enable = rowOf("friday@example.test").getByRole("button", {
+    name: "Enable friday@example.test",
+  });
+  await expect(enable).toBeFocused();
+  await expect(page.getByText("friday@example.test disabled.")).toBeVisible();
+  await page.keyboard.press("F8");
+  await expect(page.getByRole("button", { name: "Undo" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(
+    rowOf("friday@example.test").getByText("Active", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    rowOf("friday@example.test").getByRole("button", {
+      name: "Disable friday@example.test",
+    }),
+  ).toBeFocused();
+
+  // Disabling under the Enabled filter: the row leaves; focus takes its place.
+  await page.getByLabel("Filter").selectOption("enabled");
+  await rowOf("friday@example.test")
+    .getByRole("button", { name: /^Disable/ })
+    .focus();
+  await page.keyboard.press("Enter");
+  await expect(rowOf("friday@example.test")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Disable waiting@example.test" }),
+  ).toBeFocused();
+
+  // Delete: Cancel takes focus first; after deleting, the next row's Delete.
+  await page
+    .getByRole("button", { name: "Delete waiting@example.test" })
+    .focus();
+  await page.keyboard.press("Enter");
+  const confirmation = page.getByRole("dialog", { name: "Delete alias?" });
+  await expect(
+    confirmation.getByRole("button", { name: "Cancel" }),
+  ).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(
+    confirmation.getByRole("button", { name: "Delete alias" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(rowOf("waiting@example.test")).toHaveCount(0);
+  await expect(page.getByText("waiting@example.test deleted.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Delete random-xyz@example.test" }),
+  ).toBeFocused();
+
+  // Deleting the last listed alias moves focus to the list heading.
+  await page.keyboard.press("Enter");
+  await confirmation
+    .getByRole("button", { name: "Delete alias" })
+    .press("Enter");
+  await expect(
+    page.getByText("No aliases match this search and filter."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Your aliases", exact: true }),
+  ).toBeFocused();
+});
+
+test("Undo works even when the refresh after disabling is slow", async ({
+  page,
+}) => {
+  await mockAliases(page);
+  let slow = false;
+  await page.route("**/api/aliases", async (route) => {
+    if (slow && route.request().method() === "GET")
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.fallback();
+  });
+  let enables = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/api/aliases/a1/enable")) enables++;
+  });
+  await page.goto("/vault/aliases");
+  const row = page
+    .getByRole("listitem")
+    .filter({ hasText: "friday@example.test" });
+  slow = true;
+  await row.getByRole("button", { name: /^Disable/ }).click();
+  await expect(row).toContainText("New mail is held instead of delivered");
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(row.getByText("Active", { exact: true })).toBeVisible();
+  expect(enables).toBe(1);
+  await expect(
+    page.getByText("friday@example.test enabled again."),
+  ).toBeVisible();
+});
+
+test("a load failure replaces dependent panels and explains disabled actions", async ({
+  page,
+}) => {
+  const failing = {
+    paths: [
+      "/api/aliases",
+      "/api/aliases/domains",
+      "/api/aliases/default-domain",
+      "/api/aliases/keys",
+    ],
+  };
+  await mockAliases(page, failing);
+  await page.goto("/vault/aliases");
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText(
+    "Could not load your aliases, alias domains, and API keys",
+  );
+  await expect(alert).toContainText("Alias service unavailable.");
+  // No empty state or settings panel is shown next to the error.
+  await expect(page.getByText(/no aliases yet|No aliases match/)).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole("heading", { name: "Your aliases", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Default alias domain" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Alias API keys" }),
+  ).toHaveCount(0);
+  const create = page.getByRole("button", {
+    name: "Create alias",
+    exact: true,
+  });
+  await expect(create).toBeDisabled();
+  await expect(create).toHaveAccessibleDescription(
+    "Available once your aliases and domains load.",
+  );
+  expect(
+    (await new AxeBuilder({ page }).analyze()).violations.filter(
+      (item) => item.impact === "serious" || item.impact === "critical",
+    ),
+  ).toEqual([]);
+
+  // Retry by keyboard once the service is back.
+  failing.paths = [];
+  await alert.getByRole("button", { name: "Retry" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("friday@example.test")).toBeVisible();
+  await expect(create).toBeEnabled();
+  await expect(
+    page.getByRole("heading", { name: "Aliases", level: 1 }),
+  ).toBeFocused();
+
+  // Only the failed part is hidden when one request fails.
+  failing.paths = ["/api/aliases/keys"];
+  await page.reload();
+  await expect(page.getByRole("alert")).toContainText(
+    "Could not load API keys",
+  );
+  await expect(page.getByText("friday@example.test")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Default alias domain" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Alias API keys" }),
+  ).toHaveCount(0);
+});
+
+test("without an eligible domain, Create alias says why", async ({ page }) => {
+  await mockAliases(page);
+  await page.route("**/api/aliases/domains", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.goto("/vault/aliases");
+  await expect(page.getByText("friday@example.test")).toBeVisible();
+  const create = page.getByRole("button", {
+    name: "Create alias",
+    exact: true,
+  });
+  await expect(create).toBeDisabled();
+  await expect(create).toHaveAccessibleDescription(
+    /No alias domain is available yet/,
+  );
+  await expect(page.getByText(/Bitwarden uses this domain/)).toHaveCount(0);
+});
+
 test("recipient badge and reply sender use a matching alias", async ({
   page,
 }) => {

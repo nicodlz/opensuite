@@ -7,7 +7,6 @@ import {
   type EventContent,
   type Reminder,
 } from "@opensuite/contracts";
-import { ORPCError } from "@orpc/client";
 import {
   keepPreviousData,
   useMutation,
@@ -31,18 +30,35 @@ import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { Icon } from "../ui/icons.tsx";
 import { TextField } from "../ui/text-field.tsx";
-import { Toast, ToastProvider } from "../ui/toast.tsx";
+import { ToastProvider } from "../ui/toast.tsx";
 import { useNotificationPrompt } from "../push/hook.ts";
-import {
-  isIosUninstalled,
-  pushIsOn,
-  supportsPush,
-  refreshCalendarTimeZone,
-} from "../push/client.ts";
+import { refreshCalendarTimeZone } from "../push/client.ts";
 import { accountId, calendarClient } from "./client.ts";
+import { ConfirmChange, type Confirm } from "./confirm-change.tsx";
+import { useEventChanges } from "./event-changes.ts";
+import { useEventFocus } from "./event-focus.ts";
+import {
+  calendarsKey,
+  eventLabel,
+  fetchRange,
+  loadError,
+  rangeKey,
+  titleOf,
+  type Colors,
+} from "./events.ts";
+import { offerReminder } from "./reminder-offer.ts";
+import { PeriodEmpty, SearchResults, useSearch } from "./search.tsx";
+import {
+  compactWeekQuery,
+  periodName as periodOf,
+  shiftVisible,
+  thisPeriod,
+  useTimeGridScroller,
+  viewLabel,
+  visibleRange,
+} from "./views.ts";
 import {
   addDays,
-  applyEventChange,
   calendarPalette,
   calendarViews,
   dateAtMinutes,
@@ -67,7 +83,6 @@ import {
   recurrenceLabels,
   resizeTo,
   sameDay,
-  shiftAnchor,
   shiftDays,
   shiftFormStart,
   snapMinutes,
@@ -82,7 +97,6 @@ import {
   wallMinutes,
   type CalendarView,
   type DateRange,
-  type EventChange,
   type EventForm,
   type EventTiming,
   type TimedSegment,
@@ -93,20 +107,12 @@ import {
 // oxlint-disable-next-line import/no-unassigned-import
 import "./calendar.css";
 
-const baseKey = ["calendar", accountId];
-const eventsKey = [...baseKey, "events"];
-const calendarsKey = [...baseKey, "calendars"];
 const viewStorage = "opensuite-calendar-view";
 const hiddenStorage = "opensuite-calendar-hidden";
 /** Pixels per hour; matches `--cal-hour` in calendar.css. */
 const HOUR_HEIGHT = 48;
 const PX_PER_MINUTE = HOUR_HEIGHT / 60;
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const viewLabels: Record<CalendarView, string> = {
-  day: "Day",
-  week: "Week",
-  month: "Month",
-};
 const viewKeys: Record<CalendarView, string> = {
   day: "D",
   week: "W",
@@ -119,37 +125,22 @@ const shortcuts: [string, string][] = [
   ["K or P", "Previous period"],
   ["C", "Create an event"],
   ["/", "Search events"],
+  ["Enter", "In search, list matches from nearby months"],
   ["Esc", "Close a popover or cancel a drag"],
+  ["F8", "Go to the latest notification, such as Undo"],
   ["?", "Show keyboard shortcuts"],
 ];
 
-type EventsData = { events: CalendarEvent[] };
-type Colors = (calendarId: string) => {
-  background: string;
-  color: string;
-  name: string;
-};
 type Popover =
   | { kind: "detail"; eventId: string; rect: DOMRect }
   | { kind: "create"; content: EventContent; rect: DOMRect }
   | { kind: "day"; day: Date; rect: DOMRect };
-type Editor = { content: EventContent; event?: CalendarEvent };
-type Confirm =
-  | { kind: "change"; event: CalendarEvent; timing: EventTiming }
-  | { kind: "delete"; event: CalendarEvent };
-
-function rangeKey(range: DateRange) {
-  return [...eventsKey, range.start.toISOString(), range.end.toISOString()];
-}
-
-function fetchRange(range: DateRange) {
-  return () =>
-    calendarClient.events({
-      accountId,
-      start: range.start.toISOString(),
-      end: range.end.toISOString(),
-    });
-}
+/** `trigger` is the control that opened the editor for a new event. */
+type Editor = {
+  content: EventContent;
+  event?: CalendarEvent;
+  trigger?: Element | null;
+};
 
 function contentOf(event: CalendarEvent): EventContent {
   const { id: _id, seriesId: _seriesId, ...content } = event;
@@ -173,28 +164,6 @@ function draftContent(
     timeZone,
     recurrence: "none",
   };
-}
-
-function titleOf(event: { title: string }) {
-  return event.title.trim() || "(No title)";
-}
-
-function eventLabel(event: CalendarEvent, calendarName: string) {
-  return [
-    titleOf(event),
-    formatEventRange(event),
-    event.recurrence === "none" ? "" : recurrenceLabels[event.recurrence],
-    event.location,
-    calendarName,
-  ]
-    .filter(Boolean)
-    .join(", ");
-}
-
-function loadError(error: unknown) {
-  if (error instanceof ORPCError && error.status === 503)
-    return "Calendar is unavailable. Try again in a moment.";
-  return "Your calendar could not be loaded.";
 }
 
 function readHidden(): Set<string> {
@@ -421,21 +390,28 @@ function CalendarWorkspace() {
     }
     return startOfDay(Number.isNaN(date.getTime()) ? new Date() : date);
   });
-  const [search, setSearch] = useState("");
+  const {
+    query: search,
+    setQuery: setSearch,
+    ...results
+  } = useSearch(anchor, view);
   const [hidden, setHidden] = useState(readHidden);
   const [popover, setPopover] = useState<Popover | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [help, setHelp] = useState(false);
   const [newCalendar, setNewCalendar] = useState(false);
-  const [notice, setNotice] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const surfaceRef = useRef<HTMLElement>(null);
+  const focus = useEventFocus(surfaceRef);
+  const changes = useEventChanges(focus);
+  const compact = useMediaQuery(compactWeekQuery);
   const firstDay = useMemo(() => firstDayOfWeek(), []);
   const now = useNow();
   const today = startOfDay(now);
   const range = useMemo(
-    () => viewRange(view, anchor, firstDay),
-    [view, anchor, firstDay],
+    () => visibleRange(view, anchor, firstDay, compact),
+    [view, anchor, firstDay, compact],
   );
   const days = useMemo(() => rangeDays(range), [range]);
 
@@ -464,10 +440,11 @@ function CalendarWorkspace() {
   useEffect(() => {
     if (!loaded) return;
     for (const direction of [-1, 1]) {
-      const next = viewRange(
+      const next = visibleRange(
         view,
-        shiftAnchor(view, anchor, direction),
+        shiftVisible(view, anchor, direction, compact),
         firstDay,
+        compact,
       );
       void queryClient.prefetchQuery({
         queryKey: rangeKey(next),
@@ -475,7 +452,7 @@ function CalendarWorkspace() {
         staleTime: 30_000,
       });
     }
-  }, [loaded, view, anchor, firstDay, queryClient]);
+  }, [loaded, view, anchor, firstDay, compact, queryClient]);
 
   const calendarList = useMemo(
     () => calendars.data?.calendars ?? [],
@@ -499,71 +476,24 @@ function CalendarWorkspace() {
     calendarList[0]?.id ??
     "";
   const pending = confirm?.kind === "change" ? confirm : null;
+  // Hidden calendars and events whose deletion can still be undone.
+  const shown = useCallback(
+    (event: CalendarEvent) =>
+      !hidden.has(event.calendarId) && !changes.deleting.has(event.seriesId),
+    [hidden, changes.deleting],
+  );
   const visible = useMemo(
     () =>
       withTiming(
         (events.data?.events ?? []).filter(
-          (event) =>
-            !hidden.has(event.calendarId) && matchesSearch(event, search),
+          (event) => shown(event) && matchesSearch(event, search),
         ),
         pending && { id: pending.event.id, timing: pending.timing },
       ),
-    [events.data, hidden, search, pending],
+    [events.data, shown, search, pending],
   );
   const inRange = visible.filter((event) => overlapsRange(event, range));
 
-  const mutation = useMutation({
-    mutationFn: async (change: EventChange): Promise<CalendarEvent | null> => {
-      if (change.type === "create")
-        return calendarClient.createEvent({ accountId, event: change.content });
-      if (change.type === "update")
-        return calendarClient.updateEvent({
-          accountId,
-          eventId: change.event.id,
-          event: change.content,
-        });
-      await calendarClient.deleteEvent({ accountId, eventId: change.event.id });
-      return null;
-    },
-    onMutate: async (change) => {
-      await queryClient.cancelQueries({ queryKey: eventsKey });
-      const snapshot = queryClient.getQueriesData<EventsData>({
-        queryKey: eventsKey,
-      });
-      queryClient.setQueriesData<EventsData>({ queryKey: eventsKey }, (data) =>
-        data ? { events: applyEventChange(data.events, change) } : data,
-      );
-      return { snapshot };
-    },
-    onSuccess: (saved, change) => {
-      if (change.type !== "create" || !saved) return;
-      queryClient.setQueriesData<EventsData>({ queryKey: eventsKey }, (data) =>
-        data
-          ? {
-              events: data.events.map((event) =>
-                event.id === change.id ? saved : event,
-              ),
-            }
-          : data,
-      );
-    },
-    onError: (error, change, context) => {
-      for (const [key, data] of context?.snapshot ?? [])
-        queryClient.setQueryData(key, data);
-      const action =
-        change.type === "delete"
-          ? "deleted"
-          : change.type === "create"
-            ? "created"
-            : "saved";
-      setNotice(
-        error instanceof ORPCError && error.status === 503
-          ? "Calendar is unavailable. Your change was undone."
-          : `The event could not be ${action}. Your change was undone.`,
-      );
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: eventsKey }),
-  });
   const createCalendar = useMutation({
     mutationFn: (input: { name: string; color: string }) =>
       calendarClient.createCalendar({ accountId, ...input }),
@@ -579,7 +509,7 @@ function CalendarWorkspace() {
     setPopover(null);
   }
   function go(direction: number) {
-    setAnchor((current) => shiftAnchor(view, current, direction));
+    setAnchor((current) => shiftVisible(view, current, direction, compact));
     setPopover(null);
   }
   function goToday() {
@@ -617,6 +547,7 @@ function CalendarWorkspace() {
         false,
         defaultCalendarId,
       ),
+      trigger: document.activeElement,
     });
   }
   function requestTiming(event: CalendarEvent, timing: EventTiming) {
@@ -625,56 +556,33 @@ function CalendarWorkspace() {
     else setConfirm({ kind: "change", event, timing });
   }
   function saveTiming(event: CalendarEvent, timing: EventTiming) {
-    mutation.mutate({
-      type: "update",
-      event,
-      content: { ...contentOf(event), ...timing },
-    });
+    void changes.move(event, contentOf(event), timing);
   }
   function saveEditor(content: EventContent) {
     const current = editor?.event;
-    // This callback is specific to an editor save, not drag or quick-create.
-    const onSuccess = (saved: CalendarEvent | null) => {
-      if (!saved) return;
-      const reminder = saved.reminder ?? content.reminder;
-      if (!reminder || reminder === "none") return;
-      const details = {
-        reason: "calendar-reminder",
-        message: "Get this reminder on this device?",
-      };
-      if (isIosUninstalled()) offer(details);
-      else if (supportsPush())
-        void pushIsOn("calendar")
-          .then((enabled) => {
-            if (!enabled) offer(details);
-            return undefined;
-          })
-          .catch(() => {});
-    };
-    if (current)
-      mutation.mutate(
-        { type: "update", event: current, content },
-        { onSuccess },
-      );
-    else
-      mutation.mutate(
-        { type: "create", id: `draft-${crypto.randomUUID()}`, content },
-        { onSuccess },
-      );
     setEditor(null);
+    void (
+      current
+        ? changes.save(current, content)
+        : changes.create(content, editor?.trigger)
+    ).then((saved) => offerReminder(saved, content, offer));
   }
   function createQuick(content: EventContent) {
-    mutation.mutate({
-      type: "create",
-      id: `draft-${crypto.randomUUID()}`,
-      content,
-    });
+    void changes.create(content);
     setPopover(null);
   }
   function remove(event: CalendarEvent) {
-    if (!isPending(event)) mutation.mutate({ type: "delete", event });
+    changes.remove(event);
     setConfirm(null);
     setPopover(null);
+  }
+  function pickResult(event: CalendarEvent) {
+    setAnchor(startOfDay(eventStart(event)));
+    focus.request({ seriesId: event.seriesId, start: event.start });
+  }
+  function closeResults() {
+    results.hide();
+    searchRef.current?.focus();
   }
 
   const modal = editor !== null || confirm !== null || help || newCalendar;
@@ -754,7 +662,7 @@ function CalendarWorkspace() {
           (event) => event.id === popover.eventId && !isPending(event),
         ) ?? null)
       : null;
-  const periodName = view === "day" ? "day" : view;
+  const periodName = periodOf(view, compact);
   const title = periodTitle(view, anchor, range);
 
   return (
@@ -827,6 +735,7 @@ function CalendarWorkspace() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             onKeyDown={(event) => {
+              if (event.key === "Enter") results.show();
               if (event.key === "Escape" && search) {
                 event.preventDefault();
                 setSearch("");
@@ -904,10 +813,10 @@ function CalendarWorkspace() {
                 key={item}
                 type="button"
                 aria-pressed={view === item}
-                title={`${viewLabels[item]} view (${viewKeys[item]})`}
+                title={`${viewLabel(item, compact)} view (${viewKeys[item]})`}
                 onClick={() => setView(item)}
               >
-                {viewLabels[item]}
+                {viewLabel(item, compact)}
               </button>
             ))}
           </fieldset>
@@ -925,21 +834,33 @@ function CalendarWorkspace() {
           </div>
         )}
         <section
+          ref={surfaceRef}
+          tabIndex={-1}
           className={`cal-surface cal-surface-${view}`}
-          aria-label={`${viewLabels[view]} of ${title}`}
+          aria-label={`${viewLabel(view, compact)} of ${title}`}
           aria-busy={events.isPending}
         >
-          {view === "month" ? (
+          {results.open ? (
+            <SearchResults
+              query={search}
+              anchor={anchor}
+              include={shown}
+              colors={colors}
+              onPick={pickResult}
+              onClose={closeResults}
+            />
+          ) : view === "month" ? (
             <MonthView {...viewProps} month={anchor.getMonth()} />
           ) : (
             <TimeGrid key={view} {...viewProps} />
           )}
-          {!events.isPending && !events.isError && inRange.length === 0 && (
-            <output className="cal-empty">
-              {search.trim()
-                ? `No events match “${search.trim()}” this ${periodName}.`
-                : `Nothing scheduled this ${periodName}. Select a time or press C to add an event.`}
-            </output>
+          {!results.open && !events.isPending && inRange.length === 0 && (
+            <PeriodEmpty
+              query={search}
+              period={thisPeriod(view, compact)}
+              hidden={events.isError}
+              onSearch={results.show}
+            />
           )}
         </section>
       </div>
@@ -1011,54 +932,15 @@ function CalendarWorkspace() {
         )}
       </Dialog>
 
-      <Dialog
-        open={confirm !== null}
-        onOpenChange={(open) => !open && setConfirm(null)}
-      >
-        {confirm && (
-          <DialogContent
-            title={
-              confirm.kind === "delete"
-                ? !isRecurring(confirm.event)
-                  ? "Delete event?"
-                  : "Delete recurring event?"
-                : "Change recurring event?"
-            }
-            description={
-              confirm.kind === "delete"
-                ? !isRecurring(confirm.event)
-                  ? `“${titleOf(confirm.event)}” will be removed from your calendar.`
-                  : `This deletes every occurrence of “${titleOf(confirm.event)}”.`
-                : `This changes every occurrence of “${titleOf(confirm.event)}”.`
-            }
-          >
-            <div className="dialog-actions cal-dialog-actions">
-              <Button variant="ghost" onClick={() => setConfirm(null)}>
-                Cancel
-              </Button>
-              {confirm.kind === "delete" ? (
-                <Button
-                  className="cal-danger"
-                  onClick={() => remove(confirm.event)}
-                >
-                  {!isRecurring(confirm.event)
-                    ? "Delete"
-                    : "Delete all occurrences"}
-                </Button>
-              ) : (
-                <Button
-                  onClick={() => {
-                    saveTiming(confirm.event, confirm.timing);
-                    setConfirm(null);
-                  }}
-                >
-                  Change all occurrences
-                </Button>
-              )}
-            </div>
-          </DialogContent>
-        )}
-      </Dialog>
+      <ConfirmChange
+        confirm={confirm}
+        onCancel={() => setConfirm(null)}
+        onConfirm={(choice) => {
+          if (choice.kind === "delete") remove(choice.event);
+          else saveTiming(choice.event, choice.timing);
+          setConfirm(null);
+        }}
+      />
 
       <Dialog open={newCalendar} onOpenChange={setNewCalendar}>
         <DialogContent
@@ -1100,12 +982,6 @@ function CalendarWorkspace() {
           </dl>
         </DialogContent>
       </Dialog>
-
-      <Toast
-        open={notice !== ""}
-        onOpenChange={(open) => !open && setNotice("")}
-        message={notice}
-      />
     </AppShell>
   );
 }
@@ -1161,7 +1037,7 @@ function TimeGrid({
   onChange,
   onPickDay,
 }: ViewProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useTimeGridScroller();
   const columnsRef = useRef<HTMLDivElement>(null);
   const allDayRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<GridDrag | null>(null);
@@ -1190,7 +1066,7 @@ function TimeGrid({
     element.scrollTop = Math.max(0, initialMinute * PX_PER_MINUTE - 12);
     // Once events are loaded the position belongs to the user.
     autoScrolled.current = loading ? element.scrollTop : -1;
-  }, [initialMinute, loading]);
+  }, [scrollRef, initialMinute, loading]);
 
   const segments = useMemo(() => timedSegments(shown, days), [shown, days]);
   const byDay = useMemo(
@@ -1664,6 +1540,8 @@ function TimedChip({
         color: color.color,
       }}
       aria-label={eventLabel(event, color.name)}
+      data-series={event.seriesId}
+      data-start={event.start}
       onClick={(click) => onOpen(event, click.currentTarget)}
       onPointerDown={onMove}
       onContextMenu={(menu) => menu.preventDefault()}
@@ -1721,6 +1599,8 @@ function EventChip({
           : {}),
       }}
       aria-label={eventLabel(event, color.name)}
+      data-series={event.seriesId}
+      data-start={event.start}
       onClick={(click) => onOpen(event, click.currentTarget)}
       onPointerDown={onPointerDown}
       onContextMenu={(menu) => menu.preventDefault()}

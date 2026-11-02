@@ -18,10 +18,21 @@ const status: SetupStatus = {
   mailDomain: "example.test",
 };
 export const syntheticSetup = {
+  /**
+   * Browser tests set `setup-fixture-role` to "user" for a regular account,
+   * or to "error" for a failed lookup.
+   */
   me: (
     _input: object,
-  ): Promise<{ id: string; email: string; role: "admin" | "user" }> =>
-    Promise.resolve(admin),
+  ): Promise<{ id: string; email: string; role: "admin" | "user" }> => {
+    const role = sessionStorage.getItem("setup-fixture-role");
+    if (role === "error") return Promise.reject(new Error("Unavailable"));
+    return Promise.resolve(
+      role === "user"
+        ? { id: "user", email: "you@example.test", role: "user" }
+        : admin,
+    );
+  },
   status: (_input: object) => Promise.resolve(status),
   users: (_input: object) => Promise.resolve(structuredClone(users)),
   createUser: (input: { email: string; name: string; password: string }) => {

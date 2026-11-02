@@ -9,7 +9,9 @@ type Scenario =
   "fresh" | "root-owned" | "already-owned" | "vault-created-first";
 
 async function exerciseVolume(scenario: Scenario) {
-  const { compose, chooseSubnets } = createVaultFixture(`volume-${scenario}`);
+  const { compose, chooseSubnets, releaseSubnets } = createVaultFixture(
+    `volume-${scenario}`,
+  );
   // Run a shell in the secrets image to inspect/seed volumes without running
   // the secrets job. The Vaultwarden data mount is the production mount.
   const volumeShell = (script: string) =>
@@ -116,7 +118,11 @@ async function exerciseVolume(scenario: Scenario) {
     ).toBe("1000");
     await compose("exec", "-T", "vault", "test", "-s", "/data/rsa_key.pem");
   } finally {
-    await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+    try {
+      await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
+    } finally {
+      await releaseSubnets();
+    }
   }
 }
 

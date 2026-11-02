@@ -139,6 +139,30 @@
 .vault-url code {
   overflow-wrap: anywhere;
 }
+.vault-operator {
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+}
+.vault-operator h3 {
+  font-size: 15px;
+}
+.empty-card .vault-operator p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+.empty-card .vault-link {
+  margin-top: 0;
+}
+.vault-generate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+.vault-generate-blocker,
 .vault-copy-message,
 .vault-note {
   color: var(--muted);
