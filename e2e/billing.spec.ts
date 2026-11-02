@@ -98,18 +98,35 @@ for (const size of ["desktop", "mobile"] as const) {
       await expect(
         page.getByRole("heading", { name: "Plan & storage" }),
       ).toBeVisible();
+      await expect(page).toHaveTitle("Plan & storage · Esuno Mail");
       if (state === "active")
         await expect(
           page.getByText("€2.99/month, billed €35.88 per year"),
         ).toBeVisible();
-      if (state === "past_due")
+      if (state === "past_due") {
+        const alert = page.getByRole("alert");
+        await expect(alert).toContainText(
+          /Payment issue.*update your payment method/,
+        );
         await expect(
-          page.getByText(/Payment issue.*update your payment method/),
+          alert.getByRole("button", { name: "Update payment method" }),
         ).toBeVisible();
-      if (state === "over_quota")
+      }
+      if (state === "over_quota") {
         await expect(
           page.getByText(/new uploads and incoming mail are paused/),
         ).toBeVisible();
+        // The full bar is drawn in the danger colour, not the accent.
+        const meter = page.getByRole("progressbar", { name: "Storage used" });
+        const [fill, danger] = await meter.evaluate((node) => {
+          const style = getComputedStyle(node);
+          return [
+            style.getPropertyValue("--meter-fill").trim(),
+            style.getPropertyValue("--danger").trim(),
+          ];
+        });
+        expect(fill).toBe(danger);
+      }
       if (state === "no_plan")
         await expect(
           page.getByRole("button", { name: "Continue to checkout" }),
@@ -156,6 +173,41 @@ test("settings handle unknown usage, warning, read-only and cancellation", async
   await expect(page.getByText(/at least 80%/)).toBeVisible({ timeout: 8000 });
   data = { ...base, storage: { ...base.storage, usedBytes: 47_500_000_000 } };
   await expect(page.getByText(/at least 95%/)).toBeVisible({ timeout: 8000 });
+});
+test("a payment issue leads to the billing portal", async ({ page }) => {
+  await live(page);
+  await mockOverview(page, scenarios.past_due);
+  let portal = 0;
+  await page.route("**/api/billing/portal", async (route) => {
+    portal++;
+    await route.fulfill({
+      json: { url: `${new URL(page.url()).origin}/stripe-result` },
+    });
+  });
+  await page.route("**/stripe-result", (route) =>
+    route.fulfill({ contentType: "text/html", body: "Stripe portal" }),
+  );
+  await page.goto("/settings/billing");
+  await page
+    .getByRole("alert")
+    .getByRole("button", { name: "Update payment method" })
+    .click();
+  await expect(page).toHaveURL(/stripe-result/);
+  expect(portal).toBe(1);
+});
+test("an ended subscription is flagged with one billing action", async ({
+  page,
+}) => {
+  await live(page);
+  await mockOverview(page, {
+    ...scenarios.past_due,
+    subscription: { ...scenarios.past_due.subscription, status: "paused" },
+  });
+  await page.goto("/settings/billing");
+  await expect(page.getByRole("alert")).toContainText("Subscription paused");
+  await expect(
+    page.getByRole("button", { name: "Manage billing" }),
+  ).toHaveCount(1);
 });
 test("operator account has no purchase UI", async ({ page }) => {
   await live(page);
@@ -294,6 +346,26 @@ test("subscribe follows a checkout URL", async ({ page }) => {
   await page.goto("/subscribe?plan=pro&interval=year");
   await expect(page).toHaveURL(/stripe-result/);
   expect(body).toEqual({ plan: "pro", interval: "year" });
+});
+test("welcome without a checkout session explains the broken link", async ({
+  page,
+}) => {
+  await live(page);
+  await page.goto("/welcome");
+  await expect(
+    page.getByRole("heading", { name: "This link is not valid" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Welcome to Esuno" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Sign in" })).toHaveAttribute(
+    "href",
+    "/login",
+  );
+  await expect(
+    page.getByRole("link", { name: "Choose a plan" }),
+  ).toHaveAttribute("href", "/subscribe");
+  await axe(page);
 });
 test("welcome confirms, claims and offers sign-in", async ({ page }) => {
   await live(page);

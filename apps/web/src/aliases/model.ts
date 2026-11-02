@@ -7,6 +7,31 @@ export function aliasState(alias: Alias): "Suspended" | "Pending" | "Ready" {
   if (alias.suspended || alias.detachedByDomain) return "Suspended";
   return alias.ready ? "Ready" : "Pending";
 }
+export type AliasStatus = "active" | "pending" | "disabled" | "suspended";
+/**
+ * One status for the list, combining the owner's switch with delivery: a
+ * suspension outranks the switch, and a disabled alias never receives mail.
+ */
+export function aliasStatus(alias: Alias): AliasStatus {
+  if (aliasState(alias) === "Suspended") return "suspended";
+  if (!alias.enabled) return "disabled";
+  return alias.ready ? "active" : "pending";
+}
+/** What the status means for incoming mail, in one sentence or two. */
+export function aliasStatusDetail(alias: Alias): string {
+  const status = aliasStatus(alias);
+  if (status === "active") return "Receiving mail.";
+  if (status === "pending")
+    return "Being set up. Mail is delivered once it is ready.";
+  // Mail accepted while disabled is held and arrives if the alias is
+  // re-enabled within the hold window; deliveries already routed still land.
+  if (status === "disabled")
+    return `New mail is held instead of delivered, and arrives if you re-enable it in time. Messages already on their way may still arrive.${alias.ready ? "" : " Setup is still pending."}`;
+  const reason = alias.detachedByDomain
+    ? "Its domain is no longer available."
+    : "Suspended by your administrator.";
+  return `New mail is not delivered. ${reason}${alias.enabled ? "" : " You have also disabled it."}`;
+}
 export function canSendFrom(alias: Alias) {
   return (
     alias.enabled && alias.ready && !alias.suspended && !alias.detachedByDomain
@@ -50,6 +75,12 @@ export function recipientAddresses(
         .filter((address) => address.length <= 1000),
     ),
   ].slice(0, 200);
+}
+/** "your aliases and API keys": the parts of the page that failed to load. */
+export function failedParts(parts: { label: string; failed: boolean }[]) {
+  return new Intl.ListFormat("en", { type: "conjunction" }).format(
+    parts.filter((part) => part.failed).map((part) => part.label),
+  );
 }
 export function aliasError(error: unknown): string {
   if (error instanceof ORPCError) {
