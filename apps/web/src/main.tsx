@@ -18,6 +18,10 @@ import { createRoot } from "react-dom/client";
 
 import { ORPCError } from "@orpc/client";
 import { AuthError } from "./auth/client.ts";
+import {
+  liveMigrationClients,
+  MigrationClientsProvider,
+} from "./migration/clients.tsx";
 import { LoginPage, Protected, expireSession } from "./auth/components.tsx";
 import { CallbackPage, HandoffPage, startHandoff } from "./auth/handoff.tsx";
 import { activeLayout, redirectFor, rewriteFor } from "./origins.ts";
@@ -61,6 +65,31 @@ const SetupPage = lazy(() =>
     default: module.SetupPage,
   })),
 );
+const MigrationPage = lazy(() =>
+  import("./migration/migration-page.tsx").then((module) => ({
+    default: module.MigrationPage,
+  })),
+);
+const MigrationWizard = lazy(() =>
+  import("./migration/wizard.tsx").then((module) => ({
+    default: module.MigrationWizard,
+  })),
+);
+const MigrationJobPage = lazy(() =>
+  import("./migration/job-page.tsx").then((module) => ({
+    default: module.MigrationJobPage,
+  })),
+);
+const MigrationOffer = lazy(() =>
+  import("./migration/offer.tsx").then((module) => ({
+    default: module.MigrationOffer,
+  })),
+);
+// The development server uses synthetic migrations; production builds never
+// include them.
+const migrationClients = import.meta.env.DEV
+  ? (await import("./dev-data/migration.ts")).fakeMigrationClients
+  : liveMigrationClients();
 const DomainsPage = lazy(() =>
   import("./domains/domains-page.tsx").then((module) => ({
     default: module.DomainsPage,
@@ -165,12 +194,48 @@ const welcomeRoute = createRoute({
     </Titled>
   ),
 });
+const migrationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/migration",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <MigrationPage />
+      </Lazy>
+    </Protected>
+  ),
+});
+const migrationWizardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/migration/new",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <MigrationWizard />
+      </Lazy>
+    </Protected>
+  ),
+});
+const migrationJobRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/migration/$kind/$jobId",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <MigrationJobPage />
+      </Lazy>
+    </Protected>
+  ),
+});
 const mailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mail",
   component: () => (
     <Protected>
       <MailPage />
+      <Suspense fallback={null}>
+        <MigrationOffer />
+      </Suspense>
     </Protected>
   ),
 });
@@ -288,6 +353,9 @@ const router = createRouter({
     loginRoute,
     billingSettingsRoute,
     addressesSettingsRoute,
+    migrationRoute,
+    migrationWizardRoute,
+    migrationJobRoute,
     subscribeRoute,
     welcomeRoute,
     mailRoute,
@@ -323,7 +391,9 @@ if (moved === null || !/^https?:/.test(moved))
   createRoot(root).render(
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
-        <RouterProvider router={router} />
+        <MigrationClientsProvider value={migrationClients}>
+          <RouterProvider router={router} />
+        </MigrationClientsProvider>
       </ToastProvider>
     </QueryClientProvider>,
   );

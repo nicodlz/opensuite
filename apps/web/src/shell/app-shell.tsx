@@ -122,6 +122,9 @@ function SignedInActions({ product }: { product: Product }) {
             Plan &amp; storage
           </a>
         </DropdownItem>
+        <DropdownItem className="menu-item" asChild>
+          <a href={hubHref(activeLayout(), "/settings/migration")}>Migration</a>
+        </DropdownItem>
         <AppearanceItems />
       </AccountMenu>
     </>
