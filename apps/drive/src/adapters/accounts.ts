@@ -2,8 +2,9 @@ import { ResultAsync } from "neverthrow";
 import { z } from "zod";
 import type { AccountDirectory } from "../domain/accounts.ts";
 
-// The API answers at most this many accounts per request.
-const BATCH = 100;
+// The API answers at most this many accounts per request, which keeps the
+// query string well below the server's header size limit.
+const BATCH = 50;
 const Resolved = z.object({ userId: z.string().min(1).max(200).nullable() });
 const Addresses = z.object({
   accounts: z
@@ -12,22 +13,18 @@ const Addresses = z.object({
 });
 
 /**
- * Looks accounts up on the API's internal routes with the service token.
- * Addresses travel in request bodies so they stay out of URLs and access
- * logs. Any failure is reported, never taken as "no account".
+ * Looks accounts up on the API's internal routes with the service token. Any
+ * failure is reported, never taken as "no account".
  */
 export const httpAccountDirectory = (
   origin: string,
   token: string,
 ): AccountDirectory => {
-  const post = async (path: string, body: unknown) => {
-    const response = await fetch(new URL(path, origin), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
+  const get = async (path: string, query: Record<string, string>) => {
+    const url = new URL(path, origin);
+    url.search = new URLSearchParams(query).toString();
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(5000),
       redirect: "error",
     });
@@ -38,7 +35,7 @@ export const httpAccountDirectory = (
     resolve: (address) =>
       ResultAsync.fromPromise(
         (async () =>
-          Resolved.parse(await post("/internal/accounts/resolve", { address }))
+          Resolved.parse(await get("/internal/accounts/resolve", { address }))
             .userId)(),
         () => "unavailable" as const,
       ),
@@ -51,8 +48,10 @@ export const httpAccountDirectory = (
               { length: Math.ceil(wanted.length / BATCH) },
               async (_, index) =>
                 Addresses.parse(
-                  await post("/internal/accounts/addresses", {
-                    userIds: wanted.slice(index * BATCH, (index + 1) * BATCH),
+                  await get("/internal/accounts/addresses", {
+                    userIds: JSON.stringify(
+                      wanted.slice(index * BATCH, (index + 1) * BATCH),
+                    ),
                   }),
                 ).accounts,
             ),

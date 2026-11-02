@@ -98,6 +98,90 @@ function tree(id: string): typeof items {
       .flatMap((entry) => tree(entry.id)),
   ];
 }
+type ShareInput = Extract<
+  DriveCommand,
+  { action: "shares" | "share" | "unshare" | "link" | "unlink" }
+>;
+const shareActions = new Set<DriveCommand["action"]>([
+  "shares",
+  "share",
+  "unshare",
+  "link",
+  "unlink",
+]);
+const isShareInput = (input: DriveCommand): input is ShareInput =>
+  shareActions.has(input.action);
+function shareWith(input: Extract<ShareInput, { action: "share" }>) {
+  const address = input.address.toLowerCase();
+  const userId = accounts.get(address);
+  if (userId === undefined)
+    throw new ORPCError("RECIPIENT_NOT_FOUND", {
+      status: 404,
+      defined: true,
+      message: "No account on this server uses this address",
+    });
+  const current = shares.get(input.id) ?? [];
+  const existing = current.find((share) => share.userId === userId);
+  if (existing) existing.access = input.access;
+  else
+    shares.set(input.id, [
+      ...current,
+      { id: crypto.randomUUID(), userId, address, access: input.access },
+    ]);
+  return { shared: true as const };
+}
+function createLink(id: string, expiresAt: string) {
+  const link = {
+    id: crypto.randomUUID(),
+    token: `synthetic_${crypto.randomUUID()}`,
+    expiresAt,
+  };
+  links.set(id, [...(links.get(id) ?? []), link]);
+  return link;
+}
+// Shares and public links of the synthetic owner, kept per item.
+function shareCommand(input: ShareInput): DriveOutput {
+  item(input.id);
+  switch (input.action) {
+    case "shares":
+      return {
+        shares: (shares.get(input.id) ?? []).map(({ id, address, access }) => ({
+          id,
+          address,
+          access,
+        })),
+        // Without a link key, the server cannot show a token again.
+        links: (links.get(input.id) ?? [])
+          .filter((link) => Date.parse(link.expiresAt) > Date.now())
+          .map(({ id, token, expiresAt }) => ({
+            id,
+            expiresAt,
+            token: sessionStorage.getItem("drive-fixture-keyless-links")
+              ? null
+              : token,
+          })),
+      };
+    case "share":
+      return shareWith(input);
+    case "unshare":
+      shares.set(
+        input.id,
+        (shares.get(input.id) ?? []).filter(
+          (share) => share.id !== input.shareId,
+        ),
+      );
+      return { revoked: true };
+    case "link":
+      return createLink(input.id, input.expiresAt);
+    case "unlink":
+      links.set(
+        input.id,
+        (links.get(input.id) ?? []).filter((link) => link.id !== input.linkId),
+      );
+      return { revoked: true };
+  }
+  throw new Error("Unknown action");
+}
 async function command(input: DriveCommand): Promise<DriveOutput> {
   await Promise.resolve();
   if (
@@ -111,6 +195,7 @@ async function command(input: DriveCommand): Promise<DriveOutput> {
     input.action !== "shared"
   )
     fail("Action failed");
+  if (isShareInput(input)) return shareCommand(input);
   switch (input.action) {
     case "list":
       return {
@@ -240,61 +325,6 @@ async function command(input: DriveCommand): Promise<DriveOutput> {
       }
       return { deleted: true };
     }
-    case "shares":
-      item(input.id);
-      return {
-        shares: (shares.get(input.id) ?? []).map(({ id, address, access }) => ({
-          id,
-          address,
-          access,
-        })),
-        links: (links.get(input.id) ?? []).filter(
-          (link) => Date.parse(link.expiresAt) > Date.now(),
-        ),
-      };
-    case "share": {
-      item(input.id);
-      const address = input.address.toLowerCase();
-      const userId = accounts.get(address);
-      if (userId === undefined)
-        throw new ORPCError("RECIPIENT_NOT_FOUND", {
-          status: 404,
-          defined: true,
-          message: "No account on this server uses this address",
-        });
-      const current = shares.get(input.id) ?? [];
-      const existing = current.find((share) => share.userId === userId);
-      if (existing) existing.access = input.access;
-      else
-        shares.set(input.id, [
-          ...current,
-          { id: crypto.randomUUID(), userId, address, access: input.access },
-        ]);
-      return { shared: true };
-    }
-    case "unshare":
-      shares.set(
-        input.id,
-        (shares.get(input.id) ?? []).filter(
-          (share) => share.id !== input.shareId,
-        ),
-      );
-      return { revoked: true };
-    case "link": {
-      const link = {
-        id: crypto.randomUUID(),
-        token: `synthetic_${crypto.randomUUID()}`,
-        expiresAt: input.expiresAt,
-      };
-      links.set(input.id, [...(links.get(input.id) ?? []), link]);
-      return link;
-    }
-    case "unlink":
-      links.set(
-        input.id,
-        (links.get(input.id) ?? []).filter((link) => link.id !== input.linkId),
-      );
-      return { revoked: true };
   }
   throw new Error("Unknown action");
 }

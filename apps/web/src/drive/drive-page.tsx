@@ -325,6 +325,7 @@ export function DrivePage() {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const opener = useRef<Element | null>(null);
   const { notify } = useToast();
+  // Keyboard focus follows each action, as the item that takes its place.
   const focusAfter = useFocusAfter();
   const parentId = path.at(-1)?.id ?? null;
   const here = path.at(-1) ?? root;
@@ -356,33 +357,9 @@ export function DrivePage() {
     selectedEntries.length === 1 ? (selectedEntries[0] ?? null) : null;
   const stale = list.isPlaceholderData;
 
-  function announce(message: string, undo?: () => void) {
-    notify(
-      undo
-        ? { message, action: { label: "Undo", onAction: undo } }
-        : { message },
-    );
-  }
-  const itemButton = (id: string) =>
-    itemsRef.current?.querySelector<HTMLElement>(
-      `[data-entry-id="${CSS.escape(id)}"] .drive-item-main`,
-    ) ?? null;
-  /** Focus an item once it is listed. */
-  function focusItem(id: string) {
-    focusAfter(() => itemButton(id));
-  }
-  /** Focus the item that takes the place of `ids` in the listing, else the heading. */
-  function focusPast(ids: readonly string[]) {
-    const next = neighbour(
-      visible.map((entry) => entry.id),
-      ids,
-    );
-    focusAfter(() =>
-      firstReachable(
-        next === null ? null : itemButton(next),
-        headingRef.current,
-      ),
-    );
+  function setNotice(message: string, onAction?: () => void) {
+    const action = onAction && { label: "Undo", onAction };
+    notify(action ? { message, action } : { message });
   }
   function invalidate(keys: QueryKey[]) {
     return Promise.all(
@@ -497,20 +474,6 @@ export function DrivePage() {
     setDialogError("");
     setModal(next);
   }
-  /** A dismissed dialog gives focus back to what opened it. */
-  function dismissModal() {
-    setModal(null);
-    setDialogError("");
-    const from = opener.current;
-    const item = selected?.id;
-    focusAfter(() =>
-      firstReachable(
-        from instanceof HTMLElement ? from : null,
-        item === undefined ? null : itemButton(item),
-        headingRef.current,
-      ),
-    );
-  }
   async function rename(entry: DriveEntry, value: string) {
     const key = listKey(scope, parentId);
     await queryClient.cancelQueries({ queryKey: key });
@@ -531,8 +494,8 @@ export function DrivePage() {
       setModal("rename");
       return;
     }
-    announce("Item renamed.");
-    focusItem(entry.id);
+    setNotice("Item renamed.");
+    focusItem({ id: entry.id, name: value });
   }
   async function saveName(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -553,8 +516,8 @@ export function DrivePage() {
     if (!created || !("kind" in created)) return;
     setModal(null);
     clearSelection();
-    announce("Folder created.");
-    focusItem(created.id);
+    setNotice("Folder created.");
+    focusItem(created);
   }
 
   async function moveItems(items: readonly DraggedItem[], target: Crumb) {
@@ -586,7 +549,7 @@ export function DrivePage() {
     ]);
     setBusy(false);
     if (result.failed.length > 0) {
-      announce(
+      setNotice(
         result.done.length === 0
           ? failure
           : `Moved ${plural(result.done.length, "item")} to ${target.name}. ${plural(result.failed.length, "item")} could not be moved.`,
@@ -594,14 +557,14 @@ export function DrivePage() {
       return;
     }
     const [first] = result.done;
-    announce(
+    setNotice(
       `Moved ${result.done.length === 1 && first ? first.name : plural(result.done.length, "item")} to ${target.name}.`,
       () => void undoMove(result.done, target.id),
     );
   }
   async function undoMove(items: readonly DraggedItem[], from: string | null) {
     const [first] = items;
-    if (first) focusItem(first.id);
+    if (first) focusItem(first);
     const rollback = await removeOptimistically(
       items.map((item) => ({ ...item, parentId: from })),
     );
@@ -613,7 +576,7 @@ export function DrivePage() {
       listKey("drive", from),
       ...items.map((item) => listKey("drive", item.parentId)),
     ]);
-    announce(result.failed.length ? failure : "Move undone.");
+    setNotice(result.failed.length ? failure : "Move undone.");
   }
   async function trashItems(items: readonly DraggedItem[]) {
     setBusy(true);
@@ -629,24 +592,21 @@ export function DrivePage() {
     setBusy(false);
     const undo = () => void restoreItems(result.done, "restored");
     if (result.failed.length > 0)
-      announce(
+      setNotice(
         result.done.length === 0
           ? failure
           : `Moved ${plural(result.done.length, "item")} to trash. ${plural(result.failed.length, "item")} could not be moved.`,
         result.done.length ? undo : undefined,
       );
     else
-      announce(
+      setNotice(
         result.done.length === 1
           ? "Moved to trash."
           : `Moved ${plural(result.done.length, "item")} to trash.`,
         undo,
       );
   }
-  /**
-   * From the trash, focus goes to the next trashed item; after an undo, to
-   * the first item brought back.
-   */
+  // Focus goes to the next trashed item, or after an undo to the first back.
   async function restoreItems(
     items: readonly DraggedItem[],
     focus: "past" | "restored" = "past",
@@ -654,7 +614,7 @@ export function DrivePage() {
     setBusy(true);
     const [first] = items;
     if (focus === "past") focusPast(items.map((item) => item.id));
-    else if (first) focusItem(first.id);
+    else if (first) focusItem(first);
     clearSelection();
     const result = await run(items, (item) =>
       command({ action: "restore", id: item.id }),
@@ -663,7 +623,7 @@ export function DrivePage() {
     // the root.
     await invalidate([["drive", "list"]]);
     setBusy(false);
-    announce(
+    setNotice(
       result.failed.length
         ? failure
         : result.done.length === 1
@@ -686,7 +646,7 @@ export function DrivePage() {
     focusPast(items.map((item) => item.id));
     setModal(null);
     clearSelection();
-    announce(
+    setNotice(
       result.done.length === 1
         ? "Item permanently deleted."
         : `${plural(result.done.length, "item")} permanently deleted.`,
@@ -967,14 +927,14 @@ export function DrivePage() {
         .join(" ");
       const shown = failed.slice(0, 5).join(", ");
       setQuotaError(quotaExceeded);
-      announce(
+      setNotice(
         failed.length === 0
           ? done
           : `${files > 0 ? `${done} ` : ""}${plural(failed.length, "item")} could not be uploaded: ${shown}${failed.length > 5 ? "…" : ""}`,
       );
     } catch (error) {
       queue.current = [];
-      announce(
+      setNotice(
         error instanceof DOMException && error.name === "AbortError"
           ? "Upload cancelled."
           : error instanceof Error
@@ -1010,7 +970,7 @@ export function DrivePage() {
           : { plan, parentId: target.id },
       );
     } catch {
-      announce("Could not read the dropped items. Try the Upload button.");
+      setNotice("Could not read the dropped items. Try the Upload button.");
     }
   }
 
@@ -1055,7 +1015,7 @@ export function DrivePage() {
             kind === "items" && items
               ? checkMove(items, target.id, target.path)
               : null;
-          announce(
+          setNotice(
             check && !check.ok
               ? moveRefusal(check.reason)
               : target.trash
@@ -1078,7 +1038,7 @@ export function DrivePage() {
           return;
         }
         const check = checkMove(items, target.id, target.path);
-        if (!check.ok) announce(moveRefusal(check.reason));
+        if (!check.ok) setNotice(moveRefusal(check.reason));
         else void moveItems(check.items, target);
       },
     };
@@ -1086,6 +1046,53 @@ export function DrivePage() {
   function highlight(key: string) {
     if (hover?.key !== key) return "";
     return hover.valid ? " drop-target" : " drop-refused";
+  }
+  function itemButton(id: string) {
+    return (
+      itemsRef.current?.querySelector<HTMLElement>(
+        `[data-entry-id="${CSS.escape(id)}"] .drive-item-main`,
+      ) ?? null
+    );
+  }
+  /** Focus an item once it is listed. */
+  /**
+   * Focus an item once it is listed, or the search box when its text filters
+   * the item out (the list applies that text after a short delay).
+   */
+  function focusItem(item: { id: string; name: string }) {
+    const hidden = !item.name
+      .toLocaleLowerCase()
+      .includes(searchInput.toLocaleLowerCase());
+    focusAfter(() =>
+      hidden ? document.getElementById("drive-search") : itemButton(item.id),
+    );
+  }
+  /** Focus the item that takes the place of `ids` in the listing, else the heading. */
+  function focusPast(ids: readonly string[]) {
+    const next = neighbour(
+      visible.map((entry) => entry.id),
+      ids,
+    );
+    focusAfter(() =>
+      firstReachable(
+        next === null ? null : itemButton(next),
+        headingRef.current,
+      ),
+    );
+  }
+  /** A dismissed dialog gives focus back to what opened it. */
+  function dismissModal() {
+    setModal(null);
+    setDialogError("");
+    const from = opener.current;
+    const item = selected?.id;
+    focusAfter(() =>
+      firstReachable(
+        from instanceof HTMLElement ? from : null,
+        item === undefined ? null : itemButton(item),
+        headingRef.current,
+      ),
+    );
   }
   function startDrag(event: ReactDragEvent<HTMLElement>, entry: DriveEntry) {
     const group = (
@@ -1160,7 +1167,7 @@ export function DrivePage() {
       setHover(null);
       if (modal) return;
       if (canCreate) void uploadDrop(sources(data), here);
-      else announce(`Files cannot be uploaded to ${here.name}.`);
+      else setNotice(`Files cannot be uploaded to ${here.name}.`);
     }
   });
   useEffect(() => {
@@ -1520,7 +1527,7 @@ export function DrivePage() {
                       icon="download"
                       label="Download"
                       onClick={() => {
-                        void download(selected, announce);
+                        void download(selected, setNotice);
                       }}
                       disabled={
                         selected.kind !== "file" || selected.state !== "ready"
@@ -1669,7 +1676,6 @@ export function DrivePage() {
                 >
                   {visible.map((entry) => {
                     const isSelected = selectedIds.includes(entry.id);
-                    const key = `item:${entry.id}`;
                     const folder =
                       entry.kind === "folder" &&
                       entry.state === "ready" &&
@@ -1679,13 +1685,13 @@ export function DrivePage() {
                       <div
                         key={entry.id}
                         data-entry-id={entry.id}
-                        className={`drive-item${isSelected ? " selected" : ""}${draggingIds.includes(entry.id) ? " dragging" : ""}${highlight(key)}`}
+                        className={`drive-item${isSelected ? " selected" : ""}${draggingIds.includes(entry.id) ? " dragging" : ""}${highlight(`item:${entry.id}`)}`}
                         draggable={canMoveItems && entry.state === "ready"}
                         onDragStart={(event) => startDrag(event, entry)}
                         onDragEnd={endDrag}
                         {...(folder
                           ? targetProps({
-                              key,
+                              key: `item:${entry.id}`,
                               id: entry.id,
                               name: entry.name,
                               path: [...pathIds, entry.id],
@@ -2023,7 +2029,7 @@ export function DrivePage() {
           }}
           onClose={() => setViewing(null)}
           onDownload={(target) => {
-            void download(target, announce);
+            void download(target, setNotice);
           }}
         />
       )}

@@ -48,6 +48,13 @@ export interface ServerDependencies {
       email: string,
     ) => Promise<{ id: string; email: string } | null>;
     readonly userIdForEmail?: (email: string) => Promise<string | null>;
+    /** Enabled accounts by sign-in address, for sharing between accounts. */
+    readonly accountDirectory?: {
+      readonly resolve: (email: string) => Promise<string | null>;
+      readonly addresses: (
+        userIds: readonly string[],
+      ) => Promise<readonly { userId: string; address: string }[]>;
+    };
     readonly audit?: (event: {
       userId: string | null;
       action: string;

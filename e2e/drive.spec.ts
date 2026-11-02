@@ -608,4 +608,53 @@ test("focus follows new folder, rename, trash and restore", async ({
     .click();
   await expect(page.getByText("Trash is empty")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Trash" })).toBeFocused();
+
+  // A name the search filter hides leaves focus on the search box.
+  await page.getByRole("button", { name: "My drive", exact: true }).click();
+  await page.getByLabel("Search Drive").fill("Welcome");
+  await page
+    .getByRole("button", { name: "Welcome to Drive.pdf, file" })
+    .click();
+  await page
+    .getByRole("toolbar", { name: "Actions for Welcome to Drive.pdf" })
+    .getByRole("button", { name: "Rename" })
+    .click();
+  await page.getByLabel("Name", { exact: true }).fill("Report.pdf");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Item renamed.")).toBeVisible();
+  await expect(page.getByLabel("Search Drive")).toBeFocused();
+});
+
+test("a link the server cannot show again stays copyable until the dialog closes", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.addInitScript(() =>
+    sessionStorage.setItem("drive-fixture-keyless-links", "1"),
+  );
+  await page.goto("/drive");
+  await page
+    .getByRole("button", { name: "Welcome to Drive.pdf, file" })
+    .click();
+  const share = page
+    .getByRole("toolbar", { name: "Actions for Welcome to Drive.pdf" })
+    .getByRole("button", { name: "Share" });
+  await share.click();
+  const links = page
+    .getByRole("dialog", { name: "Share Welcome to Drive.pdf" })
+    .getByRole("region", { name: "Public links" });
+  await links.getByRole("button", { name: "Create link" }).click();
+  const copyLink = links.getByRole("button", { name: /^Copy Public link/ });
+  await expect(copyLink).toBeFocused();
+  await copyLink.click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(
+    /\/drive\/api\/v1\/public\/[\w-]+$/,
+  );
+  await page.keyboard.press("Escape");
+  await share.click();
+  await expect(links.getByText("Link created earlier")).toBeVisible();
+  await expect(copyLink).toHaveCount(0);
+  await links.getByRole("button", { name: /^Revoke Public link/ }).click();
+  await expect(links.getByText("No active links.")).toBeVisible();
 });

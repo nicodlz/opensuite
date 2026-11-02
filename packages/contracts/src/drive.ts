@@ -116,6 +116,8 @@ export const DriveLinkSchema = z.object({
   // Null when the link can be revoked but not shown again.
   token: z.string().nullable(),
 });
+export type DriveShare = z.infer<typeof DriveShareSchema>;
+export type DriveLink = z.infer<typeof DriveLinkSchema>;
 export const DriveOutputSchema = z.union([
   DriveEntrySchema,
   z.object({ entries: z.array(DriveEntrySchema) }),

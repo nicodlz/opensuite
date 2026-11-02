@@ -49,26 +49,25 @@ export function useFocusAfter() {
     target.focus();
   }, []);
   useEffect(() => {
-    const end = () => {
-      request.current = null;
-    };
-    const check = () => queueMicrotask(apply);
-    // Removing or hiding the focused element fires no focus event.
+    // A key or pointer press means the user chooses where focus goes.
+    const listeners: [string, () => void, boolean][] = [
+      ["keydown", () => (request.current = null), true],
+      ["pointerdown", () => (request.current = null), true],
+      ["focusout", () => queueMicrotask(apply), false],
+    ];
+    for (const [type, listener, capture] of listeners)
+      document.addEventListener(type, listener, capture);
+    // Removing, hiding or disabling the focused element fires no focus event.
     const observer = new MutationObserver(apply);
     observer.observe(document.body, {
       subtree: true,
       childList: true,
-      attributes: true,
       attributeFilter: ["class", "hidden", "inert", "aria-hidden", "disabled"],
     });
-    document.addEventListener("keydown", end, true);
-    document.addEventListener("pointerdown", end, true);
-    document.addEventListener("focusout", check);
     return () => {
       observer.disconnect();
-      document.removeEventListener("keydown", end, true);
-      document.removeEventListener("pointerdown", end, true);
-      document.removeEventListener("focusout", check);
+      for (const [type, listener, capture] of listeners)
+        document.removeEventListener(type, listener, capture);
     };
   }, [apply]);
   return useCallback(
