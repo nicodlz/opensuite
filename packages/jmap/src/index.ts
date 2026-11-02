@@ -1,15 +1,9 @@
 import { CalendarClient } from "./calendar-client.ts";
+import { mailMapping } from "./mail-content.ts";
 import { ScheduledSubmissions } from "./scheduled-send.ts";
 import { threadPage } from "./thread-page.ts";
 
 export { JmapCapability } from "./protocol.ts";
-export { mailFilterFor } from "./mail-filter.ts";
-export {
-  mailAddresses,
-  mailAttachments,
-  mailBody,
-  mailboxMemberships,
-} from "./mail-content.ts";
 export type {
   JmapError,
   JmapResult,
@@ -27,6 +21,7 @@ export type {
 
 /** The authorization value is supplied by the caller; keep user credentials server-side. */
 export class JmapClient extends CalendarClient {
+  readonly mailMapping = mailMapping;
   readonly scheduled = new ScheduledSubmissions(this.transport);
   threadPage(
     ...args: Parameters<typeof threadPage> extends [unknown, ...infer Rest]

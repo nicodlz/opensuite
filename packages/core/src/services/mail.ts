@@ -1,5 +1,4 @@
 import {
-  type Draft,
   type DraftContent,
   type MailAction,
   type Mailbox,
@@ -7,16 +6,7 @@ import {
   type Message,
   type ThreadSummary,
 } from "@opensuite/contracts";
-import {
-  JmapCapability,
-  mailAddresses,
-  mailAttachments,
-  mailBody,
-  mailFilterFor,
-  mailboxMemberships,
-  type Email,
-  type JmapClient,
-} from "@opensuite/jmap";
+import { JmapCapability, type Email, type JmapClient } from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
 import {
   createScheduledSend,
@@ -48,7 +38,14 @@ export interface ThreadOptions {
 const date = (timestamp: string) => new Date(timestamp).toISOString();
 const customIds = (boxes: Mailbox[]) =>
   new Set(boxes.filter((box) => box.role === "custom").map((box) => box.id));
-function message(email: Email, boxes: Mailbox[], fallback: string): Message {
+function message(
+  email: Email,
+  boxes: Mailbox[],
+  fallback: string,
+  mapping: JmapClient["mailMapping"],
+): Message {
+  const { mailAddresses, mailboxMemberships, mailBody, mailAttachments } =
+    mapping;
   const from = mailAddresses(email.from)[0] ?? { email: fallback };
   const mailboxIds = mailboxMemberships(email);
   const custom = customIds(boxes);
@@ -75,33 +72,20 @@ function message(email: Email, boxes: Mailbox[], fallback: string): Message {
     labels: mailboxIds.filter((id) => custom.has(id)),
   };
 }
-function draft(email: Email): Draft {
-  return {
-    id: email.id,
-    ...(email.from?.[0]?.email ? { from: email.from[0].email } : {}),
-    to: mailAddresses(email.to),
-    cc: mailAddresses(email.cc),
-    bcc: mailAddresses(email.bcc),
-    subject: email.subject ?? "",
-    htmlBody: mailBody(email, email.htmlBody, "text/html"),
-    textBody: mailBody(email, email.textBody, "text/plain"),
-    attachmentBlobIds: mailAttachments(email).map((part) => part.blobId),
-    ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
-    references: email.references ?? [],
-    threadId: email.threadId,
-  };
-}
 function summary(
   emails: Email[],
   boxes: Mailbox[],
   fallback: string,
+  mapping: JmapClient["mailMapping"],
 ): ThreadSummary {
   const ordered = emails.toSorted((a, b) =>
     a.receivedAt.localeCompare(b.receivedAt),
   );
   const last = ordered.at(-1);
   if (last === undefined) return fail("not_found");
-  const mapped = ordered.map((email) => message(email, boxes, fallback));
+  const mapped = ordered.map((email) =>
+    message(email, boxes, fallback, mapping),
+  );
   const participants = new Map<string, Message["from"]>();
   for (const item of mapped)
     for (const person of [item.from, ...item.to, ...item.cc])
@@ -142,9 +126,11 @@ async function applyAction(
     };
   } else {
     const custom = customIds(list);
-    const retained = mailboxMemberships(email).filter((id) =>
-      action.type === "labels" ? !custom.has(id) : custom.has(id),
-    );
+    const retained = c.client.mailMapping
+      .mailboxMemberships(email)
+      .filter((id) =>
+        action.type === "labels" ? !custom.has(id) : custom.has(id),
+      );
     const additions =
       action.type === "labels"
         ? action.labels
@@ -181,7 +167,7 @@ function draftRecovery(
         return fail("conflict");
       const list = await deps.boxes(c);
       const original = await getDraft(c, id, list);
-      const content = draft(original);
+      const content = c.client.mailMapping.mailDraft(original);
       const created = await deps.create(c, content, list, original);
       return {
         draft: { ...content, id: created.id, threadId: created.threadId },
@@ -248,7 +234,10 @@ export function createMailService(dependencies: {
     prior?: Email,
   ) => {
     const existing = new Map(
-      (prior ? mailAttachments(prior) : []).map((item) => [item.blobId, item]),
+      (prior ? c.client.mailMapping.mailAttachments(prior) : []).map((item) => [
+        item.blobId,
+        item,
+      ]),
     );
     const parts = content.attachmentBlobIds.map((blobId) => {
       const key = `${c.owner}:${blobId}`;
@@ -358,7 +347,7 @@ export function createMailService(dependencies: {
         if (!Number.isSafeInteger(position)) return fail("validation");
         const pageResult = value(
           await c.client.threadPage(c.session, c.id, {
-            filter: mailFilterFor(options),
+            filter: c.client.mailMapping.mailFilterFor(options),
             sort: [
               {
                 property: "receivedAt",
@@ -396,7 +385,9 @@ export function createMailService(dependencies: {
           );
         });
         return {
-          threads: groups.map((group) => summary(group, list, c.address)),
+          threads: groups.map((group) =>
+            summary(group, list, c.address, c.client.mailMapping),
+          ),
           nextCursor:
             pageResult.query.ids.length > options.limit
               ? String(position + options.limit)
@@ -412,7 +403,9 @@ export function createMailService(dependencies: {
           id: threadId,
           messages: emails
             .toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt))
-            .map((item) => message(item, list, c.address)),
+            .map((item) =>
+              message(item, list, c.address, c.client.mailMapping),
+            ),
         };
       }),
     action: (
@@ -475,7 +468,7 @@ export function createMailService(dependencies: {
           }),
         ).ids;
         const emails = value(await c.client.emails(c.session, c.id, ids)).list;
-        return { drafts: emails.map(draft) };
+        return { drafts: emails.map(c.client.mailMapping.mailDraft) };
       }),
     createDraft: (actor: Actor, accountId: string, content: DraftContent) =>
       run(async () => {
