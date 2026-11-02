@@ -38,12 +38,12 @@ import {
 import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
-import { buildServer } from "./server.ts";
 import {
-  configurePush,
-  createMailImport,
-  registerBackgroundJobs,
-} from "./push-runtime.ts";
+  buildServer,
+  configureMailImports,
+  registerShutdown,
+} from "./server.ts";
+import { configurePush, registerBackgroundJobs } from "./push-runtime.ts";
 import { registerMailImport } from "./routes/migration-mail-job.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
@@ -308,7 +308,7 @@ const { mail, invitations } = createMailWithInvitations({
   intentions: createInvitationStore(database.value),
   beforeAliasSend: createAliasGuard,
 });
-const migrationMail = createMailImport(
+const { migrationMail, migrationDirect } = configureMailImports(
   database.value,
   authConfig.value,
   mailboxStore,
@@ -351,6 +351,7 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   migrationMail,
+  migrationDirect,
   calendar,
   contacts: createContactsService(
     contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
@@ -395,11 +396,7 @@ registerBackgroundJobs({
   auth,
 });
 registerMailImport(app, migrationMail);
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => {
-    app.log.info({ signal }, "shutting down");
-    void app.close();
-  });
-}
+registerMailImport(app, migrationDirect);
+registerShutdown(app);
 
 await app.listen({ host: config.value.host, port: config.value.port });

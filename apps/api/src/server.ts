@@ -1,9 +1,20 @@
+import { createDirectMigrationService } from "@opensuite/core/services/migration-direct";
+import type { MailCredentialStore } from "@opensuite/core/services/jmap-access";
+import {
+  createDirectConnector,
+  directDestinationPolicy,
+  revokeGoogleToken,
+  directMigrationTools,
+} from "@opensuite/core/adapters/migration-direct";
+import type { PrismaClient } from "@opensuite/db";
 import Fastify, {
   LogController,
   type FastifyInstance,
   type FastifyRequest,
 } from "fastify";
 import type { Actor } from "@opensuite/core/services/accounts";
+import { z } from "zod";
+import { createMailImport } from "./push-runtime.ts";
 import { createAliasLimiter } from "./auth/alias-limits.ts";
 import { registerRequestHooks } from "./auth/request-hooks.ts";
 import { registerAuthRoutes } from "./auth/auth-routes.ts";
@@ -63,3 +74,50 @@ export const buildServer = async (
   );
   return app;
 };
+
+export function configureDirectImport(
+  db: PrismaClient,
+  config: { mailboxKey: string; stalwartOrigin: string },
+  store: MailCredentialStore,
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  const settings = z
+    .object({
+      MAIL_MIGRATION_IMAP_ALLOW: z.string().optional(),
+      MAIL_MIGRATION_GOOGLE_OAUTH: z.enum(["true", "false"]).default("false"),
+    })
+    .parse(env);
+  return createDirectMigrationService({
+    db,
+    key: config.mailboxKey,
+    store,
+    origin: config.stalwartOrigin,
+    tools: directMigrationTools,
+    connectSource: createDirectConnector(
+      directDestinationPolicy(settings.MAIL_MIGRATION_IMAP_ALLOW),
+    ),
+    oauthEnabled: settings.MAIL_MIGRATION_GOOGLE_OAUTH === "true",
+    revokeOAuth: revokeGoogleToken,
+  });
+}
+export function configureMailImports(
+  db: PrismaClient,
+  config: { mailboxKey: string; stalwartOrigin: string },
+  mailboxes: Parameters<typeof createMailImport>[2],
+) {
+  const migrationMail = createMailImport(db, config, mailboxes);
+  const store = {
+    getForOwner: async (userId: string, accountId: string) =>
+      mailboxes.getForOwner(userId, accountId),
+  };
+  const migrationDirect = configureDirectImport(db, config, store, process.env);
+  return { migrationMail, migrationDirect };
+}
+export function registerShutdown(app: FastifyInstance) {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      app.log.info({ signal }, "shutting down");
+      void app.close();
+    });
+  }
+}

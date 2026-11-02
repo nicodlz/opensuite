@@ -62,6 +62,11 @@ model MailImportJob {
   mailboxId       String
   labels          Json
   mailboxNames    Json?
+  sourceKind      String?
+  sourceDetails   Json?
+  sourceConfig    String?
+  sourceExpiresAt DateTime?
+  inventoryReady  Boolean          @default(false)
   archive         String?
   status          String           @default("queued")
   cancelRequested Boolean          @default(false)
@@ -85,6 +90,8 @@ model MailImportItem {
   status   String        @default("pending")
   error    String?
   remoteId String?
+  sourceRef Json?
+  sourceRaw String?
 
   @@id([jobId, index])
 }

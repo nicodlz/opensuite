@@ -4,7 +4,7 @@ import { mailContext, type ApiContext } from "./context.ts";
 import type { ServerDependencies } from "./server-dependencies.ts";
 import type { Actor } from "@opensuite/core/services/accounts";
 import { createFixedWindow } from "../auth/fixed-window.ts";
-import type { createAliasLimiter } from "../auth/alias-limits.ts";
+import { createAliasLimiter } from "../auth/alias-limits.ts";
 import type { registerDownloads } from "./downloads.ts";
 import type { registerOpenApi } from "./openapi.ts";
 import { registerMailImportUpload } from "./migration-mail.ts";
@@ -20,6 +20,11 @@ export function registerDispatch(
 ) {
   const pushLimits = createFixedWindow();
   const checkoutLimits = createFixedWindow();
+  const featureLimits = {
+    alias: aliasLimits,
+    address: addressLimits,
+    direct: createAliasLimiter(),
+  };
   const handleApi = async (request: FastifyRequest, reply: FastifyReply) => {
     // The origin map decides cross-origin navigation; never let a browser
     // or intermediary keep an old copy.
@@ -27,7 +32,8 @@ export function registerDispatch(
       ["/origins", "/push/public-key", "/push/privacy"].includes(
         request.url.split("?")[0] ?? "",
       ) ||
-      request.url.startsWith("/mail/imports/")
+      request.url.startsWith("/mail/imports/") ||
+      request.url.startsWith("/mail/direct-imports/")
     )
       void reply.header("cache-control", "no-store");
     const headers = requestHeaders(request);
@@ -42,8 +48,7 @@ export function registerDispatch(
         dependencies,
         downloads,
         startedAt,
-        aliasLimits,
-        addressLimits,
+        featureLimits,
         pushLimits,
         checkoutLimits,
       ),
@@ -72,8 +77,11 @@ function createApiContext(
   dependencies: ServerDependencies,
   downloads: ReturnType<typeof registerDownloads>,
   startedAt: number,
-  aliasLimits: ReturnType<typeof createAliasLimiter>,
-  addressLimits: ReturnType<typeof createAliasLimiter>,
+  featureLimits: {
+    alias: ReturnType<typeof createAliasLimiter>;
+    address: ReturnType<typeof createAliasLimiter>;
+    direct: ReturnType<typeof createAliasLimiter>;
+  },
   pushLimits: ReturnType<typeof createFixedWindow>,
   checkoutLimits: ReturnType<typeof createFixedWindow>,
 ): ApiContext {
@@ -109,6 +117,9 @@ function createApiContext(
     audit: dependencies.identity?.audit,
     ...mailContext(dependencies),
     migrationMail: dependencies.migrationMail,
+    migrationDirect: dependencies.migrationDirect,
+    directImportCreationLimit: (userId) => featureLimits.direct.user(userId),
+    directImportMutationLimit: (userId) => featureLimits.direct.mutate(userId),
     contacts: dependencies.contacts,
     productOrigins: dependencies.identity?.productOrigins ?? {},
     vaultOrigin: dependencies.vaultOrigin,
@@ -117,9 +128,9 @@ function createApiContext(
     domains: dependencies.domains,
     aliases: dependencies.aliases,
     addresses: dependencies.addresses,
-    addressMutationLimit: (userId) => addressLimits.mutate(userId),
-    aliasCreationLimit: (userId) => aliasLimits.user(userId),
-    aliasMutationLimit: (userId) => aliasLimits.mutate(userId),
+    addressMutationLimit: (userId) => featureLimits.address.mutate(userId),
+    aliasCreationLimit: (userId) => featureLimits.alias.user(userId),
+    aliasMutationLimit: (userId) => featureLimits.alias.mutate(userId),
     log: request.log,
     readiness: dependencies.readiness,
     uptimeSeconds: () =>

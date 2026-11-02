@@ -49,7 +49,7 @@ class MailImportStore {
   }
   async list(userId: string, accountId: string) {
     const rows = await this.db.mailImportJob.findMany({
-      where: { userId, accountId },
+      where: { userId, accountId, sourceKind: null },
       orderBy: { createdAt: "desc" },
       take: 50,
       select: { id: true, status: true, createdAt: true },
@@ -100,7 +100,7 @@ class MailImportStore {
   }
   get(userId: string, accountId: string, id: string) {
     return this.db.mailImportJob.findFirst({
-      where: { userId, accountId, id },
+      where: { userId, accountId, id, sourceKind: null },
       include: { items: { orderBy: { index: "asc" } } },
     });
   }
@@ -243,14 +243,15 @@ class MailImportStore {
       return true;
     });
   }
-  async claim(now: Date) {
+  async claim(now: Date, source: "archive" | "direct" = "archive") {
+    const direct = source === "direct";
     const token = randomUUID();
     const until = new Date(now.getTime() + 300_000);
     const rows = await this.db.$queryRaw<{ id: string }[]>`
       UPDATE "MailImportJob" SET "claimToken" = ${token}, "claimUntil" = ${until}, "status" = 'running', "updatedAt" = ${now}
       WHERE "id" = (
         SELECT "id" FROM "MailImportJob"
-        WHERE "status" IN ('queued', 'running') AND ("claimUntil" IS NULL OR "claimUntil" <= ${now})
+        WHERE (("sourceKind" IS NULL AND ${direct} = false) OR ("sourceKind" IS NOT NULL AND ${direct} = true)) AND "status" IN ('queued', 'running') AND ("claimUntil" IS NULL OR "claimUntil" <= ${now})
         ORDER BY "createdAt" FOR UPDATE SKIP LOCKED LIMIT 1
       ) RETURNING "id"`;
     const id = rows[0]?.id;
@@ -287,6 +288,7 @@ class MailImportStore {
     status: string,
     error: string | null,
     remoteId: string | null,
+    clearSourceRaw = false,
   ) {
     return this.db.$transaction(async (tx) => {
       const active = await tx.mailImportJob.updateMany({
@@ -296,7 +298,15 @@ class MailImportStore {
       if (!active.count) return false;
       await tx.mailImportItem.update({
         where: { jobId_index: { jobId: id, index } },
-        data: { status, error, remoteId },
+        data: {
+          status,
+          error,
+          remoteId,
+          ...(clearSourceRaw &&
+          ["imported", "duplicate", "failed"].includes(status)
+            ? { sourceRaw: null }
+            : {}),
+        },
       });
       return true;
     });
