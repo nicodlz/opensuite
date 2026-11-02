@@ -25,7 +25,10 @@ import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { Icon, type IconName } from "../ui/icons.tsx";
 import { TextField } from "../ui/text-field.tsx";
+import { useToast } from "../ui/toast.tsx";
 import { command, driveTransport, entries, uploadFile } from "./client.ts";
+import { firstReachable, neighbour, useFocusAfter } from "./focus.ts";
+import { ShareDialog } from "./share-dialog.tsx";
 import { Viewer } from "./viewer.tsx";
 import {
   checkMove,
@@ -57,7 +60,6 @@ type Scope = "drive" | "shared" | "trash";
 type Crumb = { id: string | null; name: string };
 type Destination = Crumb & { path: (string | null)[] };
 type Modal = "folder" | "rename" | "move" | "share" | "delete" | null;
-type Notice = { text: string; undo?: { label: string; run: () => void } };
 /** A folder (or Trash) that accepts drops. `path` lists folder ids from the root to the target. */
 type DropTarget = {
   key: string;
@@ -118,9 +120,6 @@ function fileIcon(entry: DriveEntry): { icon: IconName; tone: string } {
   if (entry.contentType === "application/pdf")
     return { icon: "draft", tone: "pdf" };
   return { icon: "draft", tone: "file" };
-}
-function expiresAfter(days: number) {
-  return new Date(Date.now() + days * 86_400_000).toISOString();
 }
 function plural(count: number, noun: string) {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
@@ -301,16 +300,8 @@ export function DrivePage() {
     ...root,
     path: [null],
   });
-  const [userId, setUserId] = useState("");
-  const [access, setAccess] = useState<"read" | "write">("read");
-  const [linkId, setLinkId] = useState("");
-  const [link, setLink] = useState<{
-    id: string;
-    url: string;
-    expiresAt: string;
-  } | null>(null);
-  const [days, setDays] = useState("7");
-  const [notice, setNoticeState] = useState<Notice>({ text: "" });
+  // Problems with what a dialog asks for show in the dialog itself.
+  const [dialogError, setDialogError] = useState("");
   const [busy, setBusy] = useState(false);
   const [transfer, setTransfer] = useState<Transfer | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
@@ -330,6 +321,11 @@ export function DrivePage() {
   const dragging = useRef<DraggedItem[] | null>(null);
   const dragDepth = useRef(0);
   const menuAction = useRef(false);
+  const itemsRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const opener = useRef<Element | null>(null);
+  const { notify } = useToast();
+  const focusAfter = useFocusAfter();
   const parentId = path.at(-1)?.id ?? null;
   const here = path.at(-1) ?? root;
   const scope = scopeOf(place, parentId);
@@ -360,8 +356,33 @@ export function DrivePage() {
     selectedEntries.length === 1 ? (selectedEntries[0] ?? null) : null;
   const stale = list.isPlaceholderData;
 
-  function setNotice(text: string, undo?: Notice["undo"]) {
-    setNoticeState(undo ? { text, undo } : { text });
+  function announce(message: string, undo?: () => void) {
+    notify(
+      undo
+        ? { message, action: { label: "Undo", onAction: undo } }
+        : { message },
+    );
+  }
+  const itemButton = (id: string) =>
+    itemsRef.current?.querySelector<HTMLElement>(
+      `[data-entry-id="${CSS.escape(id)}"] .drive-item-main`,
+    ) ?? null;
+  /** Focus an item once it is listed. */
+  function focusItem(id: string) {
+    focusAfter(() => itemButton(id));
+  }
+  /** Focus the item that takes the place of `ids` in the listing, else the heading. */
+  function focusPast(ids: readonly string[]) {
+    const next = neighbour(
+      visible.map((entry) => entry.id),
+      ids,
+    );
+    focusAfter(() =>
+      firstReachable(
+        next === null ? null : itemButton(next),
+        headingRef.current,
+      ),
+    );
   }
   function invalidate(keys: QueryKey[]) {
     return Promise.all(
@@ -454,35 +475,41 @@ export function DrivePage() {
     );
   }
 
-  async function perform(
-    input: DriveCommand,
-    success: string,
-    keys: QueryKey[],
-  ) {
+  /** Runs a dialog's command; a failure shows in the dialog. */
+  async function perform(input: DriveCommand, keys: QueryKey[]) {
     setBusy(true);
-    setNotice("");
+    setDialogError("");
     try {
-      await command(input);
+      const result = await command(input);
       await invalidate(keys);
-      setNotice(success);
-      setModal(null);
-      clearSelection();
-      return true;
+      return result;
     } catch {
-      setNotice(failure);
-      return false;
+      setDialogError(failure);
+      return null;
     } finally {
       setBusy(false);
     }
   }
   function showModal(next: Modal) {
+    opener.current = document.activeElement;
     setName(next === "rename" ? (selected?.name ?? "") : "");
     setDestination({ ...root, path: [null] });
-    setUserId("");
-    setLinkId("");
-    setLink(null);
-    setNotice("");
+    setDialogError("");
     setModal(next);
+  }
+  /** A dismissed dialog gives focus back to what opened it. */
+  function dismissModal() {
+    setModal(null);
+    setDialogError("");
+    const from = opener.current;
+    const item = selected?.id;
+    focusAfter(() =>
+      firstReachable(
+        from instanceof HTMLElement ? from : null,
+        item === undefined ? null : itemButton(item),
+        headingRef.current,
+      ),
+    );
   }
   async function rename(entry: DriveEntry, value: string) {
     const key = listKey(scope, parentId);
@@ -496,37 +523,43 @@ export function DrivePage() {
         ),
       );
     setModal(null);
-    const ok = await perform(
-      { action: "rename", id: entry.id, name: value },
-      "Item renamed.",
-      [key],
-    );
+    const ok = await perform({ action: "rename", id: entry.id, name: value }, [
+      key,
+    ]);
     if (!ok) {
       queryClient.setQueryData(key, previous);
       setModal("rename");
+      return;
     }
+    announce("Item renamed.");
+    focusItem(entry.id);
   }
   async function saveName(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = name.trim();
     if (!validName(value)) {
-      setNotice(
+      setDialogError(
         "Enter a name of up to 255 characters without slashes or control characters.",
       );
       return;
     }
-    if (modal === "folder")
-      await perform(
-        { action: "folder", name: value, parentId },
-        "Folder created.",
-        [listKey("drive", parentId)],
-      );
-    else if (selected) await rename(selected, value);
+    if (modal !== "folder") {
+      if (selected) await rename(selected, value);
+      return;
+    }
+    const created = await perform({ action: "folder", name: value, parentId }, [
+      listKey("drive", parentId),
+    ]);
+    if (!created || !("kind" in created)) return;
+    setModal(null);
+    clearSelection();
+    announce("Folder created.");
+    focusItem(created.id);
   }
 
   async function moveItems(items: readonly DraggedItem[], target: Crumb) {
     setBusy(true);
-    setNotice("");
+    focusPast(items.map((item) => item.id));
     clearSelection();
     const known = new Map(all.map((entry) => [entry.id, entry]));
     const rollback = await removeOptimistically(items);
@@ -553,7 +586,7 @@ export function DrivePage() {
     ]);
     setBusy(false);
     if (result.failed.length > 0) {
-      setNotice(
+      announce(
         result.done.length === 0
           ? failure
           : `Moved ${plural(result.done.length, "item")} to ${target.name}. ${plural(result.failed.length, "item")} could not be moved.`,
@@ -561,13 +594,14 @@ export function DrivePage() {
       return;
     }
     const [first] = result.done;
-    setNotice(
+    announce(
       `Moved ${result.done.length === 1 && first ? first.name : plural(result.done.length, "item")} to ${target.name}.`,
-      { label: "Undo", run: () => void undoMove(result.done, target.id) },
+      () => void undoMove(result.done, target.id),
     );
   }
   async function undoMove(items: readonly DraggedItem[], from: string | null) {
-    setNotice("");
+    const [first] = items;
+    if (first) focusItem(first.id);
     const rollback = await removeOptimistically(
       items.map((item) => ({ ...item, parentId: from })),
     );
@@ -579,11 +613,11 @@ export function DrivePage() {
       listKey("drive", from),
       ...items.map((item) => listKey("drive", item.parentId)),
     ]);
-    setNotice(result.failed.length ? failure : "Move undone.");
+    announce(result.failed.length ? failure : "Move undone.");
   }
   async function trashItems(items: readonly DraggedItem[]) {
     setBusy(true);
-    setNotice("");
+    focusPast(items.map((item) => item.id));
     clearSelection();
     const rollback = await removeOptimistically(items);
     const result = await run(items, (item) =>
@@ -593,28 +627,34 @@ export function DrivePage() {
     // A trashed folder takes its whole tree, so every listing may change.
     await invalidate([["drive", "list"]]);
     setBusy(false);
-    const undo = {
-      label: "Undo",
-      run: () => void restoreItems(result.done),
-    };
+    const undo = () => void restoreItems(result.done, "restored");
     if (result.failed.length > 0)
-      setNotice(
+      announce(
         result.done.length === 0
           ? failure
           : `Moved ${plural(result.done.length, "item")} to trash. ${plural(result.failed.length, "item")} could not be moved.`,
         result.done.length ? undo : undefined,
       );
     else
-      setNotice(
+      announce(
         result.done.length === 1
           ? "Moved to trash."
           : `Moved ${plural(result.done.length, "item")} to trash.`,
         undo,
       );
   }
-  async function restoreItems(items: readonly DraggedItem[]) {
+  /**
+   * From the trash, focus goes to the next trashed item; after an undo, to
+   * the first item brought back.
+   */
+  async function restoreItems(
+    items: readonly DraggedItem[],
+    focus: "past" | "restored" = "past",
+  ) {
     setBusy(true);
-    setNotice("");
+    const [first] = items;
+    if (focus === "past") focusPast(items.map((item) => item.id));
+    else if (first) focusItem(first.id);
     clearSelection();
     const result = await run(items, (item) =>
       command({ action: "restore", id: item.id }),
@@ -623,7 +663,7 @@ export function DrivePage() {
     // the root.
     await invalidate([["drive", "list"]]);
     setBusy(false);
-    setNotice(
+    announce(
       result.failed.length
         ? failure
         : result.done.length === 1
@@ -633,19 +673,20 @@ export function DrivePage() {
   }
   async function deleteItems(items: readonly DraggedItem[]) {
     setBusy(true);
-    setNotice("");
+    setDialogError("");
     const result = await run(items, (item) =>
       command({ action: "delete", id: item.id }),
     );
     await invalidate([trashKey]);
     setBusy(false);
     if (result.failed.length) {
-      setNotice(failure);
+      setDialogError(failure);
       return;
     }
+    focusPast(items.map((item) => item.id));
     setModal(null);
     clearSelection();
-    setNotice(
+    announce(
       result.done.length === 1
         ? "Item permanently deleted."
         : `${plural(result.done.length, "item")} permanently deleted.`,
@@ -715,7 +756,6 @@ export function DrivePage() {
     if (controller.current) return;
     const abort = new AbortController();
     controller.current = abort;
-    setNotice("");
     const affected = new Set<string | null>();
     const finished: UploadJob[] = [];
     const failed: string[] = [];
@@ -927,14 +967,14 @@ export function DrivePage() {
         .join(" ");
       const shown = failed.slice(0, 5).join(", ");
       setQuotaError(quotaExceeded);
-      setNotice(
+      announce(
         failed.length === 0
           ? done
           : `${files > 0 ? `${done} ` : ""}${plural(failed.length, "item")} could not be uploaded: ${shown}${failed.length > 5 ? "…" : ""}`,
       );
     } catch (error) {
       queue.current = [];
-      setNotice(
+      announce(
         error instanceof DOMException && error.name === "AbortError"
           ? "Upload cancelled."
           : error instanceof Error
@@ -970,7 +1010,7 @@ export function DrivePage() {
           : { plan, parentId: target.id },
       );
     } catch {
-      setNotice("Could not read the dropped items. Try the Upload button.");
+      announce("Could not read the dropped items. Try the Upload button.");
     }
   }
 
@@ -1015,7 +1055,7 @@ export function DrivePage() {
             kind === "items" && items
               ? checkMove(items, target.id, target.path)
               : null;
-          setNotice(
+          announce(
             check && !check.ok
               ? moveRefusal(check.reason)
               : target.trash
@@ -1038,7 +1078,7 @@ export function DrivePage() {
           return;
         }
         const check = checkMove(items, target.id, target.path);
-        if (!check.ok) setNotice(moveRefusal(check.reason));
+        if (!check.ok) announce(moveRefusal(check.reason));
         else void moveItems(check.items, target);
       },
     };
@@ -1120,7 +1160,7 @@ export function DrivePage() {
       setHover(null);
       if (modal) return;
       if (canCreate) void uploadDrop(sources(data), here);
-      else setNotice(`Files cannot be uploaded to ${here.name}.`);
+      else announce(`Files cannot be uploaded to ${here.name}.`);
     }
   });
   useEffect(() => {
@@ -1138,80 +1178,8 @@ export function DrivePage() {
     anchor.current = entry.id;
     setSelectedIds([entry.id]);
     if (entry.kind === "folder") openFolder(entry);
-    else if (place !== "trash" && entry.state === "ready") {
-      setNotice("");
-      setViewing(entry.id);
-    }
+    else if (place !== "trash" && entry.state === "ready") setViewing(entry.id);
   }
-  async function shareUser(revoke: boolean) {
-    if (!selected || !userId.trim()) {
-      setNotice("Enter a user ID.");
-      return;
-    }
-    setBusy(true);
-    setNotice("");
-    try {
-      await command(
-        revoke
-          ? { action: "unshare", id: selected.id, userId: userId.trim() }
-          : { action: "share", id: selected.id, userId: userId.trim(), access },
-      );
-      setNotice(revoke ? "User access revoked." : "User access saved.");
-    } catch {
-      setNotice("Could not update sharing. Check access and try again.");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function createLink() {
-    if (!selected) return;
-    const duration = Number(days);
-    if (!Number.isInteger(duration) || duration < 1 || duration > 365) {
-      setNotice("Choose an expiry between 1 and 365 days.");
-      return;
-    }
-    setBusy(true);
-    setNotice("");
-    try {
-      const result = await command({
-        action: "link",
-        id: selected.id,
-        expiresAt: expiresAfter(duration),
-      });
-      if (!("token" in result)) throw new Error("Missing token");
-      setLink({
-        id: result.id,
-        url: `${window.location.origin}/drive/api/v1/public/${encodeURIComponent(result.token)}`,
-        expiresAt: result.expiresAt,
-      });
-    } catch {
-      setNotice("Could not create a public link.");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function revokeLink() {
-    if (!selected || !linkId.trim()) {
-      setNotice("Enter a link ID.");
-      return;
-    }
-    setBusy(true);
-    setNotice("");
-    try {
-      await command({
-        action: "unlink",
-        id: selected.id,
-        linkId: linkId.trim(),
-      });
-      setLink(null);
-      setNotice("Link revoked.");
-    } catch {
-      setNotice("Could not revoke the link.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   const pathIds = path.map((crumb) => crumb.id);
   const treeDnd: TreeDnd = { targetProps, highlight, prefetch };
   const menuAnchor = (where: "sidebar" | "main") =>
@@ -1324,7 +1292,7 @@ export function DrivePage() {
               ) : (
                 <strong>Usage temporarily unavailable</strong>
               )}
-              <a className="drive-billing-link" href={settingsHref}>
+              <a className="drive-plan-link" href={settingsHref}>
                 Plan &amp; storage
               </a>
             </div>
@@ -1349,19 +1317,19 @@ export function DrivePage() {
         <div className="drive-page">
           {menuAnchor("main")}
           {billingOverview.data?.uploadsAllowed === false && (
-            <output className="billing-warning drive-billing-banner">
+            <output className="drive-quota-banner">
               {billingOverview.data.plan === "none"
                 ? "Choose a plan to enable uploads and incoming mail."
                 : "Storage quota reached: new uploads and incoming mail are paused; nothing is deleted."}{" "}
-              <a className="drive-billing-link" href={settingsHref}>
+              <a className="drive-plan-link" href={settingsHref}>
                 Plan &amp; storage
               </a>
             </output>
           )}
           {quotaError && (
-            <div className="billing-warning drive-billing-banner" role="alert">
+            <div className="drive-quota-banner is-error" role="alert">
               Storage quota exceeded. Your upload could not be completed.{" "}
-              <a className="drive-billing-link" href={settingsHref}>
+              <a className="drive-plan-link" href={settingsHref}>
                 Review plan &amp; storage
               </a>
             </div>
@@ -1403,7 +1371,9 @@ export function DrivePage() {
             </nav>
             <div className="drive-title-row">
               <div>
-                <h1>{here.name}</h1>
+                <h1 ref={headingRef} tabIndex={-1}>
+                  {here.name}
+                </h1>
                 <p className="drive-subtitle">
                   {place === "trash" ? (
                     "Restore items or delete them permanently."
@@ -1468,32 +1438,6 @@ export function DrivePage() {
               </div>
             </div>
           </div>
-          <output
-            className={`drive-notice${notice.text && !modal ? "" : " is-empty"}`}
-          >
-            {notice.text && !modal && (
-              <>
-                <span>{notice.text}</span>
-                {notice.undo && (
-                  <button
-                    type="button"
-                    className="drive-undo"
-                    onClick={notice.undo.run}
-                  >
-                    {notice.undo.label}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="drive-dismiss"
-                  aria-label="Dismiss message"
-                  onClick={() => setNotice("")}
-                >
-                  <Icon name="close" size={16} />
-                </button>
-              </>
-            )}
-          </output>
           {transfer && (
             <output className="drive-transfer">
               <div>
@@ -1576,7 +1520,7 @@ export function DrivePage() {
                       icon="download"
                       label="Download"
                       onClick={() => {
-                        void download(selected, setNotice);
+                        void download(selected, announce);
                       }}
                       disabled={
                         selected.kind !== "file" || selected.state !== "ready"
@@ -1718,6 +1662,7 @@ export function DrivePage() {
                   </div>
                 )}
                 <div
+                  ref={itemsRef}
                   className={
                     view === "grid" ? "drive-items grid" : "drive-items"
                   }
@@ -1733,6 +1678,7 @@ export function DrivePage() {
                     return (
                       <div
                         key={entry.id}
+                        data-entry-id={entry.id}
                         className={`drive-item${isSelected ? " selected" : ""}${draggingIds.includes(entry.id) ? " dragging" : ""}${highlight(key)}`}
                         draggable={canMoveItems && entry.state === "ready"}
                         onDragStart={(event) => startDrag(event, entry)}
@@ -1937,11 +1883,7 @@ export function DrivePage() {
       <Dialog
         open={modal !== null}
         onOpenChange={(open) => {
-          if (!open && !busy) {
-            setModal(null);
-            setLink(null);
-            setNotice("");
-          }
+          if (!open && !busy) dismissModal();
         }}
       >
         {modal === "folder" || modal === "rename" ? (
@@ -1964,9 +1906,9 @@ export function DrivePage() {
                 onChange={(event) => setName(event.target.value)}
                 maxLength={255}
               />
-              {notice.text && (
+              {dialogError && (
                 <p className="field-error" role="alert">
-                  {notice.text}
+                  {dialogError}
                 </p>
               )}
               <div className="dialog-actions">
@@ -2012,9 +1954,9 @@ export function DrivePage() {
             <p>
               Destination: <strong>{destination.name}</strong>
             </p>
-            {notice.text && (
+            {dialogError && (
               <p className="field-error" role="alert">
-                {notice.text}
+                {dialogError}
               </p>
             )}
             <div className="dialog-actions">
@@ -2027,7 +1969,7 @@ export function DrivePage() {
                     destination.path,
                   );
                   if (!check.ok) {
-                    setNotice(moveRefusal(check.reason));
+                    setDialogError(moveRefusal(check.reason));
                     return;
                   }
                   setModal(null);
@@ -2044,8 +1986,13 @@ export function DrivePage() {
             title="Delete permanently?"
             description={`This permanently deletes ${selected ? selected.name : plural(selectedEntries.length, "item")}${selectedEntries.some((entry) => entry.kind === "folder") ? " and everything inside" : ""}. This cannot be undone.`}
           >
+            {dialogError && (
+              <p className="field-error" role="alert">
+                {dialogError}
+              </p>
+            )}
             <div className="dialog-actions">
-              <Button variant="secondary" onClick={() => setModal(null)}>
+              <Button variant="secondary" onClick={dismissModal}>
                 Cancel
               </Button>
               <Button
@@ -2060,131 +2007,7 @@ export function DrivePage() {
           </DialogContent>
         )}
         {modal === "share" && selected && (
-          <DialogContent
-            title={`Share ${selected.name}`}
-            description="Shares apply to this item only, not its contents."
-          >
-            <div className="drive-share">
-              <TextField
-                label="User ID (not email)"
-                value={userId}
-                onChange={(event) => setUserId(event.target.value)}
-              />
-              <label className="field-label" htmlFor="drive-access">
-                Access
-              </label>
-              <select
-                id="drive-access"
-                className="field-input"
-                value={access}
-                onChange={(event) =>
-                  setAccess(event.target.value === "write" ? "write" : "read")
-                }
-              >
-                <option value="read">Can view</option>
-                <option value="write">Can edit</option>
-              </select>
-              <div className="drive-share-buttons">
-                <Button
-                  size="small"
-                  disabled={busy}
-                  onClick={() => {
-                    void shareUser(false);
-                  }}
-                >
-                  Save access
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="small"
-                  disabled={busy}
-                  onClick={() => {
-                    void shareUser(true);
-                  }}
-                >
-                  Revoke user
-                </Button>
-              </div>
-              <p className="field-description">
-                Existing shares are not listed by the server. Enter the
-                account’s user ID (not its email address) to change or revoke
-                access.
-              </p>
-              {selected.kind === "file" && (
-                <>
-                  <div className="drive-divider" />
-                  <label className="field-label" htmlFor="drive-expiry">
-                    Public link expiry (days)
-                  </label>
-                  <input
-                    id="drive-expiry"
-                    className="field-input"
-                    type="number"
-                    min="1"
-                    max="365"
-                    value={days}
-                    onChange={(event) => setDays(event.target.value)}
-                  />
-                  <Button
-                    variant="secondary"
-                    size="small"
-                    disabled={busy}
-                    onClick={() => {
-                      void createLink();
-                    }}
-                  >
-                    Create public link
-                  </Button>
-                  {link && (
-                    <div className="drive-link-result">
-                      <strong>Copy this link now</strong>
-                      <p>
-                        The token is shown only once. Save the link ID to revoke
-                        it later.
-                      </p>
-                      <label>
-                        Public link
-                        <input
-                          className="field-input"
-                          readOnly
-                          value={link.url}
-                          onFocus={(event) => event.currentTarget.select()}
-                        />
-                      </label>
-                      <label>
-                        Link ID
-                        <input
-                          className="field-input"
-                          readOnly
-                          value={link.id}
-                          onFocus={(event) => event.currentTarget.select()}
-                        />
-                      </label>
-                      <small>
-                        Expires {new Date(link.expiresAt).toLocaleString()}
-                      </small>
-                    </div>
-                  )}
-                  <TextField
-                    label="Link ID to revoke"
-                    value={linkId}
-                    onChange={(event) => setLinkId(event.target.value)}
-                  />
-                  <Button
-                    variant="secondary"
-                    size="small"
-                    disabled={busy}
-                    onClick={() => {
-                      void revokeLink();
-                    }}
-                  >
-                    Revoke link
-                  </Button>
-                </>
-              )}
-              {notice.text && <output>{notice.text}</output>}
-            </div>
-          </DialogContent>
+          <ShareDialog entry={selected} focusAfter={focusAfter} />
         )}
       </Dialog>
       {viewerIndex >= 0 && (
@@ -2200,7 +2023,7 @@ export function DrivePage() {
           }}
           onClose={() => setViewing(null)}
           onDownload={(target) => {
-            void download(target, setNotice);
+            void download(target, announce);
           }}
         />
       )}

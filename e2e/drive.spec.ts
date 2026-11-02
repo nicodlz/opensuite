@@ -91,19 +91,15 @@ test("upload, rename, move, share, download, trash and restore", async ({
   await toolbar.getByRole("button", { name: "Rename" }).click();
   await page.getByLabel("Name", { exact: true }).fill("renamed.txt");
   await page.getByRole("button", { name: "Save name" }).click();
-  await page.getByRole("button", { name: "renamed.txt, file" }).click();
+  await expect(
+    page.getByRole("button", { name: "renamed.txt, file" }),
+  ).toBeFocused();
   await page.getByRole("button", { name: "Share", exact: true }).click();
-  await page.getByLabel("User ID (not email)").fill("colleague-id");
-  await page.getByRole("button", { name: "Save access" }).click();
-  await expect(page.getByText("User access saved.")).toBeVisible();
-  await page.getByRole("button", { name: "Create public link" }).click();
-  await expect(page.getByLabel("Public link", { exact: true })).toHaveValue(
-    /synthetic_token_shown_once/,
-  );
-  const id = await page.getByLabel("Link ID", { exact: true }).inputValue();
-  await page.getByLabel("Link ID to revoke").fill(id);
-  await page.getByRole("button", { name: "Revoke link" }).click();
-  await expect(page.getByText("Link revoked.")).toBeVisible();
+  await page.getByLabel("Email address").fill("colleague@example.org");
+  await page.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(
+    page.getByText("Shared with colleague@example.org."),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Close dialog" }).click();
   await page.getByRole("button", { name: "Move", exact: true }).click();
   await page
@@ -465,4 +461,151 @@ test("download a folder or selection as ZIP and show preparation errors", async 
   );
   await page.getByRole("button", { name: "Download as ZIP" }).click();
   await expect(page.getByText("Could not prepare ZIP download.")).toBeVisible();
+});
+
+test("shares by email address and lists access with Copy and Revoke", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const clipboard = () => page.evaluate(() => navigator.clipboard.readText());
+  await page.goto("/drive");
+  await page
+    .getByRole("button", { name: "Welcome to Drive.pdf, file" })
+    .click();
+  const share = page
+    .getByRole("toolbar", { name: "Actions for Welcome to Drive.pdf" })
+    .getByRole("button", { name: "Share" });
+  await share.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Share Welcome to Drive.pdf",
+  });
+  const people = dialog.getByRole("region", { name: "People with access" });
+  const links = dialog.getByRole("region", { name: "Public links" });
+  const address = dialog.getByLabel("Email address");
+  await expect(people.getByText("Only you have access.")).toBeVisible();
+  await expect(links.getByText("No active links.")).toBeVisible();
+  await expect(address).toBeFocused();
+
+  await address.fill("someone");
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByText(/Enter an email address/)).toBeVisible();
+  await address.fill("nobody@example.org");
+  await page.keyboard.press("Enter");
+  await expect(
+    dialog.getByText("No account on this server uses this address."),
+  ).toBeVisible();
+  await expect(address).toBeFocused();
+  await expect(people.getByText("Only you have access.")).toBeVisible();
+
+  await address.fill("colleague@example.org");
+  await dialog.getByLabel("Access", { exact: true }).selectOption("write");
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(
+    page.getByText("Shared with colleague@example.org."),
+  ).toBeVisible();
+  await expect(address).toHaveValue("");
+  await expect(people.getByText("colleague@example.org")).toBeVisible();
+  await expect(people.getByText("Can edit")).toBeVisible();
+  await people
+    .getByRole("button", { name: "Copy colleague@example.org" })
+    .click();
+  await expect(page.getByText("Address copied.")).toBeVisible();
+  expect(await clipboard()).toBe("colleague@example.org");
+
+  await links.getByRole("button", { name: "Create link" }).click();
+  await expect(page.getByText("Public link created.")).toBeVisible();
+  const copyLink = links.getByRole("button", { name: /^Copy Public link/ });
+  await expect(copyLink).toBeFocused();
+  await copyLink.click();
+  await expect(page.getByText("Link copied.")).toBeVisible();
+  expect(await clipboard()).toMatch(/\/drive\/api\/v1\/public\/[\w-]+$/);
+  await checkAxe(page);
+
+  // Revoking needs no identifier and focus stays in the dialog.
+  await links.getByRole("button", { name: /^Revoke Public link/ }).click();
+  await expect(page.getByText("Link revoked.")).toBeVisible();
+  await expect(links.getByText("No active links.")).toBeVisible();
+  await expect(
+    links.getByRole("button", { name: "Create link" }),
+  ).toBeFocused();
+  await people
+    .getByRole("button", { name: "Remove access for colleague@example.org" })
+    .click();
+  await expect(
+    page.getByText("Access removed for colleague@example.org."),
+  ).toBeVisible();
+  await expect(people.getByText("Only you have access.")).toBeVisible();
+  await expect(address).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(share).toBeFocused();
+});
+
+test("focus follows new folder, rename, trash and restore", async ({
+  page,
+}) => {
+  await page.goto("/drive");
+  await page.getByRole("button", { name: "New folder", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Archive");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Folder created.")).toBeVisible();
+  const archive = page.getByRole("button", { name: "Archive, folder" });
+  await expect(archive).toBeFocused();
+
+  await page.keyboard.press("Space");
+  await page
+    .getByRole("toolbar", { name: "Actions for Archive" })
+    .getByRole("button", { name: "Rename" })
+    .click();
+  await page.getByLabel("Name", { exact: true }).fill("Archives");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Item renamed.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Archives, folder" }),
+  ).toBeFocused();
+
+  // A dismissed dialog gives focus back to the button that opened it.
+  const rename = page
+    .getByRole("toolbar", { name: "Actions for Archives" })
+    .getByRole("button", { name: "Rename" });
+  await rename.click();
+  await page.keyboard.press("Escape");
+  await expect(rename).toBeFocused();
+
+  // The next item takes the place of the trashed one.
+  await page
+    .getByRole("toolbar", { name: "Actions for Archives" })
+    .getByRole("button", { name: "Move to trash" })
+    .click();
+  await expect(page.getByText("Moved to trash.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Photos, folder" }),
+  ).toBeFocused();
+  await page.getByRole("button", { name: "Photos, folder" }).click();
+  await page
+    .getByRole("toolbar", { name: "Actions for Photos" })
+    .getByRole("button", { name: "Move to trash" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Projects, folder" }),
+  ).toBeFocused();
+
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+  await page.getByRole("button", { name: "Archives, folder" }).click();
+  await page
+    .getByRole("toolbar", { name: "Actions for Archives" })
+    .getByRole("button", { name: "Restore" })
+    .click();
+  await expect(page.getByText("Item restored.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Photos, folder" }),
+  ).toBeFocused();
+  await page.getByRole("button", { name: "Photos, folder" }).click();
+  await page
+    .getByRole("toolbar", { name: "Actions for Photos" })
+    .getByRole("button", { name: "Restore" })
+    .click();
+  await expect(page.getByText("Trash is empty")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Trash" })).toBeFocused();
 });

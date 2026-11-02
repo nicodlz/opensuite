@@ -340,10 +340,18 @@ AWS and other S3-compatible providers have not been exercised here.
 The web Drive workspace uses synthetic in-memory data in the Vite development
 server and the real Drive API in production builds. Set `DRIVE_PROXY_TARGET` to
 proxy `/drive/api` to a local Drive service when testing a production preview.
-The current contract does not expose quota totals or lists of existing shares
-and links; the workspace reports quota as unavailable and accepts user and
-link IDs to change or revoke access. A public link and its ID must be saved
-when created because the token is returned only once. The browser attempts to
+The current contract does not expose quota totals; the workspace reports quota
+as unavailable. Sharing takes the recipient's sign-in address: with the same
+service token, Drive asks the API's `POST /internal/accounts/resolve` for the
+enabled account using that address and `POST /internal/accounts/addresses` for
+the addresses of existing shares. Addresses travel in request bodies, aliases
+and additional addresses never match, and only an item's owner can trigger a
+lookup, at most 60 per hour per owner and Drive instance. Drive fails closed
+when these routes are unavailable. A public link token is an HMAC of the link
+ID under a key derived from the service token, and the database keeps only its
+hash, so the owner can copy an active link again. Rotating the service token
+makes existing links impossible to copy again; they keep working until they
+expire or are revoked. The browser attempts to
 remove pending reservations when an upload fails or is cancelled; if it lacks
 owner access, the service has no separate abort command and cleanup requires
 the owner.

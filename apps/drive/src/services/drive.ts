@@ -8,13 +8,20 @@ import { UploadMismatchError, type Storage } from "../adapters/storage.ts";
 import { reserveQuota } from "./quota.ts";
 import { zip } from "./download-zip.ts";
 import { visible } from "./entry-view.ts";
-import { createLinkToken, hashLinkToken } from "../sharing/tokens.ts";
+import {
+  createLinkToken,
+  hashLinkToken,
+  recoverLinkToken,
+} from "../sharing/tokens.ts";
+import type { AccountDirectory } from "../domain/accounts.ts";
 
 const missing = () =>
   new ORPCError("NOT_FOUND", { message: "Entry not found" });
-const tooMany = () =>
-  new ORPCError("TOO_MANY_REQUESTS", {
-    message: "Too many upload finalizations",
+const tooMany = (message = "Too many upload finalizations") =>
+  new ORPCError("TOO_MANY_REQUESTS", { message });
+const unavailable = () =>
+  new ORPCError("SERVICE_UNAVAILABLE", {
+    message: "Account directory unavailable",
   });
 const invalid = (message: string) => new ORPCError("BAD_REQUEST", { message });
 
@@ -73,6 +80,8 @@ const destinationOwner = async (
   if (item === null) throw missing();
   return item.ownerId;
 };
+const shareAccess = (value: string): "read" | "write" =>
+  value === "write" ? "write" : "read";
 const lockOwner = async (tx: Prisma.TransactionClient, owner: string) => {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${owner}, 0))`;
 };
@@ -89,6 +98,7 @@ export const createDrive = (
         uploadsAllowed: boolean;
       }>),
   refreshQuota?: (owner: string) => Promise<void>,
+  sharing: { accounts?: AccountDirectory; linkKey?: Buffer } = {},
 ) => {
   const notifyQuota = (owner: string) => {
     if (refreshQuota !== undefined)
@@ -160,6 +170,34 @@ export const createDrive = (
       if (left > 0) finishing.set(user, left);
       else finishing.delete(user);
     };
+  };
+  // Resolving an address tells whether an account uses it. Only owners
+  // sharing an item resolve addresses, and only this many times an hour.
+  const lookups = new Map<string, { count: number; until: number }>();
+  const limitLookup = (user: string) => {
+    const now = Date.now();
+    for (const [key, value] of lookups)
+      if (value.until <= now) lookups.delete(key);
+    const current = lookups.get(user);
+    if (current !== undefined) {
+      if (current.count >= 60) throw tooMany("Too many sharing attempts");
+      current.count++;
+    } else {
+      if (lookups.size >= 10_000) throw tooMany("Too many sharing attempts");
+      lookups.set(user, { count: 1, until: now + 3_600_000 });
+    }
+  };
+  const directory = () => {
+    if (sharing.accounts === undefined) throw unavailable();
+    return sharing.accounts;
+  };
+  // Without shares there is nothing to look up, so links still list when the
+  // directory is down.
+  const addressesOf = async (userIds: string[]) => {
+    if (userIds.length === 0) return new Map<string, string>();
+    const found = await directory().addresses(userIds);
+    if (found.isErr()) throw unavailable();
+    return found.value;
   };
   const removeObject = (item: Entry) =>
     storage.remove(item.id, item.objectKey, item.uploadId);
@@ -675,18 +713,63 @@ export const createDrive = (
         }
         return result;
       }
+      case "shares": {
+        const entry = await get(user, input.id, "owner");
+        const [shares, links] = await Promise.all([
+          db.share.findMany({ where: { entryId: entry.id } }),
+          db.publicLink.findMany({
+            where: {
+              entryId: entry.id,
+              revokedAt: null,
+              expiresAt: { gt: new Date() },
+            },
+            orderBy: { expiresAt: "asc" },
+          }),
+        ]);
+        const addresses = await addressesOf(
+          shares.map((share) => share.userId),
+        );
+        return {
+          shares: shares
+            .map((share) => ({
+              id: share.id,
+              address: addresses.get(share.userId) ?? null,
+              access: shareAccess(share.access),
+            }))
+            .toSorted(
+              (a, b) =>
+                Number(a.address === null) - Number(b.address === null) ||
+                (a.address ?? "").localeCompare(b.address ?? ""),
+            ),
+          links: links.map((link) => ({
+            id: link.id,
+            expiresAt: link.expiresAt.toISOString(),
+            token: recoverLinkToken(sharing.linkKey, link),
+          })),
+        };
+      }
       case "share": {
         const entry = await get(user, input.id, "owner");
-        if (entry.state !== "ready" || entry.ownerId === input.userId)
-          throw invalid("Invalid share");
+        if (entry.state !== "ready") throw invalid("Invalid share");
+        const accounts = directory();
+        limitLookup(user);
+        const resolved = await accounts.resolve(input.address);
+        if (resolved.isErr()) throw unavailable();
+        const recipient = resolved.value;
+        if (recipient === null)
+          throw new ORPCError("RECIPIENT_NOT_FOUND", {
+            status: 404,
+            defined: true,
+            message: "No account on this server uses this address",
+          });
+        if (recipient === entry.ownerId)
+          throw invalid("You already own this item");
         await db.share.upsert({
-          where: {
-            entryId_userId: { entryId: entry.id, userId: input.userId },
-          },
+          where: { entryId_userId: { entryId: entry.id, userId: recipient } },
           create: {
             id: randomUUID(),
             entryId: entry.id,
-            userId: input.userId,
+            userId: recipient,
             access: input.access,
           },
           update: { access: input.access },
@@ -696,7 +779,7 @@ export const createDrive = (
       case "unshare": {
         const entry = await get(user, input.id, "owner");
         await db.share.deleteMany({
-          where: { entryId: entry.id, userId: input.userId },
+          where: { id: input.shareId, entryId: entry.id },
         });
         return { revoked: true };
       }
@@ -706,16 +789,17 @@ export const createDrive = (
         const expiresAt = new Date(input.expiresAt);
         if (expiresAt.getTime() <= Date.now())
           throw invalid("Expiry must be in the future");
-        const token = createLinkToken();
-        const link = await db.publicLink.create({
+        const id = randomUUID();
+        const token = createLinkToken(sharing.linkKey, id);
+        await db.publicLink.create({
           data: {
-            id: randomUUID(),
+            id,
             tokenHash: hashLinkToken(token),
             entryId: entry.id,
             expiresAt,
           },
         });
-        return { id: link.id, token, expiresAt: expiresAt.toISOString() };
+        return { id, token, expiresAt: expiresAt.toISOString() };
       }
       case "unlink": {
         const entry = await get(user, input.id, "owner", true);

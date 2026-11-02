@@ -1,4 +1,5 @@
 import type { DriveCommand, DriveOutput } from "@opensuite/contracts";
+import { ORPCError } from "@orpc/client";
 import type { DriveEntry } from "../drive/model.ts";
 
 // Synthetic, in-memory data is loaded only by Vite's development build.
@@ -68,6 +69,19 @@ const blobs = new Map<string, Blob>([
   ["shared", new Blob(["Roadmap"], { type: "text/plain" })],
 ]);
 const pending = new Map<string, Blob[]>();
+// Other accounts of the synthetic server, by sign-in address.
+const accounts = new Map([["colleague@example.org", "colleague"]]);
+type Share = {
+  id: string;
+  userId: string;
+  address: string;
+  access: "read" | "write";
+};
+const shares = new Map<string, Share[]>();
+const links = new Map<
+  string,
+  { id: string; token: string; expiresAt: string }[]
+>();
 const previews = new WeakMap<Blob, string>();
 const fail = (message: string): never => {
   throw new Error(message);
@@ -226,17 +240,61 @@ async function command(input: DriveCommand): Promise<DriveOutput> {
       }
       return { deleted: true };
     }
-    case "share":
-      return { shared: true };
-    case "unshare":
-    case "unlink":
-      return { revoked: true };
-    case "link":
+    case "shares":
+      item(input.id);
       return {
+        shares: (shares.get(input.id) ?? []).map(({ id, address, access }) => ({
+          id,
+          address,
+          access,
+        })),
+        links: (links.get(input.id) ?? []).filter(
+          (link) => Date.parse(link.expiresAt) > Date.now(),
+        ),
+      };
+    case "share": {
+      item(input.id);
+      const address = input.address.toLowerCase();
+      const userId = accounts.get(address);
+      if (userId === undefined)
+        throw new ORPCError("RECIPIENT_NOT_FOUND", {
+          status: 404,
+          defined: true,
+          message: "No account on this server uses this address",
+        });
+      const current = shares.get(input.id) ?? [];
+      const existing = current.find((share) => share.userId === userId);
+      if (existing) existing.access = input.access;
+      else
+        shares.set(input.id, [
+          ...current,
+          { id: crypto.randomUUID(), userId, address, access: input.access },
+        ]);
+      return { shared: true };
+    }
+    case "unshare":
+      shares.set(
+        input.id,
+        (shares.get(input.id) ?? []).filter(
+          (share) => share.id !== input.shareId,
+        ),
+      );
+      return { revoked: true };
+    case "link": {
+      const link = {
         id: crypto.randomUUID(),
-        token: "synthetic_token_shown_once",
+        token: `synthetic_${crypto.randomUUID()}`,
         expiresAt: input.expiresAt,
       };
+      links.set(input.id, [...(links.get(input.id) ?? []), link]);
+      return link;
+    }
+    case "unlink":
+      links.set(
+        input.id,
+        (links.get(input.id) ?? []).filter((link) => link.id !== input.linkId),
+      );
+      return { revoked: true };
   }
   throw new Error("Unknown action");
 }
