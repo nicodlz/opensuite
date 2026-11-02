@@ -340,10 +340,7 @@ async function reconcileOne(
         { ...row, state: "releasing", submissionId: found.id },
         store,
       );
-  } else if (
-    row.state === "creating" ||
-    (row.state === "unknown" && !row.submissionId)
-  ) {
+  } else if (["creating", "unknown"].includes(row.state) && !row.submissionId) {
     await store.transition(
       row.id,
       [row.state],
