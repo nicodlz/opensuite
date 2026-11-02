@@ -32,6 +32,7 @@ import {
 } from "./auth/limits.ts";
 import { z } from "zod";
 import { router, type ApiContext } from "./routes/index.ts";
+import { toWebHeaders } from "./routes/context.ts";
 import type { Entitlements } from "./billing/entitlements.ts";
 import type { StorageMeter } from "./billing/storage.ts";
 import type { StripeBilling } from "./billing/stripe.ts";
@@ -78,6 +79,7 @@ export interface ServerDependencies {
   readonly accounts?: AccountService;
   readonly mail?: MailService;
   readonly calendar?: CalendarService;
+  readonly contacts?: NonNullable<ApiContext["contacts"]>;
   readonly domains?: DomainService;
   readonly aliases?: AliasService;
   readonly addresses?: AddressService;
@@ -215,13 +217,7 @@ export const buildServer = async (
         .send({ code: "FORBIDDEN", message: "Invalid origin" });
     }
     if (request.method === "POST" && rawPath === "/mail/attachments/upload") {
-      const headers = new Headers();
-      for (const [name, value] of Object.entries(request.headers)) {
-        if (value === undefined) continue;
-        if (Array.isArray(value))
-          for (const part of value) headers.append(name, part);
-        else headers.set(name, value);
-      }
+      const headers = toWebHeaders(request.headers);
       const actor = (await identity?.actor?.(headers)) ?? null;
       if (actor === null)
         return reply
@@ -278,13 +274,7 @@ export const buildServer = async (
         tokens.delete(request.params.token);
         return reply.code(404).send();
       }
-      const headers = new Headers();
-      for (const [name, value] of Object.entries(request.headers)) {
-        if (value === undefined) continue;
-        if (Array.isArray(value))
-          for (const part of value) headers.append(name, part);
-        else headers.set(name, value);
-      }
+      const headers = toWebHeaders(request.headers);
       const actor = await dependencies.identity?.actor?.(headers);
       if (actor === undefined || actor === null) return reply.code(401).send();
       if (actor.id !== token.userId) return reply.code(403).send();
@@ -512,13 +502,7 @@ export const buildServer = async (
   );
   app.get("/vault/status", async (request, reply) => {
     reply.header("cache-control", "no-store");
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(request.headers)) {
-      if (value === undefined) continue;
-      if (Array.isArray(value))
-        for (const part of value) headers.append(name, part);
-      else headers.set(name, value);
-    }
+    const headers = toWebHeaders(request.headers);
     const actor = (await dependencies.identity?.actor?.(headers)) ?? null;
     const { version, ...status } = await vaultStatus();
     return actor === null
@@ -911,13 +895,7 @@ export const buildServer = async (
       )
     )
       reply.header("cache-control", "no-store");
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(request.headers)) {
-      if (value === undefined) continue;
-      if (Array.isArray(value))
-        for (const part of value) headers.append(name, part);
-      else headers.set(name, value);
-    }
+    const headers = toWebHeaders(request.headers);
     const actor =
       actors.get(request) ??
       (await dependencies.identity?.actor?.(headers)) ??
@@ -956,6 +934,7 @@ export const buildServer = async (
         audit: dependencies.identity?.audit,
         mail: dependencies.mail,
         calendar: dependencies.calendar,
+        contacts: dependencies.contacts,
         productOrigins: dependencies.identity?.productOrigins ?? {},
         vaultOrigin: dependencies.vaultOrigin,
         downloads,

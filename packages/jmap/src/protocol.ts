@@ -7,6 +7,7 @@ export const JmapCapability = {
   submission: "urn:ietf:params:jmap:submission",
   blob: "urn:ietf:params:jmap:blob",
   calendars: "urn:ietf:params:jmap:calendars",
+  contacts: "urn:ietf:params:jmap:contacts",
   management: "urn:stalwart:jmap",
 } as const;
 
@@ -268,3 +269,141 @@ export const setFailure = (
     ? undefined
     : { kind: "set", method, id: entry[0], ...entry[1] };
 };
+
+const ContactBookSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  isDefault: z.boolean(),
+  myRights: z.object({
+    mayRead: z.boolean(),
+    mayWrite: z.boolean(),
+    mayDelete: z.boolean(),
+  }),
+});
+const ContactCardSchema = z.looseObject({
+  id: z.string(),
+  addressBookIds: z.record(z.string(), z.boolean()),
+  name: z.looseObject({ full: z.string().optional() }).nullable().optional(),
+  emails: z
+    .record(z.string(), z.looseObject({ address: z.string() }))
+    .nullable()
+    .optional(),
+});
+const ContactSetSchema = z.object({
+  accountId: z.string(),
+  newState: z.string().optional(),
+  created: z.record(z.string(), z.object({ id: z.string() })).nullish(),
+  updated: z.record(z.string(), z.unknown()).nullish(),
+  destroyed: z.array(z.string()).nullish(),
+  notCreated: z.record(z.string(), SetErrorSchema).nullish(),
+  notUpdated: z.record(z.string(), SetErrorSchema).nullish(),
+  notDestroyed: z.record(z.string(), SetErrorSchema).nullish(),
+});
+const getContactsSchema = <T>(item: z.ZodType<T>) =>
+  z.object({
+    accountId: z.string(),
+    state: z.string(),
+    list: z.array(item),
+    notFound: z.array(z.string()),
+  });
+const contactQuerySchema = z.object({
+  accountId: z.string(),
+  queryState: z.string(),
+  canCalculateChanges: z.boolean(),
+  position: z.number(),
+  ids: z.array(z.string()),
+  total: z.number().optional(),
+});
+const contactCapabilities = [JmapCapability.core, JmapCapability.contacts];
+
+/** User-scoped contacts and sent-recipient operations on the JMAP transport. */
+export class ContactsApi {
+  readonly #transport: Transport;
+  constructor(transport: Transport) {
+    this.#transport = transport;
+  }
+  addressBooks(session: Session, accountId: string) {
+    return this.#transport.call(
+      session.apiUrl,
+      "AddressBook/get",
+      { accountId },
+      contactCapabilities,
+      getContactsSchema(ContactBookSchema),
+    );
+  }
+  queryContacts(
+    session: Session,
+    accountId: string,
+    options: {
+      filter?: object;
+      position?: number;
+      limit?: number;
+      calculateTotal?: boolean;
+    },
+  ) {
+    return this.#transport.call(
+      session.apiUrl,
+      "ContactCard/query",
+      { accountId, ...options },
+      contactCapabilities,
+      contactQuerySchema,
+    );
+  }
+  contactCards(session: Session, accountId: string, ids: readonly string[]) {
+    return this.#transport.call(
+      session.apiUrl,
+      "ContactCard/get",
+      { accountId, ids },
+      contactCapabilities,
+      getContactsSchema(ContactCardSchema),
+    );
+  }
+  async setContact(
+    session: Session,
+    accountId: string,
+    change: {
+      create?: Record<string, object>;
+      update?: Record<string, object>;
+      destroy?: string[];
+      ifInState?: string;
+    },
+  ) {
+    const method = "ContactCard/set";
+    const result = await this.#transport.call(
+      session.apiUrl,
+      method,
+      { accountId, ...change },
+      contactCapabilities,
+      ContactSetSchema,
+    );
+    if (result.isErr()) return result;
+    const failure =
+      setFailure(method, result.value.notCreated) ??
+      setFailure(method, result.value.notUpdated) ??
+      setFailure(method, result.value.notDestroyed);
+    return failure === undefined ? result : err(failure);
+  }
+  recentRecipients(
+    session: Session,
+    accountId: string,
+    ids: readonly string[],
+  ) {
+    const address = z.object({
+      name: z.string().nullable(),
+      email: z.string(),
+    });
+    const message = z.object({
+      id: z.string(),
+      to: z.array(address).nullable(),
+      cc: z.array(address).nullable(),
+      bcc: z.array(address).nullable(),
+    });
+    return this.#transport.call(
+      session.apiUrl,
+      "Email/get",
+      { accountId, ids, properties: ["id", "to", "cc", "bcc"] },
+      [JmapCapability.core, JmapCapability.mail],
+      getContactsSchema(message),
+    );
+  }
+}

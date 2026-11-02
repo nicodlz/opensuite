@@ -19,6 +19,8 @@ import {
   createPushStore,
   createMailPushStore,
 } from "@opensuite/db";
+import { contactVcardCodec } from "@opensuite/core/adapters/contacts";
+import { createContactsService } from "@opensuite/core/services/contacts";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import { createMailService } from "@opensuite/core/services/mail";
 import { performance } from "node:perf_hooks";
@@ -290,30 +292,27 @@ const addresses = createAddressService(
   },
   authConfig.value.mailDomains,
 );
-const createAliasGuard = createAliasSendGuard(
-  aliases,
-  addresses.auditSubmission,
-);
-const mail = createMailService({
+const mailConnection = {
   store: {
-    getForOwner: async (userId, accountId) =>
+    getForOwner: async (userId: string, accountId: string) =>
       mailboxStore.getForOwner(userId, accountId),
   },
   origin: authConfig.value.stalwartOrigin,
+};
+const mail = createMailService({
+  ...mailConnection,
   canSendAs: async (userId, address) => {
     const result = await aliases.canSendAs(userId, address);
     if (result.isOk() && result.value) return `alias:${result.value}`;
     const found = await addresses.canSendAs(userId, address);
     return found.isOk() && found.value ? `address:${found.value}` : null;
   },
-  beforeAliasSend: createAliasGuard,
+  beforeAliasSend: createAliasSendGuard(aliases, addresses.auditSubmission),
 });
-const calendar = createCalendarService({
-  store: {
-    getForOwner: async (userId, accountId) =>
-      mailboxStore.getForOwner(userId, accountId),
-  },
-  origin: authConfig.value.stalwartOrigin,
+const calendar = createCalendarService(mailConnection);
+const contacts = createContactsService({
+  ...mailConnection,
+  codec: contactVcardCodec,
 });
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
@@ -349,6 +348,7 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   calendar,
+  contacts,
   aliases,
   entitlements,
   storageMeter,

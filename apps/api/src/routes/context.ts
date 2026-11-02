@@ -5,6 +5,7 @@ import type { AliasService } from "@opensuite/core/services/aliases";
 import type { SetupStatus } from "@opensuite/contracts";
 import type { DomainService } from "./domains.ts";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
+import type { ContactsService } from "@opensuite/core/services/contacts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
@@ -50,6 +51,7 @@ export interface ApiContext {
   readonly vaultOrigin?: string | undefined;
   readonly productOrigins: Readonly<Record<string, string>>;
   readonly calendar: CalendarService | undefined;
+  readonly contacts: ContactsService | undefined;
   readonly downloads: {
     issue(
       userId: string,
@@ -72,3 +74,17 @@ export interface ApiContext {
   readonly readiness: ReadinessService;
   readonly uptimeSeconds: () => number;
 }
+
+/** Copy incoming Node headers without dropping repeated values. */
+export const toWebHeaders = (
+  source: Record<string, string | string[] | undefined>,
+): Headers => {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value))
+      for (const part of value) headers.append(name, part);
+    else headers.set(name, value);
+  }
+  return headers;
+};

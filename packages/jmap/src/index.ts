@@ -5,6 +5,7 @@ import {
   SessionSchema,
   SetErrorSchema,
   Transport,
+  ContactsApi,
   setFailure,
   type JmapResult,
   type Session,
@@ -27,10 +28,7 @@ const MailboxSchema = z.object({
   totalEmails: z.number().default(0),
   unreadEmails: z.number().default(0),
 });
-const AddressSchema = z.object({
-  name: z.string().nullable(),
-  email: z.string(),
-});
+const Address = z.object({ name: z.string().nullable(), email: z.string() });
 const PartSchema = z.object({
   partId: z.string().nullable(),
   blobId: z.string().nullable(),
@@ -48,13 +46,13 @@ const EmailSchema = z.object({
   keywords: z.record(z.string(), z.boolean()),
   receivedAt: z.string(),
   subject: z.string().nullable(),
-  from: z.array(AddressSchema).nullable(),
-  to: z.array(AddressSchema).nullable(),
-  replyTo: z.array(AddressSchema).nullable().default(null),
+  from: z.array(Address).nullable(),
+  to: z.array(Address).nullable(),
+  replyTo: z.array(Address).nullable().default(null),
   messageId: z.array(z.string()).nullable(),
   attachments: z.array(PartSchema),
-  cc: z.array(AddressSchema).nullable().default(null),
-  bcc: z.array(AddressSchema).nullable().default(null),
+  cc: z.array(Address).nullable().default(null),
+  bcc: z.array(Address).nullable().default(null),
   sentAt: z.string().nullable().default(null),
   inReplyTo: z.array(z.string()).nullable().default(null),
   references: z.array(z.string()).nullable().default(null),
@@ -226,11 +224,13 @@ const expand = (template: string, values: Record<string, string>) =>
 /** The authorization value is supplied by the caller; keep user credentials server-side. */
 export class JmapClient {
   readonly #transport: Transport;
+  readonly contacts: ContactsApi;
   readonly #origin: string;
   readonly #rewriteOrigin: string | undefined;
   constructor(origin: string, options: TransportOptions) {
     this.#origin = new URL(origin).origin;
     this.#transport = new Transport(origin, options);
+    this.contacts = new ContactsApi(this.#transport);
     this.#rewriteOrigin =
       options.rewriteSessionUrlsToOrigin === undefined
         ? undefined
@@ -356,7 +356,7 @@ export class JmapClient {
           keywords: z.record(z.string(), z.boolean()),
           receivedAt: z.string(),
           subject: z.string().nullable(),
-          from: z.array(AddressSchema).nullable(),
+          from: z.array(Address).nullable(),
         }),
       ),
     );
