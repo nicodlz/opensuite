@@ -11,10 +11,7 @@ export const JmapCapability = {
   management: "urn:stalwart:jmap",
 } as const;
 
-const ErrorSchema = z.object({
-  type: z.string(),
-  description: z.string().optional(),
-});
+const JErr = z.object({ type: z.string(), description: z.string().optional() });
 export type JmapError =
   | { kind: "invalidInput"; message: string }
   | { kind: "network"; message: string; beforeRequest?: boolean }
@@ -152,7 +149,7 @@ export class Transport {
         } catch {
           data = undefined;
         }
-        const problem = ErrorSchema.safeParse(data);
+        const problem = JErr.safeParse(data);
         if (problem.success)
           return err({
             kind: "request",
@@ -219,7 +216,7 @@ export class Transport {
         message: "Unexpected method response count or call id",
       });
     if (call[0] === "error") {
-      const parsed = ErrorSchema.safeParse(call[1]);
+      const parsed = JErr.safeParse(call[1]);
       return parsed.success
         ? err({ kind: "method", method, ...parsed.data })
         : err({ kind: "invalidResponse", message: "Invalid method error" });
@@ -259,7 +256,7 @@ export class Transport {
   }
 }
 
-export const SetErrorSchema = ErrorSchema;
+export const SetErrorSchema = JErr;
 export const setFailure = (
   method: string,
   errors: Record<string, z.infer<typeof SetErrorSchema>> | null | undefined,
@@ -286,8 +283,7 @@ const ContactCardSchema = z.looseObject({
   name: z.looseObject({ full: z.string().optional() }).nullable().optional(),
   emails: z
     .record(z.string(), z.looseObject({ address: z.string() }))
-    .nullable()
-    .optional(),
+    .nullish(),
 });
 const ContactSetSchema = z.object({
   accountId: z.string(),
@@ -299,28 +295,35 @@ const ContactSetSchema = z.object({
   notUpdated: z.record(z.string(), SetErrorSchema).nullish(),
   notDestroyed: z.record(z.string(), SetErrorSchema).nullish(),
 });
-const getContactsSchema = <T>(item: z.ZodType<T>) =>
-  z.object({
-    accountId: z.string(),
-    state: z.string(),
-    list: z.array(item),
-    notFound: z.array(z.string()),
-  });
-const contactQuerySchema = z.object({
-  accountId: z.string(),
-  queryState: z.string(),
-  canCalculateChanges: z.boolean(),
-  position: z.number(),
-  ids: z.array(z.string()),
-  total: z.number().optional(),
-});
+type GetFactory = <T>(item: z.ZodType<T>) => z.ZodType<{
+  accountId: string;
+  state: string;
+  list: T[];
+  notFound: string[];
+}>;
+type ContactQuery = {
+  accountId: string;
+  queryState: string;
+  canCalculateChanges: boolean;
+  position: number;
+  ids: string[];
+  total?: number | undefined;
+};
 const contactCapabilities = [JmapCapability.core, JmapCapability.contacts];
 
 /** User-scoped contacts and sent-recipient operations on the JMAP transport. */
 export class ContactsApi {
   readonly #transport: Transport;
-  constructor(transport: Transport) {
+  readonly #get: GetFactory;
+  readonly #query: z.ZodType<ContactQuery>;
+  constructor(
+    transport: Transport,
+    get: GetFactory,
+    query: z.ZodType<ContactQuery>,
+  ) {
     this.#transport = transport;
+    this.#get = get;
+    this.#query = query;
   }
   addressBooks(session: Session, accountId: string) {
     return this.#transport.call(
@@ -328,7 +331,7 @@ export class ContactsApi {
       "AddressBook/get",
       { accountId },
       contactCapabilities,
-      getContactsSchema(ContactBookSchema),
+      this.#get(ContactBookSchema),
     );
   }
   queryContacts(
@@ -346,7 +349,7 @@ export class ContactsApi {
       "ContactCard/query",
       { accountId, ...options },
       contactCapabilities,
-      contactQuerySchema,
+      this.#query,
     );
   }
   contactCards(session: Session, accountId: string, ids: readonly string[]) {
@@ -355,7 +358,7 @@ export class ContactsApi {
       "ContactCard/get",
       { accountId, ids },
       contactCapabilities,
-      getContactsSchema(ContactCardSchema),
+      this.#get(ContactCardSchema),
     );
   }
   async setContact(
@@ -403,7 +406,7 @@ export class ContactsApi {
       "Email/get",
       { accountId, ids, properties: ["id", "to", "cc", "bcc"] },
       [JmapCapability.core, JmapCapability.mail],
-      getContactsSchema(message),
+      this.#get(message),
     );
   }
 }

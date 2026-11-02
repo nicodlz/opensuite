@@ -154,4 +154,13 @@ export interface ContactCodec {
   create(contact: ContactContent, bookId: string): object;
   patch(card: ContactRecord, contact: ContactContent): Record<string, unknown>;
   warnings(card: ContactRecord): string[];
+  preview(
+    parsed: { contact: ContactContent | null; warnings: string[] }[],
+    stored: ContactRecord[],
+  ): {
+    contact: ContactContent | null;
+    warnings: string[];
+    index: number;
+    duplicate: boolean;
+  }[];
 }

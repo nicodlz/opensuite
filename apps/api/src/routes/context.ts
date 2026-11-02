@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AddressService } from "@opensuite/core/services/addresses";
 import type { NotificationDispatcher } from "@opensuite/core/services/notifications";
 import type { createPushStore } from "@opensuite/db";
@@ -75,16 +76,14 @@ export interface ApiContext {
   readonly uptimeSeconds: () => number;
 }
 
-/** Copy incoming Node headers without dropping repeated values. */
-export const toWebHeaders = (
-  source: Record<string, string | string[] | undefined>,
-): Headers => {
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(source)) {
-    if (value === undefined) continue;
-    if (Array.isArray(value))
-      for (const part of value) headers.append(name, part);
-    else headers.set(name, value);
-  }
-  return headers;
-};
+export const tokenDigest = (value: string) =>
+  createHash("sha256").update(value).digest();
+export const mailServices = (source: {
+  mail?: ApiContext["mail"];
+  calendar?: ApiContext["calendar"];
+  contacts?: ApiContext["contacts"];
+}) => ({
+  mail: source.mail,
+  calendar: source.calendar,
+  contacts: source.contacts,
+});

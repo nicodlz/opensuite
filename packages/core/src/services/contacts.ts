@@ -50,6 +50,11 @@ export class ContactsAccess {
       fail("not_found");
     if (!book.myRights.mayWrite) fail("forbidden");
   }
+  async writeConnection(actor: Actor, accountId: string, bookId: string) {
+    const connection = await this.connect(actor, accountId);
+    await this.writable(connection, bookId);
+    return connection;
+  }
   async get(c: Connection, ids: string[]) {
     const result = value(
       await c.client.contacts.contactCards(c.session, c.id, ids),
@@ -69,6 +74,26 @@ export class ContactsAccess {
       )
     )
       fail("forbidden");
+  }
+  async item(
+    actor: Actor,
+    accountId: string,
+    id: string,
+    right: "mayWrite" | "mayDelete",
+  ) {
+    const connection = await this.connect(actor, accountId);
+    const card =
+      (await this.get(connection, [id])).list[0] ?? fail("not_found");
+    await this.requireRights(connection, card, right);
+    return { connection, card };
+  }
+  async createCard(c: Connection, state: string, card: object) {
+    return value(
+      await c.client.contacts.setContact(c.session, c.id, {
+        ifInState: state,
+        create: { item: card },
+      }),
+    );
   }
   async all(c: Connection, max = 5000) {
     const ids: string[] = [];
@@ -156,13 +181,15 @@ export class ContactsCore {
     input: { bookId: string; contact: ContactContent; state: string },
   ) {
     return this.access.run(async () => {
-      const c = await this.access.connect(actor, accountId);
-      await this.access.writable(c, input.bookId);
-      const result = value(
-        await c.client.contacts.setContact(c.session, c.id, {
-          ifInState: input.state,
-          create: { item: this.codec.create(input.contact, input.bookId) },
-        }),
+      const c = await this.access.writeConnection(
+        actor,
+        accountId,
+        input.bookId,
+      );
+      const result = await this.access.createCard(
+        c,
+        input.state,
+        this.codec.create(input.contact, input.bookId),
       );
       return { id: result.created?.["item"]?.id ?? fail("unavailable") };
     });
@@ -173,11 +200,12 @@ export class ContactsCore {
     input: { contactId: string; contact: ContactContent; state: string },
   ) {
     return this.access.run(async () => {
-      const c = await this.access.connect(actor, accountId);
-      const card =
-        (await this.access.get(c, [input.contactId])).list[0] ??
-        fail("not_found");
-      await this.access.requireRights(c, card, "mayWrite");
+      const { connection: c, card } = await this.access.item(
+        actor,
+        accountId,
+        input.contactId,
+        "mayWrite",
+      );
       const result = value(
         await c.client.contacts.setContact(c.session, c.id, {
           ifInState: input.state,
@@ -195,11 +223,12 @@ export class ContactsCore {
     input: { contactId: string; state: string },
   ) {
     return this.access.run(async () => {
-      const c = await this.access.connect(actor, accountId);
-      const card =
-        (await this.access.get(c, [input.contactId])).list[0] ??
-        fail("not_found");
-      await this.access.requireRights(c, card, "mayDelete");
+      const { connection: c, card } = await this.access.item(
+        actor,
+        accountId,
+        input.contactId,
+        "mayDelete",
+      );
       const result = value(
         await c.client.contacts.setContact(c.session, c.id, {
           ifInState: input.state,
@@ -293,34 +322,7 @@ class ContactTransfers {
       return fail("validation");
     }
     const stored = await this.access.all(c);
-    const existing = new Set(
-      stored.flatMap((card) =>
-        Object.values(card.emails ?? {}).map((e) => emailKey(e.address)),
-      ),
-    );
-    const namesWithoutEmail = new Set(
-      stored
-        .filter((card) => !Object.keys(card.emails ?? {}).length)
-        .map((card) => emailKey(card.name?.full ?? "")),
-    );
-    return parsed.map((entry, index) => {
-      const keys = entry.contact?.emails.map(emailKey) ?? [];
-      const duplicate =
-        keys.some((key) => existing.has(key)) ||
-        new Set(keys).size !== keys.length ||
-        (entry.contact !== null &&
-          keys.length === 0 &&
-          namesWithoutEmail.has(emailKey(entry.contact.name)));
-      for (const key of keys) existing.add(key);
-      if (entry.contact !== null && keys.length === 0)
-        namesWithoutEmail.add(emailKey(entry.contact.name));
-      return {
-        contact: entry.contact,
-        warnings: entry.warnings,
-        index,
-        duplicate,
-      };
-    });
+    return this.codec.preview(parsed, stored);
   }
   previewImport(actor: Actor, accountId: string, input: { vcard: string }) {
     return this.access.run(async () => ({
@@ -336,8 +338,11 @@ class ContactTransfers {
     input: { bookId: string; vcard: string; state: string },
   ) {
     return this.access.run(async () => {
-      const c = await this.access.connect(actor, accountId);
-      await this.access.writable(c, input.bookId);
+      const c = await this.access.writeConnection(
+        actor,
+        accountId,
+        input.bookId,
+      );
       const entries = await this.preview(c, input.vcard);
       const valid = entries.filter(
         (entry) => entry.contact !== null && !entry.duplicate,
@@ -348,11 +353,10 @@ class ContactTransfers {
         const entry = valid[index];
         if (entry === undefined) return 0;
         if (entry.contact === null) return save(index + 1, state);
-        const result = value(
-          await c.client.contacts.setContact(c.session, c.id, {
-            ifInState: state,
-            create: { item: this.codec.create(entry.contact, input.bookId) },
-          }),
+        const result = await this.access.createCard(
+          c,
+          state,
+          this.codec.create(entry.contact, input.bookId),
         );
         if (!result.created?.["item"]?.id || !result.newState)
           return fail("unavailable");

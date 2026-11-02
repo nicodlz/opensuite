@@ -151,6 +151,39 @@ const project = (card: ContactRecord) => {
           .map(([id]) => id),
       };
 };
+
+const emailKey = (email: string) => email.trim().toLowerCase();
+const preview = (parsed: ParsedCard[], stored: ContactRecord[]) => {
+  const existing = new Set(
+    stored.flatMap((card) =>
+      Object.values(card.emails ?? {}).map((e) => emailKey(e.address)),
+    ),
+  );
+  const namesWithoutEmail = new Set(
+    stored
+      .filter((card) => !Object.keys(card.emails ?? {}).length)
+      .map((card) => emailKey(card.name?.full ?? "")),
+  );
+  return parsed.map((entry, index) => {
+    const keys = entry.contact?.emails.map(emailKey) ?? [];
+    const duplicate =
+      keys.some((key) => existing.has(key)) ||
+      new Set(keys).size !== keys.length ||
+      (entry.contact !== null &&
+        keys.length === 0 &&
+        namesWithoutEmail.has(emailKey(entry.contact.name)));
+    for (const key of keys) existing.add(key);
+    if (entry.contact !== null && keys.length === 0)
+      namesWithoutEmail.add(emailKey(entry.contact.name));
+    return {
+      contact: entry.contact,
+      warnings: entry.warnings,
+      index,
+      duplicate,
+    };
+  });
+};
+
 export const contactVcardCodec = {
   content,
   project,
@@ -159,4 +192,5 @@ export const contactVcardCodec = {
   create: cardFor,
   patch: updatePatch,
   warnings: lossWarnings,
+  preview,
 };

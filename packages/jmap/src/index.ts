@@ -230,7 +230,7 @@ export class JmapClient {
   constructor(origin: string, options: TransportOptions) {
     this.#origin = new URL(origin).origin;
     this.#transport = new Transport(origin, options);
-    this.contacts = new ContactsApi(this.#transport);
+    this.contacts = new ContactsApi(this.#transport, GetSchema, QuerySchema);
     this.#rewriteOrigin =
       options.rewriteSessionUrlsToOrigin === undefined
         ? undefined
