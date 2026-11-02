@@ -254,6 +254,9 @@ catalogs:
     '@tanstack/react-router':
       specifier: 1.132.0
       version: 1.132.0
+    '@touch4it/ical-timezones':
+      specifier: 1.9.0
+      version: 1.9.0
     '@types/jsdom':
       specifier: 27.0.0
       version: 27.0.0
@@ -758,6 +761,9 @@ importers:
       '@opensuite/jmap':
         specifier: workspace:*
         version: link:../jmap
+      '@touch4it/ical-timezones':
+        specifier: 'catalog:'
+        version: 1.9.0
       ical.js:
         specifier: 'catalog:'
         version: 2.2.1
@@ -2734,6 +2740,10 @@ packages:
 
   '@tanstack/store@0.7.7':
     resolution: {integrity: sha512-xa6pTan1bcaqYDS9BDpSiS63qa6EoDkPN9RsRaxHuDdVDNntzq3xNwR5YKTU/V3SkSyC9T4YVOPh2zRQN0nhIQ==}
+
+  '@touch4it/ical-timezones@1.9.0':
+    resolution: {integrity: sha512-UAiZMrFlgMdOIaJDPsKu5S7OecyMLr3GGALJTYkRgHmsHAA/8Ixm1qD09ELP2X7U1lqgrctEgvKj9GzMbczC+g==}
+    engines: {node: '>= 14.0.0'}
 
   '@turbo/darwin-64@2.11.10':
     resolution: {integrity: sha512-By4idRap5+nLnMuRzLB4qkOPRlvNdyY1ne4VJYDyUoUB11H94k7uif9mbe3JT8JSNXs1D68uMcBj6hJ/jMQRvA==}
@@ -6661,6 +6671,8 @@ snapshots:
       tiny-warning: 1.0.3
 
   '@tanstack/store@0.7.7': {}
+
+  '@touch4it/ical-timezones@1.9.0': {}
 
   '@turbo/darwin-64@2.11.10':
     optional: true

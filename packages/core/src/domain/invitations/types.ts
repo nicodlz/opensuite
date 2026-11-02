@@ -25,6 +25,15 @@ export interface ParsedInvitation {
   signingDomains: string[];
 }
 
+export interface ParsedInvitationReply {
+  event: InvitationEvent;
+  from: string[];
+  signingDomains: string[];
+  recipients: string[];
+  occurrence: string;
+  timestamp: number;
+}
+
 export type Participation = "ACCEPTED" | "TENTATIVE" | "DECLINED";
 
 export type InvitationProtocolFailure = {

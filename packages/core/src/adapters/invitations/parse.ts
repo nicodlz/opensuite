@@ -5,10 +5,12 @@ import { signingDomains } from "./authentication.ts";
 import type {
   InvitationEvent,
   ParsedInvitation,
+  ParsedInvitationReply,
 } from "../../domain/invitations/types.ts";
 import {
   addressSchema,
   mailbox,
+  occurrenceKey,
   sequenceOf,
   stringValue,
   text,
@@ -83,9 +85,35 @@ function parseEvent(component: ICAL.Component): InvitationEvent {
   };
 }
 
+function validateMethod(
+  root: ICAL.Component,
+  allowed: "received" | "reply",
+  contentType: unknown,
+) {
+  const method = stringValue(root, "method").toUpperCase();
+  const parsed = z.enum(["REQUEST", "CANCEL", "REPLY"]).safeParse(method);
+  if (
+    root.name !== "vcalendar" ||
+    !parsed.success ||
+    (allowed === "reply" ? method !== "REPLY" : method === "REPLY")
+  )
+    throw new Error("Unsupported calendar method");
+  if (
+    typeof contentType === "object" &&
+    contentType !== null &&
+    "params" in contentType &&
+    typeof contentType.params === "object" &&
+    contentType.params !== null &&
+    "method" in contentType.params &&
+    text(contentType.params["method"]).toUpperCase() !== method
+  )
+    throw new Error("Calendar method mismatch");
+  return parsed.data;
+}
 function calendarPart(
+  allowed: "received" | "reply",
   attachments: Awaited<ReturnType<typeof simpleParser>>["attachments"],
-): { root: ICAL.Component; method: ParsedInvitation["method"] } {
+): { root: ICAL.Component; method: "REQUEST" | "CANCEL" | "REPLY" } {
   const parts = attachments.filter(
     (part) => part.contentType.toLowerCase() === "text/calendar",
   );
@@ -102,34 +130,19 @@ function calendarPart(
     parts[0].content,
   );
   const root = ICAL.Component.fromString(decoded);
-  const method = stringValue(root, "method").toUpperCase();
-  if (
-    root.name !== "vcalendar" ||
-    (method !== "REQUEST" && method !== "CANCEL")
-  )
-    throw new Error("Unsupported calendar method");
-  if (
-    typeof contentType === "object" &&
-    "params" in contentType &&
-    typeof contentType.params === "object" &&
-    "method" in contentType.params &&
-    text(contentType.params["method"]).toUpperCase() !== method
-  )
-    throw new Error("Calendar method mismatch");
+  const method = validateMethod(root, allowed, contentType);
   return { root, method };
 }
 
 /** Parse the original message with MIME and iCalendar libraries, without side effects. */
-export async function parseInvitation(
-  raw: Uint8Array,
-): Promise<ParsedInvitation> {
+async function parseMessage(raw: Uint8Array, allowed: "received" | "reply") {
   if (raw.byteLength > 10_000_000) throw new Error("Message too large");
   const message = await simpleParser(Buffer.from(raw), {
     skipHtmlToText: true,
     skipTextToHtml: true,
     skipImageLinks: true,
   });
-  const { root, method } = calendarPart(message.attachments);
+  const { root, method } = calendarPart(allowed, message.attachments);
   const components = root.getAllSubcomponents("vevent");
   if (!components.length || components.length > 100)
     throw new Error("Invalid events");
@@ -164,5 +177,70 @@ export async function parseInvitation(
     from,
     recipients: [...collect(message.to), ...collect(message.cc)],
     signingDomains: signingDomains(message),
+    root,
+  };
+}
+
+/** Parse a received REQUEST or CANCEL without changing the existing boundary. */
+export async function parseInvitation(
+  raw: Uint8Array,
+): Promise<ParsedInvitation> {
+  const parsed = await parseMessage(raw, "received");
+  if (parsed.method === "REPLY") throw new Error("Unsupported calendar method");
+  return {
+    method: parsed.method,
+    events: parsed.events,
+    calendar: parsed.calendar,
+    from: parsed.from,
+    recipients: parsed.recipients,
+    signingDomains: parsed.signingDomains,
+  };
+}
+
+function validateReply(component: ICAL.Component, event: InvitationEvent) {
+  if (
+    component.getAllProperties("uid").length !== 1 ||
+    component.getAllProperties("sequence").length > 1 ||
+    component.getAllProperties("recurrence-id").length > 1 ||
+    component.getAllProperties("dtstamp").length !== 1 ||
+    event.attendees.length !== 1
+  )
+    throw new Error("Invalid response");
+  const attendee = event.attendees[0];
+  const stamp = component.getFirstPropertyValue("dtstamp");
+  if (
+    !attendee ||
+    !["ACCEPTED", "TENTATIVE", "DECLINED"].includes(attendee.partstat) ||
+    !(stamp instanceof ICAL.Time) ||
+    stamp.isDate ||
+    stamp.zone.tzid !== "UTC" ||
+    !Number.isSafeInteger(stamp.toUnixTime())
+  )
+    throw new Error("Invalid response");
+  return stamp.toUnixTime();
+}
+/** Parse an attendee response as data; provenance is verified separately. */
+export async function parseInvitationReply(
+  raw: Uint8Array,
+): Promise<ParsedInvitationReply> {
+  const parsed = await parseMessage(raw, "reply");
+  const components = parsed.root.getAllSubcomponents("vevent");
+  const component = components[0];
+  const event = parsed.events[0];
+  if (
+    components.length !== 1 ||
+    parsed.root.getAllProperties("method").length !== 1 ||
+    !component ||
+    !event
+  )
+    throw new Error("Invalid response");
+  const timestamp = validateReply(component, event);
+  return {
+    event,
+    from: parsed.from,
+    signingDomains: parsed.signingDomains,
+    recipients: parsed.recipients,
+    occurrence: occurrenceKey(component),
+    timestamp,
   };
 }

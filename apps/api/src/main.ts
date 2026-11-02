@@ -1,8 +1,5 @@
 import { contactsConfig } from "./adapters/contacts-config.ts";
 import { createContactsService } from "@opensuite/core/services/contacts";
-import { createMailWithInvitations } from "@opensuite/core/services/invitations";
-import { invitationProtocol } from "@opensuite/core/adapters/invitations";
-import { createCalendarService } from "@opensuite/core/services/calendar";
 import {
   createAliasMail,
   createAliasSendGuard,
@@ -20,7 +17,6 @@ import {
   createDomainStore,
   createAliasStore,
   createAddressStore,
-  createInvitationStore,
   createMailboxStore,
   createPushStore,
 } from "@opensuite/db";
@@ -39,7 +35,12 @@ import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
-import { configurePush, registerBackgroundJobs } from "./push-runtime.ts";
+import {
+  configurePush,
+  createInvitationServices,
+  startOrganizerReplyJob,
+  registerBackgroundJobs,
+} from "./push-runtime.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
 import { createStorageMeter } from "./billing/storage.ts";
@@ -294,19 +295,15 @@ const credentialStore = {
   getForOwner: async (userId: string, accountId: string) =>
     mailboxStore.getForOwner(userId, accountId),
 };
-const { mail, invitations } = createMailWithInvitations({
-  aliases,
-  addresses,
-  store: credentialStore,
-  origin: authConfig.value.stalwartOrigin,
-  protocol: invitationProtocol,
-  intentions: createInvitationStore(database.value),
-  beforeAliasSend: createAliasGuard,
-});
-const calendar = createCalendarService({
-  store: credentialStore,
-  origin: authConfig.value.stalwartOrigin,
-});
+const { mail, invitations, organizer, calendar, scans, organized } =
+  createInvitationServices({
+    db: database.value,
+    store: credentialStore,
+    origin: authConfig.value.stalwartOrigin,
+    aliases,
+    addresses,
+    beforeAliasSend: createAliasGuard,
+  });
 const domainStore = createDomainStore(database.value);
 const domains = await configureDomains(process.env, domainStore);
 const app = await buildServer({
@@ -345,6 +342,7 @@ const app = await buildServer({
     contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
   ),
   invitations,
+  organizer,
   aliases,
   entitlements,
   storageMeter,
@@ -366,9 +364,17 @@ const app = await buildServer({
   ...(push === undefined ? {} : { push }),
   pushCleanup,
 });
+const stopOrganizerReplyJob = startOrganizerReplyJob(
+  scans,
+  organized,
+  organizer,
+  () => app.log.warn("Invitation reply scan failed"),
+  auth.identity.audit,
+);
 logPushFailure = (event) => app.log.warn(event, "push delivery failed");
 registerBackgroundJobs({
   app,
+  stopOrganizerReplyJob,
   db: database.value,
   cloud: billing.value.mode === "cloud",
   storageMeter,

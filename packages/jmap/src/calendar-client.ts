@@ -154,12 +154,13 @@ export class CalendarClient extends MailWriteClient {
     session: Session,
     accountId: string,
     id: string,
+    ifInState?: string,
   ): Promise<JmapResult<void>> {
     const method = "CalendarEvent/set";
     const result = await this.transport.call(
       session.apiUrl,
       method,
-      { accountId, destroy: [id] },
+      { accountId, destroy: [id], ifInState },
       usingCalendars,
       SetSchema(z.unknown()),
     );

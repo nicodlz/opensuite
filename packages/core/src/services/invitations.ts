@@ -2,9 +2,9 @@ import type { AliasService } from "./aliases.ts";
 import type { AddressService } from "./addresses.ts";
 import { createMailService } from "./mail.ts";
 import type { Actor } from "./accounts.ts";
-import { err } from "neverthrow";
 import {
   InvitationContext,
+  invitationRunner,
   type InvitationDependencies,
 } from "./invitations/context.ts";
 import { act } from "./invitations/action.ts";
@@ -14,19 +14,7 @@ import type { InvitationAction } from "./invitations/state.ts";
 
 export function createInvitationService(dependencies: InvitationDependencies) {
   const ctx = new InvitationContext(dependencies);
-  const active = new Map<string, number>();
-  const run = async <T>(actor: Actor, work: () => Promise<T>) => {
-    const count = active.get(actor.id) ?? 0;
-    if (count >= 2) return err({ kind: "rate_limited" as const });
-    active.set(actor.id, count + 1);
-    try {
-      return await ctx.access.run(work);
-    } finally {
-      const remaining = (active.get(actor.id) ?? 1) - 1;
-      if (remaining === 0) active.delete(actor.id);
-      else active.set(actor.id, remaining);
-    }
-  };
+  const run = invitationRunner(ctx);
   return {
     read: (actor: Actor, accountId: string, messageId: string) =>
       run(actor, async () => {
@@ -71,6 +59,7 @@ export function createMailWithInvitations(
   };
   const shared = { ...dependencies, canSendAs };
   return {
+    canSendAs,
     mail: createMailService(shared),
     invitations: createInvitationService(shared),
   };

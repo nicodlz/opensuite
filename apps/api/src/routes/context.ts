@@ -1,3 +1,4 @@
+import type { OrganizerService } from "@opensuite/core/services/invitations-outbound";
 import type { InvitationService } from "@opensuite/core/services/invitations";
 import type { AddressService } from "@opensuite/core/services/addresses";
 import type { NotificationDispatcher } from "@opensuite/core/services/notifications";
@@ -54,6 +55,7 @@ export interface ApiContext {
   readonly calendar: CalendarService | undefined;
   readonly contacts: ContactsService | undefined;
   readonly invitations: InvitationService | undefined;
+  readonly organizer: OrganizerService | undefined;
   readonly downloads: {
     issue(
       userId: string,
@@ -82,10 +84,12 @@ export function mailContext(dependencies: {
   mail?: MailService | undefined;
   calendar?: CalendarService | undefined;
   invitations?: InvitationService | undefined;
+  organizer?: OrganizerService | undefined;
 }) {
   return {
     mail: dependencies.mail,
     calendar: dependencies.calendar,
     invitations: dependencies.invitations,
+    organizer: dependencies.organizer,
   };
 }

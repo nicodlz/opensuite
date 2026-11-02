@@ -1,7 +1,36 @@
 import {
+  reconcileOrganizerPending,
+  scanOrganizerReplies,
+} from "@opensuite/core/services/invitations/organizer-scan";
+import {
+  invitationProtocol,
+  organizerProtocol,
+} from "@opensuite/core/adapters/invitations";
+import { createMailWithInvitations } from "@opensuite/core/services/invitations";
+import {
+  createOrganizerService,
+  type OrganizerService,
+} from "@opensuite/core/services/invitations-outbound";
+import { createCalendarService } from "@opensuite/core/services/calendar";
+import { guardOrganizedCalendar } from "@opensuite/core/services/invitations/organizer-calendar";
+import type { MailCredentialStore } from "@opensuite/core/services/jmap-access";
+import type {
+  AliasService,
+  createAliasService,
+} from "@opensuite/core/services/aliases";
+import type {
+  AddressService,
+  createAddressService,
+} from "@opensuite/core/services/addresses";
+import {
+  createInvitationStore,
+  createOrganizedInvitationStore,
+  createOrganizedReplyScanStore,
   createPushStore,
   createMailPushStore,
   type PrismaClient,
+  type OrganizedReplyScanStore,
+  type OrganizedInvitationStore,
   type createMailboxStore,
   type createDomainStore,
 } from "@opensuite/db";
@@ -42,8 +71,6 @@ export async function configurePush(
 
 import process from "node:process";
 import type { FastifyInstance } from "fastify";
-import type { createAddressService } from "@opensuite/core/services/addresses";
-import type { createAliasService } from "@opensuite/core/services/aliases";
 import type { DomainService } from "@opensuite/core/services/domains";
 import type { createAuthRuntime } from "./auth/runtime.ts";
 import type { StorageMeter } from "./billing/storage.ts";
@@ -73,6 +100,7 @@ interface JobDependencies {
   addresses: ReturnType<typeof createAddressService>;
   aliases: ReturnType<typeof createAliasService>;
   auth: ReturnType<typeof createAuthRuntime>;
+  stopOrganizerReplyJob: () => Promise<void>;
 }
 
 function startBillingJobs({
@@ -243,6 +271,73 @@ export function registerBackgroundJobs(dependencies: JobDependencies) {
     await stopMailNotifier?.();
     await stopCalendarReminders?.();
     await wait();
+    await dependencies.stopOrganizerReplyJob();
     await db.$disconnect();
   });
+}
+
+export function createInvitationServices(input: {
+  db: PrismaClient;
+  store: MailCredentialStore;
+  origin: string;
+  aliases: Pick<AliasService, "canSendAs">;
+  addresses: Pick<AddressService, "canSendAs">;
+  beforeAliasSend: (userId: string, aliasId: string) => Promise<boolean>;
+}) {
+  const { db, store, origin, aliases, addresses, beforeAliasSend } = input;
+  const intentions = createInvitationStore(db);
+  const organized = createOrganizedInvitationStore(db);
+  const scans = createOrganizedReplyScanStore(db);
+  const { mail, invitations, canSendAs } = createMailWithInvitations({
+    aliases,
+    addresses,
+    store,
+    origin,
+    protocol: invitationProtocol,
+    intentions,
+    beforeAliasSend,
+  });
+  const organizer = createOrganizerService({
+    store,
+    origin,
+    protocol: invitationProtocol,
+    organizerProtocol,
+    scans,
+    intentions,
+    organized,
+    canSendAs,
+    beforeAliasSend,
+  });
+  const calendar = guardOrganizedCalendar(
+    createCalendarService({ store, origin }),
+    store,
+    organized,
+    origin,
+  );
+  return { mail, invitations, organizer, calendar, scans, organized };
+}
+
+export function startOrganizerReplyJob(
+  scans: OrganizedReplyScanStore,
+  organized: OrganizedInvitationStore,
+  service: OrganizerService,
+  onError: () => void,
+  audit?: (event: { userId: string | null; action: string }) => Promise<void>,
+) {
+  let running: Promise<void> | undefined;
+  const tick = () => {
+    if (running) return;
+    running = (async () => {
+      await reconcileOrganizerPending(organized, service).catch(onError);
+      await scanOrganizerReplies(scans, service, audit).catch(onError);
+    })().finally(() => {
+      running = undefined;
+    });
+  };
+  tick();
+  const timer = setInterval(tick, 60_000);
+  return async () => {
+    clearInterval(timer);
+    await running;
+  };
 }
