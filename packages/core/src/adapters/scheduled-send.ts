@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
+  ScheduledSchema,
+  scheduledDto,
+  type ScheduleDelivery,
+} from "@opensuite/contracts";
+import {
   createScheduledSendStore,
   type PrismaClient,
   type ScheduledRecord,
@@ -112,6 +117,122 @@ async function findSubmission(
   return submission;
 }
 
+const Capability = z.object({
+  maxDelayedSend: z.number().int().nonnegative(),
+  submissionExtensions: z.record(z.string(), z.unknown()),
+});
+function delaySeconds(
+  c: MailConnection,
+  delivery: ScheduleDelivery,
+  now: number,
+  reject: (kind: "validation" | "unavailable") => never,
+) {
+  const releaseTime =
+    delivery.type === "delay"
+      ? now + delivery.seconds * 1000
+      : Date.parse(delivery.at);
+  const seconds = Math.ceil((releaseTime - now) / 1000);
+  const capability = Capability.safeParse(
+    c.session.accounts[c.id]?.accountCapabilities[
+      "urn:ietf:params:jmap:submission"
+    ],
+  );
+  if (
+    !capability.success ||
+    !("FUTURERELEASE" in capability.data.submissionExtensions) ||
+    !("DSN" in capability.data.submissionExtensions)
+  )
+    return reject("unavailable");
+  if (!(
+    seconds >= 1 &&
+    seconds <= Math.min(2_592_000, capability.data.maxDelayedSend)
+  ))
+    return reject("validation");
+  return { release: releaseTime, seconds, max: capability.data.maxDelayedSend };
+}
+async function submit(
+  c: MailConnection,
+  store: ScheduledSendStore,
+  p: {
+    requestId: string;
+    draftId: string;
+    threadId: string;
+    identityId: string;
+    from: string;
+    recipients: { email: string }[];
+    seconds: number;
+  },
+  now: number,
+) {
+  const {
+    requestId,
+    draftId,
+    threadId,
+    identityId,
+    from,
+    recipients,
+    seconds,
+  } = p;
+  const fallback = ScheduledSchema.parse({
+    id: requestId,
+    draftId,
+    threadId,
+    releaseAt: new Date(now + seconds * 1000).toISOString(),
+    state: "unknown",
+  });
+  try {
+    const sent = await c.client.scheduled.scheduleSubmission(
+      c.session,
+      c.id,
+      draftId,
+      identityId,
+      { mailFrom: { email: from }, rcptTo: recipients },
+      seconds,
+      requestId,
+    );
+    if (sent.isOk())
+      await store.transition(
+        requestId,
+        ["creating"],
+        sent.value.undoStatus === "pending" ? "pending" : "unknown",
+        { submissionId: sent.value.id, releaseAt: new Date(sent.value.sendAt) },
+      );
+    else if (
+      sent.error.kind === "set" ||
+      sent.error.kind === "method" ||
+      (sent.error.kind === "network" && sent.error.beforeRequest)
+    ) {
+      const row = await store.get(c.owner, requestId);
+      if (row) await store.finish(row, ["creating", "unknown"], "failed");
+    } else await store.transition(requestId, ["creating"], "unknown");
+    const row = await store.get(c.owner, requestId);
+    return row ? scheduledDto(row) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+async function reserve(
+  store: ScheduledSendStore,
+  input: Omit<ScheduledRecord, "submissionId" | "createdAt">,
+  verify: () => Promise<string[]>,
+  conflict: () => never,
+) {
+  if (!(await store.reserve(input))) return conflict();
+  try {
+    const previousIds = await verify();
+    if (
+      !(await store.transition(input.id, ["preparing"], "creating", {
+        previousIds,
+      }))
+    )
+      return conflict();
+  } catch (error) {
+    const row = await store.get(input.userId, input.id);
+    if (row) await store.finish(row, ["preparing"], "failed");
+    throw error;
+  }
+  return undefined;
+}
 export function createGuards(db: PrismaClient) {
   const store = createScheduledSendStore(db);
   return {
@@ -123,6 +244,9 @@ export function createGuards(db: PrismaClient) {
       conflict: () => never,
     ) => guardDraft(store, c, ids, work, conflict),
     findSubmission,
+    delaySeconds,
+    submit,
+    reserve,
   };
 }
 export function start(

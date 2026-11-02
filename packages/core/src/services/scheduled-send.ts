@@ -1,8 +1,8 @@
-import { z } from "zod";
 import {
-  ScheduledSchema,
+  scheduledDto,
   type Mailbox,
   type ScheduleDelivery,
+  type Scheduled,
 } from "@opensuite/contracts";
 import type { ScheduledRecord, ScheduledSendStore } from "@opensuite/db";
 import type { Actor } from "./accounts.ts";
@@ -12,38 +12,65 @@ type Access = ReturnType<typeof createJmapAccess>;
 type Connection = Awaited<ReturnType<Access["connect"]>>;
 type EmailResult = Awaited<ReturnType<Connection["client"]["emails"]>>;
 type Email = Extract<EmailResult, { value: unknown }>["value"]["list"][number];
-const submissionCapability = "urn:ietf:params:jmap:submission";
+type Submission = {
+  id: string;
+  sendAt: string;
+  undoStatus: "pending" | "final" | "canceled";
+};
+type Sender = {
+  from: string;
+  identityId: string;
+  recipients: { email: string }[];
+};
+type Timing = { release: number; seconds: number; max: number };
+type Reject = (kind: "validation" | "unavailable") => never;
+type Reservation = Omit<ScheduledRecord, "submissionId" | "createdAt">;
 type Dependencies = {
   store: ScheduledSendStore | undefined;
   connect: (actor: Actor, accountId: string) => Promise<Connection>;
-  boxes: (connection: Connection) => Promise<Mailbox[]>;
-  getDraft: (
-    connection: Connection,
-    id: string,
-    boxes: Mailbox[],
-  ) => Promise<Email>;
+  boxes: (c: Connection) => Promise<Mailbox[]>;
   now: () => number;
   run: Access["run"];
   findSubmission: (
     c: Connection,
     row: ScheduledRecord,
     store: ScheduledSendStore,
-  ) => Promise<
-    | {
-        id: string;
-        sendAt: string;
-        undoStatus: "pending" | "final" | "canceled";
-      }
-    | undefined
-  >;
-  sender: (
+  ) => Promise<Submission | undefined>;
+  sender: (c: Connection, email: Email) => Promise<Sender>;
+  delaySeconds: (
     c: Connection,
-    email: Email,
-  ) => Promise<{
-    from: string;
-    identityId: string;
-    recipients: { email: string }[];
-  }>;
+    d: ScheduleDelivery,
+    n: number,
+    reject: Reject,
+  ) => Timing;
+  reserve: (
+    store: ScheduledSendStore,
+    input: Reservation,
+    verify: () => Promise<string[]>,
+    conflict: () => never,
+  ) => Promise<void>;
+  submit: (
+    c: Connection,
+    store: ScheduledSendStore,
+    plan: Pick<
+      Prepared,
+      "requestId" | "draftId" | "identityId" | "from" | "recipients" | "seconds"
+    > & { threadId: string },
+    now: number,
+  ) => Promise<Scheduled>;
+};
+export type ScheduledAdapters = {
+  scheduledStore?: ScheduledSendStore;
+  guardDraft?: <T>(
+    c: Connection,
+    ids: string[],
+    work: () => Promise<T>,
+    conflict: () => never,
+  ) => Promise<T>;
+  findSubmission?: Dependencies["findSubmission"];
+  delaySeconds?: Dependencies["delaySeconds"];
+  submit?: Dependencies["submit"];
+  reserve?: Dependencies["reserve"];
 };
 type Prepared = {
   c: Connection;
@@ -57,41 +84,70 @@ type Prepared = {
   recipients: { email: string }[];
   seconds: number;
 };
-const dto = (row: ScheduledRecord) =>
-  ScheduledSchema.parse({
-    id: row.id,
-    draftId: row.draftId,
-    threadId: row.threadId,
-    releaseAt: row.releaseAt.toISOString(),
-    state: row.state === "preparing" ? "creating" : row.state,
-  });
 const requiredStore = (deps: Dependencies) => deps.store ?? fail("unavailable");
-const Capability = z.object({
-  maxDelayedSend: z.number().int().nonnegative(),
-  submissionExtensions: z.record(z.string(), z.unknown()),
-});
-function delaySeconds(c: Connection, delivery: ScheduleDelivery, now: number) {
-  const releaseTime =
-    delivery.type === "delay"
-      ? now + delivery.seconds * 1000
-      : Date.parse(delivery.at);
-  const seconds = Math.ceil((releaseTime - now) / 1000);
-  const capability = Capability.safeParse(
-    c.session.accounts[c.id]?.accountCapabilities[submissionCapability],
-  );
-  if (
-    !capability.success ||
-    !("FUTURERELEASE" in capability.data.submissionExtensions) ||
-    !("DSN" in capability.data.submissionExtensions)
-  )
-    return fail("unavailable");
-  if (!(
-    seconds >= 1 &&
-    seconds <= Math.min(2_592_000, capability.data.maxDelayedSend)
-  ))
-    return fail("validation");
-  return { release: releaseTime, seconds, max: capability.data.maxDelayedSend };
+export async function getDraft(c: Connection, id: string, boxes: Mailbox[]) {
+  const draftBox =
+    boxes.find((box) => box.role === "drafts")?.id ?? fail("not_found");
+  const email = value(await c.client.emails(c.session, c.id, [id])).list[0];
+  if (!email || !email.keywords["$draft"] || !email.mailboxIds[draftBox])
+    return fail("not_found");
+  return email;
 }
+export function draftOperations(deps: {
+  connect: Dependencies["connect"];
+  run: Dependencies["run"];
+  boxes: Dependencies["boxes"];
+  guard: <T>(
+    c: Connection,
+    ids: string[],
+    work: () => Promise<T>,
+  ) => Promise<T>;
+}) {
+  return <T>(
+    actor: Actor,
+    accountId: string,
+    id: string,
+    work: (c: Connection, list: Mailbox[], email: Email) => Promise<T>,
+  ) =>
+    deps.run(async () => {
+      const c = await deps.connect(actor, accountId);
+      return deps.guard(c, [id], async () => {
+        const list = await deps.boxes(c);
+        return work(c, list, await getDraft(c, id, list));
+      });
+    });
+}
+export async function senderFor(
+  c: Connection,
+  email: Email,
+  options: {
+    canSendAs?:
+      ((userId: string, address: string) => Promise<string | null>) | undefined;
+    beforeAliasSend?:
+      ((userId: string, aliasId: string) => Promise<boolean>) | undefined;
+  },
+) {
+  const recipients = [email.to, email.cc, email.bcc].flatMap((a) => a ?? []);
+  if (!recipients.length) return fail("validation");
+  const from = email.from?.[0]?.email.toLowerCase() ?? c.address.toLowerCase();
+  const aliasId =
+    from === c.address.toLowerCase()
+      ? null
+      : await options.canSendAs?.(c.owner, from);
+  if (from !== c.address.toLowerCase() && !aliasId) return fail("forbidden");
+  const identity = value(await c.client.identities(c.session, c.id)).list.find(
+    (item) => item.email.toLowerCase() === from,
+  );
+  if (!identity) return fail("unavailable");
+  if (aliasId && !(await options.beforeAliasSend?.(c.owner, aliasId)))
+    return fail("rate_limited");
+  return {
+    from,
+    identityId: identity.id,
+    recipients: recipients.map((item) => ({ email: item.email })),
+  };
+}
+
 async function prepare(
   deps: Dependencies,
   c: Connection,
@@ -100,8 +156,8 @@ async function prepare(
   delivery: ScheduleDelivery,
 ): Promise<Prepared> {
   const store = requiredStore(deps);
-  const timing = delaySeconds(c, delivery, deps.now());
-  const email = await deps.getDraft(c, draftId, await deps.boxes(c));
+  const timing = deps.delaySeconds(c, delivery, deps.now(), fail);
+  const email = await getDraft(c, draftId, await deps.boxes(c));
   const { from, identityId, recipients } = await deps.sender(c, email);
   const seconds =
     delivery.type === "at"
@@ -121,94 +177,6 @@ async function prepare(
     seconds,
   };
 }
-async function reserve(deps: Dependencies, p: Prepared) {
-  const { store, c, requestId, draftId, email, identityId, seconds, encoded } =
-    p;
-  if (
-    !(await store.reserve({
-      id: requestId,
-      userId: c.owner,
-      accountId: c.id,
-      draftId,
-      threadId: email.threadId,
-      identityId,
-      releaseAt: new Date(deps.now() + seconds * 1000),
-      previousIds: [],
-      state: "preparing",
-      requestDelivery: encoded,
-    }))
-  )
-    fail("conflict");
-  try {
-    await deps.getDraft(c, draftId, await deps.boxes(c));
-    const previous = value(
-      await c.client.scheduled.submissionIds(c.session, c.id, draftId),
-    );
-    if (previous.total === undefined || previous.total !== previous.ids.length)
-      fail("unavailable");
-    if (
-      !(await store.transition(requestId, ["preparing"], "creating", {
-        previousIds: previous.ids,
-      }))
-    )
-      fail("conflict");
-  } catch (error) {
-    const row = await store.get(c.owner, requestId);
-    if (row) await store.finish(row, ["preparing"], "failed");
-    throw error;
-  }
-  return undefined;
-}
-async function submit(deps: Dependencies, p: Prepared) {
-  const {
-    store,
-    c,
-    requestId,
-    draftId,
-    email,
-    identityId,
-    from,
-    recipients,
-    seconds,
-  } = p;
-  const fallback = ScheduledSchema.parse({
-    id: requestId,
-    draftId,
-    threadId: email.threadId,
-    releaseAt: new Date(deps.now() + seconds * 1000).toISOString(),
-    state: "unknown",
-  });
-  try {
-    const sent = await c.client.scheduled.scheduleSubmission(
-      c.session,
-      c.id,
-      draftId,
-      identityId,
-      { mailFrom: { email: from }, rcptTo: recipients },
-      seconds,
-      requestId,
-    );
-    if (sent.isOk())
-      await store.transition(
-        requestId,
-        ["creating"],
-        sent.value.undoStatus === "pending" ? "pending" : "unknown",
-        { submissionId: sent.value.id, releaseAt: new Date(sent.value.sendAt) },
-      );
-    else if (
-      sent.error.kind === "set" ||
-      sent.error.kind === "method" ||
-      (sent.error.kind === "network" && sent.error.beforeRequest)
-    ) {
-      const row = await store.get(c.owner, requestId);
-      if (row) await store.finish(row, ["creating", "unknown"], "failed");
-    } else await store.transition(requestId, ["creating"], "unknown");
-    const row = await store.get(c.owner, requestId);
-    return row ? dto(row) : fallback;
-  } catch {
-    return fallback;
-  }
-}
 async function schedule(
   deps: Dependencies,
   actor: Actor,
@@ -227,11 +195,43 @@ async function schedule(
       existing.requestDelivery !== JSON.stringify(delivery)
     )
       return fail("conflict");
-    return dto(existing);
+    return scheduledDto(existing);
   }
   const prepared = await prepare(deps, c, draftId, requestId, delivery);
-  await reserve(deps, prepared);
-  return submit(deps, prepared);
+  await deps.reserve(
+    store,
+    {
+      id: requestId,
+      userId: c.owner,
+      accountId: c.id,
+      draftId,
+      threadId: prepared.email.threadId,
+      identityId: prepared.identityId,
+      releaseAt: new Date(deps.now() + prepared.seconds * 1000),
+      previousIds: [],
+      state: "preparing",
+      requestDelivery: prepared.encoded,
+    },
+    async () => {
+      await getDraft(c, draftId, await deps.boxes(c));
+      const previous = value(
+        await c.client.scheduled.submissionIds(c.session, c.id, draftId),
+      );
+      if (
+        previous.total === undefined ||
+        previous.total !== previous.ids.length
+      )
+        return fail("unavailable");
+      return previous.ids;
+    },
+    () => fail("conflict"),
+  );
+  return deps.submit(
+    prepared.c,
+    prepared.store,
+    { ...prepared, threadId: prepared.email.threadId },
+    deps.now(),
+  );
 }
 async function current(
   deps: Dependencies,
@@ -255,9 +255,9 @@ async function cancel(
   if (row.state === "pending" && row.releaseAt.getTime() <= deps.now()) {
     await store.transition(row.id, ["pending"], "releasing");
     const found = await store.get(actor.id, id);
-    return found ? dto(found) : fail("unavailable");
+    return found ? scheduledDto(found) : fail("unavailable");
   }
-  if (row.state !== "pending" || !row.submissionId) return dto(row);
+  if (row.state !== "pending" || !row.submissionId) return scheduledDto(row);
   if (await store.transition(row.id, ["pending"], "canceling")) {
     try {
       const canceled = await c.client.scheduled.cancelSubmission(
@@ -268,13 +268,13 @@ async function cancel(
       if (canceled.isOk()) await store.finish(row, ["canceling"], "canceled");
       else await store.transition(row.id, ["canceling"], "unknown");
       const found = await store.get(actor.id, id);
-      return dto(found ?? { ...row, state: "unknown" });
+      return scheduledDto(found ?? { ...row, state: "unknown" });
     } catch {
-      return dto({ ...row, state: "unknown" });
+      return scheduledDto({ ...row, state: "unknown" });
     }
   }
   const found = await store.get(actor.id, id);
-  return found ? dto(found) : fail("unavailable");
+  return found ? scheduledDto(found) : fail("unavailable");
 }
 async function release(
   deps: Dependencies,
@@ -392,7 +392,8 @@ export function createScheduledSend(deps: Dependencies) {
       deps.run(async () => {
         const store = requiredStore(deps);
         const c = await deps.connect(actor, accountId);
-        return { scheduled: (await store.list(c.owner, c.id)).map(dto) };
+        const rows = await store.list(c.owner, c.id);
+        return { scheduled: rows.map(scheduledDto) };
       }),
     cancelScheduled: (actor: Actor, accountId: string, id: string) =>
       deps.run(() => cancel(deps, actor, accountId, id)),

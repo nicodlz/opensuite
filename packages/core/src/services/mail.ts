@@ -1,4 +1,3 @@
-import type { ScheduledRecord, ScheduledSendStore } from "@opensuite/db";
 import {
   type Draft,
   type DraftContent,
@@ -10,7 +9,12 @@ import {
 } from "@opensuite/contracts";
 import { JmapCapability, type Email, type JmapClient } from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
-import { createScheduledSend } from "./scheduled-send.ts";
+import {
+  createScheduledSend,
+  draftOperations,
+  senderFor,
+  type ScheduledAdapters,
+} from "./scheduled-send.ts";
 import {
   createJmapAccess,
   fail,
@@ -19,21 +23,9 @@ import {
   type MailCredentialStore,
 } from "./jmap-access.ts";
 
-type MailConnection = Awaited<
-  ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
->;
-type FindSubmission = (
-  c: MailConnection,
-  row: ScheduledRecord,
-  store: ScheduledSendStore,
-) => Promise<
-  | { id: string; sendAt: string; undoStatus: "pending" | "final" | "canceled" }
-  | undefined
->;
+type MailConnection = Parameters<typeof senderFor>[0];
 export type MailFailureKind = AccessFailureKind;
-export interface MailFailure {
-  kind: MailFailureKind;
-}
+export type MailFailure = { kind: MailFailureKind };
 export type { MailCredentialStore } from "./jmap-access.ts";
 export interface ThreadOptions {
   mailboxId: string;
@@ -42,10 +34,8 @@ export interface ThreadOptions {
   search?: MailSearch | undefined;
   sort: "newest" | "oldest";
 }
-const address = (item: { name: string | null; email: string }) => ({
-  email: item.email,
-  ...(item.name ? { name: item.name } : {}),
-});
+const address = ({ name, email }: { name: string | null; email: string }) =>
+  name ? { email, name } : { email };
 const addresses = (items: Email["from"]) => (items ?? []).map(address);
 const body = (email: Email, parts: Email["textBody"], type: string) =>
   parts
@@ -216,14 +206,12 @@ export function createMailService(dependencies: {
   now?: () => number;
   canSendAs?: (userId: string, address: string) => Promise<string | null>;
   beforeAliasSend?: (userId: string, aliasId: string) => Promise<boolean>;
-  scheduledStore?: ScheduledSendStore;
-  guardDraft?: <T>(
-    c: MailConnection,
-    ids: string[],
-    work: () => Promise<T>,
-    conflict: () => never,
-  ) => Promise<T>;
-  findSubmission?: FindSubmission;
+  scheduledStore?: ScheduledAdapters["scheduledStore"];
+  guardDraft?: ScheduledAdapters["guardDraft"];
+  findSubmission?: ScheduledAdapters["findSubmission"];
+  delaySeconds?: ScheduledAdapters["delaySeconds"];
+  submit?: ScheduledAdapters["submit"];
+  reserve?: ScheduledAdapters["reserve"];
 }) {
   const { run, connect: open, now } = createJmapAccess(dependencies);
   const uploads = new Map<
@@ -259,16 +247,6 @@ export function createMailService(dependencies: {
     if (result.notFound.length > 0 || result.list.length === 0)
       return fail("conflict");
     return result.list;
-  };
-  const getDraft = async (c: Connection, id: string, list: Mailbox[]) => {
-    const email = value(await c.client.emails(c.session, c.id, [id])).list[0];
-    if (
-      email === undefined ||
-      !email.keywords["$draft"] ||
-      !email.mailboxIds[role(list, "drafts")]
-    )
-      return fail("not_found");
-    return email;
   };
   const create = async (
     c: Connection,
@@ -329,64 +307,29 @@ export function createMailService(dependencies: {
       }),
     );
   };
-  const sender = async (c: Connection, email: Email) => {
-    const recipients = [
-      ...addresses(email.to),
-      ...addresses(email.cc),
-      ...addresses(email.bcc),
-    ];
-    if (!recipients.length) return fail("validation");
-    const from =
-      email.from?.[0]?.email.toLowerCase() ?? c.address.toLowerCase();
-    const aliasId =
-      from === c.address.toLowerCase()
-        ? null
-        : await dependencies.canSendAs?.(c.owner, from);
-    if (from !== c.address.toLowerCase() && !aliasId) return fail("forbidden");
-    const identity = value(
-      await c.client.identities(c.session, c.id),
-    ).list.find((item) => item.email.toLowerCase() === from);
-    if (!identity) return fail("unavailable");
-    if (aliasId && !(await dependencies.beforeAliasSend?.(c.owner, aliasId)))
-      return fail("rate_limited");
-    return {
-      from,
-      identityId: identity.id,
-      recipients: recipients.map((item) => ({ email: item.email })),
-    };
-  };
   const store = dependencies.scheduledStore;
   const scheduled = createScheduledSend({
     store,
     connect,
     boxes,
-    getDraft,
     now,
     run,
-    sender,
+    sender: (c, email) => senderFor(c, email, dependencies),
+    delaySeconds: dependencies.delaySeconds ?? (() => fail("unavailable")),
+    submit:
+      dependencies.submit ?? (() => Promise.reject(new Error("unavailable"))),
+    reserve:
+      dependencies.reserve ?? (() => Promise.reject(new Error("unavailable"))),
     findSubmission:
       dependencies.findSubmission ?? (() => Promise.resolve(undefined)),
   });
   const guard = <T>(c: Connection, ids: string[], work: () => Promise<T>) => {
     if (!store) return work();
-    return (
-      dependencies.guardDraft?.(c, ids, work, () => fail("conflict")) ??
-      fail("unavailable")
-    );
+    const guarded = dependencies.guardDraft;
+    if (!guarded) return fail("unavailable");
+    return guarded(c, ids, work, () => fail("conflict"));
   };
-  const withDraft = <T>(
-    actor: Actor,
-    accountId: string,
-    id: string,
-    work: (c: Connection, list: Mailbox[], email: Email) => Promise<T>,
-  ) =>
-    run(async () => {
-      const c = await connect(actor, accountId);
-      return guard(c, [id], async () => {
-        const list = await boxes(c);
-        return work(c, list, await getDraft(c, id, list));
-      });
-    });
+  const withDraft = draftOperations({ connect, run, boxes, guard });
   return {
     identity: (actor: Actor, accountId: string) =>
       run(async () => {
@@ -563,7 +506,11 @@ export function createMailService(dependencies: {
       }),
     send: (actor: Actor, accountId: string, id: string) =>
       withDraft(actor, accountId, id, async (c, list, email) => {
-        const { from, identityId, recipients } = await sender(c, email);
+        const { from, identityId, recipients } = await senderFor(
+          c,
+          email,
+          dependencies,
+        );
         value(
           await c.client.submit(
             c.session,

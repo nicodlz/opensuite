@@ -104,6 +104,21 @@ export const ScheduledSchema = z.object({
     "failed",
   ]),
 });
+export function scheduledDto(row: {
+  id: string;
+  draftId: string;
+  threadId: string;
+  releaseAt: Date;
+  state: string;
+}) {
+  return ScheduledSchema.parse({
+    id: row.id,
+    draftId: row.draftId,
+    threadId: row.threadId,
+    releaseAt: row.releaseAt.toISOString(),
+    state: row.state === "preparing" ? "creating" : row.state,
+  });
+}
 export type Scheduled = z.infer<typeof ScheduledSchema>;
 export const ScheduleDeliverySchema = z.discriminatedUnion("type", [
   z.object({
