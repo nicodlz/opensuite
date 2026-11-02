@@ -22,6 +22,11 @@ case_done() { [ "$vault_drill" = 0 ] || printf '%s\n' "$1" >> "$VAULT_DRILL_CASE
 cleanup() {
   rc=$?
   trap - EXIT HUP INT TERM
+  if [ "$rc" -ne 0 ]; then
+    for log_file in limited.log warning.log verify-failure.log prune-failure.log; do
+      [ ! -f "$work/$log_file" ] || tail -40 "$work/$log_file" >&2
+    done
+  fi
   for project in "$old" "$new"; do
     if [ "$rc" -ne 0 ]; then docker compose --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" logs --no-color postgres stalwart >&2 || :; fi
     docker compose --profile '*' --env-file "$work/source/.env" --project-name "$project" -f "$root/compose.yaml" down --volumes --remove-orphans --timeout 5 >/dev/null 2>&1 || :
@@ -82,6 +87,10 @@ chmod 644 "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$wor
 cat > "$work/backup.conf" <<CONFIG
 BACKUP_REPOSITORY='s3:http://object-store:8333/backup-fixture/repo'
 BACKUP_REGION='us-east-1'
+BACKUP_BUDGET_BYTES=1099511627776
+BACKUP_KEEP_DAILY=1
+BACKUP_KEEP_WEEKLY=0
+BACKUP_KEEP_MONTHLY=0
 BACKUP_ACCESS_KEY_ID='fixture-access'
 BACKUP_SECRET_ACCESS_KEY='fixture-secret'
 BACKUP_PASSWORD_FILE='$work/secrets/restic'
@@ -107,8 +116,13 @@ services:
     ports: !override ["127.0.0.1::8080"]
   backup-restic:
     networks: [objects]
+  backup-stream:
+    networks: [objects]
   backup-objects:
     networks: [objects]
+    environment:
+      RCLONE_RETRIES: "1"
+      RCLONE_LOW_LEVEL_RETRIES: "1"
   vault:
     environment:
       SIGNUPS_ALLOWED: "true"
@@ -212,6 +226,9 @@ compose exec -T postgres psql -U opensuite -d opensuite_drive -v ON_ERROR_STOP=1
 compose exec -T postgres psql -U opensuite -d opensuite -v ON_ERROR_STOP=1 -c 'INSERT INTO "User" (id, name, email, "updatedAt") VALUES ('"'"'fixture'"'"', '"'"'account-fixture'"'"', '"'"'fixture@example.invalid'"'"', now()); CREATE ROLE opensuite_app LOGIN; GRANT SELECT ON "User" TO opensuite_app;'
 compose exec -T postgres psql -U opensuite -d opensuite_drive -v ON_ERROR_STOP=1 -c 'INSERT INTO "Entry" (id, "ownerId", name, kind, state, "objectKey", "updatedAt") VALUES ('"'"'file-fixture'"'"', '"'"'fixture'"'"', '"'"'file'"'"', '"'"'file'"'"', '"'"'ready'"'"', '"'"'drive/objects/file-fixture'"'"', now());'
 printf 'drive-content-fixture' | rclone_local rcat store:drive-fixture/drive/objects/file-fixture
+# Incompressible data demonstrates cross-snapshot deduplication, not compression.
+dd if=/dev/urandom of="$work/large-object" bs=1048576 count=8 status=none
+rclone_local rcat store:drive-fixture/drive/objects/large-fixture < "$work/large-object"
 mailport=$(compose port stalwart 8080 | sed 's/.*://')
 password=$(compose run --rm --no-deps -T backup-management 'cat /run/opensuite/stalwart-management/password')
 base="http://127.0.0.1:$mailport"
@@ -226,7 +243,7 @@ email=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].created.fixture
 [ "$vault_drill" = 0 ] || vault_case_create
 ./deploy/backup/init.sh
 if [ "$vault_drill" = 1 ]; then vault_case_failure; vault_case_missing_key; fi
-# A scratch area too small for the objects is refused before any service stops.
+# An insufficient scratch reserve is refused before any service stops.
 services=$(compose ps --services --filter status=running)
 before=$(printf '%s\n' "$services" | sort)
 if BACKUP_SCRATCH_RESERVE_BYTES=999999999999999999 ./deploy/backup/backup.sh 2>"$work/too-small"; then
@@ -239,7 +256,168 @@ services=$(compose ps --services --filter status=running)
 ./deploy/backup/backup.sh
 [ -s "$work/source/deploy/backup-status/last-success" ]
 [ "$(stat -c %a "$work/source/deploy/backup-status/last-success")" = 644 ]
-[ "$vault_drill" = 0 ] || vault_case_backup
+[ "$(cat "$work/source/deploy/backup-status/last-failure")" = verification ]
+# Maintenance cannot prune until an independent restore has been pinned.
+if ./deploy/backup/retention.sh > "$work/no-pin.log" 2>&1; then
+  echo 'retention ran without an independent restore pin' >&2; exit 1
+fi
+grep -q 'independent restore pin required' "$work/no-pin.log"
+[ "$vault_drill" = 0 ] || case_done 'real encrypted backup and success marker'
+first_bytes=$(compose run --rm --no-deps -T backup-restic 'exec restic stats --json --mode raw-data' | jq '.total_size')
+# A budget already exhausted is refused before stopping any service.
+cp "$work/backup.conf" "$work/limited-backup.conf"
+printf '\nBACKUP_BUDGET_BYTES=1\n' >> "$work/limited-backup.conf"
+if BACKUP_CONFIG="$work/limited-backup.conf" ./deploy/backup/backup.sh > "$work/limited.log" 2>&1; then
+  echo 'backup ran with an exhausted repository budget' >&2; exit 1
+fi
+grep -q 'repository budget reached' "$work/limited.log"
+services=$(compose ps --services --filter status=running)
+[ "$(printf '%s\n' "$services" | sort)" = "$before" ]
+# A low but not exhausted budget emits an early warning on a successful run.
+cp "$work/backup.conf" "$work/warning-backup.conf"
+printf '\nBACKUP_BUDGET_BYTES=1000000000\n' >> "$work/warning-backup.conf"
+BACKUP_CONFIG="$work/warning-backup.conf" ./deploy/backup/backup.sh > "$work/warning.log" 2>&1
+grep -q '"event":"storage_near_limit"' "$work/warning.log"
+[ "$(cat "$work/source/deploy/backup-status/last-failure")" = capacity ]
+[ -s "$work/source/deploy/backup-status/last-success" ]
+second_bytes=$(compose run --rm --no-deps -T backup-restic 'exec restic stats --json --mode raw-data' | jq '.total_size')
+[ "$((second_bytes - first_bytes))" -lt 4194304 ] || { echo 'unchanged object bytes were not deduplicated' >&2; exit 1; }
+snapshot_count=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified' | jq 'length')
+[ "$snapshot_count" -ge 2 ] || { echo 'backup removed the previous verified snapshot' >&2; exit 1; }
+# A failed full readback after restart must not publish a verified snapshot.
+mkdir "$work/fail-bin"
+docker_path=$(command -v docker)
+cat > "$work/fail-bin/docker" <<WRAPPER
+#!/bin/sh
+case "\$*" in
+  *'backup-stream verify '*) echo 'fixture: injected object verification failure' >&2; exit 1;;
+esac
+exec "$docker_path" "\$@"
+WRAPPER
+chmod +x "$work/fail-bin/docker"
+if PATH="$work/fail-bin:$PATH" ./deploy/backup/backup.sh > "$work/verify-failure.log" 2>&1; then
+  echo 'backup ignored a failed snapshot verification' >&2; exit 1
+fi
+grep -q 'fixture: injected object verification failure' "$work/verify-failure.log"
+grep -q '"event":"captured"' "$work/verify-failure.log"
+grep -q '"event":"failure"' "$work/verify-failure.log"
+services=$(compose ps --services --filter status=running)
+[ "$(printf '%s\n' "$services" | sort)" = "$before" ]
+[ "$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified' | jq 'length')" = "$snapshot_count" ]
+pending_id=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-pending' | jq -er '.[0].id')
+if ./deploy/backup/mark-restorable.sh "$pending_id" --confirm-restored "$pending_id" > "$work/pending-pin.log" 2>&1; then
+  echo 'pending snapshot was accepted as restorable' >&2; exit 1
+fi
+# Independently restore a verified snapshot into a second disposable project.
+# Both projects use the fixture object store; writers are stopped and the
+# existing objects must match exactly before the isolated restore can proceed.
+proof_id=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified --latest 1 --group-by paths' | jq -er '.[0].snapshots[0].id')
+mkdir "$work/original-secrets"
+for secret in mail drive relay tls-cert tls-key; do cp "$work/secrets/$secret" "$work/original-secrets/$secret"; done
+if [ "$vault_drill" = 1 ]; then cp "$work/secrets/vault-admin" "$work/original-secrets/vault-admin"; fi
+# Inspect scratch immediately after restic restores the metadata subtree. The
+# object trees must stay in the repository and be streamed to their targets.
+mkdir "$work/inspect-bin"
+cat > "$work/inspect-bin/docker" <<WRAPPER
+#!/bin/sh
+case "\$*" in
+  *'chown -R "\$1:\$2" /stage/data'*)
+    "$docker_path" run --rm --network none --mount "type=bind,src=\$BACKUP_STAGE,dst=/stage,readonly" \
+      alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a \
+      sh -ec '[ ! -d /stage/data/objects/mail ] && [ ! -d /stage/data/objects/drive ]' || {
+        echo 'restore staged object data in scratch' >&2; exit 1;
+      }
+    : > "$work/scratch-checked"
+    ;;
+esac
+exec "$docker_path" "\$@"
+WRAPPER
+chmod +x "$work/inspect-bin/docker"
+compose --profile '*' down --remove-orphans --timeout 10
+(
+  export COMPOSE_PROJECT_NAME="$new"
+  cd "$work/target"
+  PATH="$work/inspect-bin:$PATH" ./deploy/backup/restore.sh --force --confirm-project "$new" "$proof_id"
+  [ -f "$work/scratch-checked" ] || { echo 'restore scratch inspection did not run' >&2; exit 1; }
+  [ "$(compose exec -T postgres psql -U opensuite -d opensuite -Atc 'select name from "User"')" = account-fixture ]
+  [ "$(compose exec -T postgres psql -U opensuite -d opensuite_drive -Atc 'select "objectKey" from "Entry"')" = drive/objects/file-fixture ]
+  compose up -d --no-deps --wait --wait-timeout 180 stalwart
+  mailport=$(compose port stalwart 8080 | sed 's/.*://')
+  base="http://127.0.0.1:$mailport"
+  response=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Email/get\",{\"accountId\":\"$account\",\"ids\":[\"$email\"],\"properties\":[\"id\",\"blobId\"]},\"a\"]]}")
+  restored_blob=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].list[0].blobId')
+  request "$base/jmap/download/$account/$restored_blob/fixture.eml" > "$work/proof-message"
+  cmp "$work/message" "$work/proof-message"
+  rclone_local cat store:drive-fixture/drive/objects/large-fixture > "$work/proof-large"
+  cmp "$work/large-object" "$work/proof-large"
+  if [ "$vault_drill" = 1 ]; then vault_case_restore; vault_case_verify; fi
+  compose --profile '*' down --volumes --remove-orphans --timeout 10
+  rm .env deploy/ingest.env deploy/observe.env
+)
+for secret in mail drive relay tls-cert tls-key; do rm -f "$work/secrets/$secret"; cp "$work/original-secrets/$secret" "$work/secrets/$secret"; chmod 644 "$work/secrets/$secret"; done
+if [ "$vault_drill" = 1 ]; then rm -f "$work/secrets/vault-admin"; cp "$work/original-secrets/vault-admin" "$work/secrets/vault-admin"; rm -rf "$work/cli-verify"; fi
+# Recreate the one-shot dependencies as well: later compose start must find them.
+compose up -d --no-deps secrets
+compose up -d --no-deps --wait --wait-timeout 180 postgres stalwart
+if [ "$vault_drill" = 1 ]; then
+  compose --profile vault up --no-deps --exit-code-from vault-provision vault-provision
+  compose --profile vault up -d --no-deps --wait --wait-timeout 180 vault caddy
+fi
+./deploy/backup/mark-restorable.sh "$proof_id" --confirm-restored "$proof_id" > "$work/restorable.log"
+grep -q '"event":"snapshot_restorable"' "$work/restorable.log"
+[ "$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-restorable' | jq 'length')" -ge 1 ]
+old_pin=$(jq -er 'select(.event == "snapshot_restorable") | .snapshot' "$work/restorable.log")
+unproven=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified' | jq -er --arg pinned "$old_pin" '[.[] | select(.id != $pinned)][0].id')
+if ./deploy/backup/retire-restorable.sh "$old_pin" --confirm-replacement "$unproven" > "$work/unpin-refused.log" 2>&1; then
+  echo 'last restorable pin was retired in favor of an unproven snapshot' >&2; exit 1
+fi
+grep -q 'both snapshots must be verified and pinned' "$work/unpin-refused.log"
+if ./deploy/backup/retire-restorable.sh "$old_pin" --confirm-replacement "$old_pin" > "$work/unpin-self.log" 2>&1; then
+  echo 'last restorable pin was retired without a replacement' >&2; exit 1
+fi
+# Create an older synthetic verified fixture so retention has an actual pack
+# to forget and prune after the independently restored snapshot is pinned.
+mkdir -p "$work/scratch/data"
+dd if=/dev/urandom of="$work/scratch/data/old-fixture" bs=1048576 count=1 status=none
+old_id=$(compose run --rm --no-deps -T backup-restic 'exec restic backup --json --time "2020-01-01 00:00:00" --tag opensuite-verified /stage/data' | jq -r 'select(.message_type == "summary") | .snapshot_id')
+# A budget stop can be recovered by applying the same pinned policy manually.
+BACKUP_CONFIG="$work/limited-backup.conf" ./deploy/backup/retention.sh > "$work/maintenance.log" 2>&1
+grep -q '"event":"retention_maintenance_success"' "$work/maintenance.log"
+snapshots=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified')
+[ "$(printf '%s' "$snapshots" | jq --arg id "$old_id" '[.[] | select(.id == $id)] | length')" = 0 ]
+[ "$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-restorable' | jq --arg id "$old_pin" '[.[] | select(.id == $id)] | length')" = 1 ]
+# Recreate the obsolete fixture for the interrupted-prune recovery case.
+old_id=$(compose run --rm --no-deps -T backup-restic 'exec restic backup --json --time "2020-01-01 00:00:00" --tag opensuite-verified /stage/data' | jq -r 'select(.message_type == "summary") | .snapshot_id')
+rm -rf "$work/scratch/data"
+# Interrupt prune after a newer snapshot has passed verification. Retention
+# leaves at least two verified snapshots and the next run can resume pruning.
+cat > "$work/fail-bin/docker" <<WRAPPER
+#!/bin/bash
+args=("\$@")
+for i in "\${!args[@]}"; do
+  if [[ "\${args[\$i]}" == 'restic prune || '* ]]; then
+    args[\$i]='mkfifo /stage/prune-fixture.pipe; restic prune > /stage/prune-fixture.pipe 2>&1 & p=\$!; while IFS= read -r line; do printf "%s\\n" "\$line" >&2; case "\$line" in *"loading all snapshots"*) kill -KILL "\$p" || exit 42; echo fixture-prune-killed >&2; break;; esac; done < /stage/prune-fixture.pipe; wait "\$p" 2>/dev/null; restic unlock; exit 43'
+    echo 'fixture: interrupting prune' >&2
+  fi
+done
+exec "$docker_path" "\${args[@]}"
+WRAPPER
+chmod +x "$work/fail-bin/docker"
+if PATH="$work/fail-bin:$PATH" ./deploy/backup/backup.sh > "$work/prune-failure.log" 2>&1; then
+  echo 'interrupted prune unexpectedly succeeded' >&2; exit 1
+fi
+grep -q 'fixture: interrupting prune' "$work/prune-failure.log"
+grep -q 'fixture-prune-killed' "$work/prune-failure.log"
+grep -q 'loading all snapshots' "$work/prune-failure.log"
+grep -q 'successfully removed 1 locks' "$work/prune-failure.log"
+grep -q '"event":"snapshot_verified"' "$work/prune-failure.log"
+grep -q '"event":"failure"' "$work/prune-failure.log"
+./deploy/backup/backup.sh
+# The pinned recovery point and newer snapshots survive; the old fixture was forgotten.
+snapshots=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified')
+[ "$(printf '%s' "$snapshots" | jq --arg id "$old_id" '[.[] | select(.id == $id)] | length')" = 0 ]
+[ "$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-restorable' | jq 'length')" -ge 1 ]
+latest_after_prune=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-verified --latest 1 --group-by paths' | jq -er '.[0].snapshots[0].id')
 # Delete live application state and object copies while retaining the backup bucket.
 compose --profile '*' down --volumes --remove-orphans --timeout 10
 rclone_local purge store:mail-fixture/mail
@@ -248,7 +426,7 @@ rm "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$work/secre
 if [ "$vault_drill" = 1 ]; then rm "$work/secrets/vault-admin"; rm -rf "$work/cli-create"; fi
 export COMPOSE_PROJECT_NAME="$new"
 cd "$work/target"
-./deploy/backup/restore.sh
+./deploy/backup/restore.sh "$latest_after_prune"
 if [ "$vault_drill" = 1 ]; then
   vault_case_refusal; vault_case_restore; vault_case_verify
   vault_case_force_preflight; vault_case_partial_restore; vault_case_retry
@@ -263,10 +441,20 @@ compose up -d --no-deps --wait --wait-timeout 180 stalwart
 [ "$(compose exec -T postgres psql -U opensuite -d opensuite_drive -Atc 'select "objectKey" from "Entry"')" = drive/objects/file-fixture ]
 [ "$(compose exec -T postgres psql -U opensuite -d opensuite -Atc "SELECT has_table_privilege('opensuite_app', '\"User\"', 'SELECT')")" = t ]
 [ "$(rclone_local cat store:drive-fixture/drive/objects/file-fixture)" = drive-content-fixture ]
+rclone_local cat store:drive-fixture/drive/objects/large-fixture > "$work/restored-large"
+cmp "$work/large-object" "$work/restored-large"
 mailport=$(compose port stalwart 8080 | sed 's/.*://')
 base="http://127.0.0.1:$mailport"
 response=$(jmap "{\"using\":[\"urn:ietf:params:jmap:core\",\"urn:ietf:params:jmap:mail\"],\"methodCalls\":[[\"Email/get\",{\"accountId\":\"$account\",\"ids\":[\"$email\"],\"properties\":[\"id\",\"blobId\"]},\"a\"]]}")
 restored_blob=$(printf '%s' "$response" | jq -er '.methodResponses[0][1].list[0].blobId')
 request "$base/jmap/download/$account/$restored_blob/fixture.eml" > "$work/restored-message"
 cmp "$work/message" "$work/restored-message"
+# The just-restored newer snapshot can replace the older independent proof.
+./deploy/backup/mark-restorable.sh "$latest_after_prune" --confirm-restored "$latest_after_prune" > "$work/new-restorable.log"
+new_pin=$(jq -er 'select(.event == "snapshot_restorable") | .snapshot' "$work/new-restorable.log")
+./deploy/backup/retire-restorable.sh "$old_pin" --confirm-replacement "$new_pin" > "$work/unpinned.log"
+grep -q '"event":"snapshot_unpinned"' "$work/unpinned.log"
+BACKUP_CONFIG="$work/limited-backup.conf" ./deploy/backup/retention.sh > "$work/final-maintenance.log" 2>&1
+[ "$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-restorable' | jq --arg id "$new_pin" '[.[] | select(.id == $id)] | length')" = 1 ]
+[ "$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag opensuite-restorable' | jq 'length')" = 1 ]
 printf '%s\n' 'Backup integration passed: PostgreSQL accounts and Drive metadata, Drive object, Stalwart account and S3 mail bytes restored.'

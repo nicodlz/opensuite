@@ -2,11 +2,19 @@
 # A separate B2 key scoped to the private backup bucket/prefix. Never commit it.
 BACKUP_REPOSITORY='s3:https://s3.example.invalid/private-backup/opensuite'
 BACKUP_REGION='us-east-1'
+# Repository budget and configurable retention; at least two verified snapshots
+# are kept regardless of these values. Monitor storage_near_limit and failures.
+BACKUP_BUDGET_BYTES=1099511627776
+BACKUP_KEEP_DAILY=7
+BACKUP_KEEP_WEEKLY=5
+BACKUP_KEEP_MONTHLY=12
 BACKUP_ACCESS_KEY_ID='replace-me'
 BACKUP_SECRET_ACCESS_KEY='replace-me'
 BACKUP_PASSWORD_FILE='/etc/opensuite/restic-password'
-# Private encrypted filesystem with room for the entire uncompressed set.
+# Private encrypted filesystem with room for dumps, volumes and manifests.
 BACKUP_SCRATCH='/var/lib/opensuite-backup-scratch'
+# Minimum free scratch before stopping services; size it for this installation.
+BACKUP_SCRATCH_RESERVE_BYTES=4294967296
 # Set to 1 when Vault is enabled even if its container/database is absent.
 # Existing Vault containers and databases are detected automatically.
 BACKUP_VAULT_ENABLED=0

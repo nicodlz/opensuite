@@ -6,6 +6,7 @@ running=''
 capture_started=''
 phase=backup
 locked=0
+warning_reason=''
 cleanup() {
   result=$?
   trap - EXIT HUP INT TERM
@@ -20,7 +21,10 @@ cleanup() {
       capture_marker=$(mktemp "$marker_dir/.last-ingest-capture.XXXXXXXX") &&
       printf '%s\n' "$capture_started" > "$capture_marker" && chmod 0644 "$capture_marker" && mv -f "$capture_marker" "$marker_dir/last-ingest-capture" &&
       marker=$(mktemp "$marker_dir/.last-success.XXXXXXXX") &&
-      printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker" && chmod 0644 "$marker" && mv -f "$marker" "$marker_dir/last-success" && rm -f "$marker_dir/last-failure"); then
+      printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker" && chmod 0644 "$marker" && mv -f "$marker" "$marker_dir/last-success" &&
+      if [ -n "$warning_reason" ]; then
+        warning=$(mktemp "$marker_dir/.last-failure.XXXXXXXX") && printf '%s\n' "$warning_reason" > "$warning" && chmod 0644 "$warning" && mv -f "$warning" "$marker_dir/last-failure"
+      else rm -f "$marker_dir/last-failure"; fi); then
       result=1
       log marker_failed
     fi
@@ -91,25 +95,51 @@ case "${MAIL_BLOB_STORE:-local}" in
     ;;
   *) echo 'backup: unknown mail blob store' >&2; exit 1 ;;
 esac
-# Objects are copied to scratch while services are stopped. Refuse before
-# stopping anything when they cannot fit, keeping a reserve for dumps and
-# volumes (BACKUP_SCRATCH_RESERVE_BYTES, default 4 GiB).
-mail_bytes=$(objects size mail)
-drive_bytes=$(objects size drive)
-needed=$((mail_bytes + drive_bytes + ${BACKUP_SCRATCH_RESERVE_BYTES:-4294967296}))
+# Scratch holds database dumps and stopped volumes, not the object prefixes.
+needed=${BACKUP_SCRATCH_RESERVE_BYTES:-4294967296}
+case "$needed" in ''|*[!0-9]*) echo 'backup: invalid scratch reserve' >&2; exit 1;; esac
 available=$(df -Pk "$BACKUP_STAGE" | awk 'NR == 2 { printf "%.0f", $4 * 1024 }')
 if [ "$needed" -gt "$available" ]; then
-  echo "backup: scratch too small: need $needed bytes (mail $mail_bytes, drive $drive_bytes, reserve), $available available" >&2
+  echo "backup: scratch too small: need $needed bytes reserve, $available available" >&2
   log scratch_too_small
   exit 1
 fi
 log scratch_checked
+: "${BACKUP_BUDGET_BYTES:?set BACKUP_BUDGET_BYTES}"
+case "$BACKUP_BUDGET_BYTES" in ''|*[!0-9]*) echo 'backup: invalid repository budget' >&2; exit 1;; esac
+[ "${#BACKUP_BUDGET_BYTES}" -le 15 ] && [ "$BACKUP_BUDGET_BYTES" -gt 0 ] || { echo 'backup: invalid repository budget' >&2; exit 1; }
+retention_policy
+prepare_stream_tool
+prepare_stream_env
+# Remove only locks restic itself considers stale; never force-unlock another writer.
+compose run --rm --no-deps -T backup-restic 'exec restic unlock' >&2
+run_tag="opensuite-run-$(basename "$BACKUP_STAGE")"
+existing_run=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag "$1"' sh "$run_tag")
+[ "$existing_run" = '[]' ] || { echo 'backup: snapshot run identifier already exists' >&2; exit 1; }
+stats=$(compose run --rm --no-deps -T backup-restic 'exec restic stats --json --mode raw-data')
+used=$(printf '%s\n' "$stats" | sed -n 's/.*"total_size":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+[ -n "$used" ] && [ "${#used}" -le 15 ] || { echo 'backup: could not measure repository usage' >&2; exit 1; }
+mail_bytes=$(objects size mail)
+drive_bytes=$(objects size drive)
+# Full source bytes are a conservative upper estimate of the next increment;
+# the actual deduplicated increment is known only after backup.
+projected=$((used + mail_bytes + drive_bytes + needed))
+if [ "$used" -ge "$BACKUP_BUDGET_BYTES" ]; then
+  echo 'backup: repository budget reached' >&2
+  log storage_budget_exceeded
+  exit 1
+fi
+if [ "$used" -ge $((BACKUP_BUDGET_BYTES / 5 * 4)) ] || [ "$projected" -ge "$BACKUP_BUDGET_BYTES" ]; then
+  warning_reason=capacity
+  log storage_near_limit
+fi
 services=$(compose ps --services --filter status=running)
 running=$(printf '%s\n' "$services" | awk '/^(caddy|api|drive|stalwart|ingest|observe|vault)$/ {print}')
 # Stop clients and workers before any snapshot; operators must stop external writers.
 [ -z "$running" ] || compose stop $running >&2
 log quiesced
 mkdir -p "$BACKUP_STAGE/data/config" "$BACKUP_STAGE/data/postgres"
+printf '2\n' > "$BACKUP_STAGE/data/config/stream-version"
 # This time is a conservative boundary for this coordinated capture, not a
 # claim that every earlier receipt was imported. Keep it in the snapshot so
 # recovery can inspect the actual ledger and mailbox state from that capture.
@@ -140,6 +170,7 @@ printf '%s\n' "$POSTGRES_USER" "$POSTGRES_DB" "$POSTGRES_DRIVE_DB" > "$BACKUP_ST
 compose exec -T postgres sh -ec 'export PGPASSWORD="$(cat /run/opensuite/postgres/password)"; exec pg_dumpall -h localhost -U "$1" --globals-only' sh "$POSTGRES_USER" > "$BACKUP_STAGE/data/postgres/globals.sql"
 for db in "$POSTGRES_DB" "$POSTGRES_DRIVE_DB"; do
   compose exec -T postgres sh -ec 'export PGPASSWORD="$(cat /run/opensuite/postgres/password)"; exec pg_dump -h localhost -U "$1" -Fc -d "$2"' sh "$POSTGRES_USER" "$db" > "$BACKUP_STAGE/data/postgres/$db.dump"
+  compose exec -T postgres pg_restore --list < "$BACKUP_STAGE/data/postgres/$db.dump" > /dev/null
 done
 if [ "$vault_enabled" = 1 ]; then
   phase=vault
@@ -166,12 +197,34 @@ VAULT_SECRETS
   log vault_captured
   phase=backup
 fi
-compose run --rm --no-deps -T backup-volumes 'tar -cpf /stage/data/volumes.tar -C / secrets stalwart caddy-data caddy-config' >&2
-objects save mail
-objects save drive
-# Restore service promptly; upload and retention do not extend downtime.
+compose run --rm --no-deps -T backup-volumes 'tar -cpf /stage/data/volumes.tar -C / secrets stalwart caddy-data caddy-config && tar -tf /stage/data/volumes.tar >/dev/null' >&2
+if [ "$vault_enabled" = 1 ]; then
+  compose run --rm --no-deps -T backup-volumes 'tar -tf /stage/data/vault-volume.tar >/dev/null' >&2
+fi
+# Hash the fenced sources, then read them through bounded read-only mounts into
+# the same restic snapshot as the local state. Restic deduplicates data chunks.
+objects manifest mail
+objects manifest drive
+compose run --rm --no-deps -T backup-stream capture "$stream_mail" "$stream_drive" "$run_tag" >&2
+snapshot=$(sed -n 's/.*"snapshot_id":"\([a-f0-9][a-f0-9]*\)".*/\1/p' "$BACKUP_STAGE/snapshot-result.json")
+[ "${#snapshot}" = 64 ] || { echo 'backup: missing completed snapshot ID' >&2; exit 1; }
+# Unmount and restart before the full readback; no retention follows a mismatch.
 if [ -n "$running" ]; then compose start $running >&2; running=''; fi
 log captured
-compose run --rm --no-deps -T backup-restic 'exec restic backup --json /stage/data' >&2
-# Only forget after a complete successful snapshot. Never auto-init on error.
-compose run --rm --no-deps -T backup-restic 'exec restic forget --group-by paths --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune' >&2
+compose run --rm --no-deps -T backup-stream verify "$snapshot" >&2
+# Promotion creates a verified snapshot only after every byte was read back.
+compose run --rm --no-deps -T backup-restic 'exec restic tag --remove opensuite-pending --add opensuite-verified "$1"' sh "$snapshot" >&2
+verified_info=$(compose run --rm --no-deps -T backup-restic 'exec restic snapshots --json --tag "$1,opensuite-verified"' sh "$run_tag")
+verified_id=$(printf '%s\n' "$verified_info" | sed -n 's/.*"id":"\([a-f0-9][a-f0-9]*\)".*/\1/p')
+[ "${#verified_id}" = 64 ] || { echo 'backup: cannot identify verified snapshot' >&2; exit 1; }
+printf '{"component":"backup","event":"snapshot_verified","snapshot":"%s","capture":"%s"}\n' "$verified_id" "$capture_started"
+# Byte verification cannot prove application-level recovery. Keep every
+# snapshot until an operator attests an independent isolated restore; protect
+# that recovery point and every newer snapshot until a newer proof is recorded.
+pin_time=$(latest_restorable_time)
+if [ -z "$pin_time" ]; then
+  log retention_waiting_restore
+  [ -n "$warning_reason" ] || warning_reason=verification
+else
+  apply_retention "$pin_time"
+fi
