@@ -59,6 +59,7 @@ model MailImportJob {
   variant         String
   mailboxId       String
   labels          Json
+  mailboxNames    Json?
   archive         String?
   status          String   @default("queued")
   cancelRequested Boolean  @default(false)

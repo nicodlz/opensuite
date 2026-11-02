@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type {
-  MailImportInput,
-  MailImportInspection,
-  MailImportInspectionFailure,
-  MailImportMetadata,
-  MailImportSnapshot,
-  MailImportTools,
+import {
+  MAIL_IMPORT_DESTINATION_CHANGED,
+  type MailImportInput,
+  type MailImportSnapshot,
+  type MailImportTools,
 } from "@opensuite/contracts";
 import {
   createMailImportStore,
@@ -14,9 +12,8 @@ import {
   type SecretBox,
 } from "@opensuite/db";
 import { z } from "zod";
-import type { Result } from "neverthrow";
 import type { Actor } from "./accounts.ts";
-import { createJmapAccess, fail, value } from "./jmap-access.ts";
+import { createJmapAccess, fail } from "./jmap-access.ts";
 
 type Store = ReturnType<typeof createMailImportStore>;
 type Job = NonNullable<Awaited<ReturnType<Store["get"]>>>;
@@ -28,17 +25,22 @@ type Options = Parameters<typeof createJmapAccess>[0] & {
     Connection["client"],
     Connection["session"],
     Job,
-    InspectionResult,
     Buffer
   >;
 };
 type Connection = Awaited<
   ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
 >;
-type InspectionResult = Result<
-  MailImportInspection,
-  MailImportInspectionFailure
->;
+type ImportWork = {
+  job: Job;
+  token: string;
+  actor: Actor;
+  connection: Connection;
+  mapping: Record<string, string>;
+  archive: Buffer;
+  snapshot: MailImportSnapshot | undefined;
+  snapshotError: string;
+};
 
 class MigrationService {
   private readonly options: Options;
@@ -70,6 +72,22 @@ class MigrationService {
     const account = await this.ownerAccount(actor, accountId);
     return (await this.store.get(actor.id, account, id)) ?? fail("not_found");
   }
+  private async destinationNames(
+    connection: Connection,
+    mailboxId: string,
+    labels: Record<string, string>,
+  ) {
+    if (Object.keys(labels).length > 100) return fail("validation");
+    const result = await this.tools.captureMigrationDestinations({
+      client: connection.client,
+      session: connection.session,
+      accountId: connection.id,
+      ids: [mailboxId, ...Object.values(labels)],
+    });
+    if (result.kind === "retry") return fail("unavailable");
+    if (result.kind === "changed") return fail("validation");
+    return result.names;
+  }
   private async createJob(actor: Actor, input: MailImportInput) {
     const raw = Buffer.from(input.base64, "base64");
     const total = await this.tools
@@ -83,16 +101,11 @@ class MigrationService {
     const accountId = await this.ownerAccount(actor, input.accountId);
     const connection = await this.open(actor, accountId);
     if (connection.id !== accountId) return fail("forbidden");
-    const boxes = value(
-      await connection.client.mailboxes(connection.session, connection.id),
-    ).list;
-    const valid = new Set(boxes.map((item) => item.id));
-    if (
-      ![input.mailboxId, ...Object.values(input.labels)].every((id) =>
-        valid.has(id),
-      )
-    )
-      return fail("validation");
+    const mailboxNames = await this.destinationNames(
+      connection,
+      input.mailboxId,
+      input.labels,
+    );
     const id = randomUUID();
     const encrypted = this.box.encrypt(`v1:${raw.toString("base64")}`, {
       userId: actor.id,
@@ -108,6 +121,7 @@ class MigrationService {
         variant: input.variant,
         mailboxId: input.mailboxId,
         labels: input.labels,
+        mailboxNames,
         archive: encrypted.value,
         total,
       });
@@ -143,10 +157,42 @@ class MigrationService {
   resume(actor: Actor, accountId: string, id: string) {
     return this.access.run(async () => {
       const current = await this.owned(actor, accountId, id);
+      if (current.error === MAIL_IMPORT_DESTINATION_CHANGED)
+        return fail("conflict");
       if (!(await this.store.resume(actor.id, current.accountId, id)).count)
         return fail("conflict");
       const updated = await this.owned(actor, current.accountId, id);
       return this.tools.migrationReport(updated);
+    });
+  }
+  remap(
+    actor: Actor,
+    accountId: string,
+    id: string,
+    mailboxId: string,
+    labels: Record<string, string>,
+  ) {
+    return this.access.run(async () => {
+      const current = await this.owned(actor, accountId, id);
+      const connection = await this.open(actor, current.accountId);
+      if (connection.id !== current.accountId) return fail("forbidden");
+      const mailboxNames = await this.destinationNames(
+        connection,
+        mailboxId,
+        labels,
+      );
+      const changed = await this.store.remap({
+        userId: actor.id,
+        accountId: current.accountId,
+        id,
+        mailboxId,
+        labels,
+        mailboxNames,
+      });
+      if (!changed.count) return fail("conflict");
+      return this.tools.migrationReport(
+        await this.owned(actor, current.accountId, id),
+      );
     });
   }
   abandon(
@@ -171,114 +217,13 @@ class MigrationService {
       return { abandoned: true as const };
     });
   }
-  private async import(
-    job: Job,
-    token: string,
-    item: Job["items"][number],
-    raw: Buffer,
-    meta: MailImportMetadata,
-    connection: Connection,
-    snapshot: MailImportSnapshot,
-  ) {
-    const result = await this.tools.importMigrationMessage({
-      client: connection.client,
-      session: connection.session,
-      accountId: connection.id,
-      bytes: raw,
-      metadata: meta,
-      marker: item.marker,
-      snapshot,
-      beforeImport: () =>
-        this.store.beforeImport(job.id, token, item.index, new Date()),
-      onImported: (id) =>
-        this.store.item(job.id, token, item.index, "imported", null, id),
-    });
-    if (result.kind !== "recorded")
-      await this.store.item(
-        job.id,
-        token,
-        item.index,
-        result.kind,
-        result.error,
-        null,
-      );
-    return result.proceed;
-  }
-  private async processItem(
-    job: Job,
-    token: string,
-    item: Job["items"][number],
-    raw: Buffer,
-    mapping: Record<string, string>,
-    connection: Connection,
-    envelope: Buffer | undefined,
-    snapshot: MailImportSnapshot | undefined,
-    snapshotError: string,
-  ) {
-    if (["imported", "duplicate", "failed"].includes(item.status)) return true;
-    let meta: MailImportMetadata;
-    try {
-      meta = await this.tools.messageMetadata(
-        raw,
-        mapping,
-        job.mailboxId,
-        envelope,
-      );
-    } catch {
-      await this.store.item(
-        job.id,
-        token,
-        item.index,
-        item.status === "pending" ? "failed" : "uncertain",
-        "Message metadata could not be parsed",
-        null,
-      );
-      return true;
-    }
-    if (item.status === "pending" && snapshot === undefined) {
-      await this.store.item(
-        job.id,
-        token,
-        item.index,
-        "failed",
-        snapshotError,
-        null,
-      );
-      return true;
-    }
-    const decision = await this.tools.resolveMigrationCandidate({
-      client: connection.client,
-      session: connection.session,
-      accountId: connection.id,
-      bytes: raw,
-      messageId: meta.messageId,
-      ...(item.status === "pending" ? {} : { marker: item.marker }),
-      ...(item.status === "pending" && snapshot !== undefined
-        ? { snapshot }
-        : {}),
-      mailboxPatch: this.tools.mailboxPatch(meta.mailboxIds),
-      beforeMapping: () => this.store.beforeMapping(job.id, token, new Date()),
-    });
-    if ("status" in decision)
-      await this.store.item(
-        job.id,
-        token,
-        item.index,
-        decision.status,
-        decision.error,
-        decision.id,
-      );
-    if (decision.action === "stop") return false;
-    if (decision.action === "continue") return true;
-    if (snapshot === undefined) return false;
-    return this.import(job, token, item, raw, meta, connection, snapshot);
-  }
   private async prepareSnapshot(
     job: Job,
     token: string,
     actor: Actor,
     connection: Connection,
     archive: Buffer,
+    mapping: Record<string, string>,
   ) {
     if (
       job.cancelRequested ||
@@ -292,6 +237,8 @@ class MigrationService {
       archive,
       format: job.format,
       variant: job.variant,
+      ids: [job.mailboxId, ...Object.values(mapping)],
+      expected: job.mailboxNames,
       keepAlive: async () => {
         await this.ownerAccount(actor, job.accountId);
         return this.store.beforeMapping(job.id, token, new Date());
@@ -313,6 +260,67 @@ class MigrationService {
       ["importing", "uncertain"].includes(item.status)
     );
   }
+  private async processArchive(work: ImportWork) {
+    const {
+      job,
+      token,
+      actor,
+      connection,
+      mapping,
+      archive,
+      snapshot,
+      snapshotError,
+    } = work;
+    let index = 0;
+    let envelope: Buffer | undefined;
+    for await (const raw of this.tools.archiveMessages(
+      archive,
+      job.format,
+      job.variant,
+      (line) => {
+        envelope = line;
+      },
+    )) {
+      const item = job.items[index++];
+      if (item === undefined) return fail("unavailable");
+      if (!(await this.shouldProcess(job, token, actor, item))) continue;
+      const continued = await this.tools.runMigrationItem({
+        client: connection.client,
+        session: connection.session,
+        accountId: connection.id,
+        raw,
+        envelope,
+        status: item.status,
+        marker: item.marker,
+        mapping,
+        destination: job.mailboxId,
+        snapshot,
+        snapshotError,
+        metadata: (...args) => this.tools.messageMetadata(...args),
+        mailboxPatch: (mailboxes) => this.tools.mailboxPatch(mailboxes),
+        importMessage: (input) => this.tools.importMigrationMessage(input),
+        record: (status, error, id) =>
+          this.store.item(job.id, token, item.index, status, error, id),
+        beforeImport: () =>
+          this.store.beforeImport(job.id, token, item.index, new Date()),
+        keepAlive: async () => {
+          await this.ownerAccount(actor, job.accountId);
+          return this.store.beforeMapping(job.id, token, new Date());
+        },
+        expected: job.mailboxNames,
+        onChanged: () =>
+          this.store.finish(
+            job.id,
+            token,
+            "attention",
+            MAIL_IMPORT_DESTINATION_CHANGED,
+            false,
+          ),
+      });
+      if (!continued) break;
+    }
+    return undefined;
+  }
   private async process(job: Job, token: string) {
     if (job.archive === null) return fail("unavailable");
     const decrypted = this.box.decrypt(job.archive, {
@@ -332,41 +340,32 @@ class MigrationService {
       actor,
       connection,
       archive,
+      mapping,
     );
     const snapshot = prepared?.kind === "ready" ? prepared.snapshot : undefined;
-    const snapshotError =
-      prepared?.kind === "failed" && prepared.error === "limit"
-        ? "Destination exceeds the duplicate scan limit"
-        : "Destination changed or duplicate scan failed";
-    let index = 0;
-    let envelope: Buffer | undefined;
-    for await (const raw of this.tools.archiveMessages(
-      archive,
-      job.format,
-      job.variant,
-      (line) => {
-        envelope = line;
-      },
-    )) {
-      const item = job.items[index++];
-      if (item === undefined) return fail("unavailable");
-      if (!(await this.shouldProcess(job, token, actor, item))) continue;
-      if (
-        !(await this.processItem(
-          job,
-          token,
-          item,
-          raw,
-          mapping,
-          connection,
-          envelope,
-          snapshot,
-          snapshotError,
-        ))
-      )
-        break;
+    if (prepared?.kind === "failed" && prepared.error === "destination") {
+      await this.store.finish(
+        job.id,
+        token,
+        "attention",
+        MAIL_IMPORT_DESTINATION_CHANGED,
+        false,
+      );
+      return undefined;
     }
-    return undefined;
+    if (prepared?.kind === "failed" && prepared.error === "unavailable")
+      return undefined;
+    const snapshotError = "Destination exceeds the duplicate scan limit";
+    return this.processArchive({
+      job,
+      token,
+      actor,
+      connection,
+      mapping,
+      archive,
+      snapshot,
+      snapshotError,
+    });
   }
   async work() {
     const claimed = await this.store.claim(new Date());
@@ -380,7 +379,8 @@ class MigrationService {
         )
       ) {
         const result = await this.access.run(() => this.process(job, token));
-        if (result.isErr()) throw new Error("Import worker unavailable");
+        if (result.isErr())
+          return await this.store.defer(job.id, token, result.error.kind);
       }
       await this.store.settle(job, token);
     } catch {

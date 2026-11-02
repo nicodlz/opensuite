@@ -52,6 +52,18 @@ export const migrationMailRouter = route.router({
     const { actor, service } = access(context);
     return result(service.resume(actor, input.accountId, input.jobId));
   }),
+  remap: route.remap.handler(({ context, input }) => {
+    const { actor, service } = access(context);
+    return result(
+      service.remap(
+        actor,
+        input.accountId,
+        input.jobId,
+        input.mailboxId,
+        input.labels,
+      ),
+    );
+  }),
   abandon: route.abandon.handler(({ context, input }) => {
     const { actor, service } = access(context);
     return result(

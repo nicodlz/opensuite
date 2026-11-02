@@ -44,9 +44,12 @@ let diagnostic: JmapClient;
 let service: ReturnType<typeof createMailMigrationService>;
 let loseResponse = false;
 let importsBeforeLostResponse = 0;
+let rejectNextImport: string | undefined;
 let failUpload = false;
+let failDiscovery = false;
 let accountEnabled = true;
 let changeBeforeImport: (() => Promise<void>) | undefined;
+let changeBeforeMapping: (() => Promise<void>) | undefined;
 const compose = async (...args: string[]) =>
   (
     await run(
@@ -80,6 +83,10 @@ const wait = async (
 };
 const fetcher: typeof fetch = async (url, init) => {
   const target = url instanceof Request ? url.url : url.toString();
+  if (failDiscovery && target.includes("/.well-known/jmap")) {
+    failDiscovery = false;
+    return new Response("fixture discovery failure", { status: 503 });
+  }
   if (failUpload && target.includes("/upload/")) {
     failUpload = false;
     return new Response("fixture upload failure", { status: 503 });
@@ -92,6 +99,37 @@ const fetcher: typeof fetch = async (url, init) => {
     const change = changeBeforeImport;
     changeBeforeImport = undefined;
     await change();
+  }
+  if (
+    changeBeforeMapping &&
+    typeof init?.body === "string" &&
+    init.body.includes('"Email/set"')
+  ) {
+    const change = changeBeforeMapping;
+    changeBeforeMapping = undefined;
+    await change();
+  }
+  if (
+    rejectNextImport !== undefined &&
+    typeof init?.body === "string" &&
+    init.body.includes('"Email/import"')
+  ) {
+    const type = rejectNextImport;
+    rejectNextImport = undefined;
+    return Response.json({
+      sessionState: "fixture",
+      methodResponses: [
+        [
+          "Email/import",
+          {
+            accountId: account,
+            newState: "fixture",
+            notCreated: { item: { type } },
+          },
+          "0",
+        ],
+      ],
+    });
   }
   const response = await fetch(url, init);
   if (
@@ -129,6 +167,62 @@ function newService() {
         fetch: fetcher,
         rewriteSessionUrlsToOrigin: base,
       }),
+  });
+}
+async function mailboxSet(input: Record<string, unknown>) {
+  const session = value(await diagnostic.discover());
+  const response = await fetch(session.apiUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`${actor.email}:${password}`).toString("base64")}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      using: [JmapCapability.core, JmapCapability.mail],
+      methodCalls: [["Mailbox/set", { accountId: account, ...input }, "0"]],
+    }),
+  });
+  const body = z
+    .object({
+      methodResponses: z.array(
+        z.tuple([z.string(), z.record(z.string(), z.unknown()), z.string()]),
+      ),
+    })
+    .parse(await response.json());
+  const call = body.methodResponses[0];
+  if (!response.ok || call?.[0] !== "Mailbox/set")
+    throw new Error("Mailbox fixture failed");
+  return call[1];
+}
+async function createFixtureMailbox(name: string) {
+  const result = await mailboxSet({ create: { item: { name } } });
+  return z
+    .object({ created: z.object({ item: z.object({ id: z.string() }) }) })
+    .parse(result).created.item.id;
+}
+function fixtureApi() {
+  return buildServer({
+    config: { logLevel: "silent" },
+    monotonicMs: now,
+    readiness: createReadinessService({
+      probes: [],
+      timeoutMs: 500,
+      now: () => new Date(),
+      monotonicMs: now,
+    }),
+    migrationMail: service,
+    identity: {
+      publicOrigin: "https://suite.example.test",
+      handler: () => Promise.resolve(new Response()),
+      actor: (headers) => {
+        const id = headers.get("cookie");
+        return Promise.resolve(
+          id === "owner" || id === "other"
+            ? { id, email: `${id}@example.test`, role: "user" }
+            : null,
+        );
+      },
+    },
   });
 }
 beforeAll(async () => {
@@ -337,7 +431,7 @@ it("deduplicates repeated Message-IDs within the same archive", async () => {
   ).toHaveLength(before + 1);
 }, 120_000);
 
-it("rejects a stale duplicate scan before importing, then succeeds after resume", async () => {
+it("refreshes a stale duplicate scan and imports without a manual resume", async () => {
   const session = value(await diagnostic.discover());
   const raw = Buffer.from(
     "Message-ID: <stale-scan@example.test>\r\n\r\nBody\r\n",
@@ -372,21 +466,461 @@ it("rejects a stale duplicate scan before importing, then succeeds after resume"
     changeBeforeImport = undefined;
   }
   expect(value(await service.report(actor, "default", job.id))).toMatchObject({
-    status: "attention",
-    messages: [{ status: "failed", error: "Message import rejected" }],
-  });
-  expect(
-    value(await diagnostic.queryEmails(session, account)).ids,
-  ).toHaveLength(before + 1);
-  value(await service.resume(actor, "default", job.id));
-  await service.work();
-  expect(value(await service.report(actor, "default", job.id))).toMatchObject({
     status: "completed",
     messages: [{ status: "imported" }],
   });
   expect(
     value(await diagnostic.queryEmails(session, account)).ids,
   ).toHaveLength(before + 2);
+}, 120_000);
+
+it("automatically continues after repeated concurrent mail and a transient upload failure", async () => {
+  const session = value(await diagnostic.discover());
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
+  const raw = Buffer.from(
+    "Message-ID: <retry-activity@example.test>\r\n\r\nBody\r\n",
+  );
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  let remaining = 6;
+  const deliver = async () => {
+    const message = Buffer.from(
+      `Message-ID: <background-${remaining}@example.test>\r\n\r\nBackground\r\n`,
+    );
+    const blob = value(await diagnostic.upload(session, account, message));
+    value(
+      await diagnostic.importEmail(session, account, {
+        blobId: blob.blobId,
+        mailboxIds: { [inbox]: true },
+      }),
+    );
+    if (--remaining) changeBeforeImport = deliver;
+  };
+  failUpload = true;
+  changeBeforeImport = deliver;
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "queued",
+        messages: [{ status: "pending" }],
+      },
+    );
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "completed",
+        messages: [{ status: "imported" }],
+      },
+    );
+    expect(
+      value(await diagnostic.queryEmails(session, account)).ids,
+    ).toHaveLength(before + 7);
+  } finally {
+    failUpload = false;
+    changeBeforeImport = undefined;
+  }
+}, 120_000);
+
+it("automatically retries a temporary discovery failure", async () => {
+  const raw = Buffer.from(
+    "Message-ID: <retry-discovery@example.test>\r\n\r\nBody\r\n",
+  );
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  service = newService();
+  failDiscovery = true;
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "queued",
+        messages: [{ status: "pending" }],
+      },
+    );
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "completed",
+        messages: [{ status: "imported" }],
+      },
+    );
+  } finally {
+    failDiscovery = false;
+  }
+}, 120_000);
+
+it("deduplicates a matching message delivered between the scan and import", async () => {
+  const session = value(await diagnostic.discover());
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
+  const raw = Buffer.from(
+    "Message-ID: <concurrent-match@example.test>\r\n\r\nBody\r\n",
+  );
+  const blob = value(await diagnostic.upload(session, account, raw));
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  changeBeforeImport = async () => {
+    value(
+      await diagnostic.importEmail(session, account, {
+        blobId: blob.blobId,
+        mailboxIds: { [inbox]: true },
+      }),
+    );
+  };
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "completed",
+        messages: [{ status: "duplicate" }],
+      },
+    );
+    expect(
+      value(await diagnostic.queryEmails(session, account)).ids,
+    ).toHaveLength(before + 1);
+  } finally {
+    changeBeforeImport = undefined;
+  }
+}, 120_000);
+
+it("retries a duplicate mailbox mapping after concurrent activity", async () => {
+  const session = value(await diagnostic.discover());
+  const raw = Buffer.from(
+    "Message-ID: <mapping-race@example.test>\r\n\r\nBody\r\n",
+  );
+  const blob = value(await diagnostic.upload(session, account, raw));
+  const existing = value(
+    await diagnostic.importEmail(session, account, {
+      blobId: blob.blobId,
+      mailboxIds: { [inbox]: true },
+    }),
+  );
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: sent,
+      labels: {},
+    }),
+  );
+  changeBeforeMapping = async () => {
+    value(
+      await diagnostic.updateEmail(session, account, existing.id, {
+        "keywords/$seen": true,
+      }),
+    );
+  };
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "completed",
+        messages: [{ status: "duplicate" }],
+      },
+    );
+    const email = value(
+      await diagnostic.emails(session, account, [existing.id]),
+    ).list[0];
+    expect(email?.mailboxIds).toMatchObject({ [inbox]: true, [sent]: true });
+    expect(
+      value(await diagnostic.queryEmails(session, account)).ids,
+    ).toHaveLength(before);
+  } finally {
+    changeBeforeMapping = undefined;
+  }
+}, 120_000);
+
+it("continues when another folder changes and a message is read and moved", async () => {
+  const session = value(await diagnostic.discover());
+  const otherFolder = await createFixtureMailbox("other-folder");
+  const existing = Buffer.from(
+    "Message-ID: <other-activity@example.test>\r\n\r\nOther\r\n",
+  );
+  const blob = value(await diagnostic.upload(session, account, existing));
+  const existingId = value(
+    await diagnostic.importEmail(session, account, {
+      blobId: blob.blobId,
+      mailboxIds: { [inbox]: true },
+    }),
+  ).id;
+  const raw = Buffer.from(
+    "Message-ID: <import-after-move@example.test>\r\n\r\nBody\r\n",
+  );
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  changeBeforeImport = async () => {
+    await mailboxSet({
+      update: { [otherFolder]: { name: "other-folder-renamed" } },
+    });
+    value(
+      await diagnostic.updateEmail(session, account, existingId, {
+        "keywords/$seen": true,
+        [`mailboxIds/${sent}`]: true,
+        [`mailboxIds/${inbox}`]: null,
+      }),
+    );
+  };
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "completed",
+        messages: [{ status: "imported" }],
+      },
+    );
+  } finally {
+    changeBeforeImport = undefined;
+  }
+}, 120_000);
+
+it("pauses for a renamed or deleted target and resumes after the owner remaps it", async () => {
+  const app = await fixtureApi();
+  const headers = { origin: "https://suite.example.test", cookie: "owner" };
+  const runCase = async (
+    name: string,
+    change: (id: string) => Promise<void>,
+  ) => {
+    const target = await createFixtureMailbox(name);
+    const raw = Buffer.from(
+      `Message-ID: <${name}@example.test>\r\n\r\nBody\r\n`,
+    );
+    const job = value(
+      await service.create(actor, {
+        accountId: "default",
+        format: "eml",
+        variant: "mboxo",
+        base64: raw.toString("base64"),
+        mailboxId: target,
+        labels: {},
+      }),
+    );
+    await change(target);
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "attention",
+        recovery: {
+          action: "remap",
+          message:
+            "A destination mailbox changed or was removed. Choose destinations again to resume.",
+        },
+        messages: [{ status: "pending" }],
+      },
+    );
+    const input = { accountId: "default", jobId: job.id };
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/mail/imports/resume",
+          headers,
+          payload: input,
+        })
+      ).statusCode,
+    ).toBe(409);
+    const payload = { ...input, mailboxId: inbox, labels: {} };
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/mail/imports/remap",
+          headers: { ...headers, cookie: "other" },
+          payload,
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/mail/imports/remap",
+          headers,
+          payload,
+        })
+      ).statusCode,
+    ).toBe(200);
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "completed",
+        messages: [{ status: "imported" }],
+        recovery: null,
+      },
+    );
+  };
+  try {
+    await runCase("rename-target", async (id) => {
+      await mailboxSet({ update: { [id]: { name: "renamed-target" } } });
+    });
+    await runCase("delete-target", async (id) => {
+      await mailboxSet({ destroy: [id] });
+    });
+  } finally {
+    await app.close();
+  }
+}, 120_000);
+
+it("detects a target renamed while an import is being written", async () => {
+  const target = await createFixtureMailbox("late-rename-target");
+  const session = value(await diagnostic.discover());
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
+  const raw = Buffer.from(
+    "Message-ID: <late-target-rename@example.test>\r\n\r\nBody\r\n",
+  );
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: target,
+      labels: {},
+    }),
+  );
+  changeBeforeImport = async () => {
+    await mailboxSet({ update: { [target]: { name: "late-target-renamed" } } });
+  };
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "attention",
+        recovery: { action: "remap" },
+        messages: [{ status: "imported" }],
+      },
+    );
+    value(await service.remap(actor, "default", job.id, target, {}));
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      { status: "completed" },
+    );
+    expect(
+      value(await diagnostic.queryEmails(session, account)).ids,
+    ).toHaveLength(before + 1);
+  } finally {
+    changeBeforeImport = undefined;
+  }
+}, 120_000);
+
+it("requires a destination confirmation for jobs created before destination tracking", async () => {
+  const raw = Buffer.from(
+    "Message-ID: <legacy-target@example.test>\r\n\r\nBody\r\n",
+  );
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  await db.$executeRaw`UPDATE "MailImportJob" SET "mailboxNames" = NULL WHERE "id" = ${job.id}`;
+  await service.work();
+  expect(value(await service.report(actor, "default", job.id))).toMatchObject({
+    status: "attention",
+    recovery: { action: "remap" },
+    messages: [{ status: "pending" }],
+  });
+  value(await service.remap(actor, "default", job.id, inbox, {}));
+  await service.work();
+  expect(value(await service.report(actor, "default", job.id))).toMatchObject({
+    status: "completed",
+    messages: [{ status: "imported" }],
+  });
+}, 120_000);
+
+it("reports quota and safely resumes after the user resolves it", async () => {
+  const app = await fixtureApi();
+  const headers = { origin: "https://suite.example.test", cookie: "owner" };
+  const raw = Buffer.from(
+    "Message-ID: <quota-resume@example.test>\r\n\r\nBody\r\n",
+  );
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  rejectNextImport = "overQuota";
+  try {
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "attention",
+        recovery: {
+          action: "resume",
+          message: "Mailbox quota exceeded. Free space and resume the import.",
+        },
+        messages: [{ status: "failed" }],
+      },
+    );
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/mail/imports/resume",
+          headers,
+          payload: { accountId: "default", jobId: job.id },
+        })
+      ).statusCode,
+    ).toBe(200);
+    await service.work();
+    expect(value(await service.report(actor, "default", job.id))).toMatchObject(
+      {
+        status: "completed",
+        messages: [{ status: "imported" }],
+        recovery: null,
+      },
+    );
+  } finally {
+    rejectNextImport = undefined;
+    await app.close();
+  }
 }, 120_000);
 
 it("confirms and audits abandonment, preserves delivered mail, and deduplicates a later re-import", async () => {
@@ -412,13 +946,13 @@ it("confirms and audits abandonment, preserves delivered mail, and deduplicates 
   const before = value(await diagnostic.queryEmails(session, account)).ids
     .length;
   const job = value(await create());
-  failUpload = true;
+  rejectNextImport = "invalidEmail";
   loseResponse = true;
   importsBeforeLostResponse = 1;
   try {
     await service.work();
   } finally {
-    failUpload = false;
+    rejectNextImport = undefined;
     loseResponse = false;
     importsBeforeLostResponse = 0;
   }
@@ -574,13 +1108,13 @@ it("retains failures for resume, safely cancels, and never retries an unresolved
       labels: {},
     });
   const failed = value(await create());
-  failUpload = true;
+  rejectNextImport = "invalidEmail";
   await service.work();
   expect(
     value(await service.report(actor, "default", failed.id)),
   ).toMatchObject({
     status: "attention",
-    messages: [{ status: "failed", error: "Upload failed" }],
+    messages: [{ status: "failed", error: "Message import rejected" }],
   });
   const saved = await db.mailImportJob.findUnique({ where: { id: failed.id } });
   expect(saved?.archive).toBeTruthy();

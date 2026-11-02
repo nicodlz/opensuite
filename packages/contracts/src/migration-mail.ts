@@ -4,6 +4,10 @@ import { IdSchema } from "./mail.ts";
 
 export const MAIL_ARCHIVE_LIMIT = 8 * 1024 * 1024;
 export const MAIL_MESSAGE_LIMIT = 4 * 1024 * 1024;
+export const MAIL_IMPORT_DESTINATION_CHANGED =
+  "A destination mailbox changed or was removed. Choose destinations again to resume.";
+export const MAIL_IMPORT_OVER_QUOTA =
+  "Mailbox quota exceeded. Free space and resume the import.";
 export const MAIL_IMPORT_LIMITATIONS = [
   "Archives are limited to 8 MiB, individual messages to 4 MiB, and jobs to 1,000 messages.",
   "MBOX messages are limited to 100,000 lines; compressed and Content-Length-framed archives are not supported.",
@@ -47,6 +51,9 @@ export const MailImportReportSchema = z.object({
   processed: z.number().int().nonnegative(),
   messages: z.array(entry),
   limitations: z.array(z.string()),
+  recovery: z
+    .object({ action: z.enum(["remap", "resume"]), message: z.string() })
+    .nullable(),
   abandonment: z
     .object({
       uncertainCount: z.number().int().positive(),
@@ -93,6 +100,15 @@ export const migrationMailContract = {
     .route({ method: "POST", path: "/mail/imports/resume" })
     .input(jobInput)
     .output(MailImportReportSchema),
+  remap: procedure
+    .route({ method: "POST", path: "/mail/imports/remap" })
+    .input(
+      jobInput.extend({
+        mailboxId: IdSchema,
+        labels: z.record(z.string().min(1).max(200), IdSchema),
+      }),
+    )
+    .output(MailImportReportSchema),
   abandon: procedure
     .route({ method: "POST", path: "/mail/imports/abandon" })
     .input(
@@ -112,8 +128,6 @@ export interface MailImportMetadata {
   keywords: Record<string, boolean>;
   receivedAt?: string;
 }
-export type MailImportInspection =
-  { kind: "match"; id: string } | { kind: "none" | "unresolved" | "collision" };
 export type MailImportInspectionFailure = { kind: "unavailable" | "limit" };
 export interface MailImportCandidate {
   id: string;
@@ -126,13 +140,27 @@ export interface MailImportSnapshot {
   state: string;
   candidates: Map<string, MailImportCandidate[]>;
 }
-export interface MailImportTools<
-  Client,
-  Session,
-  Job,
-  Inspection,
-  Raw extends Uint8Array,
-> {
+export interface MailImportTools<Client, Session, Job, Raw extends Uint8Array> {
+  captureMigrationDestinations(input: {
+    client: Client;
+    session: Session;
+    accountId: string;
+    ids: readonly string[];
+  }): Promise<
+    | { kind: "retry" }
+    | { kind: "changed" }
+    | {
+        kind: "ready";
+        names: Record<string, { name: string; parentId: string | null }>;
+      }
+  >;
+  checkMigrationDestinations(input: {
+    client: Client;
+    session: Session;
+    accountId: string;
+    ids: readonly string[];
+    expected: unknown;
+  }): Promise<{ kind: "retry" | "changed" | "ready" }>;
   mailboxPatch(mailboxes: Record<string, boolean>): Record<string, boolean>;
   archiveMessages(
     raw: Raw,
@@ -160,39 +188,46 @@ export interface MailImportTools<
     archive: Raw;
     format: string;
     variant: string;
+    ids: readonly string[];
+    expected: unknown;
     keepAlive: () => Promise<boolean>;
   }): Promise<
     | { kind: "ready"; snapshot: MailImportSnapshot }
-    | { kind: "failed"; error: MailImportInspectionFailure["kind"] }
-  >;
-  inspectMigrationCandidates(input: {
-    client: Client;
-    session: Session;
-    accountId: string;
-    bytes: Raw;
-    messageId: string | null;
-    marker?: string;
-    snapshot?: MailImportSnapshot;
-  }): Promise<Inspection>;
-  resolveMigrationCandidate(input: {
-    client: Client;
-    session: Session;
-    accountId: string;
-    bytes: Raw;
-    messageId: string | null;
-    marker?: string;
-    snapshot?: MailImportSnapshot;
-    mailboxPatch: Record<string, boolean>;
-    beforeMapping: () => Promise<boolean>;
-  }): Promise<
-    | { action: "import" | "stop" }
     | {
-        action: "continue" | "stop";
-        status: "failed" | "uncertain" | "duplicate" | "imported";
-        error: string | null;
-        id: string | null;
+        kind: "failed";
+        error: MailImportInspectionFailure["kind"] | "destination";
       }
   >;
+  runMigrationItem(input: {
+    client: Client;
+    session: Session;
+    accountId: string;
+    raw: Raw;
+    envelope?: Raw | undefined;
+    status: string;
+    marker: string;
+    mapping: Record<string, string>;
+    destination: string;
+    snapshot: MailImportSnapshot | undefined;
+    snapshotError: string;
+    metadata: MailImportTools<Client, Session, Job, Raw>["messageMetadata"];
+    mailboxPatch: MailImportTools<Client, Session, Job, Raw>["mailboxPatch"];
+    importMessage: MailImportTools<
+      Client,
+      Session,
+      Job,
+      Raw
+    >["importMigrationMessage"];
+    record: (
+      status: string,
+      error: string | null,
+      id: string | null,
+    ) => Promise<boolean>;
+    beforeImport: () => Promise<boolean>;
+    keepAlive: () => Promise<boolean>;
+    expected: unknown;
+    onChanged: () => Promise<unknown>;
+  }): Promise<boolean>;
   importMigrationMessage(input: {
     client: Client;
     session: Session;
@@ -205,6 +240,7 @@ export interface MailImportTools<
     onImported: (id: string) => Promise<boolean>;
   }): Promise<
     | { kind: "recorded"; proceed: boolean }
+    | { kind: "retry"; proceed: false }
     | { kind: "failed" | "uncertain"; error: string; proceed: boolean }
   >;
 }
@@ -238,6 +274,16 @@ export function migrationReport(job: ReportInput): MailImportReport {
       error: item.error,
     })),
     limitations: MAIL_IMPORT_LIMITATIONS,
+    recovery:
+      job.status !== "attention" ||
+      job.archive === null ||
+      job.claimToken !== null
+        ? null
+        : job.error === MAIL_IMPORT_DESTINATION_CHANGED
+          ? { action: "remap", message: MAIL_IMPORT_DESTINATION_CHANGED }
+          : job.items.some((item) => item.error === MAIL_IMPORT_OVER_QUOTA)
+            ? { action: "resume", message: MAIL_IMPORT_OVER_QUOTA }
+            : null,
     abandonment:
       job.status === "attention" &&
       job.claimToken === null &&

@@ -2,7 +2,16 @@ import { MigrationMailClient } from "./migration-mail.ts";
 import { threadPage } from "./thread-page.ts";
 
 export { inspectMigrationCandidates } from "./migration-candidates.ts";
-export { resolveMigrationCandidate } from "./migration-resolve.ts";
+export {
+  resolveMigrationCandidate,
+  migrationMailboxPatch,
+} from "./migration-resolve.ts";
+export { refreshMigrationSnapshot } from "./migration-changes.ts";
+export { runMigrationItem } from "./migration-retry.ts";
+export {
+  captureMigrationDestinations,
+  checkMigrationDestinations,
+} from "./migration-destinations.ts";
 export {
   createMigrationSnapshot,
   rememberMigrationImport,

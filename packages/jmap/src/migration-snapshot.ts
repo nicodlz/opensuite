@@ -1,10 +1,14 @@
 import { err, ok, type Result } from "neverthrow";
 import type { Session } from "./protocol.ts";
 import type { MigrationMailClient } from "./migration-mail.ts";
+import {
+  migrationBatchComplete,
+  refreshMigrationSnapshot,
+} from "./migration-changes.ts";
 
 type Client = Pick<
   MigrationMailClient,
-  "emailState" | "queryEmails" | "migrationEmails"
+  "emailState" | "emailChanges" | "queryEmails" | "migrationEmails"
 >;
 export type MigrationCandidate = {
   id: string;
@@ -34,8 +38,6 @@ class SnapshotBuilder {
   private readonly candidates = new Map<string, MigrationCandidate[]>();
   private readonly maxScan: number;
   private state = "";
-  private queryState: string | undefined;
-  private total: number | undefined;
   private matches = 0;
   constructor(input: Input) {
     this.input = input;
@@ -63,83 +65,71 @@ class SnapshotBuilder {
     return ok(undefined);
   }
 
-  private validPage(
-    page: {
-      accountId: string;
-      position: number;
-      total?: number | undefined;
-      ids: string[];
-      queryState: string;
-    },
-    position: number,
-  ) {
+  private validPage(page: {
+    accountId: string;
+    total?: number | undefined;
+    position: number;
+    ids: string[];
+  }) {
     return (
       page.accountId === this.input.accountId &&
-      page.position === position &&
       page.total !== undefined &&
+      page.position >= 0 &&
       page.ids.length <= 100 &&
-      position + page.ids.length <= page.total &&
-      (this.queryState === undefined || page.queryState === this.queryState) &&
-      (this.total === undefined || page.total === this.total)
+      page.position + page.ids.length <= page.total
     );
   }
 
-  private validFetched(
-    data: {
-      accountId: string;
-      state: string;
-      notFound: string[];
-      list: MigrationCandidate[];
-    },
-    ids: string[],
-  ) {
-    return (
-      data.accountId === this.input.accountId &&
-      data.state === this.state &&
-      !data.notFound.length &&
-      data.list.length === ids.length &&
-      new Set(data.list.map((item) => item.id)).size === ids.length &&
-      data.list.every((item) => ids.includes(item.id))
-    );
+  private trackIds(ids: string[]): Result<void, Failure> {
+    for (const id of ids) {
+      if (this.seen.has(id)) return err({ kind: "unavailable" });
+      this.seen.add(id);
+    }
+    return this.seen.size > this.maxScan
+      ? err({ kind: "limit" })
+      : ok(undefined);
+  }
+  private emptyPage(position: number, total: number): Result<null, Failure> {
+    return position === total ? ok(null) : err({ kind: "unavailable" });
   }
 
-  private async page(position: number): Promise<Result<number, Failure>> {
+  private async page(
+    anchor: string | undefined,
+  ): Promise<Result<string | null, Failure>> {
     const { client, session, accountId, keepAlive } = this.input;
     if (!(await keepAlive())) return err({ kind: "unavailable" });
     const query = await client.queryEmails(session, accountId, {
-      position,
+      sort: [{ property: "receivedAt", isAscending: true }],
+      ...(anchor === undefined ? {} : { anchor, anchorOffset: 1 }),
       limit: 100,
       calculateTotal: true,
     });
     if (query.isErr()) return err({ kind: "unavailable" });
     const page = query.value;
-    if (!this.validPage(page, position) || page.total === undefined)
+    if (!this.validPage(page) || page.total === undefined)
       return err({ kind: "unavailable" });
     if (page.total > this.maxScan) return err({ kind: "limit" });
-    this.queryState = page.queryState;
-    this.total = page.total;
-    for (const id of page.ids) {
-      if (this.seen.has(id)) return err({ kind: "unavailable" });
-      this.seen.add(id);
-    }
-    if (!page.ids.length)
-      return position === page.total ? ok(0) : err({ kind: "unavailable" });
+    const tracked = this.trackIds(page.ids);
+    if (tracked.isErr()) return err(tracked.error);
+    if (!page.ids.length) return this.emptyPage(page.position, page.total);
     const fetched = await client.migrationEmails(session, accountId, page.ids);
     if (fetched.isErr()) return err({ kind: "unavailable" });
     const data = fetched.value;
-    if (!this.validFetched(data, page.ids)) return err({ kind: "unavailable" });
+    if (data.accountId !== accountId || !migrationBatchComplete(page.ids, data))
+      return err({ kind: "unavailable" });
     for (const candidate of data.list) {
       const remembered = this.remember(candidate);
       if (remembered.isErr()) return err(remembered.error);
     }
-    return ok(page.ids.length);
+    return ok(page.ids.at(-1) ?? null);
   }
 
-  private async scanFrom(position: number): Promise<Result<void, Failure>> {
-    const page = await this.page(position);
+  private async scanFrom(
+    anchor: string | undefined,
+  ): Promise<Result<void, Failure>> {
+    const page = await this.page(anchor);
     if (page.isErr()) return err(page.error);
-    const next = position + page.value;
-    return next < (this.total ?? 0) ? this.scanFrom(next) : ok(undefined);
+    return page.value === null ? ok(undefined) : this.scanFrom(page.value);
   }
 
   async build(): Promise<Result<MigrationSnapshot, Failure>> {
@@ -147,11 +137,14 @@ class SnapshotBuilder {
     if (state === undefined) return err({ kind: "unavailable" });
     this.state = state;
     if (!this.targets.size) return ok({ state, candidates: this.candidates });
-    const scanned = await this.scanFrom(0);
+    const scanned = await this.scanFrom(undefined);
     if (scanned.isErr()) return err(scanned.error);
-    if ((await this.emailState()) !== state)
-      return err({ kind: "unavailable" });
-    return ok({ state, candidates: this.candidates });
+    const snapshot = { state, candidates: this.candidates };
+    const refreshed = await refreshMigrationSnapshot({
+      ...this.input,
+      snapshot,
+    });
+    return refreshed.isErr() ? err(refreshed.error) : ok(snapshot);
   }
 }
 
@@ -177,7 +170,6 @@ export async function rememberMigrationImport(input: {
   if (
     fetched.isErr() ||
     fetched.value.accountId !== input.accountId ||
-    fetched.value.state !== input.snapshot.state ||
     fetched.value.notFound.length ||
     fetched.value.list.length !== 1 ||
     fetched.value.list[0]?.id !== input.id

@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import {
   MAIL_ARCHIVE_LIMIT,
   MAIL_MESSAGE_LIMIT,
+  MAIL_IMPORT_OVER_QUOTA,
   migrationReport,
   type MailImportMetadata,
   type MailImportSnapshot,
@@ -9,8 +10,12 @@ import {
 import { simpleParser } from "mailparser";
 import {
   createMigrationSnapshot,
+  captureMigrationDestinations,
+  checkMigrationDestinations,
   inspectMigrationCandidates,
+  migrationMailboxPatch as mailboxPatch,
   rememberMigrationImport,
+  runMigrationItem,
   resolveMigrationCandidate,
   type JmapClient,
   type JmapError,
@@ -22,6 +27,8 @@ type Client = Pick<
   | "queryEmails"
   | "migrationEmails"
   | "emailState"
+  | "emailChanges"
+  | "mailboxes"
   | "download"
   | "upload"
   | "migrationImport"
@@ -158,8 +165,21 @@ export async function prepareMigrationSnapshot(input: {
   archive: Buffer;
   format: string;
   variant: string;
+  ids: readonly string[];
+  expected: unknown;
   keepAlive: () => Promise<boolean>;
 }) {
+  if (!(await input.keepAlive()))
+    return { kind: "failed" as const, error: "unavailable" as const };
+  const destinations = await checkMigrationDestinations(input);
+  if (destinations.kind !== "ready")
+    return {
+      kind: "failed" as const,
+      error:
+        destinations.kind === "changed"
+          ? ("destination" as const)
+          : ("unavailable" as const),
+    };
   const messageIds = new Set<string>();
   for await (const raw of archiveMessages(
     input.archive,
@@ -188,15 +208,25 @@ export async function prepareMigrationSnapshot(input: {
 }
 
 function importFailure(error: JmapError) {
-  const changed = error.kind === "method" && error.type === "stateMismatch";
+  const transient =
+    (error.kind === "method" &&
+      ["stateMismatch", "serverUnavailable"].includes(error.type)) ||
+    (error.kind === "set" && error.type === "rateLimit");
+  if (transient) return { kind: "retry" as const, proceed: false as const };
+  if (error.kind === "network" && error.beforeRequest === true)
+    return { kind: "retry" as const, proceed: false as const };
+  const quota = error.kind === "set" && error.type === "overQuota";
   const certain =
     error.kind === "set" ||
-    changed ||
-    (error.kind === "network" && error.beforeRequest === true);
+    (error.kind === "method" && error.type !== "serverPartialFail");
   return {
     kind: certain ? ("failed" as const) : ("uncertain" as const),
-    error: certain ? "Message import rejected" : "Import outcome uncertain",
-    proceed: certain && !changed,
+    error: quota
+      ? MAIL_IMPORT_OVER_QUOTA
+      : certain
+        ? "Message import rejected"
+        : "Import outcome uncertain",
+    proceed: certain && !quota,
   };
 }
 
@@ -214,8 +244,15 @@ export async function importMigrationMessage(input: {
 }) {
   const { client, session, accountId, metadata, snapshot } = input;
   const uploaded = await client.upload(session, accountId, input.bytes);
-  if (uploaded.isErr())
-    return { kind: "failed" as const, error: "Upload failed", proceed: true };
+  if (uploaded.isErr()) {
+    if (uploaded.error.kind === "http" && uploaded.error.status === 507)
+      return {
+        kind: "failed" as const,
+        error: MAIL_IMPORT_OVER_QUOTA,
+        proceed: false,
+      };
+    return { kind: "retry" as const, proceed: false as const };
+  }
   if (!(await input.beforeImport()))
     return { kind: "recorded" as const, proceed: false };
   const imported = await client.migrationImport(
@@ -351,17 +388,6 @@ export async function countArchive(
   return total;
 }
 
-function mailboxPatch(mailboxes: Record<string, boolean>) {
-  const patch: Record<string, boolean> = {};
-  for (const id of Object.keys(mailboxes))
-    Object.defineProperty(
-      patch,
-      `mailboxIds/${id.replaceAll("~", "~0").replaceAll("/", "~1")}`,
-      { value: true, enumerable: true },
-    );
-  return patch;
-}
-
 export const migrationMailTools = {
   mailboxPatch,
   archiveMessages,
@@ -369,7 +395,10 @@ export const migrationMailTools = {
   migrationReport,
   messageMetadata,
   prepareMigrationSnapshot,
+  runMigrationItem,
   inspectMigrationCandidates,
+  captureMigrationDestinations,
+  checkMigrationDestinations,
   resolveMigrationCandidate,
   importMigrationMessage,
 };

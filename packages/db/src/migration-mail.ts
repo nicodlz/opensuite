@@ -71,6 +71,7 @@ class MailImportStore {
     variant: string;
     mailboxId: string;
     labels: Record<string, string>;
+    mailboxNames: Record<string, { name: string; parentId: string | null }>;
     archive: string;
     total: number;
   }) {
@@ -151,6 +152,49 @@ class MailImportStore {
             detail: { jobId: id },
           },
         });
+      return changed;
+    });
+  }
+  async remap(input: {
+    userId: string;
+    accountId: string;
+    id: string;
+    mailboxId: string;
+    labels: Record<string, string>;
+    mailboxNames: Record<string, { name: string; parentId: string | null }>;
+  }) {
+    return this.db.$transaction(async (tx) => {
+      const changed = await tx.mailImportJob.updateMany({
+        where: {
+          id: input.id,
+          userId: input.userId,
+          accountId: input.accountId,
+          status: "attention",
+          claimToken: null,
+          cancelRequested: false,
+          archive: { not: null },
+        },
+        data: {
+          mailboxId: input.mailboxId,
+          labels: input.labels,
+          mailboxNames: input.mailboxNames,
+          status: "queued",
+          error: null,
+        },
+      });
+      if (changed.count) {
+        await tx.mailImportItem.updateMany({
+          where: { jobId: input.id, status: "failed" },
+          data: { status: "pending", error: null },
+        });
+        await tx.auditEvent.create({
+          data: {
+            userId: input.userId,
+            action: "mail.import.remapped",
+            detail: { jobId: input.id },
+          },
+        });
+      }
       return changed;
     });
   }
@@ -287,6 +331,13 @@ class MailImportStore {
       }
       return changed;
     });
+  }
+  async defer(id: string, token: string, kind: string) {
+    const status = ["unavailable", "rate_limited"].includes(kind)
+      ? "queued"
+      : "attention";
+    await this.finish(id, token, status, "Import worker unavailable", false);
+    return true;
   }
   async settle(
     job: { id: string; userId: string; accountId: string },
