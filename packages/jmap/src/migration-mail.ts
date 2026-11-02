@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { err, ok } from "neverthrow";
-import { CalendarClient } from "./calendar-client.ts";
+import { ContactsClient } from "./contacts-client.ts";
 import type { JmapResult, Session } from "./protocol.ts";
 import { GetSchema, ImportSchema, SetSchema, usingMail } from "./schemas.ts";
 import { createdItem, updatedItem } from "./set-results.ts";
@@ -13,7 +13,7 @@ const MigrationEmailSchema = z.object({
   keywords: z.record(z.string(), z.boolean()),
 });
 
-export class MigrationMailClient extends CalendarClient {
+export class MigrationMailClient extends ContactsClient {
   migrationEmails(session: Session, accountId: string, ids: readonly string[]) {
     return this.transport.call(
       session.apiUrl,
@@ -31,7 +31,7 @@ export class MigrationMailClient extends CalendarClient {
   async migrationImport(
     session: Session,
     accountId: string,
-    input: Parameters<CalendarClient["importEmail"]>[2],
+    input: Parameters<ContactsClient["importEmail"]>[2],
     ifInState: string,
   ): Promise<JmapResult<z.infer<typeof ImportSchema> & { newState: string }>> {
     const method = "Email/import";

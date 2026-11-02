@@ -2,6 +2,14 @@ import process from "node:process";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { CalendarEvent } from "@opensuite/contracts";
 import {
+  periodName,
+  shiftVisible,
+  thisPeriod,
+  viewLabel,
+  viewTitle,
+  visibleRange,
+} from "../src/calendar/views.ts";
+import {
   addDays,
   applyEventChange,
   isPending,
@@ -14,6 +22,7 @@ import {
   floorMinutes,
   formFromEvent,
   formatEventRange,
+  isCalendarView,
   fromAllDay,
   fromInputs,
   hiddenCounts,
@@ -124,6 +133,47 @@ describe("calendar ranges", () => {
     expect(
       periodTitle("day", anchor, viewRange("day", anchor, 1), "en-GB"),
     ).toMatch(/^Friday,? 30 October 2026$/u);
+  });
+});
+
+describe("agenda and phone periods", () => {
+  it("shows exactly the month of the anchor and moves by month", () => {
+    const range = visibleRange("agenda", new Date(2026, 1, 14, 15), 1, false);
+    expect(dayKey(range.start)).toBe("2026-02-01");
+    expect(dayKey(range.end)).toBe("2026-03-01");
+    expect(rangeDays(range)).toHaveLength(28);
+    const next = shiftVisible("agenda", new Date(2026, 0, 31), 1, true);
+    expect(dayKey(next)).toBe("2026-02-01");
+    expect(periodName("agenda", true)).toBe("month");
+    expect(thisPeriod("agenda", false)).toBe("this month");
+    expect(viewLabel("agenda", true)).toBe("Agenda");
+    const anchor = new Date(2026, 9, 30);
+    expect(viewTitle("agenda", anchor, range)).toBe(
+      periodTitle("month", anchor, range),
+    );
+  });
+
+  it("shows three days from the anchor for a week on a phone only", () => {
+    const anchor = new Date(2026, 9, 30, 15);
+    const phone = visibleRange("week", anchor, 1, true);
+    expect(rangeDays(phone).map(dayKey)).toEqual([
+      "2026-10-30",
+      "2026-10-31",
+      "2026-11-01",
+    ]);
+    expect(dayKey(shiftVisible("week", anchor, -1, true))).toBe("2026-10-27");
+    expect(dayKey(visibleRange("week", anchor, 1, false).start)).toBe(
+      "2026-10-26",
+    );
+    expect(viewLabel("week", true)).toBe("3 days");
+    expect(viewLabel("week", false)).toBe("Week");
+  });
+
+  it("restores only known views", () => {
+    expect(isCalendarView("agenda")).toBe(true);
+    expect(isCalendarView("week")).toBe(true);
+    expect(isCalendarView("year")).toBe(false);
+    expect(isCalendarView(null)).toBe(false);
   });
 });
 

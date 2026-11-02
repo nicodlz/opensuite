@@ -1,4 +1,7 @@
-import { createMailService } from "@opensuite/core/services/mail";
+import { contactsConfig } from "./adapters/contacts-config.ts";
+import { createContactsService } from "@opensuite/core/services/contacts";
+import { createMailWithInvitations } from "@opensuite/core/services/invitations";
+import { invitationProtocol } from "@opensuite/core/adapters/invitations";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import {
   createAliasMail,
@@ -17,6 +20,7 @@ import {
   createDomainStore,
   createAliasStore,
   createAddressStore,
+  createInvitationStore,
   createMailboxStore,
   createPushStore,
 } from "@opensuite/db";
@@ -291,18 +295,17 @@ const createAliasGuard = createAliasSendGuard(
   aliases,
   addresses.auditSubmission,
 );
-const mail = createMailService({
-  store: {
-    getForOwner: async (userId, accountId) =>
-      mailboxStore.getForOwner(userId, accountId),
-  },
+const credentialStore = {
+  getForOwner: async (userId: string, accountId: string) =>
+    mailboxStore.getForOwner(userId, accountId),
+};
+const { mail, invitations } = createMailWithInvitations({
+  aliases,
+  addresses,
+  store: credentialStore,
   origin: authConfig.value.stalwartOrigin,
-  canSendAs: async (userId, address) => {
-    const result = await aliases.canSendAs(userId, address);
-    if (result.isOk() && result.value) return `alias:${result.value}`;
-    const found = await addresses.canSendAs(userId, address);
-    return found.isOk() && found.value ? `address:${found.value}` : null;
-  },
+  protocol: invitationProtocol,
+  intentions: createInvitationStore(database.value),
   beforeAliasSend: createAliasGuard,
 });
 const migrationMail = createMailImport(
@@ -311,10 +314,7 @@ const migrationMail = createMailImport(
   mailboxStore,
 );
 const calendar = createCalendarService({
-  store: {
-    getForOwner: async (userId, accountId) =>
-      mailboxStore.getForOwner(userId, accountId),
-  },
+  store: credentialStore,
   origin: authConfig.value.stalwartOrigin,
 });
 const domainStore = createDomainStore(database.value);
@@ -352,6 +352,10 @@ const app = await buildServer({
   mail,
   migrationMail,
   calendar,
+  contacts: createContactsService(
+    contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
+  ),
+  invitations,
   aliases,
   entitlements,
   storageMeter,

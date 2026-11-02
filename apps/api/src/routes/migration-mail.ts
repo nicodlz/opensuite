@@ -1,10 +1,9 @@
 import { contract } from "@opensuite/contracts";
-import type { MailFailure } from "@opensuite/core/services/mail";
 import { implement, ORPCError } from "@orpc/server";
-import type { Result } from "neverthrow";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Actor } from "@opensuite/core/services/accounts";
 import type { ApiContext } from "./context.ts";
+import { accessResult as result } from "./access-result.ts";
 
 const route = implement(contract.migrationMail).$context<ApiContext>();
 const unavailable = (): never => {
@@ -16,20 +15,6 @@ const access = (context: ApiContext) => {
     actor: context.actor,
     service: context.migrationMail ?? unavailable(),
   };
-};
-const result = async <T>(promise: Promise<Result<T, MailFailure>>) => {
-  const value = await promise;
-  if (value.isOk()) return value.value;
-  const failures = {
-    forbidden: ["FORBIDDEN", 403],
-    not_found: ["NOT_FOUND", 404],
-    validation: ["VALIDATION", 400],
-    conflict: ["CONFLICT", 409],
-    unavailable: ["UPSTREAM_UNAVAILABLE", 503],
-    rate_limited: ["TOO_MANY_REQUESTS", 429],
-  } satisfies Record<MailFailure["kind"], [string, number]>;
-  const [code, status] = failures[value.error.kind];
-  throw new ORPCError(code, { status, defined: true });
 };
 export const migrationMailRouter = route.router({
   list: route.list.handler(({ context, input }) => {

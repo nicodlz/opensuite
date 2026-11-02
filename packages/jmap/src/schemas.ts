@@ -9,7 +9,7 @@ export const MailboxSchema = z.object({
   totalEmails: z.number().default(0),
   unreadEmails: z.number().default(0),
 });
-const AddressSchema = z.object({
+export const AddressSchema = z.object({
   name: z.string().nullable(),
   email: z.string(),
 });
@@ -116,7 +116,7 @@ const RecurrenceRuleSchema = z.looseObject({
   count: z.number().optional(),
   until: z.string().optional(),
 });
-export const CalendarEventSchema = z.object({
+export const CalendarEventSchema = z.looseObject({
   id: z.string(),
   uid: z.string().optional(),
   alerts: z.record(z.string(), z.unknown()).nullable().optional(),
@@ -132,6 +132,7 @@ export const CalendarEventSchema = z.object({
   timeZone: z.string().nullable().catch(null),
   showWithoutTime: z.boolean().catch(false),
   recurrenceRules: z.array(RecurrenceRuleSchema).nullable().catch(null),
+  recurrenceRule: RecurrenceRuleSchema.nullable().optional().catch(null),
   excludedRecurrenceRules: z.array(RecurrenceRuleSchema).nullable().catch(null),
   recurrenceOverrides: z
     .record(z.string(), z.record(z.string(), z.unknown()))

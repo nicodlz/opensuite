@@ -26,6 +26,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { AppShell } from "../shell/app-shell.tsx";
+import { drawerQuery, useMediaQuery } from "../shell/media.ts";
 import { Button } from "../ui/button.tsx";
 import { Dialog, DialogContent } from "../ui/dialog.tsx";
 import { Icon } from "../ui/icons.tsx";
@@ -33,6 +34,7 @@ import { TextField } from "../ui/text-field.tsx";
 import { ToastProvider } from "../ui/toast.tsx";
 import { useNotificationPrompt } from "../push/hook.ts";
 import { refreshCalendarTimeZone } from "../push/client.ts";
+import { AgendaView, eventsOn } from "./agenda.tsx";
 import { accountId, calendarClient } from "./client.ts";
 import { ConfirmChange, type Confirm } from "./confirm-change.tsx";
 import { useEventChanges } from "./event-changes.ts";
@@ -48,19 +50,19 @@ import {
 } from "./events.ts";
 import { offerReminder } from "./reminder-offer.ts";
 import { PeriodEmpty, SearchResults, useSearch } from "./search.tsx";
+import { CalendarToolbar } from "./toolbar.tsx";
 import {
   compactWeekQuery,
-  periodName as periodOf,
   shiftVisible,
   thisPeriod,
   useTimeGridScroller,
   viewLabel,
+  viewTitle,
   visibleRange,
 } from "./views.ts";
 import {
   addDays,
   calendarPalette,
-  calendarViews,
   dateAtMinutes,
   dayKey,
   eventEnd,
@@ -78,7 +80,6 @@ import {
   matchesSearch,
   moveTo,
   overlapsRange,
-  periodTitle,
   rangeDays,
   recurrenceLabels,
   resizeTo,
@@ -113,14 +114,9 @@ const hiddenStorage = "opensuite-calendar-hidden";
 const HOUR_HEIGHT = 48;
 const PX_PER_MINUTE = HOUR_HEIGHT / 60;
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const viewKeys: Record<CalendarView, string> = {
-  day: "D",
-  week: "W",
-  month: "M",
-};
 const shortcuts: [string, string][] = [
   ["T", "Go to today"],
-  ["D / W / M", "Day, week or month view"],
+  ["D / W / M / A", "Day, week, month or agenda view"],
   ["J or N", "Next period"],
   ["K or P", "Previous period"],
   ["C", "Create an event"],
@@ -181,10 +177,11 @@ function readHidden(): Set<string> {
   }
 }
 
+/** The stored view, except the week on a phone, which starts on a day. */
 function initialView(narrow: boolean): CalendarView {
   const stored = localStorage.getItem(viewStorage);
-  if (narrow) return stored === "month" ? "month" : "day";
-  return isCalendarView(stored) ? stored : "week";
+  if (!isCalendarView(stored)) return narrow ? "day" : "week";
+  return narrow && stored === "week" ? "day" : stored;
 }
 
 function isTyping(target: EventTarget | null) {
@@ -193,19 +190,6 @@ function isTyping(target: EventTarget | null) {
     (target.isContentEditable ||
       ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
   );
-}
-
-function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(
-    () => window.matchMedia(query).matches,
-  );
-  useEffect(() => {
-    const list = window.matchMedia(query);
-    const update = () => setMatches(list.matches);
-    list.addEventListener("change", update);
-    return () => list.removeEventListener("change", update);
-  }, [query]);
-  return matches;
 }
 
 function useNow() {
@@ -231,6 +215,9 @@ function trackPointer(
   },
 ) {
   const touch = down.pointerType === "touch";
+  // No emulated mouse press after a finger lifts: it would focus the grid,
+  // away from what the tap opens. Scrolling is not affected.
+  if (touch) down.preventDefault();
   const { clientX, clientY, pointerId } = down;
   let held = false;
   let dragged = false;
@@ -366,7 +353,7 @@ function CalendarWorkspace() {
   const notificationTarget = useRef(
     new URLSearchParams(window.location.search),
   );
-  const narrow = useMediaQuery("(max-width: 900px)");
+  const narrow = useMediaQuery(drawerQuery);
   const [view, setViewState] = useState<CalendarView>(() =>
     initialView(narrow),
   );
@@ -609,6 +596,7 @@ function CalendarWorkspace() {
         d: () => setView("day"),
         w: () => setView("week"),
         m: () => setView("month"),
+        a: () => setView("agenda"),
         j: () => go(1),
         n: () => go(1),
         k: () => go(-1),
@@ -662,8 +650,7 @@ function CalendarWorkspace() {
           (event) => event.id === popover.eventId && !isPending(event),
         ) ?? null)
       : null;
-  const periodName = periodOf(view, compact);
-  const title = periodTitle(view, anchor, range);
+  const title = viewTitle(view, anchor, range);
 
   return (
     <AppShell
@@ -759,7 +746,7 @@ function CalendarWorkspace() {
       actions={
         <button
           type="button"
-          className="shell-icon-button"
+          className="shell-icon-button shell-keyboard-help"
           aria-label="Keyboard shortcuts"
           title="Keyboard shortcuts (?)"
           onClick={() => setHelp(true)}
@@ -769,58 +756,15 @@ function CalendarWorkspace() {
       }
     >
       <div className="cal-page">
-        <div className="cal-toolbar">
-          <button
-            type="button"
-            className="cal-today"
-            onClick={goToday}
-            title="Today (T)"
-          >
-            Today
-          </button>
-          <div className="cal-nav">
-            <button
-              type="button"
-              className="cal-icon-button"
-              aria-label={`Previous ${periodName}`}
-              title={`Previous ${periodName} (K)`}
-              onClick={() => go(-1)}
-            >
-              <Icon name="chevronLeft" />
-            </button>
-            <button
-              type="button"
-              className="cal-icon-button"
-              aria-label={`Next ${periodName}`}
-              title={`Next ${periodName} (J)`}
-              onClick={() => go(1)}
-            >
-              <Icon name="chevronRight" />
-            </button>
-          </div>
-          <h1 className="cal-title" aria-live="polite">
-            {title}
-          </h1>
-          {events.isFetching && !events.isPending && (
-            <output className="cal-sync">
-              <span className="visually-hidden">Updating</span>
-            </output>
-          )}
-          <fieldset className="cal-views">
-            <legend className="visually-hidden">View</legend>
-            {calendarViews.map((item) => (
-              <button
-                key={item}
-                type="button"
-                aria-pressed={view === item}
-                title={`${viewLabel(item, compact)} view (${viewKeys[item]})`}
-                onClick={() => setView(item)}
-              >
-                {viewLabel(item, compact)}
-              </button>
-            ))}
-          </fieldset>
-        </div>
+        <CalendarToolbar
+          view={view}
+          compact={compact}
+          title={title}
+          syncing={events.isFetching && !events.isPending}
+          onToday={goToday}
+          onStep={go}
+          onView={setView}
+        />
         {events.isError && (
           <div className="cal-banner" role="alert">
             <span>{loadError(events.error)}</span>
@@ -851,6 +795,8 @@ function CalendarWorkspace() {
             />
           ) : view === "month" ? (
             <MonthView {...viewProps} month={anchor.getMonth()} />
+          ) : view === "agenda" ? (
+            <AgendaView {...viewProps} />
           ) : (
             <TimeGrid key={view} {...viewProps} />
           )}
@@ -858,6 +804,7 @@ function CalendarWorkspace() {
             <PeriodEmpty
               query={search}
               period={thisPeriod(view, compact)}
+              grid={view !== "agenda"}
               hidden={events.isError}
               onSearch={results.show}
             />
@@ -2262,15 +2209,7 @@ function DayPopover({
   onOpen: (event: CalendarEvent, rect: DOMRect) => void;
 }) {
   const titleId = useId();
-  const list = events
-    .filter((event) =>
-      overlapsRange(event, { start: day, end: addDays(day, 1) }),
-    )
-    .toSorted(
-      (a, b) =>
-        Number(isSpanning(b)) - Number(isSpanning(a)) ||
-        eventStart(a).getTime() - eventStart(b).getTime(),
-    );
+  const list = eventsOn(events, day);
   return (
     <Popover
       rect={rect}

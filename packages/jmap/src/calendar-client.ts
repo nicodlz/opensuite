@@ -121,12 +121,13 @@ export class CalendarClient extends MailWriteClient {
     session: Session,
     accountId: string,
     event: object,
+    ifInState?: string,
   ): Promise<JmapResult<{ id: string }>> {
     const method = "CalendarEvent/set";
     const result = await this.transport.call(
       session.apiUrl,
       method,
-      { accountId, create: { item: event } },
+      { accountId, create: { item: event }, ifInState },
       usingCalendars,
       SetSchema(z.object({ id: z.string() })),
     );
@@ -137,12 +138,13 @@ export class CalendarClient extends MailWriteClient {
     accountId: string,
     id: string,
     patch: Record<string, unknown>,
+    ifInState?: string,
   ): Promise<JmapResult<void>> {
     const method = "CalendarEvent/set";
     const result = await this.transport.call(
       session.apiUrl,
       method,
-      { accountId, update: { [id]: patch } },
+      { accountId, update: { [id]: patch }, ifInState },
       usingCalendars,
       SetSchema(z.unknown()),
     );

@@ -10,50 +10,52 @@ datasource db {
 
 // Better Auth's core schema: https://better-auth.com/docs/concepts/database
 model User {
-  id               String            @id
-  name             String
-  email            String            @unique
-  emailVerified    Boolean           @default(false)
-  twoFactorEnabled Boolean           @default(false)
-  role             String            @default("user")
-  disabled         Boolean           @default(false)
-  image            String?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  sessions         Session[]
-  accounts         Account[]
-  domains          Domain[]
-  addresses        Address[]
-  providers        ProviderConfig[]
-  ingestions       IngestionRecord[]
-  auditEvents      AuditEvent[]
-  twoFactor        TwoFactor?
-  securityKeys     SecurityKey[]
-  mailbox          MailboxLink?
-  mailboxProvision MailboxProvision?
-  aliasSyncToken String?
-  aliasSyncUntil DateTime?
-  emailAliases     EmailAlias[]
-  aliasApiKeys     AliasApiKey[]
-  pushSubscriptions PushSubscription[]
-  pushTags PushTag[]
-  mailPushState MailPushState?
-  calendarReminders CalendarReminder[]
+  id                   String                @id
+  name                 String
+  email                String                @unique
+  emailVerified        Boolean               @default(false)
+  twoFactorEnabled     Boolean               @default(false)
+  role                 String                @default("user")
+  disabled             Boolean               @default(false)
+  image                String?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  sessions             Session[]
+  accounts             Account[]
+  domains              Domain[]
+  addresses            Address[]
+  providers            ProviderConfig[]
+  ingestions           IngestionRecord[]
+  auditEvents          AuditEvent[]
+  twoFactor            TwoFactor?
+  securityKeys         SecurityKey[]
+  mailbox              MailboxLink?
+  mailboxProvision     MailboxProvision?
+  aliasSyncToken       String?
+  aliasSyncUntil       DateTime?
+  emailAliases         EmailAlias[]
+  aliasApiKeys         AliasApiKey[]
+  pushSubscriptions    PushSubscription[]
+  pushTags             PushTag[]
+  mailPushState        MailPushState?
+  calendarReminders    CalendarReminder[]
   calendarReminderSync CalendarReminderSync?
-  pushShowDetails Boolean @default(false)
-  calendarTimeZone String @default("UTC")
+  invitationSeries     InvitationSeries[]
+  invitationOperations InvitationOperation[]
+  pushShowDetails      Boolean               @default(false)
+  calendarTimeZone     String                @default("UTC")
   defaultAliasDomainId String?
-  defaultAliasDomain Domain? @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
-  billingCustomer BillingCustomer?
-  billingGrant BillingGrant?
-  subscriptions Subscription[]
-  mailImports MailImportJob[]
+  defaultAliasDomain   Domain?               @relation("DefaultAliasDomain", fields: [defaultAliasDomainId], references: [id], onDelete: Restrict)
+  billingCustomer      BillingCustomer?
+  billingGrant         BillingGrant?
+  subscriptions        Subscription[]
+  mailImports          MailImportJob[]
 }
 
 model MailImportJob {
-  id              String   @id
+  id              String           @id
   userId          String
-  user            User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Restrict)
   accountId       String
   format          String
   variant         String
@@ -61,14 +63,14 @@ model MailImportJob {
   labels          Json
   mailboxNames    Json?
   archive         String?
-  status          String   @default("queued")
-  cancelRequested Boolean  @default(false)
+  status          String           @default("queued")
+  cancelRequested Boolean          @default(false)
   claimToken      String?
   claimUntil      DateTime?
-  total           Int      @default(0)
+  total           Int              @default(0)
   error           String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
   items           MailImportItem[]
 
   @@index([userId, createdAt])
@@ -76,27 +78,27 @@ model MailImportJob {
 }
 
 model MailImportItem {
-  jobId     String
-  job       MailImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  index     Int
-  marker    String
-  status    String @default("pending")
-  error     String?
-  remoteId  String?
+  jobId    String
+  job      MailImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  index    Int
+  marker   String
+  status   String        @default("pending")
+  error    String?
+  remoteId String?
 
   @@id([jobId, index])
 }
 
 model SecurityKey {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   userId       String
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  credentialId String   @unique
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credentialId String    @unique
   publicKey    Bytes
-  counter      BigInt   @default(0)
+  counter      BigInt    @default(0)
   transports   String[]
   name         String
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
   lastUsedAt   DateTime?
 
   @@index([userId])
@@ -179,86 +181,86 @@ model Verification {
 }
 
 model Domain {
-  id        String    @id @default(cuid())
-  userId    String
-  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
-  name      String    @unique
-  stalwartId String?
-  status String @default("pending")
-  removalPending Boolean @default(false)
-  adoptionFailureCount Int @default(0)
-  records Json @default("[]")
-  checkedAt DateTime?
-  createdAt DateTime  @default(now())
-  addresses Address[]
-  defaultForUsers User[] @relation("DefaultAliasDomain")
-  emailAliases EmailAlias[]
+  id                   String       @id @default(cuid())
+  userId               String
+  user                 User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  name                 String       @unique
+  stalwartId           String?
+  status               String       @default("pending")
+  removalPending       Boolean      @default(false)
+  adoptionFailureCount Int          @default(0)
+  records              Json         @default("[]")
+  checkedAt            DateTime?
+  createdAt            DateTime     @default(now())
+  addresses            Address[]
+  defaultForUsers      User[]       @relation("DefaultAliasDomain")
+  emailAliases         EmailAlias[]
 
   @@unique([id, userId])
   @@index([userId])
 }
 
 model Address {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
-  domainId  String
-  domain    Domain   @relation(fields: [domainId], references: [id], onDelete: Restrict)
-  localPart String
-  isAlias   Boolean  @default(false)
-  createdAt DateTime @default(now())
-  emailAlias EmailAlias?
-  mailboxManaged Boolean @default(false)
-  active Boolean @default(false)
-  removedAt DateTime?
-  ready Boolean @default(false)
-  removalPending Boolean @default(false)
-  lastAccountId String?
-  revision Int @default(0)
-  updatedAt DateTime @default(now()) @updatedAt
+  id             String      @id @default(cuid())
+  userId         String
+  user           User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  domainId       String
+  domain         Domain      @relation(fields: [domainId], references: [id], onDelete: Restrict)
+  localPart      String
+  isAlias        Boolean     @default(false)
+  createdAt      DateTime    @default(now())
+  emailAlias     EmailAlias?
+  mailboxManaged Boolean     @default(false)
+  active         Boolean     @default(false)
+  removedAt      DateTime?
+  ready          Boolean     @default(false)
+  removalPending Boolean     @default(false)
+  lastAccountId  String?
+  revision       Int         @default(0)
+  updatedAt      DateTime    @default(now()) @updatedAt
 
-  @@index([mailboxManaged, ready, updatedAt])
   @@unique([domainId, localPart])
+  @@index([mailboxManaged, ready, updatedAt])
   @@index([userId])
 }
 
 model EmailAlias {
-  id String @id @default(cuid())
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
-  domainId String
-  domain Domain @relation(fields: [domainId], references: [id], onDelete: Restrict)
-  addressId String @unique
-  addressRecord Address @relation(fields: [addressId], references: [id], onDelete: Restrict)
-  address String @unique
-  localPart String
-  website String?
-  note String?
-  enabled Boolean @default(true)
-  ready Boolean @default(false)
-  detachedByDomain Boolean @default(false)
-  suspended Boolean @default(false)
-  lastAccountId String?
-  revision Int @default(0)
-  requestId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  deletedAt DateTime?
+  id               String    @id @default(cuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  domainId         String
+  domain           Domain    @relation(fields: [domainId], references: [id], onDelete: Restrict)
+  addressId        String    @unique
+  addressRecord    Address   @relation(fields: [addressId], references: [id], onDelete: Restrict)
+  address          String    @unique
+  localPart        String
+  website          String?
+  note             String?
+  enabled          Boolean   @default(true)
+  ready            Boolean   @default(false)
+  detachedByDomain Boolean   @default(false)
+  suspended        Boolean   @default(false)
+  lastAccountId    String?
+  revision         Int       @default(0)
+  requestId        String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
 
   @@unique([userId, requestId])
   @@index([userId])
 }
 
 model AliasApiKey {
-  id String @id @default(cuid())
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
-  name String
-  prefix String @unique
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  name       String
+  prefix     String    @unique
   secretHash String
-  createdAt DateTime @default(now())
+  createdAt  DateTime  @default(now())
   lastUsedAt DateTime?
-  revokedAt DateTime?
+  revokedAt  DateTime?
 
   @@index([userId])
 }
@@ -300,118 +302,122 @@ model AuditEvent {
 
 // The envelope must remain recoverable even when no local user matches it.
 model InboundMessage {
-  id             String             @id
-  bucket         String
-  objectKey      String
-  notification   Json
-  state          String             @default("received")
-  receivedAt     DateTime
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  recipients     InboundRecipient[]
+  id           String             @id
+  bucket       String
+  objectKey    String
+  notification Json
+  state        String             @default("received")
+  receivedAt   DateTime
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  recipients   InboundRecipient[]
 }
 
 model InboundRecipient {
-  idempotencyKey String         @id
-  messageId      String
-  message        InboundMessage @relation(fields: [messageId], references: [id], onDelete: Restrict)
-  destination    String
-  addresses      Json
-  state          String         @default("received")
-  attempts       Int            @default(0)
-  remoteId       String?
-  claimedAt      DateTime?
-  claimOwner     String?
+  idempotencyKey  String         @id
+  messageId       String
+  message         InboundMessage @relation(fields: [messageId], references: [id], onDelete: Restrict)
+  destination     String
+  addresses       Json
+  state           String         @default("received")
+  attempts        Int            @default(0)
+  remoteId        String?
+  claimedAt       DateTime?
+  claimOwner      String?
   importStartedAt DateTime?
-  legacy         Boolean        @default(false)
-  permanent      Boolean        @default(false)
-  error          String?
-  updatedAt      DateTime       @updatedAt
+  legacy          Boolean        @default(false)
+  permanent       Boolean        @default(false)
+  error           String?
+  updatedAt       DateTime       @updatedAt
 
   @@index([messageId])
+  @@index([destination, remoteId])
 }
 
 model InboundResolutionAudit {
-  id             String   @id @default(cuid())
-  recipientKey   String
-  operator       String
-  reason         String
-  action         String
-  previousState  String
-  remoteId       String?
-  createdAt      DateTime @default(now())
+  id            String   @id @default(cuid())
+  recipientKey  String
+  operator      String
+  reason        String
+  action        String
+  previousState String
+  remoteId      String?
+  createdAt     DateTime @default(now())
 
   @@index([recipientKey])
 }
 
 model PushSubscription {
-  id String @id @default(cuid())
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  product String
-  endpoint String @unique
-  p256dh String
-  auth String
-  userAgent String
-  createdAt DateTime @default(now())
-  lastSuccessAt DateTime?
-  failureCount Int @default(0)
-  nextAttemptAt DateTime?
+  id               String    @id @default(cuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product          String
+  endpoint         String    @unique
+  p256dh           String
+  auth             String
+  userAgent        String
+  createdAt        DateTime  @default(now())
+  lastSuccessAt    DateTime?
+  failureCount     Int       @default(0)
+  nextAttemptAt    DateTime?
   vapidFingerprint String?
-  sessionId String?
+  sessionId        String?
+
   @@index([userId, product])
   @@index([userId, sessionId])
 }
 
 model PushTag {
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  product String
-  tag String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   String
+  tag       String
   expiresAt DateTime
+
   @@id([userId, product, tag])
   @@index([expiresAt])
 }
 
 model MailPushState {
-  userId String @id
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String    @id
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   generation String
-  accountId String
-  state String?
+  accountId  String
+  state      String?
   leaseToken String?
   leaseUntil DateTime?
 }
 
 model CalendarReminderSync {
-  userId String @id
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  owner String?
-  leaseUntil DateTime?
+  userId       String    @id
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  owner        String?
+  leaseUntil   DateTime?
   lastSyncedAt DateTime?
 }
 
 model CalendarReminder {
-  id String @id @default(cuid())
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  calendarId String
-  eventId String
-  uid String
-  occurrenceId String
-  recurrenceKey String
-  alarmId String
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendarId      String
+  eventId         String
+  uid             String
+  occurrenceId    String
+  recurrenceKey   String
+  alarmId         String
   occurrenceStart DateTime
-  triggerAt DateTime
-  title String
-  location String
-  timeZone String
-  allDay Boolean
-  state String @default("pending")
-  claimOwner String?
-  claimUntil DateTime?
-  nextAttemptAt DateTime?
-  updatedAt DateTime @default(now()) @updatedAt
+  triggerAt       DateTime
+  title           String
+  location        String
+  timeZone        String
+  allDay          Boolean
+  state           String    @default("pending")
+  claimOwner      String?
+  claimUntil      DateTime?
+  nextAttemptAt   DateTime?
+  updatedAt       DateTime  @default(now()) @updatedAt
+
   @@unique([userId, uid, recurrenceKey, alarmId, occurrenceStart], map: "calendar_reminder_identity_key")
   @@index([state, triggerAt])
   @@index([state, updatedAt])
@@ -422,47 +428,48 @@ model CalendarReminder {
 // the Stripe API after a verified webhook, never from client input. No payment
 // card data is stored.
 model BillingCustomer {
-  userId           String   @id
-  user             User     @relation(fields: [userId], references: [id], onDelete: Restrict)
-  stripeCustomerId String   @unique
+  userId           String    @id
+  user             User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  stripeCustomerId String    @unique
   metadataSyncedAt DateTime?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
 }
 
 // Complimentary access is managed by operators, never by public procedures.
 model BillingGrant {
-  userId    String   @id
-  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  userId    String    @id
+  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
   plan      String
   reason    String
-  grantedAt DateTime @default(now())
+  grantedAt DateTime  @default(now())
   expiresAt DateTime?
   revokedAt DateTime?
 }
 
 model Subscription {
   // The Stripe subscription ID.
-  id                 String    @id
+  id                  String    @id
   // Null until a checkout started without an account is claimed.
-  userId             String?
-  user               User?     @relation(fields: [userId], references: [id], onDelete: Restrict)
-  stripeCustomerId   String
-  plan               String
-  interval           String
-  status             String
-  priceId            String
-  storageQuotaBytes  BigInt
-  currentPeriodStart DateTime?
-  currentPeriodEnd   DateTime?
-  cancelAtPeriodEnd  Boolean   @default(false)
-  canceledAt         DateTime?
-  endedAt            DateTime?
+  userId              String?
+  user                User?     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  stripeCustomerId    String
+  plan                String
+  interval            String
+  status              String
+  priceId             String
+  storageQuotaBytes   BigInt
+  currentPeriodStart  DateTime?
+  currentPeriodEnd    DateTime?
+  cancelAtPeriodEnd   Boolean   @default(false)
+  canceledAt          DateTime?
+  endedAt             DateTime?
   latestInvoiceStatus String?
   // Stripe's own timestamp of the state stored here; older reads never win.
-  stripeCreatedAt    DateTime?
-  stripeObservedAt   DateTime
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  stripeCreatedAt     DateTime?
+  stripeObservedAt    DateTime
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
   @@index([userId, status])
   @@index([stripeCustomerId])
 }
@@ -475,6 +482,7 @@ model StripeEvent {
   processedAt DateTime?
   ignoredAt   DateTime?
   attempts    Int       @default(0)
+
   @@index([processedAt, receivedAt])
 }
 
@@ -494,8 +502,50 @@ model CheckoutClaim {
 }
 
 model BillingSyncState {
-  id String @id
+  id              String    @id
   lastCompletedAt DateTime?
-  leaseUntil DateTime?
-  leaseToken String?
+  leaseUntil      DateTime?
+  leaseToken      String?
+}
+
+model InvitationSeries {
+  id            String                @id @default(cuid())
+  userId        String
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId     String
+  uid           String
+  organizer     String
+  recipient     String
+  calendarId    String
+  eventId       String?
+  calendar      String?
+  eventSnapshot String?
+  pendingId     String?
+  revision      Int                   @default(0)
+  operations    InvitationOperation[]
+  updatedAt     DateTime              @updatedAt
+
+  @@unique([userId, accountId, uid])
+  @@index([userId])
+}
+
+model InvitationOperation {
+  id                String           @id
+  userId            String
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  seriesId          String
+  series            InvitationSeries @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  fingerprint       String
+  phase             String
+  calendar          String
+  organizerCalendar String?
+  baseSnapshot      String?
+  participation     String?
+  recurrenceId      String?
+  draftId           String?
+  identityId        String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([userId, seriesId])
 }

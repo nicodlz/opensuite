@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from "react";
 import {
   addDays,
+  periodTitle,
   shiftAnchor,
   startOfDay,
   viewRange,
@@ -17,6 +18,8 @@ const compactDays = 3;
 
 const isCompactWeek = (view: CalendarView, compact: boolean) =>
   compact && view === "week";
+/** The agenda moves and is named by month, but shows only that month. */
+const unitOf = (view: CalendarView) => (view === "agenda" ? "month" : view);
 
 export function visibleRange(
   view: CalendarView,
@@ -24,6 +27,10 @@ export function visibleRange(
   firstDay: number,
   compact: boolean,
 ): DateRange {
+  if (view === "agenda") {
+    const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    return { start, end: new Date(start.getFullYear(), start.getMonth() + 1) };
+  }
   if (!isCompactWeek(view, compact)) return viewRange(view, anchor, firstDay);
   const start = startOfDay(anchor);
   return { start, end: addDays(start, compactDays) };
@@ -36,7 +43,7 @@ export function shiftVisible(
   compact: boolean,
 ): Date {
   if (!isCompactWeek(view, compact))
-    return shiftAnchor(view, anchor, direction);
+    return shiftAnchor(unitOf(view), anchor, direction);
   return addDays(startOfDay(anchor), direction * compactDays);
 }
 
@@ -61,6 +68,7 @@ const labels: Record<CalendarView, string> = {
   day: "Day",
   week: "Week",
   month: "Month",
+  agenda: "Agenda",
 };
 
 /** Name of a view button and of the calendar surface. */
@@ -70,10 +78,15 @@ export function viewLabel(view: CalendarView, compact: boolean) {
 
 /** Period after "Previous" or "Next". */
 export function periodName(view: CalendarView, compact: boolean) {
-  return isCompactWeek(view, compact) ? "3 days" : view;
+  return isCompactWeek(view, compact) ? "3 days" : unitOf(view);
 }
 
 /** Period at the end of a sentence: "Nothing scheduled this week". */
 export function thisPeriod(view: CalendarView, compact: boolean) {
-  return isCompactWeek(view, compact) ? "these 3 days" : `this ${view}`;
+  return isCompactWeek(view, compact) ? "these 3 days" : `this ${unitOf(view)}`;
+}
+
+/** Heading of the period shown: a day, a range of days or a month. */
+export function viewTitle(view: CalendarView, anchor: Date, range: DateRange) {
+  return periodTitle(unitOf(view), anchor, range);
 }
