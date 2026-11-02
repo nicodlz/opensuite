@@ -52,6 +52,16 @@ const compose = async (...args: string[]) =>
   (
     await run("docker", [...composeArgs, ...args], {
       cwd: root,
+      env: {
+        ...process.env,
+        // Compose interpolates Drive settings even though this suite does not start it.
+        DRIVE_S3_ENDPOINT: "http://fixture.invalid",
+        DRIVE_S3_PUBLIC_ENDPOINT: "http://fixture.invalid",
+        DRIVE_S3_BUCKET: "fixture",
+        DRIVE_S3_REGION: "fixture",
+        DRIVE_S3_ACCESS_KEY: "fixture",
+        DRIVE_S3_SECRET_FILE: "/dev/null",
+      },
       maxBuffer: 16 * 1024 * 1024,
     })
   ).stdout;
