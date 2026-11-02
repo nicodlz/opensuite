@@ -293,6 +293,9 @@ catalogs:
     fastify:
       specifier: 5.12.7
       version: 5.12.7
+    ical.js:
+      specifier: 2.2.1
+      version: 2.2.1
     jsdom:
       specifier: 27.4.0
       version: 27.4.0
@@ -743,6 +746,9 @@ importers:
       '@opensuite/jmap':
         specifier: workspace:*
         version: link:../jmap
+      ical.js:
+        specifier: 'catalog:'
+        version: 2.2.1
       neverthrow:
         specifier: 'catalog:'
         version: 8.2.0
@@ -3495,6 +3501,9 @@ packages:
   https-proxy-agent@9.1.0:
     resolution: {integrity: sha512-ag87y7cJJ9/3+GxFr8Oy4O5faDsGRGnBGsJj/YjOSsSx/5eadKLYTMPlzuR6obgoCDDm0abAAZitXXQkMOPSpA==}
     engines: {node: '>= 20'}
+
+  ical.js@2.2.1:
+    resolution: {integrity: sha512-yK/UlPbEs316igb/tjRgbFA8ZV75rCsBJp/hWOatpyaPNlgw0dGDmU+FoicOcwX4xXkeXOkYiOmCqNPFpNPkQg==}
 
   iconv-lite@0.4.24:
     resolution: {integrity: sha512-v3MXnZAcvnywkTUEZomIActle7RXXeedOR31wwl7VlyoXO4Qi9arvSenNQWne1TcRwhCL1HwLI21bEqdpj8/rA==}
@@ -7300,6 +7309,8 @@ snapshots:
     transitivePeerDependencies:
       - kerberos
       - supports-color
+
+  ical.js@2.2.1: {}
 
   iconv-lite@0.4.24:
     dependencies:

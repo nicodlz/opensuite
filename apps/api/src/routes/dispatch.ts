@@ -100,6 +100,7 @@ function createApiContext(
     audit: dependencies.identity?.audit,
     mail: dependencies.mail,
     calendar: dependencies.calendar,
+    contacts: dependencies.contacts,
     productOrigins: dependencies.identity?.productOrigins ?? {},
     vaultOrigin: dependencies.vaultOrigin,
     downloads,

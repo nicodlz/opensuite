@@ -1,3 +1,5 @@
+import { contactsConfig } from "./adapters/contacts-config.ts";
+import { createContactsService } from "@opensuite/core/services/contacts";
 import { createMailService } from "@opensuite/core/services/mail";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import {
@@ -341,6 +343,9 @@ const app = await buildServer({
   ...(domains === undefined ? {} : { domains }),
   mail,
   calendar,
+  contacts: createContactsService(
+    contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
+  ),
   aliases,
   entitlements,
   storageMeter,

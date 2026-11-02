@@ -27,6 +27,7 @@ catalog:
   fastify: 5.12.7
   "@fontsource-variable/dm-sans": 5.2.6
   "@fontsource-variable/space-grotesk": 5.2.8
+  ical.js: 2.2.1
   jsdom: 27.4.0
   knip: 6.43.0
   neverthrow: 8.2.0
