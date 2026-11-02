@@ -36,6 +36,7 @@ export interface QueueStats {
 export interface Sources {
   ready(service: string): Promise<boolean>;
   backupAge(): Promise<number>;
+  ingestCaptureAge(): Promise<number>;
   backupFailure(): Promise<"vault" | "backup" | null>;
   diskPercent(): Promise<number>;
   certificateDays(service: "https" | "submission" | "imaps"): Promise<number>;
@@ -51,6 +52,18 @@ export interface Report {
   metrics: Record<string, number>;
   alerts: Alert[];
 }
+
+const checkBackupFailure = async (sources: Sources, alerts: Alert[]) => {
+  try {
+    const failure = await sources.backupFailure();
+    if (failure !== null)
+      alerts.push({
+        code: failure === "vault" ? "backup_vault_failure" : "backup_failure",
+      });
+  } catch {
+    alerts.push({ code: "backup_failure_status_unavailable" });
+  }
+};
 
 export async function inspect(
   config: Config,
@@ -79,18 +92,7 @@ export async function inspect(
     ...(config.OBSERVE_INGEST_ENABLED === "true" ? ["ingest"] : []),
   ];
   await Promise.all([
-    (async () => {
-      try {
-        const failure = await sources.backupFailure();
-        if (failure !== null)
-          alerts.push({
-            code:
-              failure === "vault" ? "backup_vault_failure" : "backup_failure",
-          });
-      } catch {
-        alerts.push({ code: "backup_failure_status_unavailable" });
-      }
-    })(),
+    checkBackupFailure(sources, alerts),
     ...services.map((name) =>
       check(
         `${name}_readiness`,
@@ -103,6 +105,16 @@ export async function inspect(
       () => sources.backupAge(),
       (value) => value < 0 || value > config.OBSERVE_BACKUP_MAX_AGE_SECONDS,
     ),
+    ...(config.OBSERVE_INGEST_ENABLED === "true"
+      ? [
+          check(
+            "ingest_capture_age_seconds",
+            () => sources.ingestCaptureAge(),
+            (value) =>
+              value < 0 || value > config.OBSERVE_BACKUP_MAX_AGE_SECONDS,
+          ),
+        ]
+      : []),
     check(
       "disk_used_percent",
       () => sources.diskPercent(),

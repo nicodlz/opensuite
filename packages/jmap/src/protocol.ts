@@ -269,36 +269,17 @@ export const setFailure = (
     : { kind: "set", method, id: entry[0], ...entry[1] };
 };
 
-export const GetSchema = <T>(item: z.ZodType<T>) =>
-  z.object({
-    accountId: z.string(),
-    state: z.string(),
-    list: z.array(item),
-    notFound: z.array(z.string()),
-  });
-export const QuerySchema = z.object({
-  accountId: z.string(),
-  queryState: z.string(),
-  canCalculateChanges: z.boolean(),
-  position: z.number(),
-  ids: z.array(z.string()),
-  total: z.number().optional(),
-});
-export const SetSchema = <T>(created: z.ZodType<T>) =>
-  z.object({
-    accountId: z.string(),
-    created: z.record(z.string(), created).nullable().optional(),
-    updated: z.record(z.string(), z.unknown()).nullable().optional(),
-    notCreated: z.record(z.string(), SetErrorSchema).nullable().optional(),
-    notUpdated: z.record(z.string(), SetErrorSchema).nullable().optional(),
-    destroyed: z.array(z.string()).nullable().optional(),
-    notDestroyed: z.record(z.string(), SetErrorSchema).nullable().optional(),
-  });
+type SubmissionSchemas = Pick<
+  typeof import("./schemas.ts"),
+  "GetSchema" | "SetSchema" | "QuerySchema"
+>;
 
 export class ScheduledSubmissions {
   readonly #transport: Transport;
-  constructor(transport: Transport) {
+  readonly #schemas: SubmissionSchemas;
+  constructor(transport: Transport, schemas: SubmissionSchemas) {
     this.#transport = transport;
+    this.#schemas = schemas;
   }
   async scheduleSubmission(
     session: Session,
@@ -330,7 +311,7 @@ export class ScheduledSubmissions {
         },
       },
       [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
-      SetSchema(
+      this.#schemas.SetSchema(
         z.object({
           id: z.string(),
           sendAt: z.iso.datetime(),
@@ -361,7 +342,7 @@ export class ScheduledSubmissions {
       method,
       { accountId, update: { [id]: { undoStatus: "canceled" } } },
       [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
-      SetSchema(z.unknown()),
+      this.#schemas.SetSchema(z.unknown()),
     );
     return result.andThen((response) => {
       const failure = setFailure(method, response.notUpdated);
@@ -380,7 +361,7 @@ export class ScheduledSubmissions {
       "EmailSubmission/get",
       { accountId, ids },
       [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
-      GetSchema(
+      this.#schemas.GetSchema(
         z.object({
           id: z.string(),
           emailId: z.string(),
@@ -407,7 +388,7 @@ export class ScheduledSubmissions {
         limit: 500,
       },
       [JmapCapability.core, JmapCapability.mail, JmapCapability.submission],
-      QuerySchema,
+      this.#schemas.QuerySchema,
     );
   }
 }
