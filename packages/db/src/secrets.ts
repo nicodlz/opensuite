@@ -127,16 +127,15 @@ const decryptSecret = (
   }
 };
 
+export interface SecretBox {
+  encrypt(value: unknown, context: unknown): Result<string, DatabaseError>;
+  decrypt(value: unknown, context: unknown): Result<string, DatabaseError>;
+}
+
 /** AES-GCM binds ciphertext to both the owner and the configuration ID. */
 export const createSecretBox = (
   key: unknown,
-): Result<
-  {
-    encrypt(value: unknown, context: unknown): Result<string, DatabaseError>;
-    decrypt(value: unknown, context: unknown): Result<string, DatabaseError>;
-  },
-  DatabaseError
-> => {
+): Result<SecretBox, DatabaseError> => {
   const parsedKey = Environment.shape.PROVIDER_ENCRYPTION_KEY.safeParse(key);
   if (!parsedKey.success)
     return err({

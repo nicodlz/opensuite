@@ -9,6 +9,7 @@ import { contactsContract } from "./contacts.ts";
 import { calendarContract } from "./calendar.ts";
 import { driveContract } from "./drive.ts";
 import { mailContract } from "./mail.ts";
+import { migrationMailContract } from "./migration-mail.ts";
 import { setupContract } from "./setup.ts";
 import { systemContract } from "./system.ts";
 
@@ -18,6 +19,7 @@ export * from "./domains.ts";
 export * from "./aliases.ts";
 export * from "./addresses.ts";
 export * from "./mail.ts";
+export * from "./migration-mail.ts";
 export * from "./drive.ts";
 export * from "./calendar.ts";
 export * from "./contacts.ts";
@@ -32,6 +34,7 @@ export const contract = {
   account: accountContract,
   admin: { ...adminContract, domains: domainsContract, setup: setupContract },
   mail: mailContract,
+  migrationMail: migrationMailContract,
   calendar: calendarContract,
   contacts: contactsContract,
   invitations: invitationsContract,

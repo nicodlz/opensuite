@@ -98,6 +98,8 @@ export class MailReadClient extends ClientBase {
       filter?: object;
       sort?: readonly object[];
       position?: number;
+      anchor?: string;
+      anchorOffset?: number;
       limit?: number;
       collapseThreads?: boolean;
       calculateTotal?: boolean;

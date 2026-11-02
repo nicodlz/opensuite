@@ -7,8 +7,30 @@ import {
 } from "@opensuite/db";
 import { createNotificationDispatcher } from "@opensuite/core/services/notifications";
 import { createWebPushTransport } from "@opensuite/core/adapters/web-push";
+import { migrationMailTools } from "@opensuite/core/adapters/migration-mail";
+import { createMailMigrationService } from "@opensuite/core/services/migration-mail";
 import { loadVapidConfig, loadMailPushConfig } from "./config.ts";
 import type { PushProduct } from "@opensuite/contracts";
+
+export function createMailImport(
+  db: PrismaClient,
+  config: { mailboxKey: string; stalwartOrigin: string },
+  mailboxes: Extract<
+    ReturnType<typeof createMailboxStore>,
+    { value: unknown }
+  >["value"],
+) {
+  return createMailMigrationService({
+    tools: migrationMailTools,
+    db,
+    key: config.mailboxKey,
+    store: {
+      getForOwner: async (userId, accountId) =>
+        mailboxes.getForOwner(userId, accountId),
+    },
+    origin: config.stalwartOrigin,
+  });
+}
 
 /** Missing VAPID disables only push; no secret values enter diagnostics. */
 export async function configurePush(

@@ -7,6 +7,7 @@ import { createFixedWindow } from "../auth/fixed-window.ts";
 import type { createAliasLimiter } from "../auth/alias-limits.ts";
 import type { registerDownloads } from "./downloads.ts";
 import type { registerOpenApi } from "./openapi.ts";
+import { registerMailImportUpload } from "./migration-mail.ts";
 export function registerDispatch(
   app: FastifyInstance,
   dependencies: ServerDependencies,
@@ -25,7 +26,8 @@ export function registerDispatch(
     if (
       ["/origins", "/push/public-key", "/push/privacy"].includes(
         request.url.split("?")[0] ?? "",
-      )
+      ) ||
+      request.url.startsWith("/mail/imports/")
     )
       void reply.header("cache-control", "no-store");
     const headers = requestHeaders(request);
@@ -54,6 +56,13 @@ export function registerDispatch(
     return reply;
   };
   app.post("/mail/attachments/upload", { bodyLimit: 70_000_000 }, handleApi);
+  registerMailImportUpload(
+    app,
+    handleApi,
+    dependencies.identity?.actor,
+    actors,
+    checkoutLimits,
+  );
   app.all("/*", handleApi);
 }
 
@@ -99,6 +108,7 @@ function createApiContext(
     setupIdentity: dependencies.identity,
     audit: dependencies.identity?.audit,
     ...mailContext(dependencies),
+    migrationMail: dependencies.migrationMail,
     contacts: dependencies.contacts,
     productOrigins: dependencies.identity?.productOrigins ?? {},
     vaultOrigin: dependencies.vaultOrigin,

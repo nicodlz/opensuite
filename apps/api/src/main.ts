@@ -39,7 +39,12 @@ import { createAuthRuntime } from "./auth/runtime.ts";
 import { configureDomains } from "./routes/domain-setup.ts";
 import { createSetupStatus } from "./routes/setup-status.ts";
 import { buildServer } from "./server.ts";
-import { configurePush, registerBackgroundJobs } from "./push-runtime.ts";
+import {
+  configurePush,
+  createMailImport,
+  registerBackgroundJobs,
+} from "./push-runtime.ts";
+import { registerMailImport } from "./routes/migration-mail-job.ts";
 import type { PushProduct } from "@opensuite/contracts";
 import { createEntitlements } from "./billing/entitlements.ts";
 import { createStorageMeter } from "./billing/storage.ts";
@@ -303,6 +308,11 @@ const { mail, invitations } = createMailWithInvitations({
   intentions: createInvitationStore(database.value),
   beforeAliasSend: createAliasGuard,
 });
+const migrationMail = createMailImport(
+  database.value,
+  authConfig.value,
+  mailboxStore,
+);
 const calendar = createCalendarService({
   store: credentialStore,
   origin: authConfig.value.stalwartOrigin,
@@ -340,6 +350,7 @@ const app = await buildServer({
   accounts: auth.accounts,
   ...(domains === undefined ? {} : { domains }),
   mail,
+  migrationMail,
   calendar,
   contacts: createContactsService(
     contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
@@ -383,6 +394,7 @@ registerBackgroundJobs({
   aliases,
   auth,
 });
+registerMailImport(app, migrationMail);
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     app.log.info({ signal }, "shutting down");

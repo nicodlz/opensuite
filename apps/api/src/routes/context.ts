@@ -9,6 +9,7 @@ import type { AccountService, Actor } from "@opensuite/core/services/accounts";
 import type { ContactsService } from "@opensuite/core/services/contacts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
+import type { MailMigrationService } from "@opensuite/core/services/migration-mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { FastifyBaseLogger } from "fastify";
 import type { StorageMeter } from "../billing/storage.ts";
@@ -48,6 +49,7 @@ export interface ApiContext {
       }
     | undefined;
   readonly mail: MailService | undefined;
+  readonly migrationMail: MailMigrationService | undefined;
   /** Public origin of each application when they are served separately. */
   readonly vaultOrigin?: string | undefined;
   readonly productOrigins: Readonly<Record<string, string>>;
