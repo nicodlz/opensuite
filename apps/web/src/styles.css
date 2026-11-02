@@ -295,12 +295,18 @@ h3 {
   font-weight: 700;
   letter-spacing: 0.09em;
 }
+/* Shared key cap: readable on light and dark surfaces. */
 kbd {
-  border: 1px solid #776a7e;
-  border-radius: 3px;
-  padding: 1px 4px;
-  color: var(--muted-light);
-  font-size: 10px;
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--foreground);
+  font: 600 11px/1.5 var(--font-body);
+  text-align: center;
 }
 .avatar {
   display: grid;
@@ -626,32 +632,49 @@ h1 {
   width: 22px;
   color: var(--accent);
 }
+/* One notification at a time, bottom centre; clear of the mobile FAB. */
 .toast-viewport {
   position: fixed;
   z-index: 80;
-  right: 20px;
   bottom: 20px;
-  width: min(360px, calc(100vw - 40px));
-  list-style: none;
-  margin: 0;
-  padding: 0;
+  left: 50%;
+  width: min(480px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 .toast {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
+  align-items: center;
+  gap: 8px;
+}
+.toast[data-state="open"] {
+  pointer-events: auto;
+  padding: 8px 8px 8px 16px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--surface);
   color: var(--foreground);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+.toast-message {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+.toast[data-state="open"] .toast-message {
+  padding: 6px 0;
+}
+.toast-action.button {
+  color: var(--accent);
   font-weight: 700;
 }
-.toast-close {
-  border: 0;
-  background: transparent;
-  color: inherit;
+.toast-close.button {
+  padding: 6px;
+}
+@media (max-width: 900px) {
+  .toast-viewport {
+    bottom: 90px;
+  }
 }
 @media (max-width: 760px) {
   .app-shell {
