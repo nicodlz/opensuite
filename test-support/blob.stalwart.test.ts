@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { connect } from "node:tls";
 import { expect, test } from "vitest";
 import { z } from "zod";
+import { createComposeNetworks } from "./compose-networks.js";
 
 const run = promisify(execFile);
 const suffix = (process.env["OPENSUITE_RUN_ID"] ?? "local")
@@ -64,11 +65,10 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
   ]);
   await run("chmod", ["644", keyFile, certFile]);
   const certFileContents = await readFile(certFile);
-  // Avoid Docker's default 172.16.0.0/12 bridge pools, which can grow while
-  // other suites run in parallel and overlap an explicitly chosen /24.
-  const managementPrefix = `10.197.${String(process.pid % 256)}`;
+  const networks = createComposeNetworks(project);
   const env = {
     ...process.env,
+    ...networks.env,
     // Compose interpolates Drive settings even though this suite does not start it.
     DRIVE_S3_ENDPOINT: "http://object-store:8333",
     DRIVE_S3_PUBLIC_ENDPOINT: "http://object-store:8333",
@@ -81,13 +81,6 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
     MAIL_TLS_KEY_FILE: keyFile,
     MAIL_HOSTNAME: "localhost",
     MAIL_BLOB_STORE: "s3",
-    MAIL_MANAGEMENT_SUBNET: `${managementPrefix}.0/24`,
-    MAIL_MANAGEMENT_API_IP: `${managementPrefix}.10`,
-    MAIL_MANAGEMENT_STALWART_IP: `${managementPrefix}.20`,
-    MAIL_MANAGEMENT_SETUP_IP: `${managementPrefix}.21`,
-    MAIL_MANAGEMENT_OPS_IP: `${managementPrefix}.22`,
-    MAIL_MANAGEMENT_BACKUP_IP: `${managementPrefix}.23`,
-    MAIL_MANAGEMENT_BOOTSTRAP_IP: `${managementPrefix}.24`,
     MAIL_S3_ENDPOINT: "http://object-store:8333",
     MAIL_S3_REGION: "us-east-1",
     MAIL_S3_BUCKET: bucket,
@@ -160,6 +153,8 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
 
   let stage = "start";
   try {
+    await networks.reserve();
+    Object.assign(env, networks.env);
     await bootstrap(
       "up",
       "-d",
@@ -449,6 +444,7 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
     try {
       await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
     } finally {
+      await networks.release();
       await rm(directory, { recursive: true, force: true });
     }
   }
