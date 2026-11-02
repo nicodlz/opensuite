@@ -45,6 +45,7 @@ let service: ReturnType<typeof createMailMigrationService>;
 let loseResponse = false;
 let failUpload = false;
 let accountEnabled = true;
+let changeBeforeImport: (() => Promise<void>) | undefined;
 const compose = async (...args: string[]) =>
   (
     await run(
@@ -81,6 +82,15 @@ const fetcher: typeof fetch = async (url, init) => {
   if (failUpload && target.includes("/upload/")) {
     failUpload = false;
     return new Response("fixture upload failure", { status: 503 });
+  }
+  if (
+    changeBeforeImport &&
+    typeof init?.body === "string" &&
+    init.body.includes('"Email/import"')
+  ) {
+    const change = changeBeforeImport;
+    changeBeforeImport = undefined;
+    await change();
   }
   const response = await fetch(url, init);
   if (
@@ -187,6 +197,48 @@ afterAll(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 }, 120_000);
 
+it("finds exact Message-ID candidates among similar messages", async () => {
+  const session = value(await diagnostic.discover());
+  const ids = ["filter-one+tag@example.test", "filter.two_42@example.test"];
+  const created = await Promise.all(
+    ids.map(async (messageId) => {
+      const raw = Buffer.from(
+        `From: sender@example.test\r\nTo: alice@example.test\r\nMessage-ID: <${messageId}>\r\n\r\nFilter fixture\r\n`,
+      );
+      const uploaded = value(await diagnostic.upload(session, account, raw));
+      const imported = value(
+        await diagnostic.importEmail(session, account, {
+          blobId: uploaded.blobId,
+          mailboxIds: { [inbox]: true },
+        }),
+      );
+      return { id: imported.id, raw, messageId };
+    }),
+  );
+  try {
+    await Promise.all(
+      created.map(async (expected) => {
+        const found = value(
+          await migrationMailTools.inspectMigrationCandidates({
+            client: diagnostic,
+            session,
+            accountId: account,
+            bytes: expected.raw,
+            messageId: expected.messageId,
+          }),
+        );
+        expect(found).toEqual({ kind: "match", id: expected.id });
+      }),
+    );
+  } finally {
+    await Promise.all(
+      created.map(async (message) =>
+        value(await diagnostic.destroyEmail(session, account, message.id)),
+      ),
+    );
+  }
+}, 120_000);
+
 it("imports raw MIME and mapped labels, deduplicates, and recovers an uncertain response after restart", async () => {
   const raw = Buffer.from(
     "From: sender@example.test\r\nTo: alice@example.test\r\nDate: Thu, 02 Jan 2020 03:04:05 +0000\r\nMessage-ID: <import-one@example.test>\r\nX-Gmail-Labels: Sent,Starred\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=x.bin\r\nContent-Transfer-Encoding: base64\r\n\r\nAAECA/8=\r\n--x--\r\n",
@@ -250,6 +302,87 @@ it("imports raw MIME and mapped labels, deduplicates, and recovers an uncertain 
   expect(
     value(await diagnostic.queryEmails(session, account)).ids,
   ).toHaveLength(1);
+}, 120_000);
+
+it("deduplicates repeated Message-IDs within the same archive", async () => {
+  const raw = Buffer.from(
+    "From: sender@example.test\r\nTo: alice@example.test\r\nMessage-ID: <same-archive@example.test>\r\n\r\nRepeated\r\n\r\n",
+  );
+  const envelope = Buffer.from("From sender Thu Jan 2 06:04:05 2020 +0000\r\n");
+  const archive = Buffer.concat([envelope, raw, envelope, raw]);
+  const session = value(await diagnostic.discover());
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "mbox",
+      variant: "mboxo",
+      base64: archive.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  await service.work();
+  expect(value(await service.report(actor, "default", job.id))).toMatchObject({
+    status: "completed",
+    messages: [{ status: "imported" }, { status: "duplicate" }],
+  });
+  expect(
+    value(await diagnostic.queryEmails(session, account)).ids,
+  ).toHaveLength(before + 1);
+}, 120_000);
+
+it("rejects a stale duplicate scan before importing, then succeeds after resume", async () => {
+  const session = value(await diagnostic.discover());
+  const raw = Buffer.from(
+    "Message-ID: <stale-scan@example.test>\r\n\r\nBody\r\n",
+  );
+  const other = Buffer.from(
+    "Message-ID: <concurrent@example.test>\r\n\r\nOther\r\n",
+  );
+  const blob = value(await diagnostic.upload(session, account, other));
+  const before = value(await diagnostic.queryEmails(session, account)).ids
+    .length;
+  const job = value(
+    await service.create(actor, {
+      accountId: "default",
+      format: "eml",
+      variant: "mboxo",
+      base64: raw.toString("base64"),
+      mailboxId: inbox,
+      labels: {},
+    }),
+  );
+  changeBeforeImport = async () => {
+    value(
+      await diagnostic.importEmail(session, account, {
+        blobId: blob.blobId,
+        mailboxIds: { [inbox]: true },
+      }),
+    );
+  };
+  try {
+    await service.work();
+  } finally {
+    changeBeforeImport = undefined;
+  }
+  expect(value(await service.report(actor, "default", job.id))).toMatchObject({
+    status: "attention",
+    messages: [{ status: "failed", error: "Message import rejected" }],
+  });
+  expect(
+    value(await diagnostic.queryEmails(session, account)).ids,
+  ).toHaveLength(before + 1);
+  value(await service.resume(actor, "default", job.id));
+  await service.work();
+  expect(value(await service.report(actor, "default", job.id))).toMatchObject({
+    status: "completed",
+    messages: [{ status: "imported" }],
+  });
+  expect(
+    value(await diagnostic.queryEmails(session, account)).ids,
+  ).toHaveLength(before + 2);
 }, 120_000);
 
 it("retains failures for resume, safely cancels, and never retries an unresolved import", async () => {

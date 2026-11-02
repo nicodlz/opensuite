@@ -11,6 +11,7 @@ export const MAIL_IMPORT_LIMITATIONS = [
   "Gmail labels containing commas cannot be distinguished from multiple labels.",
   "Mboxo cannot distinguish original From quoting; choose mboxrd only for mboxrd archives.",
   "Messages without a reliable Message-ID cannot be deduplicated. Conflicting IDs and uncertain imports require attention.",
+  "Duplicate checks scan at most 1,000,000 destination messages and retain at most 10,000 matching candidates per job.",
   "Dates missing from message headers and unsupported source flags cannot be preserved.",
   "Envelope dates without a clear time zone fall back to the message Date header.",
 ];
@@ -97,6 +98,17 @@ export interface MailImportMetadata {
 export type MailImportInspection =
   { kind: "match"; id: string } | { kind: "none" | "unresolved" | "collision" };
 export type MailImportInspectionFailure = { kind: "unavailable" | "limit" };
+export interface MailImportCandidate {
+  id: string;
+  blobId: string;
+  size: number;
+  messageId: string[] | null;
+  keywords: Record<string, boolean>;
+}
+export interface MailImportSnapshot {
+  state: string;
+  candidates: Map<string, MailImportCandidate[]>;
+}
 export interface MailImportTools<
   Client,
   Session,
@@ -124,6 +136,18 @@ export interface MailImportTools<
     destination: string,
     envelope?: Raw,
   ): Promise<MailImportMetadata>;
+  prepareMigrationSnapshot(input: {
+    client: Client;
+    session: Session;
+    accountId: string;
+    archive: Raw;
+    format: string;
+    variant: string;
+    keepAlive: () => Promise<boolean>;
+  }): Promise<
+    | { kind: "ready"; snapshot: MailImportSnapshot }
+    | { kind: "failed"; error: MailImportInspectionFailure["kind"] }
+  >;
   inspectMigrationCandidates(input: {
     client: Client;
     session: Session;
@@ -131,7 +155,41 @@ export interface MailImportTools<
     bytes: Raw;
     messageId: string | null;
     marker?: string;
+    snapshot?: MailImportSnapshot;
   }): Promise<Inspection>;
+  resolveMigrationCandidate(input: {
+    client: Client;
+    session: Session;
+    accountId: string;
+    bytes: Raw;
+    messageId: string | null;
+    marker?: string;
+    snapshot?: MailImportSnapshot;
+    mailboxPatch: Record<string, boolean>;
+    beforeMapping: () => Promise<boolean>;
+  }): Promise<
+    | { action: "import" | "stop" }
+    | {
+        action: "continue" | "stop";
+        status: "failed" | "uncertain" | "duplicate" | "imported";
+        error: string | null;
+        id: string | null;
+      }
+  >;
+  importMigrationMessage(input: {
+    client: Client;
+    session: Session;
+    accountId: string;
+    bytes: Raw;
+    metadata: MailImportMetadata;
+    marker: string;
+    snapshot: MailImportSnapshot;
+    beforeImport: () => Promise<boolean>;
+    onImported: (id: string) => Promise<boolean>;
+  }): Promise<
+    | { kind: "recorded"; proceed: boolean }
+    | { kind: "failed" | "uncertain"; error: string; proceed: boolean }
+  >;
 }
 
 type ReportInput = {

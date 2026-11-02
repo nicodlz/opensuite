@@ -1,23 +1,31 @@
-/* oxlint-disable eslint/no-await-in-loop */
-import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import {
   MAIL_ARCHIVE_LIMIT,
   MAIL_MESSAGE_LIMIT,
   migrationReport,
+  type MailImportMetadata,
+  type MailImportSnapshot,
 } from "@opensuite/contracts";
 import { simpleParser } from "mailparser";
-import type { JmapClient, Session } from "@opensuite/jmap";
-import { err, ok, type Result } from "neverthrow";
+import {
+  createMigrationSnapshot,
+  inspectMigrationCandidates,
+  rememberMigrationImport,
+  resolveMigrationCandidate,
+  type JmapClient,
+  type JmapError,
+  type Session,
+} from "@opensuite/jmap";
 
-type Client = Pick<JmapClient, "queryEmails" | "migrationEmails" | "download">;
-type Inspection =
-  | { kind: "match"; id: string }
-  | { kind: "none" }
-  | { kind: "unresolved" }
-  | { kind: "collision" };
-type Failure = { kind: "unavailable" | "limit" };
-
+type Client = Pick<
+  JmapClient,
+  | "queryEmails"
+  | "migrationEmails"
+  | "emailState"
+  | "download"
+  | "upload"
+  | "migrationImport"
+>;
 export class ArchiveError extends Error {
   readonly kind: "invalid_archive" | "archive_limit" | "message_limit";
   constructor(kind: "invalid_archive" | "archive_limit" | "message_limit") {
@@ -141,140 +149,101 @@ export async function* splitMbox(
   }
 }
 
-type InspectionInput = {
+export { inspectMigrationCandidates };
+
+export async function prepareMigrationSnapshot(input: {
   client: Client;
   session: Session;
   accountId: string;
-  bytes: Uint8Array;
-  messageId: string | null;
-  marker?: string;
-  maxCandidates?: number;
-};
-type Candidate = {
-  id: string;
-  blobId: string;
-  size: number;
-  messageId: string[] | null;
-  keywords: Record<string, boolean>;
-};
-
-class CandidateScanner {
-  readonly input: InspectionInput;
-  readonly seen = new Set<string>();
-  readonly matches: string[] = [];
-  readonly max: number;
-  readonly expected: string;
-  state: string | undefined;
-  collision = false;
-  constructor(input: InspectionInput) {
-    this.input = input;
-    this.max = Math.min(Math.max(input.maxCandidates ?? 10_000, 1), 10_000);
-    this.expected = createHash("sha256").update(input.bytes).digest("hex");
-  }
-  query(position: number) {
-    const { client, session, accountId, marker } = this.input;
-    return client.queryEmails(session, accountId, {
-      ...(marker === undefined ? {} : { filter: { hasKeyword: marker } }),
-      position,
-      limit: Math.min(100, this.max + 1),
-    });
-  }
-  async compare(email: Candidate): Promise<Result<void, Failure>> {
-    const { marker, messageId, bytes, client, session, accountId } = this.input;
-    const relevant =
-      marker === undefined
-        ? email.messageId?.includes(messageId ?? "") === true
-        : email.keywords[marker] === true;
-    if (!relevant) return ok(undefined);
-    if (email.size !== bytes.byteLength) {
-      this.collision = true;
-      return ok(undefined);
+  archive: Buffer;
+  format: string;
+  variant: string;
+  keepAlive: () => Promise<boolean>;
+}) {
+  const messageIds = new Set<string>();
+  for await (const raw of archiveMessages(
+    input.archive,
+    input.format,
+    input.variant,
+  )) {
+    if (!(await input.keepAlive()))
+      return { kind: "failed" as const, error: "unavailable" as const };
+    try {
+      const metadata = await messageMetadata(raw, {}, "");
+      if (metadata.messageId !== null) messageIds.add(metadata.messageId);
+    } catch {
+      // The worker reports malformed metadata for the individual message.
     }
-    const raw = await client.download(session, accountId, email.blobId);
-    if (raw.isErr()) return err({ kind: "unavailable" });
-    if (
-      raw.value.byteLength === bytes.byteLength &&
-      createHash("sha256").update(raw.value).digest("hex") === this.expected
-    )
-      this.matches.push(email.id);
-    else this.collision = true;
-    return ok(undefined);
   }
-  async inspectIds(ids: string[]): Promise<Result<void, Failure>> {
-    const { client, session, accountId } = this.input;
-    const fetched = await client.migrationEmails(session, accountId, ids);
-    if (fetched.isErr()) return err({ kind: "unavailable" });
-    const data = fetched.value;
-    if (
-      data.accountId !== accountId ||
-      data.notFound.length ||
-      data.list.length !== ids.length ||
-      new Set(data.list.map((email) => email.id)).size !== ids.length ||
-      data.list.some((email) => !ids.includes(email.id))
-    )
-      return err({ kind: "unavailable" });
-    for (const email of data.list) {
-      const result = await this.compare(email);
-      if (result.isErr()) return result;
-    }
-    return ok(undefined);
-  }
-  async page(position: number): Promise<Result<number, Failure>> {
-    const page = await this.query(position);
-    if (page.isErr()) return err({ kind: "unavailable" });
-    const data = page.value;
-    if (
-      data.accountId !== this.input.accountId ||
-      data.position !== position ||
-      (this.state !== undefined && this.state !== data.queryState)
-    )
-      return err({ kind: "unavailable" });
-    this.state = data.queryState;
-    for (const id of data.ids) {
-      if (this.seen.has(id)) return err({ kind: "unavailable" });
-      this.seen.add(id);
-    }
-    if (this.seen.size > this.max) return err({ kind: "limit" });
-    if (data.ids.length) {
-      const fetched = await this.inspectIds(data.ids);
-      if (fetched.isErr()) return err(fetched.error);
-    }
-    return ok(data.ids.length);
-  }
-  async scan(): Promise<Result<Inspection, Failure>> {
-    let position = 0;
-    let more = true;
-    while (more) {
-      const page = await this.page(position);
-      if (page.isErr()) return err(page.error);
-      position += page.value;
-      more = page.value === Math.min(100, this.max + 1);
-    }
-    const check = await this.query(0);
-    if (
-      check.isErr() ||
-      check.value.accountId !== this.input.accountId ||
-      check.value.position !== 0 ||
-      check.value.queryState !== this.state
-    )
-      return err({ kind: "unavailable" });
-    if (this.collision || this.matches.length > 1)
-      return ok({ kind: "collision" });
-    const id = this.matches[0];
-    if (id !== undefined) return ok({ kind: "match", id });
-    return ok({
-      kind: this.input.marker === undefined ? "none" : "unresolved",
-    });
-  }
+  const snapshot = await createMigrationSnapshot({
+    client: input.client,
+    session: input.session,
+    accountId: input.accountId,
+    messageIds: [...messageIds],
+    keepAlive: input.keepAlive,
+  });
+  return snapshot.isErr()
+    ? { kind: "failed" as const, error: snapshot.error.kind }
+    : { kind: "ready" as const, snapshot: snapshot.value };
 }
 
-/** A missing marker cannot prove that an in-flight write will not commit. */
-export function inspectMigrationCandidates(
-  input: InspectionInput,
-): Promise<Result<Inspection, Failure>> {
-  if (input.marker === undefined && input.messageId === null)
-    return Promise.resolve(ok({ kind: "unresolved" }));
-  return new CandidateScanner(input).scan();
+function importFailure(error: JmapError) {
+  const changed = error.kind === "method" && error.type === "stateMismatch";
+  const certain =
+    error.kind === "set" ||
+    changed ||
+    (error.kind === "network" && error.beforeRequest === true);
+  return {
+    kind: certain ? ("failed" as const) : ("uncertain" as const),
+    error: certain ? "Message import rejected" : "Import outcome uncertain",
+    proceed: certain && !changed,
+  };
+}
+
+/** Fence the external write with durable intent and record success before further reads. */
+export async function importMigrationMessage(input: {
+  client: Client;
+  session: Session;
+  accountId: string;
+  bytes: Buffer;
+  metadata: MailImportMetadata;
+  marker: string;
+  snapshot: MailImportSnapshot;
+  beforeImport: () => Promise<boolean>;
+  onImported: (id: string) => Promise<boolean>;
+}) {
+  const { client, session, accountId, metadata, snapshot } = input;
+  const uploaded = await client.upload(session, accountId, input.bytes);
+  if (uploaded.isErr())
+    return { kind: "failed" as const, error: "Upload failed", proceed: true };
+  if (!(await input.beforeImport()))
+    return { kind: "recorded" as const, proceed: false };
+  const imported = await client.migrationImport(
+    session,
+    accountId,
+    {
+      blobId: uploaded.value.blobId,
+      mailboxIds: metadata.mailboxIds,
+      keywords: { ...metadata.keywords, [input.marker]: true },
+      ...(metadata.receivedAt === undefined
+        ? {}
+        : { receivedAt: metadata.receivedAt }),
+    },
+    snapshot.state,
+  );
+  if (imported.isErr()) return importFailure(imported.error);
+  if (!(await input.onImported(imported.value.id)))
+    return { kind: "recorded" as const, proceed: false };
+  snapshot.state = imported.value.newState;
+  const proceed = await rememberMigrationImport({
+    client,
+    session,
+    accountId,
+    snapshot,
+    id: imported.value.id,
+    messageId: metadata.messageId,
+  });
+  return { kind: "recorded" as const, proceed };
 }
 
 export async function* archiveMessages(
@@ -399,5 +368,8 @@ export const migrationMailTools = {
   countArchive,
   migrationReport,
   messageMetadata,
+  prepareMigrationSnapshot,
   inspectMigrationCandidates,
+  resolveMigrationCandidate,
+  importMigrationMessage,
 };

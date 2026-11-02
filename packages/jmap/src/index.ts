@@ -1,6 +1,16 @@
 import { MigrationMailClient } from "./migration-mail.ts";
 import { threadPage } from "./thread-page.ts";
 
+export { inspectMigrationCandidates } from "./migration-candidates.ts";
+export { resolveMigrationCandidate } from "./migration-resolve.ts";
+export {
+  createMigrationSnapshot,
+  rememberMigrationImport,
+} from "./migration-snapshot.ts";
+export type {
+  MigrationCandidate,
+  MigrationSnapshot,
+} from "./migration-snapshot.ts";
 export { JmapCapability } from "./protocol.ts";
 export type {
   JmapError,
