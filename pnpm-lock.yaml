@@ -749,6 +749,9 @@ importers:
       '@opensuite/jmap':
         specifier: workspace:*
         version: link:../jmap
+      mailparser:
+        specifier: 3.14.1
+        version: 3.14.1
       neverthrow:
         specifier: 'catalog:'
         version: 8.2.0

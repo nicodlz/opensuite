@@ -4,6 +4,7 @@ import { aliasesRouter } from "./aliases.ts";
 import { accountRouter, adminRouter } from "./account.ts";
 import { calendarRouter } from "./calendar.ts";
 import { mailRouter } from "./mail.ts";
+import { migrationMailRouter } from "./migration-mail.ts";
 import { systemRouter } from "./system.ts";
 import { billingRouter } from "./billing.ts";
 
@@ -16,6 +17,7 @@ export const router = {
   account: accountRouter,
   admin: adminRouter,
   mail: mailRouter,
+  migrationMail: migrationMailRouter,
   calendar: calendarRouter,
   push: pushRouter,
   billing: billingRouter,

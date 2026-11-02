@@ -7,6 +7,7 @@ import type { AliasService } from "@opensuite/core/services/aliases";
 import { registerAliasCompat } from "./routes/alias-compat.ts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
+import type { MailMigrationService } from "@opensuite/core/services/migration-mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
 import { OpenAPIGenerator } from "@orpc/openapi";
@@ -77,6 +78,7 @@ export interface ServerDependencies {
   };
   readonly accounts?: AccountService;
   readonly mail?: MailService;
+  readonly migrationMail?: MailMigrationService;
   readonly calendar?: CalendarService;
   readonly domains?: DomainService;
   readonly aliases?: AliasService;
@@ -214,7 +216,10 @@ export const buildServer = async (
         .code(403)
         .send({ code: "FORBIDDEN", message: "Invalid origin" });
     }
-    if (request.method === "POST" && rawPath === "/mail/attachments/upload") {
+    if (
+      request.method === "POST" &&
+      ["/mail/attachments/upload", "/mail/imports/create"].includes(rawPath)
+    ) {
       const headers = new Headers();
       for (const [name, value] of Object.entries(request.headers)) {
         if (value === undefined) continue;
@@ -227,6 +232,17 @@ export const buildServer = async (
         return reply
           .code(401)
           .send({ code: "UNAUTHORIZED", message: "Unauthorized" });
+      if (
+        rawPath === "/mail/imports/create" &&
+        (checkoutLimits.consume(`mail-import:${actor.id}`, 5, 60_000) !==
+          undefined ||
+          checkoutLimits.consume("mail-import:global", 30, 60_000) !==
+            undefined)
+      )
+        return reply.code(429).send({
+          code: "TOO_MANY_REQUESTS",
+          message: "Too many import requests",
+        });
       actors.set(request, actor);
     }
     return undefined;
@@ -908,7 +924,8 @@ export const buildServer = async (
     if (
       ["/origins", "/push/public-key", "/push/privacy"].includes(
         request.url.split("?")[0] ?? "",
-      )
+      ) ||
+      request.url.startsWith("/mail/imports/")
     )
       reply.header("cache-control", "no-store");
     const headers = new Headers();
@@ -955,6 +972,7 @@ export const buildServer = async (
         setupIdentity: dependencies.identity,
         audit: dependencies.identity?.audit,
         mail: dependencies.mail,
+        migrationMail: dependencies.migrationMail,
         calendar: dependencies.calendar,
         productOrigins: dependencies.identity?.productOrigins ?? {},
         vaultOrigin: dependencies.vaultOrigin,
@@ -980,6 +998,7 @@ export const buildServer = async (
     return reply;
   };
   app.post("/mail/attachments/upload", { bodyLimit: 70_000_000 }, handleApi);
+  app.post("/mail/imports/create", { bodyLimit: 12_000_000 }, handleApi);
   app.all("/*", handleApi);
 
   return app;

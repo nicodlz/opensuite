@@ -47,6 +47,43 @@ model User {
   billingCustomer BillingCustomer?
   billingGrant BillingGrant?
   subscriptions Subscription[]
+  mailImports MailImportJob[]
+}
+
+model MailImportJob {
+  id              String   @id
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountId       String
+  format          String
+  variant         String
+  mailboxId       String
+  labels          Json
+  archive         String?
+  status          String   @default("queued")
+  cancelRequested Boolean  @default(false)
+  claimToken      String?
+  claimUntil      DateTime?
+  total           Int      @default(0)
+  error           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  items           MailImportItem[]
+
+  @@index([userId, createdAt])
+  @@index([status, claimUntil])
+}
+
+model MailImportItem {
+  jobId     String
+  job       MailImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  index     Int
+  marker    String
+  status    String @default("pending")
+  error     String?
+  remoteId  String?
+
+  @@id([jobId, index])
 }
 
 model SecurityKey {

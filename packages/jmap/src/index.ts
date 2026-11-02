@@ -395,6 +395,28 @@ export class JmapClient {
       GetSchema(EmailSchema),
     );
   }
+  /** Metadata needed to compare candidate imports without fetching message bodies. */
+  migrationEmails(session: Session, accountId: string, ids: readonly string[]) {
+    return this.#transport.call(
+      session.apiUrl,
+      "Email/get",
+      {
+        accountId,
+        ids,
+        properties: ["id", "blobId", "size", "messageId", "keywords"],
+      },
+      usingMail,
+      GetSchema(
+        z.object({
+          id: z.string(),
+          blobId: z.string(),
+          size: z.number().int().nonnegative(),
+          messageId: z.array(z.string()).nullable(),
+          keywords: z.record(z.string(), z.boolean()),
+        }),
+      ),
+    );
+  }
   async threadPage(
     session: Session,
     accountId: string,
