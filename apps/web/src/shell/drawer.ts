@@ -3,12 +3,35 @@ import { useEffect, useRef, useState } from "react";
 /** Width below which the sidebar becomes a drawer; matches shell.css. */
 const narrow = "(max-width: 900px)";
 
+const tabbable =
+  "a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]";
+
+/** Tab past the last control goes to the first; Shift+Tab, the other way. */
+function wrap(container: HTMLElement, event: KeyboardEvent) {
+  const stops = [...container.querySelectorAll<HTMLElement>(tabbable)].filter(
+    (element) => element.tabIndex >= 0 && element.checkVisibility(),
+  );
+  const first = stops[0];
+  const last = stops.at(-1);
+  if (!first || !last) return;
+  const active = document.activeElement;
+  const outside = !container.contains(active);
+  if (event.shiftKey && (active === first || outside)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || outside)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 /**
  * Mobile navigation drawer. While it is open, focus moves into it and stays
- * there: the rest of the shell is meant to be `inert`, and focus reaching
- * anything else, such as a notification, is sent back. Escape closes it. On
- * close, focus goes back to the button that opened it unless something else
- * took it, such as the composer opened from the drawer.
+ * there: Tab and Shift+Tab wrap at its edges, the rest of the shell is meant
+ * to be `inert`, and focus reaching anything else, such as a notification, is
+ * sent back. Escape closes it. On close, focus goes back to the button that
+ * opened it unless something else took it, such as the composer opened from
+ * the drawer.
  */
 export function useNavigationDrawer() {
   const [open, setOpen] = useState(false);
@@ -43,8 +66,10 @@ export function useNavigationDrawer() {
     const start = () =>
       element?.querySelector<HTMLElement>("[data-drawer-focus]")?.focus();
     start();
-    function escape(event: KeyboardEvent) {
-      if (event.key === "Escape" && !event.defaultPrevented) setOpen(false);
+    function keys(event: KeyboardEvent) {
+      if (event.defaultPrevented) return;
+      if (event.key === "Escape") setOpen(false);
+      else if (event.key === "Tab" && element) wrap(element, event);
     }
     function contain(event: FocusEvent) {
       const target = event.target;
@@ -57,10 +82,10 @@ export function useNavigationDrawer() {
         setOpen(false);
       else start();
     }
-    document.addEventListener("keydown", escape);
+    document.addEventListener("keydown", keys);
     document.addEventListener("focusin", contain);
     return () => {
-      document.removeEventListener("keydown", escape);
+      document.removeEventListener("keydown", keys);
       document.removeEventListener("focusin", contain);
       const active = document.activeElement;
       if (

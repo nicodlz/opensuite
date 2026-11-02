@@ -417,28 +417,23 @@ for (const theme of ["light", "dark"] as const)
       drawer.locator(".shell-nav-item[aria-current='page']"),
     ).toHaveText(["Generator"]);
     await checkAxe(page);
-    // Record every element that takes focus outside the drawer while tabbing.
-    await page.evaluate(() => {
-      const outside: string[] = [];
-      Reflect.set(window, "focusOutsideDrawer", outside);
-      document.addEventListener("focusin", (event) => {
-        if (
-          event.target instanceof Element &&
-          !event.target.closest(".shell-sidebar")
-        )
-          outside.push(event.target.outerHTML.slice(0, 80));
-      });
-    });
-    await Array.from({ length: 16 }).reduce<Promise<void>>(
-      (previous) => previous.then(() => page.keyboard.press("Tab")),
-      Promise.resolve(),
+    // Focus wraps at both edges instead of leaving the drawer or the page.
+    const close = drawer.getByRole("button", { name: "Close navigation" });
+    await page.keyboard.press("Shift+Tab");
+    await expect(drawer.getByRole("link", { name: "Admin" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(close).toBeFocused();
+    const tabInside = async () => {
+      await page.keyboard.press("Tab");
+      return page.evaluate(() =>
+        Boolean(document.activeElement?.closest(".shell-sidebar")),
+      );
+    };
+    const inside = await Array.from({ length: 16 }).reduce<Promise<boolean[]>>(
+      (previous) => previous.then(async (seen) => [...seen, await tabInside()]),
+      Promise.resolve([]),
     );
-    expect(
-      await page.evaluate(() => {
-        const outside: unknown = Reflect.get(window, "focusOutsideDrawer");
-        return Array.isArray(outside) ? outside.map(String) : null;
-      }),
-    ).toEqual([]);
+    expect(inside).toEqual(Array.from({ length: 16 }, () => true));
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
     await expect(opener).toBeFocused();
@@ -578,9 +573,45 @@ test("only the exact sidebar and product links are marked current", async ({
   await expect(sidebar.locator("[aria-current='page']")).toHaveText([
     "Domains",
   ]);
-  // Calendar shows its messages in the shared region, not in one of its own.
+});
+
+test("Calendar reports a failed change in the shared notification region", async ({
+  page,
+}) => {
+  // The development calendar runs in the page; make its deletions fail.
+  let patched = false;
+  await page.route("**/src/dev-data/calendar.ts*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const body = source.replace(
+      /deleteEvent: api\.deleteEvent\.handler\(\(\{\s*input,\s*errors\s*\}\)\s*=>\s*\{/,
+      (start) => {
+        patched = true;
+        return `${start} throw errors.NOT_FOUND();`;
+      },
+    );
+    await route.fulfill({ response, body });
+  });
+  await page.clock.setFixedTime(new Date("2026-10-28T09:00:00Z"));
   await page.goto("/calendar");
-  await expect(page.locator(".toast-viewport")).toHaveCount(1);
+  const event = page.getByRole("button", { name: /^Design review,/ });
+  await event.click();
+  expect(patched).toBe(true);
+  await page.getByRole("button", { name: "Delete event" }).click();
+  await page
+    .getByRole("dialog", { name: "Delete event?" })
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+  const live = page.locator(".toast-viewport [aria-live='polite']");
+  await expect(
+    page.locator("[aria-live='polite'][aria-atomic='true']"),
+  ).toHaveCount(1);
+  await expect(live).toHaveText(
+    "The event could not be deleted. Your change was undone.",
+  );
+  await expect(event).toBeVisible();
+  await page.getByRole("button", { name: "Dismiss notification" }).click();
+  await expect(live).toBeEmpty();
 });
 
 const channels = (color: string) => (color.match(/[\d.]+/g) ?? []).map(Number);
