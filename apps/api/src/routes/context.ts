@@ -1,3 +1,4 @@
+import type { InvitationService } from "@opensuite/core/services/invitations";
 import type { AddressService } from "@opensuite/core/services/addresses";
 import type { NotificationDispatcher } from "@opensuite/core/services/notifications";
 import type { createPushStore } from "@opensuite/db";
@@ -50,6 +51,7 @@ export interface ApiContext {
   readonly vaultOrigin?: string | undefined;
   readonly productOrigins: Readonly<Record<string, string>>;
   readonly calendar: CalendarService | undefined;
+  readonly invitations: InvitationService | undefined;
   readonly downloads: {
     issue(
       userId: string,
@@ -71,4 +73,17 @@ export interface ApiContext {
   readonly log: FastifyBaseLogger;
   readonly readiness: ReadinessService;
   readonly uptimeSeconds: () => number;
+}
+
+/** Build the mail and calendar portion of a request context. */
+export function mailContext(dependencies: {
+  mail?: MailService | undefined;
+  calendar?: CalendarService | undefined;
+  invitations?: InvitationService | undefined;
+}) {
+  return {
+    mail: dependencies.mail,
+    calendar: dependencies.calendar,
+    invitations: dependencies.invitations,
+  };
 }

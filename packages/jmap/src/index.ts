@@ -1,4 +1,4 @@
-import { CalendarClient } from "./calendar-client.ts";
+import { InvitationClient } from "./invitations.ts";
 import { threadPage } from "./thread-page.ts";
 
 export { JmapCapability } from "./protocol.ts";
@@ -18,7 +18,7 @@ export type {
 } from "./schemas.ts";
 
 /** The authorization value is supplied by the caller; keep user credentials server-side. */
-export class JmapClient extends CalendarClient {
+export class JmapClient extends InvitationClient {
   threadPage(
     ...args: Parameters<typeof threadPage> extends [unknown, ...infer Rest]
       ? Rest

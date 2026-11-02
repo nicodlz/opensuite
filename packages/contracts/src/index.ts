@@ -1,3 +1,4 @@
+import { invitationsContract } from "./invitations.ts";
 import { addressesContract } from "./addresses.ts";
 import { billingContract } from "./billing.ts";
 import { pushContract } from "./push.ts";
@@ -18,6 +19,7 @@ export * from "./addresses.ts";
 export * from "./mail.ts";
 export * from "./drive.ts";
 export * from "./calendar.ts";
+export * from "./invitations.ts";
 export * from "./push.ts";
 export * from "./billing.ts";
 
@@ -29,6 +31,7 @@ export const contract = {
   admin: { ...adminContract, domains: domainsContract, setup: setupContract },
   mail: mailContract,
   calendar: calendarContract,
+  invitations: invitationsContract,
   push: pushContract,
   billing: billingContract,
   drive: driveContract,
