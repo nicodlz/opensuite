@@ -1413,3 +1413,132 @@ button.cal-dayhead[data-today]:hover .cal-dayhead-number {
     background-position: -100% 0;
   }
 }
+
+/* Guests of an event and the messages a change sends them. */
+.cal-banner-info {
+  border-color: var(--border);
+  background: var(--accent-soft);
+  color: var(--foreground);
+}
+.cal-guests {
+  display: grid;
+  gap: 10px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.cal-guests-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.cal-guest-add {
+  display: flex;
+  gap: 8px;
+}
+.cal-guest-add .field-input {
+  flex: 1;
+  min-width: 0;
+}
+.cal-guest-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cal-guest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 36px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.cal-guest-address {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cal-guest-answer,
+.cal-guest-occurrence {
+  color: var(--muted);
+  font-size: 13px;
+}
+.cal-guest-answer[data-answer="ACCEPTED"] {
+  color: var(--success);
+}
+.cal-guest-answer[data-answer="DECLINED"] {
+  color: var(--danger);
+}
+.cal-guest-remove {
+  margin-left: auto;
+}
+.cal-guests-status {
+  display: grid;
+  gap: 6px;
+}
+.cal-guests-status p,
+.cal-guests-summary {
+  margin: 0;
+}
+.cal-guests-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cal-editor-block {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 13px;
+}
+.cal-invite {
+  display: grid;
+  gap: 14px;
+}
+.cal-invite-note {
+  margin: 0;
+}
+.cal-invite-groups {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+.cal-invite-groups dt {
+  font-weight: 700;
+}
+.cal-invite-groups dd {
+  margin: 0;
+}
+.cal-invite-groups ul,
+.cal-invite-notice ul,
+.cal-replies {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+.cal-invite-notice {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+.cal-invite-notice p {
+  margin: 0;
+}
+.cal-invite-notice[data-tone="danger"] {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.cal-replies {
+  display: grid;
+  gap: 8px;
+}
+@media (pointer: coarse) {
+  .cal-guest {
+    min-height: 48px;
+  }
+}

@@ -1,11 +1,8 @@
 import * as React from "react";
-import {
-  RecurrenceSchema,
-  ReminderSchema,
-  type Calendar,
-  type CalendarEvent,
-  type EventContent,
-  type Reminder,
+import type {
+  Calendar,
+  CalendarEvent,
+  EventContent,
 } from "@opensuite/contracts";
 import {
   keepPreviousData,
@@ -21,7 +18,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type FormEvent,
   type ReactNode,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -37,6 +33,8 @@ import { refreshCalendarTimeZone } from "../push/client.ts";
 import { AgendaView, eventsOn } from "./agenda.tsx";
 import { accountId, calendarClient } from "./client.ts";
 import { ConfirmChange, type Confirm } from "./confirm-change.tsx";
+import { CalendarSelect } from "./editor-fields.tsx";
+import { EventEditor } from "./event-editor.tsx";
 import { useEventChanges } from "./event-changes.ts";
 import { useEventFocus } from "./event-focus.ts";
 import {
@@ -48,9 +46,12 @@ import {
   titleOf,
   type Colors,
 } from "./events.ts";
+import { useInvitations } from "./invitation-dialog.tsx";
 import { offerReminder } from "./reminder-offer.ts";
 import { PeriodEmpty, SearchResults, useSearch } from "./search.tsx";
+import { ShortcutsDialog } from "./shortcuts.tsx";
 import { CalendarToolbar } from "./toolbar.tsx";
+import { UnverifiedReplies } from "./unverified-replies.tsx";
 import {
   compactWeekQuery,
   shiftVisible,
@@ -69,7 +70,6 @@ import {
   eventStart,
   firstDayOfWeek,
   floorMinutes,
-  formFromEvent,
   formatEventRange,
   formatHour,
   formatTime,
@@ -85,20 +85,17 @@ import {
   resizeTo,
   sameDay,
   shiftDays,
-  shiftFormStart,
   snapMinutes,
   spanLanes,
   startOfDay,
   textColorFor,
   timeZoneLabel,
   timedSegments,
-  timingFromForm,
   toAllDay,
   viewRange,
   wallMinutes,
   type CalendarView,
   type DateRange,
-  type EventForm,
   type EventTiming,
   type TimedSegment,
   isPending,
@@ -114,18 +111,6 @@ const hiddenStorage = "opensuite-calendar-hidden";
 const HOUR_HEIGHT = 48;
 const PX_PER_MINUTE = HOUR_HEIGHT / 60;
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const shortcuts: [string, string][] = [
-  ["T", "Go to today"],
-  ["D / W / M / A", "Day, week, month or agenda view"],
-  ["J or N", "Next period"],
-  ["K or P", "Previous period"],
-  ["C", "Create an event"],
-  ["/", "Search events"],
-  ["Enter", "In search, list matches from nearby months"],
-  ["Esc", "Close a popover or cancel a drag"],
-  ["F8", "Go to the latest notification, such as Undo"],
-  ["?", "Show keyboard shortcuts"],
-];
 
 type Popover =
   | { kind: "detail"; eventId: string; rect: DOMRect }
@@ -392,6 +377,7 @@ function CalendarWorkspace() {
   const surfaceRef = useRef<HTMLElement>(null);
   const focus = useEventFocus(surfaceRef);
   const changes = useEventChanges(focus);
+  const invitations = useInvitations(focus, () => setEditor(null));
   const compact = useMediaQuery(compactWeekQuery);
   const firstDay = useMemo(() => firstDayOfWeek(), []);
   const now = useNow();
@@ -539,8 +525,11 @@ function CalendarWorkspace() {
   }
   function requestTiming(event: CalendarEvent, timing: EventTiming) {
     if (isPending(event)) return;
-    if (!isRecurring(event)) saveTiming(event, timing);
-    else setConfirm({ kind: "change", event, timing });
+    // Events with guests are confirmed and sent through the invitations.
+    void invitations.move(event, timing, () => {
+      if (!isRecurring(event)) saveTiming(event, timing);
+      else setConfirm({ kind: "change", event, timing });
+    });
   }
   function saveTiming(event: CalendarEvent, timing: EventTiming) {
     void changes.move(event, contentOf(event), timing);
@@ -765,6 +754,7 @@ function CalendarWorkspace() {
           onStep={go}
           onView={setView}
         />
+        <UnverifiedReplies />
         {events.isError && (
           <div className="cal-banner" role="alert">
             <span>{loadError(events.error)}</span>
@@ -824,7 +814,9 @@ function CalendarWorkspace() {
           }}
           onDelete={() => {
             setPopover(null);
-            setConfirm({ kind: "delete", event: detail });
+            void invitations.remove(detail, () =>
+              setConfirm({ kind: "delete", event: detail }),
+            );
           }}
         />
       )}
@@ -872,15 +864,18 @@ function CalendarWorkspace() {
           >
             <EventEditor
               content={editor.content}
+              event={editor.event}
               calendars={calendarList}
               fallbackCalendarId={defaultCalendarId}
               onCancel={() => setEditor(null)}
               onSave={saveEditor}
+              onInvite={invitations.review}
             />
           </DialogContent>
         )}
       </Dialog>
 
+      {invitations.dialog}
       <ConfirmChange
         confirm={confirm}
         onCancel={() => setConfirm(null)}
@@ -906,31 +901,7 @@ function CalendarWorkspace() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={help} onOpenChange={setHelp}>
-        <DialogContent
-          title="Keyboard shortcuts"
-          description="Shortcuts work when you are not typing in a field."
-        >
-          <dl className="cal-shortcuts">
-            {shortcuts.map(([keys, label]) => (
-              <div key={keys}>
-                <dt>
-                  {keys
-                    .split(" ")
-                    .map((part) =>
-                      ["/", "or"].includes(part) && keys !== "/" ? (
-                        <span key={part}> {part} </span>
-                      ) : (
-                        <kbd key={part}>{part}</kbd>
-                      ),
-                    )}
-                </dt>
-                <dd>{label}</dd>
-              </div>
-            ))}
-          </dl>
-        </DialogContent>
-      </Dialog>
+      <ShortcutsDialog open={help} onOpenChange={setHelp} />
     </AppShell>
   );
 }
@@ -2102,38 +2073,6 @@ function EventDetails({
   );
 }
 
-/** A labelled calendar picker; `children` is the label's visible content. */
-function CalendarSelect({
-  className,
-  children,
-  calendars,
-  value,
-  onChange,
-}: {
-  className: string;
-  children: ReactNode;
-  calendars: Calendar[];
-  value: string;
-  onChange: (id: string) => void;
-}) {
-  return (
-    <label className={className}>
-      {children}
-      <select
-        className="field-input"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {calendars.map((calendar) => (
-          <option key={calendar.id} value={calendar.id}>
-            {calendar.name}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
 function QuickCreate({
   content,
   rect,
@@ -2288,261 +2227,6 @@ function DayPopover({
         ))}
       </ul>
     </Popover>
-  );
-}
-
-function EventEditor({
-  content,
-  calendars,
-  fallbackCalendarId,
-  onCancel,
-  onSave,
-}: {
-  content: EventContent;
-  calendars: Calendar[];
-  /** Used while no calendar was chosen, e.g. when calendars load late. */
-  fallbackCalendarId: string;
-  onCancel: () => void;
-  onSave: (content: EventContent) => void;
-}) {
-  const id = useId();
-  const [form, setForm] = useState<EventForm>(() => formFromEvent(content));
-  const [reminder, setReminder] = useState<Reminder>(
-    content.reminder ?? "none",
-  );
-  const [error, setError] = useState("");
-  const calendarId = form.calendarId || fallbackCalendarId;
-  const formRef = useRef<HTMLFormElement>(null);
-  const titleRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    titleRef.current?.focus();
-    const element = formRef.current;
-    function key(event: KeyboardEvent) {
-      if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
-      event.preventDefault();
-      element?.requestSubmit();
-    }
-    element?.addEventListener("keydown", key);
-    return () => element?.removeEventListener("keydown", key);
-  }, []);
-  const update = (change: Partial<EventForm>) => {
-    setForm((current) => ({ ...current, ...change }));
-    setError("");
-  };
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    const timing = timingFromForm(form);
-    if ("error" in timing) {
-      setError(timing.error);
-      return;
-    }
-    onSave({
-      ...content,
-      title: form.title.trim(),
-      allDay: form.allDay,
-      recurrence: form.recurrence,
-      reminder,
-      calendarId,
-      location: form.location.trim(),
-      description: form.description,
-      // Keep the event's own zone: a different zone moves the series and
-      // drops its exceptions. All-day events have none, so a timed version
-      // uses this browser's zone.
-      timeZone: content.allDay && !form.allDay ? timeZone : content.timeZone,
-      ...timing,
-    });
-  }
-  const errorId = `${id}-error`;
-  const invalid = error !== "";
-  return (
-    <form className="cal-editor" ref={formRef} onSubmit={submit}>
-      <TextField
-        ref={titleRef}
-        label="Title"
-        placeholder="Add title"
-        maxLength={500}
-        value={form.title}
-        onChange={(event) => update({ title: event.target.value })}
-      />
-      <label className="cal-checkbox">
-        <input
-          type="checkbox"
-          checked={form.allDay}
-          onChange={(event) => {
-            const allDay = event.target.checked;
-            // A former all-day event gets a one-hour slot instead of 00:00.
-            const untimed =
-              !allDay && form.startTime === "00:00" && form.endTime === "00:00";
-            update({
-              allDay,
-              ...(untimed
-                ? {
-                    startTime: "09:00",
-                    endTime: "10:00",
-                    endDate: form.startDate,
-                  }
-                : {}),
-            });
-          }}
-        />
-        All day
-      </label>
-      <fieldset className="cal-editor-when">
-        <legend className="visually-hidden">Date and time</legend>
-        <div className="cal-editor-pair">
-          <label className="field">
-            <span className="field-label">Start date</span>
-            <input
-              type="date"
-              className="field-input"
-              required
-              value={form.startDate}
-              onChange={(event) =>
-                setForm((current) =>
-                  shiftFormStart(
-                    current,
-                    event.target.value,
-                    current.startTime,
-                  ),
-                )
-              }
-            />
-          </label>
-          {!form.allDay && (
-            <label className="field">
-              <span className="field-label">Start time</span>
-              <input
-                type="time"
-                className="field-input"
-                required
-                step={300}
-                value={form.startTime}
-                onChange={(event) =>
-                  setForm((current) =>
-                    shiftFormStart(
-                      current,
-                      current.startDate,
-                      event.target.value,
-                    ),
-                  )
-                }
-              />
-            </label>
-          )}
-        </div>
-        <div className="cal-editor-pair">
-          <label className="field">
-            <span className="field-label">End date</span>
-            <input
-              type="date"
-              className="field-input"
-              required
-              aria-invalid={invalid}
-              aria-describedby={invalid ? errorId : undefined}
-              value={form.endDate}
-              onChange={(event) => update({ endDate: event.target.value })}
-            />
-          </label>
-          {!form.allDay && (
-            <label className="field">
-              <span className="field-label">End time</span>
-              <input
-                type="time"
-                className="field-input"
-                required
-                step={300}
-                aria-invalid={invalid}
-                aria-describedby={invalid ? errorId : undefined}
-                value={form.endTime}
-                onChange={(event) => update({ endTime: event.target.value })}
-              />
-            </label>
-          )}
-        </div>
-        {invalid && (
-          <p className="field-error" id={errorId} role="alert">
-            {error}
-          </p>
-        )}
-      </fieldset>
-      <div className="cal-editor-pair">
-        <label className="field">
-          <span className="field-label">Repeat</span>
-          <select
-            className="field-input"
-            value={form.recurrence}
-            onChange={(event) => {
-              const recurrence = RecurrenceSchema.safeParse(event.target.value);
-              if (recurrence.success) update({ recurrence: recurrence.data });
-            }}
-          >
-            {Object.entries(recurrenceLabels).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <CalendarSelect
-          className="field"
-          calendars={calendars}
-          value={calendarId}
-          onChange={(picked) => update({ calendarId: picked })}
-        >
-          <span className="field-label">Calendar</span>
-        </CalendarSelect>
-      </div>
-      <label className="field">
-        <span className="field-label">Reminder</span>
-        <select
-          className="field-input"
-          value={reminder}
-          onChange={(event) => {
-            const parsed = ReminderSchema.safeParse(event.target.value);
-            if (parsed.success) setReminder(parsed.data);
-          }}
-        >
-          <option value="none">None</option>
-          <option value="at-time">At time of event</option>
-          <option value="5m">5 minutes before</option>
-          <option value="10m">10 minutes before</option>
-          <option value="15m">15 minutes before</option>
-          <option value="30m">30 minutes before</option>
-          <option value="1h">1 hour before</option>
-          <option value="1d">1 day before</option>
-          {content.reminder === "custom" && (
-            <option value="custom">Custom reminders</option>
-          )}
-        </select>
-      </label>
-      <TextField
-        label="Location"
-        maxLength={500}
-        value={form.location}
-        onChange={(event) => update({ location: event.target.value })}
-      />
-      <label className="field">
-        <span className="field-label">Description</span>
-        <textarea
-          className="field-input cal-editor-description"
-          rows={3}
-          maxLength={20_000}
-          value={form.description}
-          onChange={(event) => update({ description: event.target.value })}
-        />
-      </label>
-      <div className="dialog-actions cal-dialog-actions">
-        <span className="cal-editor-hint">
-          <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to save
-        </span>
-        <Button type="button" variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button type="submit" disabled={!calendarId}>
-          Save
-        </Button>
-      </div>
-    </form>
   );
 }
 

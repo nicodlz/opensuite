@@ -11,8 +11,10 @@ import type {
 } from "@orpc/contract";
 import { implement } from "@orpc/server";
 import { zonedInstant } from "../lib/zoned-time.ts";
-import { fakeCalendarClient } from "./calendar.ts";
+import { calendarText, fakeCalendarClient, mailCalendar } from "./calendar.ts";
 import { organizerHandlers } from "./invitation-organizer.ts";
+
+export { base64 } from "./calendar.ts";
 
 /*
  * Synthetic calendar invitations for the development server, modelled on
@@ -163,37 +165,6 @@ function fixturesFor(you: Account): InvitationFixture[] {
   );
 }
 
-const text = (value: string) => value.replaceAll(/([\\;,])/g, "\\$1");
-const attendee = (email: string, partstat: string) =>
-  `ATTENDEE;PARTSTAT=${partstat}:mailto:${email}`;
-const compact = (value: string | null) => (value ?? "").replaceAll(/[-:]/g, "");
-/** Fixture iCalendar text for downloads and replies; it is never parsed here. */
-function calendarText(method: string, event: InvitationEvent, reply?: string) {
-  const zone = event.timeZone ? `;TZID=${event.timeZone}` : "";
-  const attendees = event.attendees
-    .filter((item) => !reply || item.partstat === "NEEDS-ACTION")
-    .map((item) => attendee(item.email, reply ?? item.partstat));
-  return [
-    "BEGIN:VCALENDAR",
-    "VERSION:2.0",
-    `METHOD:${reply ? "REPLY" : method}`,
-    "BEGIN:VEVENT",
-    `DTSTART${zone}:${compact(event.start)}`,
-    `DTEND${zone}:${compact(event.end)}`,
-    `UID:${event.uid}`,
-    `SEQUENCE:${String(event.sequence)}`,
-    `ORGANIZER:mailto:${event.organizer.email}`,
-    ...attendees,
-    `SUMMARY:${text(event.title)}`,
-    ...event.recurrence.map((rule) => `RRULE:${rule}`),
-    "END:VEVENT",
-    "END:VCALENDAR",
-    "",
-  ].join("\r\n");
-}
-export const base64 = (value: string) =>
-  btoa(String.fromCharCode(...new TextEncoder().encode(value)));
-
 // What the local service remembers per series and per request, like the API.
 type Series = {
   calendarId: string;
@@ -254,28 +225,6 @@ async function writeCalendar(
     : await fakeCalendarClient.createEvent(write);
   return written.seriesId;
 }
-/** Sends the iTIP REPLY through the synthetic mailbox, so it shows in Sent. */
-async function sendReply(
-  mail: MailClient,
-  event: InvitationEvent,
-  partstat: string,
-) {
-  const subject = `Invitation response: ${partstat.toLowerCase()}`;
-  const { blobId } = await mail.upload({
-    accountId,
-    name: "reply.ics",
-    type: "text/calendar",
-    base64: base64(calendarText("REPLY", event, partstat)),
-  });
-  const to = [{ email: event.organizer.email }];
-  const draft = { to, cc: [], bcc: [], subject, htmlBody: "", references: [] };
-  const { id } = await mail.createDraft({
-    accountId,
-    draft: { ...draft, textBody: subject, attachmentBlobIds: [blobId] },
-  });
-  await mail.send({ accountId, draftId: id });
-}
-
 const refusesUnverified = (
   confirmed: boolean,
   invitation: Invitation,
@@ -339,7 +288,13 @@ async function answer(
   errors: Errors,
 ) {
   const flag = outcomeFlag();
-  const send = () => sendReply(service.mail, reply.event, reply.partstat);
+  const send = () =>
+    mailCalendar(
+      service.mail,
+      reply.event.organizer.email,
+      `Invitation response: ${reply.partstat.toLowerCase()}`,
+      ["reply.ics", calendarText("REPLY", reply.event, reply.partstat)],
+    );
   if (flag === "failed") return record("failed");
   if (flag !== "uncertain") {
     await send();
@@ -396,7 +351,7 @@ const failRead = () =>
 function routerFor(service: Service) {
   // Each synthetic mailbox has its own series and requests.
   return api.router({
-    ...organizerHandlers,
+    ...organizerHandlers(service.account.email, service.mail),
     read: api.read.handler(({ input, errors }) => {
       const found = service.fixtures.find(
         (item) => item.id === input.messageId,
