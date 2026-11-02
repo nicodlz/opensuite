@@ -6,6 +6,8 @@ import { z } from "zod";
 import type { PrismaClient, Entry, Prisma } from "../db/generated/index.js";
 import { UploadMismatchError, type Storage } from "../adapters/storage.ts";
 import { reserveQuota } from "./quota.ts";
+import { zip } from "./download-zip.ts";
+import { visible } from "./entry-view.ts";
 import { createLinkToken, hashLinkToken } from "../sharing/tokens.ts";
 
 const missing = () =>
@@ -15,18 +17,6 @@ const tooMany = () =>
     message: "Too many upload finalizations",
   });
 const invalid = (message: string) => new ORPCError("BAD_REQUEST", { message });
-const visible = (entry: Entry) => ({
-  id: entry.id,
-  ownerId: entry.ownerId,
-  parentId: entry.parentId,
-  name: entry.name,
-  kind: entry.kind,
-  state: entry.state,
-  size: Number(entry.size),
-  contentType: entry.contentType,
-  trashedAt: entry.trashedAt?.toISOString() ?? null,
-  createdAt: entry.createdAt.toISOString(),
-});
 
 // Every item below a folder shares its owner, so the walk stays within one owner.
 const subtree = async (
@@ -787,6 +777,6 @@ export const createDrive = (
     }, Promise.resolve());
     return expired.length;
   };
-  return { command, file, publicFile, sweepExpired, usage };
+  return { command, file, publicFile, sweepExpired, usage, ...zip(db) };
 };
 export type DriveService = ReturnType<typeof createDrive>;

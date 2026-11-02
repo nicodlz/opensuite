@@ -270,6 +270,17 @@ async function put(
 export const fakeDriveTransport = {
   command,
   put,
+  zip: async (ids: string[]) => {
+    await Promise.resolve();
+    if (sessionStorage.getItem("drive-fixture-fail-action"))
+      fail("Could not prepare ZIP download.");
+    for (const id of ids)
+      if (item(id).ownerId !== "demo" || item(id).trashedAt)
+        fail("An item is missing, trashed, or not owned by you");
+    return URL.createObjectURL(
+      new Blob(["Synthetic ZIP download"], { type: "application/zip" }),
+    );
+  },
   // One object URL per file keeps the viewer and thumbnails stable.
   preview: (id: string) => {
     const blob = blobs.get(id);

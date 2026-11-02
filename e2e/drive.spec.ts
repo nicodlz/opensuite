@@ -439,3 +439,30 @@ test("dragging items moves them, trashes them and refuses invalid drops", async 
   await page.getByRole("menuitem", { name: "New folder" }).click();
   await expect(page.getByRole("dialog", { name: "New folder" })).toBeVisible();
 });
+
+test("download a folder or selection as ZIP and show preparation errors", async ({
+  page,
+}) => {
+  await page.goto("/drive");
+  await page.getByRole("button", { name: "Projects, folder" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download as ZIP" }).click();
+  expect((await download).suggestedFilename()).toBe("Drive.zip");
+  await expect(page.getByText("ZIP download started.")).toBeVisible();
+  await page
+    .getByRole("button", { name: "Photos, folder" })
+    .click({ modifiers: ["Control"] });
+  await expect(
+    page
+      .getByRole("toolbar", { name: "Actions for 2 items" })
+      .getByRole("button", { name: "Download as ZIP" }),
+  ).toBeVisible();
+  const selectionDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download as ZIP" }).click();
+  expect((await selectionDownload).suggestedFilename()).toBe("Drive.zip");
+  await page.evaluate(() =>
+    sessionStorage.setItem("drive-fixture-fail-action", "1"),
+  );
+  await page.getByRole("button", { name: "Download as ZIP" }).click();
+  await expect(page.getByText("Could not prepare ZIP download.")).toBeVisible();
+});

@@ -113,6 +113,10 @@ const app = buildServer(
   readiness,
   config.DRIVE_TRUSTED_ORIGINS,
   internalToken,
+  {
+    maxEntries: config.DRIVE_ZIP_MAX_ENTRIES,
+    maxBytes: config.DRIVE_ZIP_MAX_BYTES,
+  },
 );
 let sweepTask: Promise<void> | undefined;
 const runSweep = async () => {

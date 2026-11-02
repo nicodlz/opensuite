@@ -73,6 +73,18 @@ const Env = z.object({
         )
         .min(1),
     ),
+  DRIVE_ZIP_MAX_ENTRIES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100_000)
+    .default(10_000),
+  DRIVE_ZIP_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(10_000_000_000),
   DRIVE_QUOTA_BYTES: z.coerce
     .number()
     .int()

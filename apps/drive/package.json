@@ -14,6 +14,7 @@
   "devDependencies": {
     "@opensuite/typescript-config": "workspace:*",
     "@types/node": "catalog:",
+    "@types/yazl": "catalog:",
     "typescript": "catalog:"
   },
   "dependencies": {
@@ -27,6 +28,7 @@
     "neverthrow": "catalog:",
     "prisma": "catalog:",
     "zod": "catalog:",
+    "yazl": "catalog:",
     "@opensuite/core": "workspace:*"
   }
 }

@@ -27,6 +27,21 @@ export interface StorageConfig {
   secretAccessKey: string;
   forcePathStyle: boolean;
 }
+const getObject = (
+  client: S3Client,
+  bucket: string,
+  objectKey: string,
+  range?: string,
+  signal?: AbortSignal,
+) =>
+  client.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      ...(range === undefined ? {} : { Range: range }),
+    }),
+    signal === undefined ? {} : { abortSignal: signal },
+  );
 export const createStorage = (config: StorageConfig) => {
   const common = {
     region: config.region,
@@ -186,15 +201,8 @@ export const createStorage = (config: StorageConfig) => {
         { expiresIn: 300 },
       );
     },
-    async get(objectKey: string, range?: string) {
-      return client.send(
-        new GetObjectCommand({
-          Bucket,
-          Key: objectKey,
-          ...(range === undefined ? {} : { Range: range }),
-        }),
-      );
-    },
+    get: (objectKey: string, range?: string, signal?: AbortSignal) =>
+      getObject(client, Bucket, objectKey, range, signal),
     async remove(
       id: string,
       objectKey: string | null,
