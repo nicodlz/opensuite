@@ -1,11 +1,13 @@
 import { MailNotificationOffer, NotificationPrompt } from "../push/prompt.tsx";
 import { PushSettings } from "../push/settings.tsx";
 import * as React from "react";
+import type { PushProduct } from "@opensuite/contracts";
 import { themeChoices } from "@opensuite/design-tokens";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode, type RefObject } from "react";
 import { AccountMenu } from "../auth/components.tsx";
 import { Button } from "../ui/button.tsx";
+import { useDocumentTitle } from "../ui/document-title.ts";
 import {
   DropdownContent,
   DropdownItemIndicator,
@@ -16,90 +18,32 @@ import {
   DropdownTrigger,
 } from "../ui/dropdown-menu.tsx";
 import { Icon, type IconName } from "../ui/icons.tsx";
-import { activeLayout, hubHref, isExternal, productHref } from "../origins.ts";
+import { activeLayout, hubHref } from "../origins.ts";
+import { useNavigationDrawer } from "./drawer.ts";
+import {
+  AppLink,
+  MobileProducts,
+  ProductRail,
+  productName,
+  shellTitle,
+  type Product,
+} from "./navigation.tsx";
 import { setTheme, useTheme } from "./theme.ts";
 
-export type Product =
-  "mail" | "calendar" | "contacts" | "drive" | "vault" | "admin";
+export type { Product } from "./navigation.tsx";
 
-const products: {
-  id: Product;
+type PrimaryAction = {
   label: string;
-  icon: IconName;
-  mark?: string;
-}[] = [
-  {
-    id: "mail",
-    label: "Mail",
-    icon: "mail",
-    mark: "/mail-mark.svg",
-  },
-  {
-    id: "calendar",
-    label: "Calendar",
-    icon: "calendar",
-    mark: "/calendar-mark.svg",
-  },
-  {
-    id: "contacts",
-    label: "Contacts",
-    icon: "contacts",
-    mark: "/contacts-mark.svg",
-  },
-  { id: "vault", label: "Vault", icon: "vault", mark: "/vault-mark.svg" },
-  {
-    id: "drive",
-    label: "Drive",
-    icon: "drive",
-    mark: "/drive-mark.svg",
-  },
-];
+  icon?: IconName;
+  shortcut?: string;
+  onClick: () => void;
+};
+type Drawer = { open: boolean; setOpen: (open: boolean) => void };
 
-/** Route link on this origin, plain link to another application origin. */
-function AppLink({
-  href,
-  className,
-  children,
-  ...aria
-}: {
-  href: string;
-  className?: string;
-  children: ReactNode;
-  "aria-label"?: string;
-  "aria-current"?: "page" | undefined;
-}) {
-  const props = {
-    ...(className === undefined ? {} : { className }),
-    ...(aria["aria-label"] === undefined
-      ? {}
-      : { "aria-label": aria["aria-label"] }),
-    ...(aria["aria-current"] === undefined
-      ? {}
-      : { "aria-current": aria["aria-current"] }),
-  };
-  if (isExternal(href))
-    return (
-      <a href={href} {...props}>
-        {children}
-      </a>
-    );
-  return (
-    <Link to={href} {...props}>
-      {children}
-    </Link>
-  );
-}
-const hrefOf = (product: Product) =>
-  product === "admin" || product === "contacts" || product === "vault"
-    ? hubHref(
-        activeLayout(),
-        product === "admin"
-          ? "/status"
-          : product === "vault"
-            ? "/vault"
-            : "/contacts",
-      )
-    : productHref(activeLayout(), product);
+const pushProductOf = (product: Product): PushProduct | null =>
+  product === "mail" || product === "calendar" || product === "drive"
+    ? product
+    : null;
 
 function AppearanceItems() {
   const theme = useTheme();
@@ -122,46 +66,194 @@ function AppearanceItems() {
   );
 }
 
-function AppearanceMenu() {
+/** Theme menu and sign-in link for visitors without a session. */
+function SignedOutActions() {
   return (
-    <DropdownMenu>
-      <DropdownTrigger asChild>
-        <Button
-          variant="ghost"
-          size="small"
-          className="shell-avatar-button"
-          aria-label="Account and appearance menu"
-        >
-          <Icon name="settings" />
-        </Button>
-      </DropdownTrigger>
-      <DropdownContent>
+    <>
+      <DropdownMenu>
+        <DropdownTrigger asChild>
+          <Button
+            variant="ghost"
+            size="small"
+            className="shell-avatar-button"
+            aria-label="Account and appearance menu"
+          >
+            <Icon name="settings" />
+          </Button>
+        </DropdownTrigger>
+        <DropdownContent>
+          <AppearanceItems />
+        </DropdownContent>
+      </DropdownMenu>
+      <Button asChild size="small">
+        <AppLink href={hubHref(activeLayout(), "/login")}>Sign in</AppLink>
+      </Button>
+    </>
+  );
+}
+
+function SignedInActions({ product }: { product: Product }) {
+  const [pushOpen, setPushOpen] = useState(false);
+  const pushProduct = pushProductOf(product);
+  return (
+    <>
+      {pushProduct && (
+        <PushSettings
+          product={pushProduct}
+          open={pushOpen}
+          onOpenChange={setPushOpen}
+        />
+      )}
+      <AccountMenu>
+        {pushProduct && (
+          <DropdownItem
+            className="menu-item"
+            onSelect={() => setPushOpen(true)}
+          >
+            Notification settings
+          </DropdownItem>
+        )}
+        <DropdownItem className="menu-item" asChild>
+          <a href={hubHref(activeLayout(), "/settings/addresses")}>Addresses</a>
+        </DropdownItem>
+        <DropdownItem className="menu-item" asChild>
+          <a href={hubHref(activeLayout(), "/settings/billing")}>
+            Plan &amp; storage
+          </a>
+        </DropdownItem>
         <AppearanceItems />
-      </DropdownContent>
-    </DropdownMenu>
+      </AccountMenu>
+    </>
+  );
+}
+
+/** Sidebar on wide screens, modal navigation drawer on narrow ones. */
+function ShellSidebar({
+  product,
+  label,
+  primaryAction,
+  drawer,
+  drawerRef,
+  children,
+}: {
+  product: Product;
+  label: string;
+  primaryAction: PrimaryAction | undefined;
+  drawer: Drawer;
+  drawerRef: RefObject<HTMLElement | null>;
+  children: ReactNode;
+}) {
+  const modal = drawer.open
+    ? ({
+        role: "dialog",
+        "aria-modal": true,
+        "aria-label": `${label} navigation`,
+      } as const)
+    : {};
+  return (
+    <aside className="shell-sidebar" ref={drawerRef} {...modal}>
+      <div className="shell-sidebar-head">
+        <span className="shell-product-name">{label}</span>
+        <button
+          type="button"
+          className="shell-drawer-close"
+          aria-label="Close navigation"
+          data-drawer-focus
+          onClick={() => drawer.setOpen(false)}
+        >
+          <Icon name="close" />
+        </button>
+      </div>
+      {primaryAction && (
+        <Button
+          className="shell-primary"
+          onClick={() => {
+            drawer.setOpen(false);
+            primaryAction.onClick();
+          }}
+        >
+          <Icon name={primaryAction.icon ?? "plus"} />
+          <span>{primaryAction.label}</span>
+          {primaryAction.shortcut && <kbd>{primaryAction.shortcut}</kbd>}
+        </Button>
+      )}
+      <div className="shell-sidebar-scroll">{children}</div>
+      <MobileProducts product={product} />
+    </aside>
+  );
+}
+
+function ShellTopbar({
+  product,
+  search,
+  actions,
+  signedIn,
+  drawer,
+  openerRef,
+}: {
+  product: Product;
+  search: ReactNode;
+  actions: ReactNode;
+  signedIn: boolean;
+  drawer: Drawer;
+  openerRef: RefObject<HTMLButtonElement | null>;
+}) {
+  return (
+    <header className="shell-topbar">
+      <button
+        ref={openerRef}
+        type="button"
+        className="shell-menu-button"
+        aria-label="Open navigation"
+        aria-expanded={drawer.open}
+        onClick={() => drawer.setOpen(true)}
+      >
+        <Icon name="menu" size={20} />
+      </button>
+      <div className="shell-search">{search}</div>
+      <div className="shell-actions">
+        {actions}
+        {signedIn ? (
+          <SignedInActions product={product} />
+        ) : (
+          <SignedOutActions />
+        )}
+      </div>
+    </header>
+  );
+}
+
+/** Push suggestions for the signed-in products that send notifications. */
+function ShellPrompts({ product }: { product: Product }) {
+  const pushProduct = pushProductOf(product);
+  return (
+    <>
+      {pushProduct && (
+        <NotificationPrompt key={pushProduct} product={pushProduct} />
+      )}
+      {product === "mail" && <MailNotificationOffer />}
+    </>
   );
 }
 
 export function AppShell({
   product,
   productLabel,
+  title,
   primaryAction,
   sidebar,
   search,
   actions,
   signedIn = true,
   mainId = "main-content",
-  mainClassName,
+  mainClassName = "",
   children,
 }: {
   product: Product;
   productLabel?: string;
-  primaryAction?: {
-    label: string;
-    icon?: IconName;
-    shortcut?: string;
-    onClick: () => void;
-  };
+  /** Page name shown before the product in the browser tab. */
+  title?: string;
+  primaryAction?: PrimaryAction;
   sidebar?: ReactNode;
   search?: ReactNode;
   actions?: ReactNode;
@@ -170,188 +262,40 @@ export function AppShell({
   mainClassName?: string;
   children: ReactNode;
 }) {
-  const [navOpen, setNavOpen] = useState(false);
-  const [pushOpen, setPushOpen] = useState(false);
-  const pushProduct =
-    product === "mail" || product === "calendar" || product === "drive"
-      ? product
-      : null;
-  const sidebarRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    // Navigating from the mobile drawer closes it.
-    const element = sidebarRef.current;
-    function close(event: MouseEvent) {
-      if (
-        event.target instanceof Element &&
-        event.target.closest("a, button[data-nav]")
-      )
-        setNavOpen(false);
-    }
-    element?.addEventListener("click", close);
-    return () => element?.removeEventListener("click", close);
-  }, []);
-  useEffect(() => {
-    if (!navOpen) return undefined;
-    function close(event: KeyboardEvent) {
-      if (event.key === "Escape") setNavOpen(false);
-    }
-    document.addEventListener("keydown", close);
-    return () => document.removeEventListener("keydown", close);
-  }, [navOpen]);
-  const label =
-    productLabel ??
-    products.find((item) => item.id === product)?.label ??
-    "Administration";
+  const { drawerRef, openerRef, ...drawer } = useNavigationDrawer();
+  useDocumentTitle(shellTitle(product, title));
   return (
-    <div className={`shell ${navOpen ? "nav-open" : ""}`}>
-      {signedIn && pushProduct && (
-        <PushSettings
-          product={pushProduct}
-          open={pushOpen}
-          onOpenChange={setPushOpen}
-        />
-      )}
-      <a href={`#${mainId}`} className="skip-link">
+    <div className={`shell ${drawer.open ? "nav-open" : ""}`}>
+      <a href={`#${mainId}`} className="skip-link" inert={drawer.open}>
         Skip to content
       </a>
-      <nav className="shell-rail" aria-label="Products">
-        <AppLink
-          href={hrefOf("mail")}
-          className="shell-logo"
-          aria-label="Esuno home"
-        >
-          <img src="/mark.svg" alt="" />
-        </AppLink>
-        {products.map((item) => (
-          <AppLink
-            key={item.id}
-            href={hrefOf(item.id)}
-            className={`shell-rail-link ${product === item.id ? "active" : ""}`}
-            aria-current={product === item.id ? "page" : undefined}
-          >
-            <span className="shell-rail-icon">
-              {item.mark ? (
-                <img className="product-mark" src={item.mark} alt="" />
-              ) : (
-                <Icon name={item.icon} size={20} />
-              )}
-            </span>
-            <span>{item.label}</span>
-          </AppLink>
-        ))}
-        <AppLink
-          href={hrefOf("admin")}
-          className={`shell-rail-link shell-rail-bottom ${product === "admin" ? "active" : ""}`}
-          aria-current={product === "admin" ? "page" : undefined}
-        >
-          <span className="shell-rail-icon">
-            <Icon name="settings" size={20} />
-          </span>
-          <span>Admin</span>
-        </AppLink>
-      </nav>
-      <aside className="shell-sidebar" ref={sidebarRef}>
-        <div className="shell-sidebar-head">
-          <span className="shell-product-name">{label}</span>
-          <button
-            type="button"
-            className="shell-drawer-close"
-            aria-label="Close navigation"
-            onClick={() => setNavOpen(false)}
-          >
-            <Icon name="close" />
-          </button>
-        </div>
-        {primaryAction && (
-          <Button
-            className="shell-primary"
-            onClick={() => {
-              setNavOpen(false);
-              primaryAction.onClick();
-            }}
-          >
-            <Icon name={primaryAction.icon ?? "plus"} />
-            <span>{primaryAction.label}</span>
-            {primaryAction.shortcut && <kbd>{primaryAction.shortcut}</kbd>}
-          </Button>
-        )}
-        <div className="shell-sidebar-scroll">{sidebar}</div>
-        <nav className="shell-mobile-products" aria-label="Switch product">
-          {products.map((item) => (
-            <AppLink
-              key={item.id}
-              href={hrefOf(item.id)}
-              aria-current={product === item.id ? "page" : undefined}
-            >
-              {item.mark ? (
-                <img className="product-mark" src={item.mark} alt="" />
-              ) : (
-                <Icon name={item.icon} />
-              )}
-              {item.label}
-            </AppLink>
-          ))}
-          <AppLink
-            href={hrefOf("admin")}
-            aria-current={product === "admin" ? "page" : undefined}
-          >
-            <Icon name="settings" />
-            Admin
-          </AppLink>
-        </nav>
-      </aside>
+      <ProductRail product={product} inert={drawer.open} />
+      <ShellSidebar
+        product={product}
+        label={productLabel ?? productName(product)}
+        primaryAction={primaryAction}
+        drawer={drawer}
+        drawerRef={drawerRef}
+      >
+        {sidebar}
+      </ShellSidebar>
       <button
         type="button"
         className="shell-scrim"
         aria-label="Close navigation"
         tabIndex={-1}
-        onClick={() => setNavOpen(false)}
+        onClick={() => drawer.setOpen(false)}
       />
-      <div className="shell-body">
-        {signedIn && pushProduct && (
-          <NotificationPrompt key={pushProduct} product={pushProduct} />
-        )}
-        {signedIn && product === "mail" && <MailNotificationOffer />}
-        <header className="shell-topbar">
-          <button
-            type="button"
-            className="shell-menu-button"
-            aria-label="Open navigation"
-            aria-expanded={navOpen}
-            onClick={() => setNavOpen(true)}
-          >
-            <Icon name="menu" size={20} />
-          </button>
-          <div className="shell-search">{search}</div>
-          <div className="shell-actions">
-            {actions}
-            {signedIn ? (
-              <AccountMenu>
-                {pushProduct && (
-                  <DropdownItem
-                    className="menu-item"
-                    onSelect={() => setPushOpen(true)}
-                  >
-                    Notification settings
-                  </DropdownItem>
-                )}
-                <DropdownItem className="menu-item" asChild>
-                  <a href={hubHref(activeLayout(), "/settings/addresses")}>
-                    Addresses
-                  </a>
-                </DropdownItem>
-                <DropdownItem className="menu-item" asChild>
-                  <a href={hubHref(activeLayout(), "/settings/billing")}>
-                    Plan &amp; storage
-                  </a>
-                </DropdownItem>
-                <AppearanceItems />
-              </AccountMenu>
-            ) : (
-              <AppearanceMenu />
-            )}
-          </div>
-        </header>
+      <div className="shell-body" inert={drawer.open}>
+        {signedIn && <ShellPrompts product={product} />}
+        <ShellTopbar
+          product={product}
+          search={search}
+          actions={actions}
+          signedIn={signedIn}
+          drawer={drawer}
+          openerRef={openerRef}
+        />
         {primaryAction && (
           <button
             type="button"
@@ -365,7 +309,7 @@ export function AppShell({
         <main
           id={mainId}
           tabIndex={-1}
-          className={`shell-main ${mainClassName ?? ""}`}
+          className={`shell-main ${mainClassName}`}
         >
           {children}
         </main>
@@ -374,7 +318,12 @@ export function AppShell({
   );
 }
 
-/** Sidebar link to another route. */
+/** Progress bar shown while a page or its session check loads. */
+export function PageLoading() {
+  return <div className="page-loading" aria-busy="true" />;
+}
+
+/** Sidebar link to another route; only an exact path match is current. */
 export function SidebarLink({
   to,
   icon,
@@ -389,6 +338,8 @@ export function SidebarLink({
   return (
     <Link
       to={to}
+      activeOptions={{ exact: true, includeSearch: false }}
+      activeProps={{}}
       className={`shell-nav-item ${active ? "active" : ""}`}
       aria-current={active ? "page" : undefined}
     >
