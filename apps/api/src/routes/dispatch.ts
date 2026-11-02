@@ -1,6 +1,6 @@
 import { requestHeaders } from "../auth/request-headers.ts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { ApiContext } from "./context.ts";
+import { mailContext, type ApiContext } from "./context.ts";
 import type { ServerDependencies } from "./server-dependencies.ts";
 import type { Actor } from "@opensuite/core/services/accounts";
 import { createFixedWindow } from "../auth/fixed-window.ts";
@@ -98,8 +98,7 @@ function createApiContext(
     setupStatus: dependencies.setupStatus,
     setupIdentity: dependencies.identity,
     audit: dependencies.identity?.audit,
-    mail: dependencies.mail,
-    calendar: dependencies.calendar,
+    ...mailContext(dependencies),
     contacts: dependencies.contacts,
     productOrigins: dependencies.identity?.productOrigins ?? {},
     vaultOrigin: dependencies.vaultOrigin,

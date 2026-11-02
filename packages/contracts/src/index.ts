@@ -1,3 +1,4 @@
+import { invitationsContract } from "./invitations.ts";
 import { addressesContract } from "./addresses.ts";
 import { billingContract } from "./billing.ts";
 import { pushContract } from "./push.ts";
@@ -20,6 +21,7 @@ export * from "./mail.ts";
 export * from "./drive.ts";
 export * from "./calendar.ts";
 export * from "./contacts.ts";
+export * from "./invitations.ts";
 export * from "./push.ts";
 export * from "./billing.ts";
 
@@ -32,6 +34,7 @@ export const contract = {
   mail: mailContract,
   calendar: calendarContract,
   contacts: contactsContract,
+  invitations: invitationsContract,
   push: pushContract,
   billing: billingContract,
   drive: driveContract,

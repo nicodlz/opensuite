@@ -1,4 +1,4 @@
-import { CalendarClient } from "./calendar-client.ts";
+import { InvitationClient } from "./invitations.ts";
 import { err, ok } from "neverthrow";
 import { z } from "zod";
 import {
@@ -195,6 +195,6 @@ export class ContactsApi {
 }
 
 /** Contact operations use the same user-scoped transport as mail and calendar. */
-export class ContactsClient extends CalendarClient {
+export class ContactsClient extends InvitationClient {
   readonly contacts = new ContactsApi(this.transport);
 }

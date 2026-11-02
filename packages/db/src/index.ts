@@ -24,3 +24,6 @@ export type { PlannedCalendarReminder } from "./calendar-reminders.ts";
 
 export { createAddressStore, validMailboxLocalPart } from "./addresses.ts";
 export type { AddressStore } from "./addresses.ts";
+
+export { createInvitationStore } from "./invitations.ts";
+export type { InvitationStore } from "./invitations.ts";

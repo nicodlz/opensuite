@@ -1,7 +1,6 @@
 import { contract } from "@opensuite/contracts";
-import type { ContactsFailure } from "@opensuite/core/services/contacts";
 import { implement, ORPCError } from "@orpc/server";
-import type { Result } from "neverthrow";
+import { accessResult } from "./access-result.ts";
 import type { ApiContext } from "./context.ts";
 
 const contacts = implement(contract.contacts).$context<ApiContext>();
@@ -11,24 +10,7 @@ const access = (context: ApiContext) => {
     throw new ORPCError("UPSTREAM_UNAVAILABLE", { status: 503, defined: true });
   return { actor: context.actor, service: context.contacts };
 };
-const failureCodes = {
-  forbidden: ["FORBIDDEN", 403],
-  not_found: ["NOT_FOUND", 404],
-  validation: ["VALIDATION", 400],
-  conflict: ["CONFLICT", 409],
-  unavailable: ["UPSTREAM_UNAVAILABLE", 503],
-  rate_limited: ["TOO_MANY_REQUESTS", 429],
-} satisfies Record<ContactsFailure["kind"], [string, number]>;
-const result = async <T>(
-  promise: Promise<Result<T, ContactsFailure>>,
-): Promise<T> => {
-  const outcome = await promise;
-  if (outcome.isErr()) {
-    const [code, status] = failureCodes[outcome.error.kind];
-    throw new ORPCError(code, { status, defined: true });
-  }
-  return outcome.value;
-};
+const result = accessResult;
 export const contactsRouter = contacts.router({
   books: contacts.books.handler(({ context, input }) => {
     const { actor, service } = access(context);

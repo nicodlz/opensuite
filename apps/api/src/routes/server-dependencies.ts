@@ -57,6 +57,7 @@ export interface ServerDependencies {
   readonly mail?: MailService;
   readonly calendar?: CalendarService;
   readonly contacts?: NonNullable<ApiContext["contacts"]>;
+  readonly invitations?: ApiContext["invitations"];
   readonly domains?: DomainService;
   readonly aliases?: AliasService;
   readonly addresses?: AddressService;
