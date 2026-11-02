@@ -1,5 +1,17 @@
 import type { PrismaClient } from "./generated/index.js";
 
+export type DraftGuardWrite = "destroy" | "send" | "mutation";
+type ScheduledState =
+  | "preparing"
+  | "creating"
+  | "pending"
+  | "canceling"
+  | "unknown"
+  | "releasing"
+  | "sent"
+  | "canceled"
+  | "failed";
+
 export type ScheduledRecord = {
   id: string;
   userId: string;
@@ -28,7 +40,7 @@ class Store {
   ) {
     try {
       await this.#db.mailDraftGuard.create({
-        data: { userId, accountId, draftId, token },
+        data: { userId, accountId, draftId, token, phase: "preparing" },
       });
       return true;
     } catch (error) {
@@ -52,6 +64,78 @@ class Store {
       where: { userId, accountId, draftId, token },
     });
   }
+  async beginWrite(
+    userId: string,
+    accountId: string,
+    ids: string[],
+    token: string,
+    phase: DraftGuardWrite,
+  ) {
+    await this.#db.$transaction(async (tx) => {
+      const result = await tx.mailDraftGuard.updateMany({
+        where: {
+          userId,
+          accountId,
+          draftId: { in: ids },
+          token,
+          phase: "preparing",
+        },
+        data: { phase },
+      });
+      if (result.count !== ids.length) throw new Error("draft guard changed");
+    });
+  }
+  staleGuards(before: Date) {
+    return this.#db.mailDraftGuard.findMany({
+      where: {
+        phase: { in: ["preparing", "destroy", "send"] },
+        updatedAt: { lt: before },
+      },
+      orderBy: { updatedAt: "asc" },
+      take: 100,
+    });
+  }
+  async clearStaleGuard(
+    guard: {
+      userId: string;
+      accountId: string;
+      draftId: string;
+      token: string;
+      phase: string;
+    },
+    before: Date,
+  ) {
+    await this.#db.mailDraftGuard.deleteMany({
+      where: { ...guard, updatedAt: { lt: before } },
+    });
+  }
+  async touchGuard(
+    guard: {
+      userId: string;
+      accountId: string;
+      draftId: string;
+      token: string;
+    },
+    now: Date,
+  ) {
+    const { userId, accountId, draftId, token } = guard;
+    await this.#db.mailDraftGuard.updateMany({
+      where: { userId, accountId, draftId, token },
+      data: { updatedAt: now },
+    });
+  }
+  guard(userId: string, accountId: string, draftId: string) {
+    return this.#db.mailDraftGuard.findUnique({
+      where: { userId_accountId_draftId: { userId, accountId, draftId } },
+    });
+  }
+  async guardStatus(userId: string, accountId: string, draftId: string) {
+    const guard = await this.guard(userId, accountId, draftId);
+    if (!guard) return "clear" as const;
+    const scheduled = await this.get(userId, guard.token);
+    if (scheduled?.state === "pending") return "scheduled" as const;
+    return "unknown" as const;
+  }
   async reserve(input: Omit<ScheduledRecord, "submissionId" | "createdAt">) {
     try {
       await this.#db.$transaction(async (tx) => {
@@ -61,6 +145,7 @@ class Store {
             accountId: input.accountId,
             draftId: input.draftId,
             token: input.id,
+            phase: "scheduled",
           },
         });
         await tx.scheduledSend.create({ data: input });
@@ -127,8 +212,8 @@ class Store {
   }
   async transition(
     id: string,
-    from: string[],
-    state: string,
+    from: ScheduledState[],
+    state: ScheduledState,
     extra: {
       submissionId?: string;
       releaseAt?: Date;
@@ -146,7 +231,11 @@ class Store {
     });
     return result.count === 1;
   }
-  async finish(row: ScheduledRecord, from: string[], state: string) {
+  async finish(
+    row: ScheduledRecord,
+    from: ScheduledState[],
+    state: ScheduledState,
+  ) {
     return this.#db.$transaction(async (tx) => {
       const result = await tx.scheduledSend.updateMany({
         where: { id: row.id, state: { in: from } },

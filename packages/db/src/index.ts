@@ -25,4 +25,8 @@ export type { PlannedCalendarReminder } from "./calendar-reminders.ts";
 export { createAddressStore, validMailboxLocalPart } from "./addresses.ts";
 export type { AddressStore } from "./addresses.ts";
 export { createScheduledSendStore } from "./scheduled-send.ts";
-export type { ScheduledRecord, ScheduledSendStore } from "./scheduled-send.ts";
+export type {
+  DraftGuardWrite,
+  ScheduledRecord,
+  ScheduledSendStore,
+} from "./scheduled-send.ts";

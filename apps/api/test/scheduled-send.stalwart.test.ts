@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { RecoveredDraftSchema } from "@opensuite/contracts";
 import { createReadinessService } from "@opensuite/core";
 import { createMailService } from "@opensuite/core/services/mail";
 import { createGuards } from "@opensuite/core/adapters/scheduled-send";
@@ -132,14 +133,52 @@ afterAll(async () => {
 it("persists, isolates, cancels, restarts, reconciles lost responses and releases mail", async () => {
   if (!db) throw new Error("Database unavailable");
   const database = db;
-  let lostResponse: "create" | "cancel" | "read" | "edit" | null = null;
+  let lostResponse:
+    | "create"
+    | "cancel"
+    | "read"
+    | "editCreate"
+    | "editDelete"
+    | "flag"
+    | "send"
+    | "missingSend"
+    | "missingCreate"
+    | null = null;
   let clockOffset = 0;
+  let submissionAttempts = 0;
+  let immediateAttempts = 0;
   const fetchMaybeLose: typeof fetch = async (input, init) => {
-    const response = await fetch(input, init);
     const body = typeof init?.body === "string" ? init.body : "";
+    if (body.includes("HOLDFOR")) submissionAttempts++;
+    if (body.includes('"EmailSubmission/set"') && !body.includes("HOLDFOR"))
+      immediateAttempts++;
+    if (lostResponse === "missingCreate" && body.includes("HOLDFOR")) {
+      lostResponse = null;
+      throw new Error("submission request lost");
+    }
+    if (
+      lostResponse === "missingSend" &&
+      body.includes('"EmailSubmission/set"') &&
+      !body.includes("HOLDFOR")
+    ) {
+      lostResponse = null;
+      throw new Error("immediate submission request lost");
+    }
+    const response = await fetch(input, init);
     if (
       (lostResponse === "read" && body.includes('"Mailbox/get"')) ||
-      (lostResponse === "edit" && body.includes('"Email/set"')) ||
+      (lostResponse === "editCreate" &&
+        body.includes('"Email/set"') &&
+        body.includes('"create"')) ||
+      (lostResponse === "editDelete" &&
+        body.includes('"Email/set"') &&
+        body.includes('"destroy"')) ||
+      (lostResponse === "flag" &&
+        body.includes('"Email/set"') &&
+        body.includes("keywords/$seen")) ||
+      (lostResponse === "send" &&
+        body.includes('"EmailSubmission/set"') &&
+        !body.includes("HOLDFOR")) ||
       (lostResponse === "create" && body.includes("HOLDFOR")) ||
       (lostResponse === "cancel" && body.includes("canceled"))
     ) {
@@ -242,6 +281,16 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
       draftId: draft.id,
       state: "pending",
     });
+    await expect(
+      database.$executeRaw`UPDATE "ScheduledSend" SET "state" = 'invalid' WHERE "id" = ${requestId}`,
+    ).rejects.toThrow(/ScheduledSend_state_check/);
+    const guardStatus = await app.inject({
+      method: "POST",
+      url: "/mail/drafts/guard-status",
+      headers,
+      payload: { accountId: "default", draftId: draft.id },
+    });
+    expect(guardStatus.json()).toEqual({ state: "scheduled" });
     expect(
       value(
         await mail.schedule(actor, "default", draft.id, requestId, {
@@ -358,6 +407,53 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     const received = value(await blind.emails(session, id, deliveries)).list[0];
     expect(received?.from?.[0]?.email).toBe("alias@example.test");
     expect(received?.attachments).toHaveLength(1);
+    lostResponse = "flag";
+    expect(
+      (
+        await mail.action(
+          actor,
+          "default",
+          uncertain.threadId,
+          { type: "read", value: false },
+          [uncertain.draftId],
+        )
+      ).isErr(),
+    ).toBe(true);
+    expect(
+      (
+        await mail.action(
+          actor,
+          "default",
+          uncertain.threadId,
+          { type: "read", value: true },
+          [uncertain.draftId],
+        )
+      ).isOk(),
+    ).toBe(true);
+    const immediateDraft = value(
+      await mail.createDraft(actor, "default", {
+        ...content,
+        subject: "uncertain-immediate",
+      }),
+    );
+    lostResponse = "send";
+    expect((await mail.send(actor, "default", immediateDraft.id)).isErr()).toBe(
+      true,
+    );
+    expect(
+      value(await mail.draftGuardStatus(actor, "default", immediateDraft.id))
+        .state,
+    ).toBe("unknown");
+    const immediateBefore = immediateAttempts;
+    clockOffset = 301_000;
+    mail = createService();
+    await mail.reconcileScheduled();
+    expect(
+      value(await mail.draftGuardStatus(actor, "default", immediateDraft.id))
+        .state,
+    ).toBe("clear");
+    expect(immediateAttempts).toBe(immediateBefore);
+    clockOffset = 0;
     const raceDraft = value(await mail.createDraft(actor, "default", content));
     const raceId = randomUUID();
     value(
@@ -388,12 +484,164 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     const ambiguousDraft = value(
       await mail.createDraft(actor, "default", content),
     );
-    lostResponse = "edit";
+    lostResponse = "editDelete";
     expect(
       (
         await mail.updateDraft(actor, "default", ambiguousDraft.id, content)
       ).isErr(),
     ).toBe(true);
+    expect(
+      value(await mail.draftGuardStatus(actor, "default", ambiguousDraft.id))
+        .state,
+    ).toBe("unknown");
+    clockOffset = 301_000;
+    mail = createService();
+    await mail.reconcileScheduled();
+    expect(
+      value(await mail.draftGuardStatus(actor, "default", ambiguousDraft.id))
+        .state,
+    ).toBe("clear");
+    clockOffset = 0;
+    const copyDraft = value(await mail.createDraft(actor, "default", content));
+    lostResponse = "editCreate";
+    expect(
+      (await mail.updateDraft(actor, "default", copyDraft.id, content)).isErr(),
+    ).toBe(true);
+    expect(
+      value(await mail.draftGuardStatus(actor, "default", copyDraft.id)).state,
+    ).toBe("clear");
+    const staleDraft = value(await mail.createDraft(actor, "default", content));
+    const staleToken = randomUUID();
+    await database.mailDraftGuard.create({
+      data: {
+        userId: actor.id,
+        accountId,
+        draftId: staleDraft.id,
+        token: staleToken,
+        phase: "preparing",
+        updatedAt: new Date(Date.now() - 301_000),
+      },
+    });
+    await mail.reconcileScheduled();
+    await expect(
+      createGuards(database).scheduledStore.beginWrite(
+        actor.id,
+        accountId,
+        [staleDraft.id],
+        staleToken,
+        "destroy",
+      ),
+    ).rejects.toThrow("draft guard changed");
+    expect(
+      value(await mail.draftGuardStatus(actor, "default", staleDraft.id)).state,
+    ).toBe("clear");
+    const missingDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    lostResponse = "missingCreate";
+    const missing = value(
+      await mail.schedule(actor, "default", missingDraft.id, randomUUID(), {
+        type: "delay",
+        seconds: 30,
+      }),
+    );
+    expect(missing.state).toBe("unknown");
+    const attempts = submissionAttempts;
+    await mail.reconcileScheduled();
+    await mail.reconcileScheduled();
+    expect(submissionAttempts).toBe(attempts);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (item) => item.id === missing.id,
+      )?.state,
+    ).toBe("unknown");
+    const copyRequest = {
+      accountId: "default",
+      draftId: missingDraft.id,
+      acknowledgeOriginalMayStillSend: true,
+    };
+    const deniedCopy = await app.inject({
+      method: "POST",
+      url: "/mail/drafts/recover-copy",
+      headers: { ...headers, cookie: "other" },
+      payload: copyRequest,
+    });
+    expect(deniedCopy.statusCode).toBe(403);
+    const noAcknowledgement = await app.inject({
+      method: "POST",
+      url: "/mail/drafts/recover-copy",
+      headers,
+      payload: { accountId: "default", draftId: missingDraft.id },
+    });
+    expect(noAcknowledgement.statusCode).toBe(400);
+    const originalDraft = value(
+      await mail.drafts(actor, "default"),
+    ).drafts.find((item) => item.id === missingDraft.id);
+    if (!originalDraft) throw new Error("Missing original draft");
+    const recoveredCopy = await app.inject({
+      method: "POST",
+      url: "/mail/drafts/recover-copy",
+      headers,
+      payload: copyRequest,
+    });
+    expect(recoveredCopy.statusCode).toBe(200);
+    const recovered = RecoveredDraftSchema.parse(recoveredCopy.json());
+    expect(recovered).toMatchObject({
+      state: "unknown",
+      originalMayStillSend: true,
+      draft: {
+        bcc: content.bcc,
+        attachmentBlobIds: originalDraft.attachmentBlobIds,
+      },
+    });
+    expect(recovered.draft.id).not.toBe(missingDraft.id);
+    const alice = new JmapClient(base, {
+      authorization: `Basic ${Buffer.from(`${actor.email}:${password}`).toString("base64")}`,
+      rewriteSessionUrlsToOrigin: base,
+    });
+    const aliceSession = value(await alice.discover());
+    const copiedEmails = value(
+      await alice.emails(aliceSession, accountId, [
+        missingDraft.id,
+        recovered.draft.id,
+      ]),
+    ).list;
+    const sourceEmail = copiedEmails.find(
+      (item) => item.id === missingDraft.id,
+    );
+    const copiedEmail = copiedEmails.find(
+      (item) => item.id === recovered.draft.id,
+    );
+    if (!sourceEmail || !copiedEmail)
+      throw new Error("Missing recovered email");
+    expect(recovered.draft.threadId).toBe(copiedEmail.threadId);
+    expect(
+      copiedEmail.attachments.map(({ name, type, size }) => ({
+        name,
+        type,
+        size,
+      })),
+    ).toEqual(
+      sourceEmail.attachments.map(({ name, type, size }) => ({
+        name,
+        type,
+        size,
+      })),
+    );
+    expect(
+      (
+        await mail.updateDraft(
+          actor,
+          "default",
+          recovered.draft.id,
+          recovered.draft,
+        )
+      ).isOk(),
+    ).toBe(true);
+    expect(
+      value(await mail.cancelScheduled(actor, "default", missing.id)).state,
+    ).toBe("unknown");
+    expect(submissionAttempts).toBe(attempts);
     expect(
       (
         await mail.schedule(actor, "default", ambiguousDraft.id, randomUUID(), {
@@ -401,6 +649,57 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
           seconds: 30,
         })
       ).isErr(),
+    ).toBe(true);
+    const externallyCanceledDraft = value(
+      await mail.createDraft(actor, "default", content),
+    );
+    const externallyCanceled = value(
+      await mail.schedule(
+        actor,
+        "default",
+        externallyCanceledDraft.id,
+        randomUUID(),
+        { type: "delay", seconds: 30 },
+      ),
+    );
+    const submissionRow = await database.scheduledSend.findUniqueOrThrow({
+      where: { id: externallyCanceled.id },
+    });
+    if (!submissionRow.submissionId)
+      throw new Error("Missing scheduled submission");
+    expect(
+      (
+        await alice.scheduled.cancelSubmission(
+          aliceSession,
+          accountId,
+          submissionRow.submissionId,
+        )
+      ).isOk(),
+    ).toBe(true);
+    clockOffset = 31_000;
+    const attemptsBeforeReconcile = submissionAttempts;
+    await mail.reconcileScheduled();
+    expect(submissionAttempts).toBe(attemptsBeforeReconcile);
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (item) => item.id === missing.id,
+      )?.state,
+    ).toBe("unknown");
+    expect(
+      value(await mail.scheduled(actor, "default")).scheduled.find(
+        (item) => item.id === externallyCanceled.id,
+      )?.state,
+    ).toBe("canceled");
+    clockOffset = 0;
+    expect(
+      (
+        await mail.updateDraft(
+          actor,
+          "default",
+          externallyCanceledDraft.id,
+          content,
+        )
+      ).isOk(),
     ).toBe(true);
     const lateDraft = value(await mail.createDraft(actor, "default", content));
     const lateId = randomUUID();
@@ -413,7 +712,7 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
     clockOffset = 31_000;
     expect(
       value(await mail.cancelScheduled(actor, "default", lateId)).state,
-    ).toBe("releasing");
+    ).toBe("unknown");
     clockOffset = 0;
     expect(
       (await mail.cancelScheduled(actor, "default", uncertain.id)).match(
@@ -421,6 +720,35 @@ it("persists, isolates, cancels, restarts, reconciles lost responses and release
         () => "error",
       ),
     ).toBe("sent");
+    const neverSent = value(await mail.createDraft(actor, "default", content));
+    lostResponse = "missingSend";
+    expect((await mail.send(actor, "default", neverSent.id)).isErr()).toBe(
+      true,
+    );
+    const immediateBeforeRecovery = immediateAttempts;
+    clockOffset = 301_000;
+    await expect(mail.reconcileScheduled()).rejects.toThrow(
+      "scheduled reconciliation incomplete",
+    );
+    expect(immediateAttempts).toBe(immediateBeforeRecovery);
+    expect(
+      value(await mail.draftGuardStatus(actor, "default", neverSent.id)).state,
+    ).toBe("unknown");
+    clockOffset = 0;
+    const recoveredImmediate = await app.inject({
+      method: "POST",
+      url: "/mail/drafts/recover-copy",
+      headers,
+      payload: {
+        accountId: "default",
+        draftId: neverSent.id,
+        acknowledgeOriginalMayStillSend: true,
+      },
+    });
+    expect(recoveredImmediate.statusCode).toBe(200);
+    expect(RecoveredDraftSchema.parse(recoveredImmediate.json())).toMatchObject(
+      { state: "unknown", originalMayStillSend: true },
+    );
   } finally {
     await app.close();
   }

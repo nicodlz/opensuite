@@ -492,6 +492,9 @@ model MailDraftGuard {
   draftId String
   token String
   createdAt DateTime @default(now())
+  phase String @default("legacy")
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@id([userId, accountId, draftId])
+  @@index([phase, updatedAt])
 }

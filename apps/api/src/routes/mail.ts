@@ -105,6 +105,22 @@ export const mailRouter = {
     }),
   }),
   ...scheduled.router({
+    draftGuardStatus: scheduled.draftGuardStatus.handler(
+      ({ context, input }) => {
+        const { actor, service } = access(context);
+        return result(
+          service.draftGuardStatus(actor, input.accountId, input.draftId),
+        );
+      },
+    ),
+    recoverDraftCopy: scheduled.recoverDraftCopy.handler(
+      ({ context, input }) => {
+        const { actor, service } = access(context);
+        return result(
+          service.recoverDraftCopy(actor, input.accountId, input.draftId),
+        );
+      },
+    ),
     schedule: scheduled.schedule.handler(({ context, input }) => {
       const { actor, service } = access(context);
       return result(

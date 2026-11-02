@@ -7,6 +7,7 @@ import {
 } from "@opensuite/contracts";
 import {
   createScheduledSendStore,
+  type DraftGuardWrite,
   type PrismaClient,
   type ScheduledRecord,
   type ScheduledSendStore,
@@ -33,7 +34,9 @@ async function guardDraft<T>(
   store: ScheduledSendStore,
   c: MailConnection,
   ids: string[],
-  work: (beginWrite: () => void) => Promise<T>,
+  work: (
+    beginWrite: (phase: DraftGuardWrite) => Promise<string | undefined>,
+  ) => Promise<T>,
   conflict: () => never,
 ): Promise<T> {
   const token = randomUUID();
@@ -51,8 +54,10 @@ async function guardDraft<T>(
         }),
       Promise.resolve(),
     );
-    const result = await work(() => {
+    const result = await work(async (phase) => {
+      await store.beginWrite(c.owner, c.id, acquired, token, phase);
       state.writing = true;
+      return acquired.length ? token : undefined;
     });
     completed = true;
     return result;
@@ -236,6 +241,125 @@ async function reserve(
   }
   return undefined;
 }
+async function recoverSentGuard(
+  c: MailConnection,
+  store: ScheduledSendStore,
+  guard: Awaited<ReturnType<ScheduledSendStore["staleGuards"]>>[number],
+  before: Date,
+) {
+  const ids = await c.client.scheduled.submissionIds(
+    c.session,
+    c.id,
+    guard.draftId,
+  );
+  if (
+    ids.isErr() ||
+    ids.value.total === undefined ||
+    ids.value.total !== ids.value.ids.length
+  )
+    throw new Error("submission lookup incomplete");
+  const result = await c.client.scheduled.submissions(
+    c.session,
+    c.id,
+    ids.value.ids,
+  );
+  if (result.isErr() || result.value.notFound.length)
+    throw new Error("submission lookup incomplete");
+  const matches = result.value.list.filter(
+    (item) => item.envelope.mailFrom.parameters?.["ENVID"] === guard.token,
+  );
+  const match = matches[0];
+  if (matches.length !== 1 || !match || match.undoStatus === "pending")
+    throw new Error("submission outcome unknown");
+  const canceled = match.undoStatus === "canceled";
+  const mailboxes = await c.client.mailboxes(c.session, c.id);
+  if (mailboxes.isErr()) throw new Error("mailboxes unavailable");
+  const box = mailboxes.value.list.find(
+    (item) => item.role === (canceled ? "drafts" : "sent"),
+  );
+  if (!box) throw new Error("mailbox unavailable");
+  const updated = await c.client.updateEmail(c.session, c.id, guard.draftId, {
+    mailboxIds: { [box.id]: true },
+    "keywords/$draft": canceled ? true : null,
+    "keywords/$seen": true,
+  });
+  if (
+    updated.isErr() &&
+    !(updated.error.kind === "set" && updated.error.type === "notFound")
+  )
+    throw new Error("draft reconciliation incomplete");
+  await store.clearStaleGuard(guard, before);
+}
+async function sweep(
+  store: ScheduledSendStore,
+  connect: (
+    actor: { id: string; email: string; role: "user" },
+    accountId: string,
+  ) => Promise<MailConnection>,
+  now: () => number,
+  visit: (row: ScheduledRecord) => Promise<void>,
+) {
+  const before = new Date(now() - 300_000);
+  const guards = await store.staleGuards(before);
+  const failedGuards = await guards.reduce<Promise<boolean>>(
+    (previous, guard) =>
+      previous.then(async (failed) => {
+        try {
+          if (guard.phase === "preparing")
+            await store.clearStaleGuard(guard, before);
+          else {
+            const c = await connect(
+              { id: guard.userId, email: "", role: "user" },
+              "default",
+            );
+            if (c.id !== guard.accountId) throw new Error("mailbox changed");
+            if (guard.phase === "send")
+              await recoverSentGuard(c, store, guard, before);
+            else {
+              const result = await c.client.destroyEmail(
+                c.session,
+                c.id,
+                guard.draftId,
+              );
+              if (
+                result.isOk() ||
+                (result.error.kind === "set" &&
+                  result.error.type === "notFound")
+              )
+                await store.clearStaleGuard(guard, before);
+              else throw new Error("draft deletion unresolved");
+            }
+          }
+          return failed;
+        } catch {
+          await store.touchGuard(guard, new Date(now()));
+          return true;
+        }
+      }),
+    Promise.resolve(false),
+  );
+  const page = async (after?: string): Promise<boolean> => {
+    const rows = await store.work(after, new Date(now()));
+    const failed = await rows.reduce<Promise<boolean>>(
+      (previous, row) =>
+        previous.then(async (previouslyFailed) => {
+          try {
+            await visit(row);
+            return previouslyFailed;
+          } catch {
+            return true;
+          }
+        }),
+      Promise.resolve(false),
+    );
+    const last = rows.at(-1);
+    return rows.length === 100 && last
+      ? (await page(last.id)) || failed
+      : failed;
+  };
+  if ((await page()) || failedGuards)
+    throw new Error("scheduled reconciliation incomplete");
+}
 export function createGuards(db: PrismaClient) {
   const store = createScheduledSendStore(db);
   return {
@@ -243,13 +367,16 @@ export function createGuards(db: PrismaClient) {
     guardDraft: <T>(
       c: MailConnection,
       ids: string[],
-      work: (beginWrite: () => void) => Promise<T>,
+      work: (
+        beginWrite: (phase: DraftGuardWrite) => Promise<string | undefined>,
+      ) => Promise<T>,
       conflict: () => never,
     ) => guardDraft(store, c, ids, work, conflict),
     findSubmission,
     delaySeconds,
     submit,
     reserve,
+    sweep,
   };
 }
 export function start(

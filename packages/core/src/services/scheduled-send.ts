@@ -4,16 +4,28 @@ import {
   type ScheduleDelivery,
   type Scheduled,
 } from "@opensuite/contracts";
-import type { ScheduledRecord, ScheduledSendStore } from "@opensuite/db";
+import type {
+  DraftGuardWrite,
+  ScheduledRecord,
+  ScheduledSendStore,
+} from "@opensuite/db";
 import type { Actor } from "./accounts.ts";
 import { fail, value, type createJmapAccess } from "./jmap-access.ts";
 
 type Access = ReturnType<typeof createJmapAccess>;
 type Connection = Awaited<ReturnType<Access["connect"]>>;
+type Connect = (actor: Actor, accountId: string) => Promise<Connection>;
+type BeginWrite = (phase: DraftGuardWrite) => Promise<string | undefined>;
+type Sweep = (
+  store: ScheduledSendStore,
+  connect: Connect,
+  now: () => number,
+  visit: (row: ScheduledRecord) => Promise<void>,
+) => Promise<void>;
 type DraftGuard = <T>(
   c: Connection,
   ids: string[],
-  work: (beginWrite: () => void) => Promise<T>,
+  work: (beginWrite: BeginWrite) => Promise<T>,
 ) => Promise<T>;
 type EmailResult = Awaited<ReturnType<Connection["client"]["emails"]>>;
 type Email = Extract<EmailResult, { value: unknown }>["value"]["list"][number];
@@ -32,10 +44,11 @@ type Reject = (kind: "validation" | "unavailable") => never;
 type Reservation = Omit<ScheduledRecord, "submissionId" | "createdAt">;
 type Dependencies = {
   store: ScheduledSendStore | undefined;
-  connect: (actor: Actor, accountId: string) => Promise<Connection>;
+  connect: Connect;
   boxes: (c: Connection) => Promise<Mailbox[]>;
   now: () => number;
   run: Access["run"];
+  sweep: Sweep;
   findSubmission: (
     c: Connection,
     row: ScheduledRecord,
@@ -69,13 +82,14 @@ export type ScheduledAdapters = {
   guardDraft?: <T>(
     c: Connection,
     ids: string[],
-    work: (beginWrite: () => void) => Promise<T>,
+    work: (beginWrite: BeginWrite) => Promise<T>,
     conflict: () => never,
   ) => Promise<T>;
   findSubmission?: Dependencies["findSubmission"];
   delaySeconds?: Dependencies["delaySeconds"];
   submit?: Dependencies["submit"];
   reserve?: Dependencies["reserve"];
+  sweep?: Sweep;
 };
 type Prepared = Sender & {
   c: Connection;
@@ -87,7 +101,7 @@ type Prepared = Sender & {
   seconds: number;
 };
 const requiredStore = (deps: Dependencies) => deps.store ?? fail("unavailable");
-const noWriteGuard = () => undefined;
+const noWriteGuard = () => Promise.resolve(undefined);
 export function draftGuard(
   store: ScheduledSendStore | undefined,
   guarded: ScheduledAdapters["guardDraft"],
@@ -120,7 +134,7 @@ export function draftOperations(deps: {
       c: Connection,
       list: Mailbox[],
       email: Email,
-      beginWrite: () => void,
+      beginWrite: BeginWrite,
     ) => Promise<T>,
   ) =>
     deps.run(async () => {
@@ -258,7 +272,7 @@ async function cancel(
   const row = await store.get(actor.id, id);
   if (!row || row.accountId !== c.id) return fail("not_found");
   if (row.state === "pending" && row.releaseAt.getTime() <= deps.now()) {
-    await store.transition(row.id, ["pending"], "releasing");
+    await store.transition(row.id, ["pending"], "unknown");
     const found = await store.get(actor.id, id);
     return found ? scheduledDto(found) : fail("unavailable");
   }
@@ -312,27 +326,24 @@ async function reconcileOne(
       await store.finish(row, ["preparing"], "failed");
     return;
   }
-  if (row.state === "releasing") return release(deps, c, row, store);
-  if (row.state === "pending") {
-    if (
-      row.releaseAt.getTime() <= deps.now() &&
-      (await store.transition(row.id, ["pending"], "releasing"))
-    )
-      await release(deps, c, { ...row, state: "releasing" }, store);
-    return;
-  }
+  if (row.state === "pending" && row.releaseAt.getTime() > deps.now()) return;
   const found = await deps.findSubmission(c, row, store);
   if (!found) return;
   if (found.undoStatus === "canceled")
-    await store.finish(row, ["creating", "unknown", "canceling"], "canceled");
+    await store.finish(
+      row,
+      ["creating", "unknown", "canceling", "pending", "releasing"],
+      "canceled",
+    );
   else if (found.undoStatus === "final") {
     if (
-      await store.transition(
+      row.state === "releasing" ||
+      (await store.transition(
         row.id,
-        ["creating", "unknown", "canceling"],
+        ["creating", "unknown", "canceling", "pending"],
         "releasing",
         { submissionId: found.id },
-      )
+      ))
     )
       await release(
         deps,
@@ -343,7 +354,7 @@ async function reconcileOne(
   } else if (["creating", "unknown"].includes(row.state) && !row.submissionId) {
     await store.transition(
       row.id,
-      [row.state],
+      ["creating", "unknown"],
       "pending",
       { submissionId: found.id, releaseAt: new Date(found.sendAt) },
       true,
@@ -353,25 +364,9 @@ async function reconcileOne(
 async function reconcile(deps: Dependencies) {
   const store = deps.store;
   if (!store) return;
-  const page = async (after?: string): Promise<boolean> => {
-    const rows = await store.work(after, new Date(deps.now()));
-    const failures = await rows.reduce<Promise<boolean>>(
-      (previous, row) =>
-        previous.then(async (failed) => {
-          try {
-            await reconcileOne(deps, row);
-            return failed;
-          } catch {
-            return true;
-          }
-        }),
-      Promise.resolve(false),
-    );
-    const last = rows.at(-1);
-    if (rows.length === 100 && last) return (await page(last.id)) || failures;
-    return failures;
-  };
-  if (await page()) throw new Error("scheduled reconciliation incomplete");
+  await deps.sweep(store, deps.connect, deps.now, (row) =>
+    reconcileOne(deps, row),
+  );
 }
 export function createScheduledSend(deps: Dependencies) {
   return {
@@ -394,6 +389,13 @@ export function createScheduledSend(deps: Dependencies) {
       }),
     cancelScheduled: (actor: Actor, accountId: string, id: string) =>
       deps.run(() => cancel(deps, actor, accountId, id)),
+    draftGuardStatus: (actor: Actor, accountId: string, draftId: string) =>
+      deps.run(async () => {
+        const c = await deps.connect(actor, accountId);
+        return {
+          state: await requiredStore(deps).guardStatus(actor.id, c.id, draftId),
+        };
+      }),
     reconcileScheduled: () => reconcile(deps),
   };
 }

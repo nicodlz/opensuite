@@ -79,6 +79,11 @@ export const DraftContentSchema = z.object({
   threadId: IdSchema.optional(),
 });
 export const DraftSchema = DraftContentSchema.extend({ id: IdSchema });
+export const RecoveredDraftSchema = z.object({
+  draft: DraftSchema,
+  state: z.literal("unknown"),
+  originalMayStillSend: z.literal(true),
+});
 export const SearchSchema = z.object({
   query: z.string().optional(),
   from: z.string().optional(),
@@ -225,6 +230,18 @@ export const mailContract = {
     .output(z.object({ url: z.url(), expiresAt: z.iso.datetime() })),
 };
 export const scheduledMailContract = {
+  draftGuardStatus: procedure
+    .route({ method: "POST", path: "/mail/drafts/guard-status" })
+    .input(DraftInputSchema)
+    .output(z.object({ state: z.enum(["clear", "scheduled", "unknown"]) })),
+  recoverDraftCopy: procedure
+    .route({ method: "POST", path: "/mail/drafts/recover-copy" })
+    .input(
+      DraftInputSchema.extend({
+        acknowledgeOriginalMayStillSend: z.literal(true),
+      }),
+    )
+    .output(RecoveredDraftSchema),
   schedule: procedure
     .route({ method: "POST", path: "/mail/scheduled/create" })
     .input(

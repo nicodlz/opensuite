@@ -3,6 +3,13 @@ import { ScheduledSubmissions } from "./scheduled-send.ts";
 import { threadPage } from "./thread-page.ts";
 
 export { JmapCapability } from "./protocol.ts";
+export { mailFilterFor } from "./mail-filter.ts";
+export {
+  mailAddresses,
+  mailAttachments,
+  mailBody,
+  mailboxMemberships,
+} from "./mail-content.ts";
 export type {
   JmapError,
   JmapResult,

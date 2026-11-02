@@ -7,12 +7,22 @@ import {
   type Message,
   type ThreadSummary,
 } from "@opensuite/contracts";
-import { JmapCapability, type Email, type JmapClient } from "@opensuite/jmap";
+import {
+  JmapCapability,
+  mailAddresses,
+  mailAttachments,
+  mailBody,
+  mailFilterFor,
+  mailboxMemberships,
+  type Email,
+  type JmapClient,
+} from "@opensuite/jmap";
 import type { Actor } from "./accounts.ts";
 import {
   createScheduledSend,
   draftGuard,
   draftOperations,
+  getDraft,
   senderFor,
   type ScheduledAdapters,
 } from "./scheduled-send.ts";
@@ -35,58 +45,31 @@ export interface ThreadOptions {
   search?: MailSearch | undefined;
   sort: "newest" | "oldest";
 }
-const address = ({ name, email }: { name: string | null; email: string }) =>
-  name ? { email, name } : { email };
-const addresses = (items: Email["from"]) => (items ?? []).map(address);
-const body = (email: Email, parts: Email["textBody"], type: string) =>
-  parts
-    .filter((part) => part.type.toLowerCase() === type)
-    .map((part) =>
-      part.partId === null ? "" : (email.bodyValues[part.partId]?.value ?? ""),
-    )
-    .join("\n");
-const memberships = (email: Email) =>
-  Object.keys(email.mailboxIds).filter((id) => email.mailboxIds[id]);
-const attachments = (email: Email) =>
-  email.attachments.flatMap((part) =>
-    part.blobId === null
-      ? []
-      : [
-          {
-            id: part.partId ?? part.blobId,
-            blobId: part.blobId,
-            ...(part.cid ? { cid: part.cid } : {}),
-            name: part.name ?? "attachment",
-            type: part.type,
-            size: part.size,
-          },
-        ],
-  );
 const date = (timestamp: string) => new Date(timestamp).toISOString();
 const customIds = (boxes: Mailbox[]) =>
   new Set(boxes.filter((box) => box.role === "custom").map((box) => box.id));
 function message(email: Email, boxes: Mailbox[], fallback: string): Message {
-  const from = addresses(email.from)[0] ?? { email: fallback };
-  const mailboxIds = memberships(email);
+  const from = mailAddresses(email.from)[0] ?? { email: fallback };
+  const mailboxIds = mailboxMemberships(email);
   const custom = customIds(boxes);
   return {
     id: email.id,
     threadId: email.threadId,
     mailboxIds,
     from,
-    replyTo: addresses(email.replyTo),
-    to: addresses(email.to),
-    cc: addresses(email.cc),
-    bcc: addresses(email.bcc),
+    replyTo: mailAddresses(email.replyTo),
+    to: mailAddresses(email.to),
+    cc: mailAddresses(email.cc),
+    bcc: mailAddresses(email.bcc),
     subject: email.subject ?? "",
     sentAt: date(email.sentAt ?? email.receivedAt),
     ...(email.messageId?.[0] ? { messageId: email.messageId[0] } : {}),
     ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
     references: email.references ?? [],
     headers: email.headers,
-    htmlBody: body(email, email.htmlBody, "text/html"),
-    textBody: body(email, email.textBody, "text/plain"),
-    attachments: attachments(email),
+    htmlBody: mailBody(email, email.htmlBody, "text/html"),
+    textBody: mailBody(email, email.textBody, "text/plain"),
+    attachments: mailAttachments(email),
     unread: !email.keywords["$seen"],
     starred: Boolean(email.keywords["$flagged"]),
     labels: mailboxIds.filter((id) => custom.has(id)),
@@ -96,13 +79,13 @@ function draft(email: Email): Draft {
   return {
     id: email.id,
     ...(email.from?.[0]?.email ? { from: email.from[0].email } : {}),
-    to: addresses(email.to),
-    cc: addresses(email.cc),
-    bcc: addresses(email.bcc),
+    to: mailAddresses(email.to),
+    cc: mailAddresses(email.cc),
+    bcc: mailAddresses(email.bcc),
     subject: email.subject ?? "",
-    htmlBody: body(email, email.htmlBody, "text/html"),
-    textBody: body(email, email.textBody, "text/plain"),
-    attachmentBlobIds: attachments(email).map((part) => part.blobId),
+    htmlBody: mailBody(email, email.htmlBody, "text/html"),
+    textBody: mailBody(email, email.textBody, "text/plain"),
+    attachmentBlobIds: mailAttachments(email).map((part) => part.blobId),
     ...(email.inReplyTo?.[0] ? { inReplyTo: email.inReplyTo[0] } : {}),
     references: email.references ?? [],
     threadId: email.threadId,
@@ -139,26 +122,6 @@ function summary(
     labels: [...new Set(mapped.flatMap((item) => item.labels))],
   };
 }
-const filterFor = (options: ThreadOptions) => {
-  const search = options.search;
-  return {
-    inMailbox: options.mailboxId,
-    ...(search?.query ? { text: search.query } : {}),
-    ...(search?.from ? { from: search.from } : {}),
-    ...(search?.to ? { to: search.to } : {}),
-    ...(search?.hasAttachment === undefined
-      ? {}
-      : { hasAttachment: search.hasAttachment }),
-    ...(search?.unread === undefined
-      ? {}
-      : search.unread
-        ? { notKeyword: "$seen" }
-        : { hasKeyword: "$seen" }),
-    ...(search?.after ? { after: search.after } : {}),
-    ...(search?.before ? { before: search.before } : {}),
-  };
-};
-
 const role = (list: Mailbox[], name: Mailbox["role"]) =>
   list.find((box) => box.role === name)?.id ?? fail("not_found");
 async function applyAction(
@@ -179,7 +142,7 @@ async function applyAction(
     };
   } else {
     const custom = customIds(list);
-    const retained = memberships(email).filter((id) =>
+    const retained = mailboxMemberships(email).filter((id) =>
       action.type === "labels" ? !custom.has(id) : custom.has(id),
     );
     const additions =
@@ -198,6 +161,35 @@ async function applyAction(
   }
   value(await c.client.updateEmail(c.session, c.id, email.id, patch));
 }
+type DraftAccess = Omit<Parameters<typeof draftOperations>[0], "guard">;
+function draftRecovery(
+  deps: DraftAccess & {
+    store: ScheduledAdapters["scheduledStore"];
+    create: (
+      c: MailConnection,
+      content: DraftContent,
+      boxes: Mailbox[],
+      prior: Email,
+    ) => Promise<{ id: string; threadId: string }>;
+  },
+) {
+  return (actor: Actor, accountId: string, id: string) =>
+    deps.run(async () => {
+      const c = await deps.connect(actor, accountId);
+      if (!deps.store) return fail("unavailable");
+      if ((await deps.store.guardStatus(actor.id, c.id, id)) !== "unknown")
+        return fail("conflict");
+      const list = await deps.boxes(c);
+      const original = await getDraft(c, id, list);
+      const content = draft(original);
+      const created = await deps.create(c, content, list, original);
+      return {
+        draft: { ...content, id: created.id, threadId: created.threadId },
+        state: "unknown" as const,
+        originalMayStillSend: true as const,
+      };
+    });
+}
 /** One instance per server; credentials and client instances never leave this service. */
 export function createMailService(dependencies: {
   store: MailCredentialStore;
@@ -212,6 +204,7 @@ export function createMailService(dependencies: {
   delaySeconds?: ScheduledAdapters["delaySeconds"];
   submit?: ScheduledAdapters["submit"];
   reserve?: ScheduledAdapters["reserve"];
+  sweep?: ScheduledAdapters["sweep"];
 }) {
   const { run, connect: open, now } = createJmapAccess(dependencies);
   const uploads = new Map<
@@ -253,10 +246,9 @@ export function createMailService(dependencies: {
     content: DraftContent,
     list: Mailbox[],
     prior?: Email,
-    beginWrite?: () => void,
   ) => {
     const existing = new Map(
-      (prior ? attachments(prior) : []).map((item) => [item.blobId, item]),
+      (prior ? mailAttachments(prior) : []).map((item) => [item.blobId, item]),
     );
     const parts = content.attachmentBlobIds.map((blobId) => {
       const key = `${c.owner}:${blobId}`;
@@ -285,7 +277,6 @@ export function createMailService(dependencies: {
       if (!identities.some((identity) => identity.email.toLowerCase() === from))
         return fail("validation");
     }
-    beginWrite?.();
     return value(
       await c.client.createEmail(c.session, c.id, {
         mailboxIds: { [role(list, "drafts")]: true },
@@ -322,6 +313,8 @@ export function createMailService(dependencies: {
       dependencies.submit ?? (() => Promise.reject(new Error("unavailable"))),
     reserve:
       dependencies.reserve ?? (() => Promise.reject(new Error("unavailable"))),
+    sweep:
+      dependencies.sweep ?? (() => Promise.reject(new Error("unavailable"))),
     findSubmission:
       dependencies.findSubmission ?? (() => Promise.resolve(undefined)),
   });
@@ -365,7 +358,7 @@ export function createMailService(dependencies: {
         if (!Number.isSafeInteger(position)) return fail("validation");
         const pageResult = value(
           await c.client.threadPage(c.session, c.id, {
-            filter: filterFor(options),
+            filter: mailFilterFor(options),
             sort: [
               {
                 property: "receivedAt",
@@ -454,9 +447,15 @@ export function createMailService(dependencies: {
           : all;
         return guard(
           c,
-          targets.map((item) => item.id),
+          targets
+            .filter(
+              (item) =>
+                item.keywords["$draft"] &&
+                !["read", "star", "labels"].includes(action.type),
+            )
+            .map((item) => item.id),
           async (beginWrite) => {
-            beginWrite();
+            await beginWrite(action.type === "delete" ? "destroy" : "mutation");
             await targets.reduce<Promise<void>>(
               (previous, email) =>
                 previous.then(() => applyAction(c, email, action, list)),
@@ -492,17 +491,19 @@ export function createMailService(dependencies: {
       content: DraftContent,
     ) =>
       withDraft(actor, accountId, id, async (c, list, previous, beginWrite) => {
-        const created = await create(c, content, list, previous, beginWrite);
+        const created = await create(c, content, list, previous);
+        await beginWrite("destroy");
         const removed = await c.client.destroyEmail(c.session, c.id, id);
         if (store) value(removed);
         return { ...content, id: created.id };
       }),
     deleteDraft: (actor: Actor, accountId: string, id: string) =>
       withDraft(actor, accountId, id, async (c, _list, _email, beginWrite) => {
-        beginWrite();
+        await beginWrite("destroy");
         value(await c.client.destroyEmail(c.session, c.id, id));
         return { success: true } satisfies { success: true };
       }),
+    recoverDraftCopy: draftRecovery({ connect, run, boxes, store, create }),
     send: (actor: Actor, accountId: string, id: string) =>
       withDraft(actor, accountId, id, async (c, list, email, beginWrite) => {
         const { from, identityId, recipients } = await senderFor(
@@ -510,7 +511,7 @@ export function createMailService(dependencies: {
           email,
           dependencies,
         );
-        beginWrite();
+        const requestId = await beginWrite("send");
         value(
           await c.client.submit(
             c.session,
@@ -519,14 +520,12 @@ export function createMailService(dependencies: {
             identityId,
             { mailFrom: { email: from }, rcptTo: recipients },
             role(list, "sent"),
+            { requestId, uncertainFollowup: true },
           ),
         );
         return { messageId: id, threadId: email.threadId };
       }),
-    schedule: scheduled.schedule,
-    scheduled: scheduled.scheduled,
-    cancelScheduled: scheduled.cancelScheduled,
-    reconcileScheduled: scheduled.reconcileScheduled,
+    ...scheduled,
     upload: (
       actor: Actor,
       accountId: string,

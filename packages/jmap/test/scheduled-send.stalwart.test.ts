@@ -241,6 +241,12 @@ it("probes future release, cancellation, delivery, and draft updates on the pinn
       }),
     ).ids,
   ).toHaveLength(1);
+  const finalSubmission = await call("EmailSubmission/get", {
+    ids: [scheduled.id],
+  });
+  expect(finalSubmission[0]?.[1]).toMatchObject({
+    list: [{ id: scheduled.id, undoStatus: "final" }],
+  });
   expect(
     value(
       await bob.queryEmails(bobSession, bobId, {
