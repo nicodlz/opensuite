@@ -91,6 +91,12 @@
     background 100ms ease,
     color 100ms ease;
 }
+.tool-button {
+  flex: none;
+}
+.reading-more {
+  display: none;
+}
 .tool-button:hover:not(:disabled) {
   background: var(--accent-soft);
   color: var(--foreground);
@@ -853,12 +859,15 @@ body:has(.compose-dock .composer) .toast-viewport {
 .compose-header :focus-visible {
   outline-color: var(--green);
 }
+/* On a short screen, or above a keyboard, the fields scroll. */
 .compose-fields {
   display: flex;
   flex: 1;
   flex-direction: column;
   min-height: 0;
   padding: 0 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .compose-row {
   display: flex;
@@ -1063,26 +1072,6 @@ body:has(.compose-dock .composer) .toast-viewport {
   .thread-star {
     opacity: 1;
   }
-  .compose-dock {
-    right: 0;
-    left: 0;
-  }
-  .composer,
-  .composer.expanded {
-    position: fixed;
-    inset: 0;
-    width: 100%;
-    height: 100dvh;
-    transform: none;
-    border-radius: 0;
-  }
-  .composer.minimized {
-    inset: auto 0 0;
-    height: auto;
-  }
-  .compose-header {
-    border-radius: 0;
-  }
   .search-filters {
     position: fixed;
     top: 64px;
@@ -1095,6 +1084,207 @@ body:has(.compose-dock .composer) .toast-viewport {
   }
   .message.collapsed .message-snippet {
     display: none;
+  }
+  /* The toolbar keeps the frequent actions; the others go to More. */
+  .reading-toolbar {
+    gap: 2px;
+    padding: 8px;
+  }
+  .reading-toolbar .toolbar-group {
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .reading-toolbar .reading-wide,
+  .reading-toolbar .toolbar-pager {
+    display: none;
+  }
+  .reading-more {
+    display: inline-grid;
+    margin-left: auto;
+  }
+  /* Reply stays at hand at the bottom of a long conversation. */
+  .reply-actions {
+    position: sticky;
+    bottom: 0;
+    flex-wrap: nowrap;
+    margin: 18px -14px -28px;
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .reply-actions .button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 8px;
+  }
+  .thread-tags span {
+    font-size: 12px;
+  }
+}
+/* Phones, held either way: a draft takes the whole screen, above the
+   on-screen keyboard, and minimized drafts line up at the bottom. */
+@media (max-width: 700px), (max-height: 500px) {
+  .compose-dock {
+    right: 0;
+    left: 0;
+    max-width: none;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+  }
+  .composer,
+  .composer.expanded {
+    position: fixed;
+    z-index: 81;
+    inset: var(--viewport-top, 0px) 0 auto;
+    width: 100%;
+    min-width: 0;
+    height: var(--viewport-height, 100dvh);
+    transform: none;
+    border: 0;
+    border-radius: 0;
+  }
+  .composer.minimized {
+    position: static;
+    width: 100%;
+    height: auto;
+    border-top: 1px solid var(--line-dark);
+  }
+  .composer.minimized:last-child .compose-header {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .composer-backdrop,
+  .composer:not(.minimized) .compose-header > div button:nth-child(2) {
+    /* Already full screen: no backdrop and no Maximize. */
+    display: none;
+  }
+  .compose-header {
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-right: calc(4px + env(safe-area-inset-right));
+    padding-left: calc(16px + env(safe-area-inset-left));
+  }
+  .compose-fields {
+    padding: 0 calc(14px + env(safe-area-inset-right)) 0
+      calc(14px + env(safe-area-inset-left));
+  }
+  .compose-footer {
+    padding: 8px calc(10px + env(safe-area-inset-right))
+      calc(10px + env(safe-area-inset-bottom))
+      calc(14px + env(safe-area-inset-left));
+  }
+  /* What the draft covers is out of reach until it is minimized or closed. */
+  .shell:has(.compose-dock .composer:not(.minimized))
+    :is(
+      .skip-link,
+      .shell-rail,
+      .shell-sidebar,
+      .shell-topbar,
+      .mail-panes,
+      .shell-fab
+    ) {
+    visibility: hidden;
+  }
+  .shell:has(.compose-dock .composer.minimized) .shell-fab {
+    margin-bottom: calc(52px + env(safe-area-inset-bottom));
+  }
+}
+/* Where the reader covers the list, New message would cover Reply. */
+@media (max-width: 900px) {
+  .shell-body:has(.mail-panes.show-reading) .shell-fab {
+    display: none;
+  }
+  .thread-scroll {
+    padding-bottom: calc(88px + env(safe-area-inset-bottom));
+  }
+}
+/* Fingers need larger targets than a mouse pointer. */
+@media (pointer: coarse) {
+  .tool-button,
+  .compose-tool,
+  .compose-header > div button {
+    width: 44px;
+    height: 44px;
+  }
+  .compose-header {
+    min-height: 52px;
+  }
+  .list-heading {
+    min-height: 64px;
+  }
+  .list-check-target {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    margin: 0 -6px 0 -14px;
+  }
+  .list-check {
+    width: 20px;
+    height: 20px;
+  }
+  .list-tools select {
+    height: 44px;
+  }
+  .thread-select input {
+    width: 20px;
+    height: 20px;
+    top: 23px;
+    left: 23px;
+  }
+  .thread-star {
+    top: 28px;
+    right: 2px;
+    width: 44px;
+    height: 44px;
+  }
+  .thread-top {
+    padding-right: 34px;
+  }
+  .filter-chips button {
+    min-height: 36px;
+    padding: 6px 10px 6px 12px;
+    font-size: 13px;
+  }
+  .filter-chips {
+    gap: 8px;
+  }
+  .draft-row button {
+    min-height: 64px;
+  }
+  .reply-actions .button {
+    min-height: 44px;
+  }
+  .compose-row {
+    min-height: 48px;
+  }
+  .compose-row input,
+  .compose-from select {
+    min-height: 44px;
+  }
+  .compose-copies {
+    min-height: 44px;
+    padding: 0 8px;
+  }
+  .compose-attachments li button {
+    width: 36px;
+    height: 36px;
+  }
+  .attachment-list button,
+  .image-notice button,
+  .link-button {
+    min-height: 44px;
+  }
+  .search-filters input:not([type="checkbox"]) {
+    height: 44px;
+  }
+  .search-filters label.check {
+    min-height: 44px;
+  }
+  .search-filter-actions .button {
+    min-height: 44px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

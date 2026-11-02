@@ -96,7 +96,8 @@ function destination(
  * Moves focus to an event once its chip is rendered. Chips appear, move or
  * are replaced as optimistic data and server responses arrive, so each render
  * retries until the data has settled. A request is abandoned when the user
- * puts focus somewhere else, and focus never stays on the page body.
+ * puts focus somewhere else or presses a key or pointer, and focus never
+ * stays on the page body.
  */
 export function useEventFocus(
   surfaceRef: RefObject<HTMLElement | null>,
@@ -138,6 +139,20 @@ export function useEventFocus(
     current.placed = element;
     if (found && !current.wait && !busy) pending.current = null;
   }, [surfaceRef, busy]);
+  useEffect(() => {
+    // The user's next key or pointer press ends a request, even one still
+    // waiting for its event, so a late chip never takes focus from a dialog
+    // or control opened since.
+    const end = () => {
+      pending.current = null;
+    };
+    document.addEventListener("keydown", end, true);
+    document.addEventListener("pointerdown", end, true);
+    return () => {
+      document.removeEventListener("keydown", end, true);
+      document.removeEventListener("pointerdown", end, true);
+    };
+  }, []);
   // After every render, in a timer so that it runs after a closing dialog
   // or popover has restored focus to its own trigger.
   useEffect(() => {

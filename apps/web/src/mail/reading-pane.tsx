@@ -1,18 +1,13 @@
 import * as React from "react";
-import type { MailAction, Mailbox, Message } from "@opensuite/contracts";
+import type { Message } from "@opensuite/contracts";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Alias } from "../aliases/client.ts";
 import { aliasState } from "../aliases/model.ts";
 import { expireSession } from "../auth/components.tsx";
-import {
-  DropdownContent,
-  DropdownItem,
-  DropdownMenu,
-  DropdownTrigger,
-} from "../ui/dropdown-menu.tsx";
 import { Icon } from "../ui/icons.tsx";
 import { accountId, mailClient } from "./client.ts";
 import { formatDate, formatFullDate, initials } from "./model.ts";
+import { ReadingToolbar } from "./reading-toolbar.tsx";
 import { sanitizeEmail } from "./sanitize.ts";
 
 async function download(blobId: string, name: string) {
@@ -273,186 +268,14 @@ function MessageView({
   );
 }
 
-/**
- * The open conversation's actions above its content (`children`). It stays
- * mounted while the reader moves between conversations or waits for one to
- * load, so a focused button keeps focus.
- */
+/** The open conversation's actions above its content (`children`). */
 export function ReadingPane({
-  folder,
-  mailboxes,
-  labels,
-  starred,
-  position,
-  onBack,
-  onAction,
-  onStep,
   children,
-}: {
-  folder: Mailbox | undefined;
-  mailboxes: Mailbox[];
-  labels: string[];
-  starred: boolean;
-  position: { index: number; total: number };
-  onBack: () => void;
-  onAction: (change: MailAction) => void;
-  onStep: (direction: "next" | "previous") => void;
-  children: ReactNode;
-}) {
-  const inTrash = folder?.role === "trash";
-  // Labels are the account's custom mailboxes. The mail contract can list and
-  // apply them but has no procedure to create one, so this menu offers no
-  // "New label" entry.
-  const custom = mailboxes.filter((item) => item.role === "custom");
+  ...toolbar
+}: React.ComponentProps<typeof ReadingToolbar> & { children: ReactNode }) {
   return (
     <>
-      <div className="reading-toolbar">
-        <button
-          type="button"
-          className="tool-button mobile-back"
-          aria-label="Back"
-          onClick={onBack}
-        >
-          <Icon name="back" />
-        </button>
-        <div className="toolbar-group">
-          <button
-            type="button"
-            className="tool-button"
-            aria-label="Archive"
-            title="Archive (E)"
-            onClick={() => onAction({ type: "archive" })}
-          >
-            <Icon name="archive" />
-          </button>
-          <button
-            type="button"
-            className="tool-button"
-            aria-label={inTrash ? "Delete permanently" : "Delete"}
-            title={inTrash ? "Delete permanently" : "Delete (#)"}
-            onClick={() => onAction({ type: inTrash ? "delete" : "trash" })}
-          >
-            <Icon name="trash" />
-          </button>
-          <DropdownMenu>
-            <DropdownTrigger asChild>
-              <button
-                type="button"
-                className="tool-button"
-                aria-label="Move to folder"
-                title="Move to folder"
-              >
-                <Icon name="move" />
-              </button>
-            </DropdownTrigger>
-            <DropdownContent>
-              <div className="menu-label">Move to</div>
-              {mailboxes
-                .filter(
-                  (item) =>
-                    item.role !== "custom" &&
-                    item.role !== "drafts" &&
-                    item.id !== folder?.id,
-                )
-                .map((item) => (
-                  <DropdownItem
-                    key={item.id}
-                    className="menu-item"
-                    onSelect={() =>
-                      onAction({ type: "move", mailboxId: item.id })
-                    }
-                  >
-                    {item.name}
-                  </DropdownItem>
-                ))}
-            </DropdownContent>
-          </DropdownMenu>
-          {custom.length > 0 && (
-            <DropdownMenu>
-              <DropdownTrigger asChild>
-                <button
-                  type="button"
-                  className="tool-button"
-                  aria-label="Labels"
-                  title="Labels"
-                >
-                  <Icon name="label" />
-                </button>
-              </DropdownTrigger>
-              <DropdownContent>
-                <div className="menu-label">Labels</div>
-                {custom.map((item) => (
-                  <DropdownItem
-                    key={item.id}
-                    className="menu-item"
-                    onSelect={() =>
-                      onAction({
-                        type: "labels",
-                        labels: labels.includes(item.id)
-                          ? labels.filter((id) => id !== item.id)
-                          : [...labels, item.id],
-                      })
-                    }
-                  >
-                    <span className="menu-indicator">
-                      {labels.includes(item.id) ? "✓" : ""}
-                    </span>
-                    {item.name}
-                  </DropdownItem>
-                ))}
-              </DropdownContent>
-            </DropdownMenu>
-          )}
-        </div>
-        <div className="toolbar-group">
-          <button
-            type="button"
-            className="tool-button"
-            aria-label="Mark unread"
-            title="Mark unread (Shift+U)"
-            onClick={() => onAction({ type: "read", value: false })}
-          >
-            <Icon name="unread" />
-          </button>
-          <button
-            type="button"
-            className={`tool-button ${starred ? "starred" : ""}`}
-            aria-label={starred ? "Remove star" : "Add star"}
-            aria-pressed={starred}
-            title="Star (S)"
-            onClick={() => onAction({ type: "star", value: !starred })}
-          >
-            <Icon name="star" filled={starred} />
-          </button>
-        </div>
-        {position.total > 0 && (
-          <div className="toolbar-group toolbar-pager">
-            <span>
-              {position.index + 1} of {position.total}
-            </span>
-            <button
-              type="button"
-              className="tool-button"
-              aria-label="Newer conversation"
-              title="Newer (K)"
-              disabled={position.index <= 0}
-              onClick={() => onStep("previous")}
-            >
-              <Icon name="chevronLeft" />
-            </button>
-            <button
-              type="button"
-              className="tool-button"
-              aria-label="Older conversation"
-              title="Older (J)"
-              disabled={position.index >= position.total - 1}
-              onClick={() => onStep("next")}
-            >
-              <Icon name="chevronRight" />
-            </button>
-          </div>
-        )}
-      </div>
+      <ReadingToolbar {...toolbar} />
       {children}
     </>
   );
