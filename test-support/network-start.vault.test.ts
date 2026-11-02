@@ -181,6 +181,7 @@ test("API before Caddy and one-off management containers retain distinct address
       if (leftovers) await docker("rm", "-f", ...leftovers.split(/\s+/));
       await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");
     } finally {
+      await fixture.releaseSubnets();
       await rm(directory, { recursive: true, force: true });
     }
   }

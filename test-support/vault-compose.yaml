@@ -14,24 +14,14 @@ services:
       OPENSUITE_SITE_ADDRESS: localhost
     networks:
       api-proxy:
-        ipv4_address: ${VAULT_TEST_API_IP}
+        ipv4_address: ${API_PROXY_CADDY_IP}
       pass-network:
-        ipv4_address: ${VAULT_TEST_PROXY_IP}
+        ipv4_address: ${VAULT_CADDY_IP}
     ports: !override
       - "127.0.0.1::443"
   vault:
     environment:
       DOMAIN: ${VAULT_TEST_DOMAIN:-https://vault.localhost}
-      IP_HEADER_TRUSTED_PROXIES: ${VAULT_TEST_PROXY_IP}
+      IP_HEADER_TRUSTED_PROXIES: ${VAULT_CADDY_IP}
     ports: !override
       - "127.0.0.1::8080"
-networks:
-  api-proxy:
-    ipam:
-      config: !override
-        - subnet: ${VAULT_TEST_API_SUBNET}
-  pass-network:
-    ipam:
-      config: !override
-        - subnet: ${VAULT_TEST_SUBNET}
-          ip_range: ${VAULT_TEST_DYNAMIC_RANGE}
