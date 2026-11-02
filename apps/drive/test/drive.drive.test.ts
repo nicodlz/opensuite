@@ -53,6 +53,15 @@ const compose = async (...cmd: string[]) =>
   (
     await run("docker", [...args, ...cmd], {
       cwd: root,
+      env: {
+        ...process.env,
+        DRIVE_S3_ENDPOINT: "http://localstack:4566",
+        DRIVE_S3_PUBLIC_ENDPOINT: "http://localhost:4566",
+        DRIVE_S3_BUCKET: "opensuite-drive",
+        DRIVE_S3_REGION: "us-east-1",
+        DRIVE_S3_ACCESS_KEY: "test",
+        DRIVE_S3_SECRET_FILE: "/dev/null",
+      },
       maxBuffer: 16 * 1024 * 1024,
     })
   ).stdout;
