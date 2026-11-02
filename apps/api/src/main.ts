@@ -317,7 +317,7 @@ const { mail, invitations, organizer, calendar, scans, organized } =
       domains: authConfig.value.mailDomains,
     }),
   });
-const { migrationMail, migrationDirect, calendarImport } = configureMailImports(
+const mailImports = configureMailImports(
   database.value,
   authConfig.value,
   mailboxStore,
@@ -340,10 +340,8 @@ const app = await buildServer({
   accounts: auth.accounts,
   ...(domains === undefined ? {} : { domains }),
   mail,
-  migrationMail,
-  migrationDirect,
+  ...mailImports,
   calendar,
-  calendarImport,
   contacts: createContactsService(
     contactsConfig(mailboxStore, authConfig.value.stalwartOrigin),
   ),
@@ -395,8 +393,8 @@ registerBackgroundJobs({
   aliases,
   auth,
 });
-registerMailImport(app, migrationMail);
-registerMailImport(app, migrationDirect);
+registerMailImport(app, mailImports.migrationMail);
+registerMailImport(app, mailImports.migrationDirect);
 scheduledSend.register(app, mail);
 registerShutdown(app);
 

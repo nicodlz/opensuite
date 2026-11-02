@@ -1,3 +1,5 @@
+import { portableExportContract } from "./portable-export.ts";
+export * from "./portable-export.ts";
 import { migrationCalendarContract } from "./migration-calendar.ts";
 import { invitationsContract } from "./invitations.ts";
 import { addressesContract } from "./addresses.ts";
@@ -32,6 +34,7 @@ export * from "./push.ts";
 export * from "./billing.ts";
 
 export const contract = {
+  portableExport: portableExportContract,
   aliases: aliasesContract,
   addresses: addressesContract,
   system: systemContract,

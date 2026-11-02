@@ -25,7 +25,7 @@ import {
 import { LoginPage, Protected, expireSession } from "./auth/components.tsx";
 import { CallbackPage, HandoffPage, startHandoff } from "./auth/handoff.tsx";
 import { activeLayout, redirectFor, rewriteFor } from "./origins.ts";
-import { MailPage } from "./mail/mail-page.tsx";
+import { ExportPage, MailWithExport } from "./export/mail-entry.tsx";
 import { BillingSettings } from "./billing/settings.tsx";
 import { SubscribePage, WelcomePage } from "./billing/public.tsx";
 import { ProductPlaceholder } from "./shell/admin-pages.tsx";
@@ -167,6 +167,17 @@ const addressesSettingsRoute = createRoute({
     </Protected>
   ),
 });
+const exportRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/export",
+  component: () => (
+    <Protected>
+      <Lazy>
+        <ExportPage />
+      </Lazy>
+    </Protected>
+  ),
+});
 const billingSettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/billing",
@@ -232,7 +243,7 @@ const mailRoute = createRoute({
   path: "/mail",
   component: () => (
     <Protected>
-      <MailPage />
+      <MailWithExport />
       <Suspense fallback={null}>
         <MigrationOffer />
       </Suspense>
@@ -352,6 +363,7 @@ const router = createRouter({
     callbackRoute,
     loginRoute,
     billingSettingsRoute,
+    exportRoute,
     addressesSettingsRoute,
     migrationRoute,
     migrationWizardRoute,

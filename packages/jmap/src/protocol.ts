@@ -45,7 +45,7 @@ async function responseResult(
   response: Response,
 ): Promise<JmapResult<Response>> {
   if (response.ok) return ok(response);
-  const body = await response.text();
+  const body = await readErrorBody(response);
   let data: unknown;
   try {
     data = JSON.parse(body);
@@ -277,3 +277,52 @@ export const setFailure = (
     ? undefined
     : { kind: "set", method, id: entry[0], ...entry[1] };
 };
+
+/** Bound upstream error bodies, which can include user-controlled content. */
+async function readErrorBody(response: Response): Promise<string> {
+  const result = await readPortableBody(response, 32_768);
+  return result.isOk() ? new TextDecoder().decode(result.value) : "";
+}
+
+export async function readPortableBody(response: Response, limit: number) {
+  const reader = response.body?.getReader();
+  if (!reader)
+    return err({
+      kind: "invalidResponse" as const,
+      message: "Missing response body",
+    });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const read = async (): Promise<boolean> => {
+    const part = z
+      .object({ done: z.boolean(), value: z.instanceof(Uint8Array).optional() })
+      .parse(await reader.read());
+    if (part.done) return true;
+    if (!part.value) throw new Error("Missing stream chunk");
+    size += part.value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return false;
+    }
+    chunks.push(part.value);
+    return read();
+  };
+  try {
+    if (!(await read()))
+      return err({
+        kind: "invalidResponse" as const,
+        message: "Response exceeds limit",
+      });
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return ok(bytes);
+  } catch {
+    return err({ kind: "network" as const, message: "Download failed" });
+  } finally {
+    reader.releaseLock();
+  }
+}

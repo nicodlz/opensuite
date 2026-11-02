@@ -1,4 +1,5 @@
 import type { OrganizerService } from "@opensuite/core/services/invitations-outbound";
+import type { PortableExportAccess } from "./portable-export.ts";
 import type { InvitationService } from "@opensuite/core/services/invitations";
 import type { AddressService } from "@opensuite/core/services/addresses";
 import type { NotificationDispatcher } from "@opensuite/core/services/notifications";
@@ -22,6 +23,7 @@ import type { ClaimService } from "../billing/claims.ts";
 
 /** Per-request context handed to every procedure by the server. */
 export interface ApiContext {
+  readonly portableExport: PortableExportAccess | undefined;
   readonly entitlements: Entitlements | undefined;
   readonly storageMeter: StorageMeter | undefined;
   readonly billing: StripeBilling | undefined;
@@ -95,11 +97,13 @@ export function mailContext(dependencies: {
   calendar?: CalendarService | undefined;
   invitations?: InvitationService | undefined;
   organizer?: OrganizerService | undefined;
+  portableExport?: PortableExportAccess | undefined;
 }) {
   return {
     mail: dependencies.mail,
     calendar: dependencies.calendar,
     invitations: dependencies.invitations,
     organizer: dependencies.organizer,
+    portableExport: dependencies.portableExport,
   };
 }
