@@ -4,7 +4,14 @@ import {
   type CalendarEvent,
   type EventContent,
   type Recurrence,
+  type invitationsContract,
+  type mailContract,
 } from "@opensuite/contracts";
+import type {
+  ContractRouterClient,
+  InferContractRouterOutputs,
+} from "@orpc/contract";
+import { ORPCError } from "@orpc/client";
 import { createRouterClient, implement } from "@orpc/server";
 
 // Synthetic calendar data lives only in the development bundle. Dates are
@@ -30,6 +37,11 @@ const date = (day: number) =>
     Date.UTC(monday.getFullYear(), monday.getMonth(), monday.getDate() + day),
   ).toISOString();
 
+type InvitationEvent = InferContractRouterOutputs<
+  typeof invitationsContract
+>["read"]["events"][number];
+type MailClient = ContractRouterClient<typeof mailContract>;
+const accountId = "default";
 const calendars: Calendar[] = [
   { id: "personal", name: "Personal", color: "#7c5cff", isDefault: true },
   { id: "work", name: "Work", color: "#1f9d8b", isDefault: false },
@@ -270,5 +282,92 @@ const router = api.router({
     return { success: true };
   }),
 });
-export const fakeCalendarClient = createRouterClient(router);
+const text = (value: string) => value.replaceAll(/([\\;,])/g, "\\$1");
+const attendee = (email: string, partstat: string) =>
+  `ATTENDEE;PARTSTAT=${partstat}:mailto:${email}`;
+const compact = (value: string | null) => (value ?? "").replaceAll(/[-:]/g, "");
+/** Fixture iCalendar text for downloads and replies; it is never parsed here. */
+export function calendarText(
+  method: string,
+  event: InvitationEvent,
+  reply?: string,
+) {
+  const zone = event.timeZone ? `;TZID=${event.timeZone}` : "";
+  const attendees = event.attendees
+    .filter((item) => !reply || item.partstat === "NEEDS-ACTION")
+    .map((item) => attendee(item.email, reply ?? item.partstat));
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    `METHOD:${reply ? "REPLY" : method}`,
+    "BEGIN:VEVENT",
+    `DTSTART${zone}:${compact(event.start)}`,
+    `DTEND${zone}:${compact(event.end)}`,
+    `UID:${event.uid}`,
+    `SEQUENCE:${String(event.sequence)}`,
+    `ORGANIZER:mailto:${event.organizer.email}`,
+    ...attendees,
+    `SUMMARY:${text(event.title)}`,
+    ...event.recurrence.map((rule) => `RRULE:${rule}`),
+    "END:VEVENT",
+    "END:VCALENDAR",
+    "",
+  ].join("\r\n");
+}
+export const base64 = (value: string) =>
+  btoa(String.fromCharCode(...new TextEncoder().encode(value)));
+
+/** Sends iCalendar text through the synthetic mailbox, so it shows in Sent. */
+export async function mailCalendar(
+  mail: MailClient,
+  recipient: string,
+  subject: string,
+  [name, calendar]: [string, string],
+) {
+  const { blobId } = await mail.upload({
+    accountId,
+    name,
+    type: "text/calendar",
+    base64: base64(calendar),
+  });
+  const to = [{ email: recipient }];
+  const draft = { to, cc: [], bcc: [], subject, htmlBody: "", references: [] };
+  const { id } = await mail.createDraft({
+    accountId,
+    draft: { ...draft, textBody: subject, attachmentBlobIds: [blobId] },
+  });
+  await mail.send({ accountId, draftId: id });
+}
+/** Unguarded access for the synthetic organizer, which owns its events. */
+export const organizerCalendar = createRouterClient(router);
+type Organized = (seriesId: string) => "organized" | "cancelled" | undefined;
+let organized: Organized = () => undefined;
+/** Registers how the synthetic organizer sees a series, like the API's guard. */
+export function guardOrganized(state: Organized) {
+  organized = state;
+}
+const changed = () =>
+  new ORPCError("CONFLICT", {
+    status: 409,
+    message: "Calendar item changed",
+    defined: true,
+  });
+const seriesOf = (eventId: string) => eventId.split("~")[0] ?? eventId;
+// Like the API: an event with guests changes only through the organizer
+// service, and leaves the calendar once its cancellation was handled.
+export const fakeCalendarClient: typeof organizerCalendar = {
+  // The router client is a proxy: its procedures are named, not spread.
+  calendars: organizerCalendar.calendars,
+  createCalendar: organizerCalendar.createCalendar,
+  events: organizerCalendar.events,
+  createEvent: organizerCalendar.createEvent,
+  updateEvent: (input, options) =>
+    organized(seriesOf(input.eventId))
+      ? Promise.reject(changed())
+      : organizerCalendar.updateEvent(input, options),
+  deleteEvent: (input, options) =>
+    organized(seriesOf(input.eventId)) === "organized"
+      ? Promise.reject(changed())
+      : organizerCalendar.deleteEvent(input, options),
+};
 export { fixtureMarker };
