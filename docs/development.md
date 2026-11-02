@@ -204,7 +204,7 @@ container, network and volume after the suite, including setup and test failures
 Docker and the Compose plugin are required. The direct-listener fixture maps
 Stalwart's advertised internal endpoint paths to the published loopback port;
 production clients use the advertised URLs and require the same origin as the
-discovery endpoint. The fixtures test local submission and delivery and an authenticated fake SMTP relay. They do not verify external DNS, real relay TLS or the production proxy.
+discovery endpoint. The fixtures test local submission and delivery and an authenticated fake SMTP relay on the Compose network, so the tests do not require containers to reach the host gateway. They do not verify external DNS, real relay TLS or the production proxy.
 
 The regular `@opensuite/jmap` entry point accepts an authorization header from
 its caller. `@opensuite/jmap/admin` is a Node-only entry point: instantiate it
@@ -221,17 +221,22 @@ OpenTofu module in Docker without AWS credentials or a backend. Only provider
 download uses networking. See [AWS deployment](deployment/aws.md) for operator
 setup and the limits of offline validation. The SES relay has not been tested against AWS.
 
-For the pinned Stalwart and disposable MinIO S3 integration test:
+For the pinned Stalwart and disposable SeaweedFS S3 integration test:
 
 ```sh
 pnpm exec vitest run --project stalwart
 ```
 
-This uses a separate Compose project, a pinned MinIO server, LocalStack's local
+This uses a separate Compose project, a pinned SeaweedFS server, LocalStack's local
 CLI, and a random loopback port. It exercises a
 message with an attachment, a storage outage and a stopped-store restore,
 then removes its containers and volumes. The local substitute does not verify
-real object-storage providers. Docker is required.
+real object-storage providers. Docker is required. The fixture uses [SeaweedFS
+4.51](https://github.com/seaweedfs/seaweedfs/tree/4.51) (Apache-2.0); its
+[S3 API](https://github.com/seaweedfs/seaweedfs/wiki/Amazon-S3-API) supports
+the bucket and object operations exercised here. Its data and filer metadata
+share a disposable volume that survives a container stop/start. The backup
+integration uses the same server on an isolated Docker network.
 
 ## Authentication and mailbox provisioning
 

@@ -64,9 +64,18 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
   ]);
   await run("chmod", ["644", keyFile, certFile]);
   const certFileContents = await readFile(certFile);
-  const managementPrefix = `172.29.${String(100 + (process.pid % 100))}`;
+  // Avoid Docker's default 172.16.0.0/12 bridge pools, which can grow while
+  // other suites run in parallel and overlap an explicitly chosen /24.
+  const managementPrefix = `10.197.${String(process.pid % 256)}`;
   const env = {
     ...process.env,
+    // Compose interpolates Drive settings even though this suite does not start it.
+    DRIVE_S3_ENDPOINT: "http://object-store:8333",
+    DRIVE_S3_PUBLIC_ENDPOINT: "http://object-store:8333",
+    DRIVE_S3_BUCKET: "unused-drive-fixture",
+    DRIVE_S3_REGION: "us-east-1",
+    DRIVE_S3_ACCESS_KEY: "local-fixture-key",
+    DRIVE_S3_SECRET_FILE: secretFile,
     MAIL_TLS_ENABLED: "1",
     MAIL_TLS_CERT_FILE: certFile,
     MAIL_TLS_KEY_FILE: keyFile,
@@ -79,7 +88,7 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
     MAIL_MANAGEMENT_OPS_IP: `${managementPrefix}.22`,
     MAIL_MANAGEMENT_BACKUP_IP: `${managementPrefix}.23`,
     MAIL_MANAGEMENT_BOOTSTRAP_IP: `${managementPrefix}.24`,
-    MAIL_S3_ENDPOINT: "http://minio:9000",
+    MAIL_S3_ENDPOINT: "http://object-store:8333",
     MAIL_S3_REGION: "us-east-1",
     MAIL_S3_BUCKET: bucket,
     MAIL_S3_PREFIX: "mail/",
@@ -120,7 +129,7 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
       ...args,
     );
   // The CLI runs inside the disposable LocalStack container and is explicitly
-  // confined to the disposable MinIO endpoint; no provider is contacted.
+  // confined to the disposable SeaweedFS endpoint; no provider is contacted.
   const aws = (...args: string[]) =>
     compose(
       "exec",
@@ -132,7 +141,7 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
       "localstack",
       "aws",
       "--endpoint-url",
-      "http://minio:9000",
+      "http://object-store:8333",
       "--region",
       "us-east-1",
       ...args,
@@ -159,7 +168,7 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
       "180",
       "stalwart",
       "localstack",
-      "minio",
+      "object-store",
     );
     await bootstrap("run", "--rm", "--no-deps", "stalwart-bootstrap");
     await compose(
@@ -356,12 +365,19 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
     base = `http://127.0.0.1:${restartedPort}`;
     await checkBytes();
     stage = "S3 outage";
-    await compose("stop", "minio");
+    await compose("stop", "object-store");
     const unavailable = await download();
     expect(unavailable.status).toBeGreaterThanOrEqual(500);
     expect((await unavailable.text()).length).toBeGreaterThan(0);
-    await compose("start", "minio");
-    await compose("up", "-d", "--wait", "--wait-timeout", "180", "minio");
+    await compose("start", "object-store");
+    await compose(
+      "up",
+      "-d",
+      "--wait",
+      "--wait-timeout",
+      "180",
+      "object-store",
+    );
     stage = "S3 recovery";
     await checkBytes();
 
@@ -425,7 +441,10 @@ test("S3 mail blobs survive restart, outage and a consistent restore", async () 
     });
     expect(restored["list"]).toEqual([{ id: emailId }]);
   } catch (error) {
-    throw new Error(`integration failed during ${stage}`, { cause: error });
+    throw new Error(
+      `integration failed during ${stage}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   } finally {
     try {
       await compose("down", "--volumes", "--remove-orphans", "--timeout", "10");

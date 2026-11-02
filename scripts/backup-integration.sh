@@ -7,7 +7,9 @@ work=$(mktemp -d /tmp/opensuite-backup-test.XXXXXXXX)
 name="osbackup$$"
 old="$name-old"
 new="$name-new"
-minio="$name-minio"
+object_store="$name-object-store"
+object_network="$name-objects"
+object_volume="$name-objects"
 octet=$(( ($$ % 190) + 20 ))
 test_subnet="10.238.$octet.0/24"
 test_ip="10.238.$octet.10"
@@ -29,8 +31,12 @@ cleanup() {
       rc=1
     fi
   done
-  docker rm -fv "$minio" >/dev/null 2>&1 || :
-  if [ -n "$(docker ps -aq --filter "name=^/$minio$")" ]; then echo 'cleanup: disposable object store remains' >&2; rc=1; fi
+  docker rm -fv "$object_store" >/dev/null 2>&1 || :
+  docker network rm "$object_network" >/dev/null 2>&1 || :
+  docker volume rm "$object_volume" >/dev/null 2>&1 || :
+  if [ -n "$(docker ps -aq --filter "name=^/$object_store$")" ] || [ -n "$(docker network ls -q --filter "name=^${object_network}$")" ] || [ -n "$(docker volume ls -q --filter "name=^${object_volume}$")" ]; then
+    echo 'cleanup: disposable object store resources remain' >&2; rc=1
+  fi
   rm -rf "$work"
   exit "$rc"
 }
@@ -45,12 +51,17 @@ for folder in source target; do
 done
 git -C "$work/source" init -q
 git -C "$work/source" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m fixture
-docker run -d --name "$minio" -p 0.0.0.0::9000 -e MINIO_ROOT_USER=fixture-access -e MINIO_ROOT_PASSWORD=fixture-secret \
-  minio/minio:RELEASE.2025-07-23T15-54-02Z@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0 server /data >/dev/null
-port=$(docker port "$minio" 9000/tcp | head -1 | sed 's/.*://')
+docker network create "$object_network" >/dev/null
+docker volume create "$object_volume" >/dev/null
+docker run -d --name "$object_store" --network "$object_network" --network-alias object-store \
+  -p 127.0.0.1::8333 -e AWS_ACCESS_KEY_ID=fixture-access -e AWS_SECRET_ACCESS_KEY=fixture-secret \
+  -v "$object_volume:/data" \
+  chrislusf/seaweedfs:4.51@sha256:f7a49e3f3972ebed5be2ed4befa4a0c68eb7bdddba6e692d42729ceb545134b8 \
+  server -ip.bind=0.0.0.0 -filer -s3 >/dev/null
+port=$(docker port "$object_store" 8333/tcp | head -1 | sed 's/.*://')
 tries=0
-until curl -fsS "http://127.0.0.1:$port/minio/health/ready" >/dev/null; do
-  tries=$((tries + 1)); [ "$tries" -lt 60 ] || exit 1; sleep 1
+until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/")" = 403 ]; do
+  tries=$((tries + 1)); [ "$tries" -lt 60 ] || { echo 'object store did not become ready' >&2; exit 1; }; sleep 1
 done
 rclone_local() {
   docker run --rm -i --network host -e RCLONE_CONFIG_STORE_TYPE=s3 -e RCLONE_CONFIG_STORE_PROVIDER=Other \
@@ -69,7 +80,7 @@ printf 'INGEST_FIXTURE=present\n' > "$work/source/deploy/ingest.env"
 printf 'OBSERVE_FIXTURE=present\n' > "$work/source/deploy/observe.env"
 chmod 644 "$work/secrets/mail" "$work/secrets/drive" "$work/secrets/relay" "$work/secrets/tls-cert" "$work/secrets/tls-key"
 cat > "$work/backup.conf" <<CONFIG
-BACKUP_REPOSITORY='s3:http://host.docker.internal:$port/backup-fixture/repo'
+BACKUP_REPOSITORY='s3:http://object-store:8333/backup-fixture/repo'
 BACKUP_REGION='us-east-1'
 BACKUP_ACCESS_KEY_ID='fixture-access'
 BACKUP_SECRET_ACCESS_KEY='fixture-secret'
@@ -91,14 +102,13 @@ services:
     healthcheck:
       start_period: 180s
       retries: 30
-    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks:
+      objects:
     ports: !override ["127.0.0.1::8080"]
-  stalwart-setup:
-    extra_hosts: ["host.docker.internal:host-gateway"]
   backup-restic:
-    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [objects]
   backup-objects:
-    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [objects]
   vault:
     environment:
       SIGNUPS_ALLOWED: "true"
@@ -117,6 +127,9 @@ services:
       pass-network:
         ipv4_address: 10.241.$octet.2
 networks:
+  objects:
+    external: true
+    name: $object_network
   api-proxy:
     ipam:
       config: !override
@@ -153,7 +166,7 @@ MAIL_MANAGEMENT_BOOTSTRAP_IP=10.238.$octet.24
 API_PROXY_CADDY_IP=10.240.$octet.2
 API_PROXY_API_IP=10.240.$octet.3
 MAIL_BLOB_STORE=s3
-MAIL_S3_ENDPOINT=http://host.docker.internal:$port
+MAIL_S3_ENDPOINT=http://object-store:8333
 MAIL_S3_REGION=us-east-1
 MAIL_S3_BUCKET=mail-fixture
 MAIL_S3_PREFIX=mail/
@@ -163,8 +176,8 @@ MAIL_S3_ALLOW_SWITCH=1
 MAIL_RELAY_SECRET_FILE=$work/secrets/relay
 MAIL_TLS_CERT_FILE=$work/secrets/tls-cert
 MAIL_TLS_KEY_FILE=$work/secrets/tls-key
-DRIVE_S3_ENDPOINT=http://host.docker.internal:$port
-DRIVE_S3_PUBLIC_ENDPOINT=http://host.docker.internal:$port
+DRIVE_S3_ENDPOINT=http://object-store:8333
+DRIVE_S3_PUBLIC_ENDPOINT=http://object-store:8333
 DRIVE_S3_REGION=us-east-1
 DRIVE_S3_BUCKET=drive-fixture
 DRIVE_S3_PREFIX=drive/
