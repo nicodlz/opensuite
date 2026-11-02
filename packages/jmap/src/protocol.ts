@@ -259,6 +259,40 @@ export class Transport {
 }
 
 export const SetErrorSchema = ErrorSchema;
+const MigrationEmailSchema = z.object({
+  accountId: z.string(),
+  state: z.string(),
+  list: z.array(
+    z.object({
+      id: z.string(),
+      blobId: z.string(),
+      size: z.number().int().nonnegative(),
+      messageId: z.array(z.string()).nullable(),
+      keywords: z.record(z.string(), z.boolean()),
+    }),
+  ),
+  notFound: z.array(z.string()),
+});
+
+export function migrationEmailMetadata(
+  transport: Transport,
+  session: Session,
+  accountId: string,
+  ids: readonly string[],
+) {
+  return transport.call(
+    session.apiUrl,
+    "Email/get",
+    {
+      accountId,
+      ids,
+      properties: ["id", "blobId", "size", "messageId", "keywords"],
+    },
+    [JmapCapability.core, JmapCapability.mail],
+    MigrationEmailSchema,
+  );
+}
+
 export const setFailure = (
   method: string,
   errors: Record<string, z.infer<typeof SetErrorSchema>> | null | undefined,

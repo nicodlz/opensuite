@@ -1,8 +1,9 @@
 import { contract } from "@opensuite/contracts";
 import type { MailFailure } from "@opensuite/core/services/mail";
-import type { MailMigrationService } from "@opensuite/core/services/migration-mail";
 import { implement, ORPCError } from "@orpc/server";
 import type { Result } from "neverthrow";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { Actor } from "@opensuite/core/services/accounts";
 import type { ApiContext } from "./context.ts";
 
 const route = implement(contract.migrationMail).$context<ApiContext>();
@@ -53,26 +54,46 @@ export const migrationMailRouter = route.router({
   }),
 });
 
-export function startMailMigrationJob(
-  service: MailMigrationService,
-  onError: () => void,
+/** Authenticate and rate-limit the large upload before Fastify parses its body. */
+export function registerMailImportUpload(
+  app: FastifyInstance,
+  handler: (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ) => Promise<FastifyReply>,
+  resolveActor: ((headers: Headers) => Promise<Actor | null>) | undefined,
+  actors: WeakMap<FastifyRequest, Actor | null>,
+  limits: { consume(key: string, count: number, window: number): unknown },
 ) {
-  let running: Promise<void> | undefined;
-  const tick = () => {
-    if (running !== undefined) return;
-    running = service
-      .work()
-      .then(() => undefined)
-      .catch(onError)
-      .finally(() => {
-        running = undefined;
-      });
-  };
-  tick();
-  const timer = setInterval(tick, 10_000);
-  timer.unref();
-  return async () => {
-    clearInterval(timer);
-    await running;
-  };
+  app.post(
+    "/mail/imports/create",
+    {
+      bodyLimit: 12_000_000,
+      onRequest: async (request, reply) => {
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(request.headers)) {
+          if (value === undefined) continue;
+          if (Array.isArray(value))
+            for (const part of value) headers.append(name, part);
+          else headers.set(name, value);
+        }
+        const actor = (await resolveActor?.(headers)) ?? null;
+        if (actor === null)
+          return reply
+            .code(401)
+            .send({ code: "UNAUTHORIZED", message: "Unauthorized" });
+        if (
+          limits.consume(`mail-import:${actor.id}`, 5, 60_000) !== undefined ||
+          limits.consume("mail-import:global", 30, 60_000) !== undefined
+        )
+          return reply.code(429).send({
+            code: "TOO_MANY_REQUESTS",
+            message: "Too many import requests",
+          });
+        actors.set(request, actor);
+        return undefined;
+      },
+    },
+    handler,
+  );
 }

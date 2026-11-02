@@ -7,7 +7,6 @@ import type { AliasService } from "@opensuite/core/services/aliases";
 import { registerAliasCompat } from "./routes/alias-compat.ts";
 import type { CalendarService } from "@opensuite/core/services/calendar";
 import type { MailService } from "@opensuite/core/services/mail";
-import type { MailMigrationService } from "@opensuite/core/services/migration-mail";
 import type { ReadinessService } from "@opensuite/core/services/readiness";
 import type { AccountService, Actor } from "@opensuite/core/services/accounts";
 import { OpenAPIGenerator } from "@orpc/openapi";
@@ -33,6 +32,7 @@ import {
 } from "./auth/limits.ts";
 import { z } from "zod";
 import { router, type ApiContext } from "./routes/index.ts";
+import { registerMailImportUpload } from "./routes/migration-mail.ts";
 import type { Entitlements } from "./billing/entitlements.ts";
 import type { StorageMeter } from "./billing/storage.ts";
 import type { StripeBilling } from "./billing/stripe.ts";
@@ -78,7 +78,7 @@ export interface ServerDependencies {
   };
   readonly accounts?: AccountService;
   readonly mail?: MailService;
-  readonly migrationMail?: MailMigrationService;
+  readonly migrationMail?: ApiContext["migrationMail"];
   readonly calendar?: CalendarService;
   readonly domains?: DomainService;
   readonly aliases?: AliasService;
@@ -216,10 +216,7 @@ export const buildServer = async (
         .code(403)
         .send({ code: "FORBIDDEN", message: "Invalid origin" });
     }
-    if (
-      request.method === "POST" &&
-      ["/mail/attachments/upload", "/mail/imports/create"].includes(rawPath)
-    ) {
+    if (request.method === "POST" && rawPath === "/mail/attachments/upload") {
       const headers = new Headers();
       for (const [name, value] of Object.entries(request.headers)) {
         if (value === undefined) continue;
@@ -232,17 +229,6 @@ export const buildServer = async (
         return reply
           .code(401)
           .send({ code: "UNAUTHORIZED", message: "Unauthorized" });
-      if (
-        rawPath === "/mail/imports/create" &&
-        (checkoutLimits.consume(`mail-import:${actor.id}`, 5, 60_000) !==
-          undefined ||
-          checkoutLimits.consume("mail-import:global", 30, 60_000) !==
-            undefined)
-      )
-        return reply.code(429).send({
-          code: "TOO_MANY_REQUESTS",
-          message: "Too many import requests",
-        });
       actors.set(request, actor);
     }
     return undefined;
@@ -998,7 +984,13 @@ export const buildServer = async (
     return reply;
   };
   app.post("/mail/attachments/upload", { bodyLimit: 70_000_000 }, handleApi);
-  app.post("/mail/imports/create", { bodyLimit: 12_000_000 }, handleApi);
+  registerMailImportUpload(
+    app,
+    handleApi,
+    dependencies.identity?.actor,
+    actors,
+    checkoutLimits,
+  );
   app.all("/*", handleApi);
 
   return app;

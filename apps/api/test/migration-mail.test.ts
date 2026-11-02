@@ -45,6 +45,17 @@ describe("mail import HTTP boundary", () => {
       expect(
         (await request("https://suite.example.test", "owner")).statusCode,
       ).toBe(400);
+      const attempts = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          request("https://suite.example.test", "owner"),
+        ),
+      );
+      expect(attempts.map((attempt) => attempt.statusCode)).toEqual([
+        400, 400, 400, 400,
+      ]);
+      expect(
+        (await request("https://suite.example.test", "owner")).statusCode,
+      ).toBe(429);
       const report = await app.inject({
         method: "POST",
         url: "/mail/imports/report",

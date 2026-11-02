@@ -21,9 +21,7 @@ import {
 } from "@opensuite/db";
 import { createCalendarService } from "@opensuite/core/services/calendar";
 import { createMailService } from "@opensuite/core/services/mail";
-import { createMailMigrationService } from "@opensuite/core/services/migration-mail";
-import { migrationMailTools } from "@opensuite/core/adapters/migration-mail";
-import { startMailMigrationJob } from "./routes/migration-mail.ts";
+import { createMailImport, startMailImport } from "./migration-mail-job.ts";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { readFile } from "node:fs/promises";
@@ -311,16 +309,11 @@ const mail = createMailService({
   },
   beforeAliasSend: createAliasGuard,
 });
-const migrationMail = createMailMigrationService({
-  tools: migrationMailTools,
-  db: database.value,
-  key: authConfig.value.mailboxKey,
-  store: {
-    getForOwner: async (userId, accountId) =>
-      mailboxStore.getForOwner(userId, accountId),
-  },
-  origin: authConfig.value.stalwartOrigin,
-});
+const migrationMail = createMailImport(
+  database.value,
+  authConfig.value,
+  mailboxStore,
+);
 const calendar = createCalendarService({
   store: {
     getForOwner: async (userId, accountId) =>
@@ -385,9 +378,7 @@ const app = await buildServer({
   pushCleanup,
 });
 logPushFailure = (event) => app.log.warn(event, "push delivery failed");
-const stopMailMigration = startMailMigrationJob(migrationMail, () =>
-  app.log.warn("mail import worker failed"),
-);
+const stopMailMigration = startMailImport(migrationMail, app.log);
 const stopQuotaJob =
   billing.value.mode === "cloud"
     ? startQuotaJob(database.value, storageMeter, () =>
