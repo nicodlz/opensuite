@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createReadinessService } from "@opensuite/core";
 import { contactVcardCodec } from "@opensuite/core/adapters/contacts";
@@ -43,6 +44,8 @@ const value = <T>(result: JmapResult<T>): T => {
 const listSchema = z.object({
   state: z.string(),
   contacts: z.array(ContactSchema),
+  position: z.number().int(),
+  total: z.number().int().nonnegative(),
 });
 const importSchema = z.object({
   imported: z.number().int().nonnegative(),
@@ -107,6 +110,30 @@ async function success<T>(path: string, payload: object, schema: z.ZodType<T>) {
   return schema.parse(response.body);
 }
 const list = () => success("list", {}, listSchema);
+const previewSchema = z.looseObject({
+  state: z.string(),
+  entries: z.array(
+    z.looseObject({
+      action: z.string().optional(),
+      existingId: z.string().optional(),
+      expectedContact: ContactSchema.optional(),
+    }),
+  ),
+});
+async function exportProjectionFixture(name: string, fixture: object) {
+  const prefix = process.env["CONTACT_PROJECTION_FIXTURE_PREFIX"];
+  if (prefix)
+    await writeFile(
+      `${prefix}-${name}.json`,
+      JSON.stringify(fixture, null, 2) + "\n",
+    );
+}
+const preview = (text: string, targets?: Record<string, string>) =>
+  success(
+    "import/preview",
+    { bookId, vcard: text, ...(targets ? { targets } : {}) },
+    previewSchema,
+  );
 const phones = (contact: z.infer<typeof ContactSchema>) =>
   Object.values(contact.phones ?? {});
 function vcard(email: string, properties: string[], name = "Nom source") {
@@ -213,6 +240,347 @@ beforeAll(async () => {
 afterAll(cleanup, 180_000);
 
 describe("contact phone preservation over real HTTP and pinned Stalwart", () => {
+  it("projects a phone enrichment while retaining an existing native postal address", async () => {
+    const email = "expected-existing-postal@example.test";
+    const legacy = await create({
+      name: "Postal user",
+      emails: [email],
+      addresses: {
+        home: { full: "12 rue Exemple, Paris", contexts: { private: true } },
+      },
+    });
+    const before = await list();
+    const text = vcard(email, ["TEL;TYPE=CELL:+33612340777"]);
+    const reviewed = await preview(text);
+    const expected = reviewed.entries[0]?.expectedContact;
+    expect(expected?.id).toBe(legacy.id);
+    expect(expected?.addresses).toEqual(
+      before.contacts.find((contact) => contact.id === legacy.id)?.addresses,
+    );
+    await success(
+      "import",
+      { bookId, vcard: text, state: reviewed.state, enrichExisting: true },
+      importSchema,
+    );
+    expect(
+      (await list()).contacts.find((contact) => contact.id === legacy.id),
+    ).toEqual(expected);
+  }, 30_000);
+  it.each([
+    { properties: ["ADR;TYPE=HOME:;;12 rue Exemple;Paris;;75001;France"] },
+    { properties: ["ORG:Example", "ROLE:Conception"] },
+    { properties: ["ORG;TYPE=WORK:Example"] },
+    { properties: ["TEL;PREF=1:+33612340999"] },
+  ])(
+    "omits an unverified native projection rather than claiming an approximate delta: $properties",
+    async ({ properties }) => {
+      const email = `projection-guard-${randomBytes(4).toString("hex")}@example.test`;
+      const legacy = await create({
+        name: "Projection guard",
+        emails: [email],
+      });
+      const text = vcard(email, ["TEL:+33612340888", ...properties]);
+      const before = await list();
+      const reviewed = await preview(text);
+      expect(reviewed.entries[0]).toMatchObject({
+        action: "enrich",
+        existingId: legacy.id,
+        reason: "projection_unavailable",
+      });
+      expect(reviewed.entries[0]?.expectedContact).toBeUndefined();
+      expect(await list()).toEqual(before);
+    },
+    30_000,
+  );
+  it.each([
+    {
+      name: "rich",
+      properties: [
+        "TEL;TYPE=CELL,WORK:+33612340100",
+        "NOTE;LANGUAGE=fr:Bonjour",
+        "ORG:Example;Research",
+        "TITLE:Architecte",
+        "URL:https://example.test",
+        "NICKNAME:Alias",
+        "BDAY:--0714",
+      ],
+    },
+    {
+      name: "additional-email",
+      properties: [
+        "TEL;TYPE=CELL:+33612340101",
+        "EMAIL;TYPE=HOME:new-projection@example.test",
+        "X-ESUNO-REFERENCE:Keep this",
+      ],
+    },
+  ])(
+    "projects supported metadata and additional native fields exactly: $name",
+    async ({ name, properties }) => {
+      const email = `expected-${name}-metadata@example.test`;
+      const legacy = await create({
+        name: "Keep this name",
+        emails: [email],
+        emailDetails: { "z/~user": { address: email, label: "User email" } },
+      });
+      const text = vcard(email, properties);
+      const reviewed = await preview(text);
+      expect(reviewed.entries[0]?.action).toBe("enrich");
+      expect(reviewed.entries[0]?.expectedContact?.id).toBe(legacy.id);
+      await success(
+        "import",
+        { bookId, vcard: text, state: reviewed.state, enrichExisting: true },
+        importSchema,
+      );
+      const after = await list();
+      expect(
+        after.contacts.find((contact) => contact.id === legacy.id),
+      ).toEqual(reviewed.entries[0]?.expectedContact);
+      const replay = await success(
+        "import",
+        { bookId, vcard: text, state: after.state, enrichExisting: true },
+        importSchema,
+      );
+      expect(replay).toMatchObject({
+        imported: 0,
+        updated: 0,
+        skipped: 1,
+        failed: [],
+      });
+      expect(await list()).toEqual(after);
+    },
+    30_000,
+  );
+  it.each(["Example;Research", "Example"])(
+    "projects the exact list DTO after native preparation of TEL, NOTE and ORG %s without a preview write",
+    async (organization) => {
+      const email = `expected-note-org-${organization.includes(";") ? "units" : "plain"}@example.test`;
+      const legacy = await create({
+        name: "Edited name",
+        emails: [email],
+        notes: { user: { note: "Keep me" } },
+      });
+      const text = vcard(email, [
+        "TEL:+33612340001",
+        "NOTE:hello",
+        `ORG:${organization}`,
+        "TITLE:Architecte",
+      ]);
+      const before = await list();
+      const reviewed = await preview(text);
+      expect(await list()).toEqual(before);
+      expect(reviewed.state).toBe(before.state);
+      const expected = reviewed.entries[0]?.expectedContact;
+      expect(expected).toMatchObject({
+        id: legacy.id,
+        addressBookIds: [bookId],
+        name: "Edited name",
+      });
+      expect(expected?.notes).toMatchObject({ user: { note: "Keep me" } });
+      expect(
+        Object.values(expected?.notes ?? {}).some(
+          (note) => note.note === "hello",
+        ),
+      ).toBe(true);
+      const importRequest = {
+        ...account,
+        bookId,
+        vcard: text,
+        state: reviewed.state,
+        enrichExisting: true,
+      };
+      const response = await post("import", importRequest);
+      expect(response.status).toBe(200);
+      const result = importSchema.parse(response.body);
+      expect(result).toMatchObject({ imported: 0, updated: 1, failed: [] });
+      const after = await list();
+      expect(
+        after.contacts.find((contact) => contact.id === legacy.id),
+      ).toEqual(expected);
+      const repeated = await preview(text);
+      expect(repeated.entries[0]?.action).toBe("unchanged");
+      expect(repeated.entries[0]?.expectedContact).toEqual(expected);
+      await exportProjectionFixture(
+        organization.includes(";") ? "note-org-title" : "note-org-plain-title",
+        {
+          provider: "isolated Stalwart v1.0.1 over TCP HTTP",
+          accountId: "default",
+          bookId,
+          targetId: legacy.id,
+          before,
+          previewRequest: { ...account, bookId, vcard: text },
+          preview: reviewed,
+          importRequest,
+          importResponse: response.body,
+          after,
+        },
+      );
+    },
+    30_000,
+  );
+
+  it("projects EMAIL HOME metadata with the retained native email key rather than a guessed import key", async () => {
+    const email = "expected-home-email@example.test";
+    const legacy = await create({
+      name: "Edited email",
+      emails: [email],
+      emailDetails: { "chosen/~email": { address: email } },
+    });
+    const text = [
+      "BEGIN:VCARD",
+      "VERSION:3.0",
+      "FN:Source",
+      `EMAIL;TYPE=HOME:${email}`,
+      "TEL:+33612340002",
+      "END:VCARD",
+      "",
+    ].join("\r\n");
+    const before = await list();
+    const targets = { "0": legacy.id };
+    const reviewed = await preview(text, targets);
+    const expected = reviewed.entries[0]?.expectedContact;
+    expect(expected?.emailDetails?.["chosen/~email"]).toMatchObject({
+      address: email,
+      contexts: { private: true },
+    });
+    expect(Object.keys(expected?.emailDetails ?? {})).toEqual([
+      "chosen/~email",
+    ]);
+    const importRequest = {
+      ...account,
+      bookId,
+      vcard: text,
+      state: reviewed.state,
+      enrichExisting: true,
+      targets,
+    };
+    const response = await post("import", importRequest);
+    expect(response.status).toBe(200);
+    expect(importSchema.parse(response.body)).toMatchObject({
+      updated: 1,
+      failed: [],
+    });
+    const after = await list();
+    expect(after.contacts.find((contact) => contact.id === legacy.id)).toEqual(
+      expected,
+    );
+    await exportProjectionFixture("email-home-tel", {
+      provider: "isolated Stalwart v1.0.1 over TCP HTTP",
+      accountId: "default",
+      bookId,
+      targetId: legacy.id,
+      before,
+      previewRequest: { ...account, bookId, vcard: text, targets },
+      preview: reviewed,
+      importRequest,
+      importResponse: response.body,
+      after,
+    });
+  }, 30_000);
+
+  it("returns the same final batch projection for an initially unchanged source and a later enrichment", async () => {
+    const email = "expected-batch@example.test";
+    const legacy = await create({ name: "Batch user", emails: [email] });
+    const text = vcard(email, []) + vcard(email, ["TEL:+33612340003"]);
+    const reviewed = await preview(text);
+    expect(reviewed.entries.map((entry) => entry.action)).toEqual([
+      "unchanged",
+      "enrich",
+    ]);
+    expect(reviewed.entries[0]?.expectedContact).toEqual(
+      reviewed.entries[1]?.expectedContact,
+    );
+    expect(reviewed.entries[0]?.expectedContact?.id).toBe(legacy.id);
+    await success(
+      "import",
+      { bookId, vcard: text, state: reviewed.state, enrichExisting: true },
+      importSchema,
+    );
+    expect(
+      (await list()).contacts.find((contact) => contact.id === legacy.id),
+    ).toEqual(reviewed.entries[0]?.expectedContact);
+  }, 30_000);
+
+  it("previews an explicitly chosen existing target and rejects stale review state before mutation", async () => {
+    const legacy = await create({ name: "Manual target", emails: [] });
+    const text = vcard("explicit-preview@example.test", ["TEL:+33612340004"]);
+    const targets = { "0": legacy.id };
+    const reviewed = await preview(text, targets);
+    expect(reviewed.entries[0]?.expectedContact?.id).toBe(legacy.id);
+    await create({
+      name: "Concurrent preview edit",
+      emails: ["concurrent-preview@example.test"],
+    });
+    const before = await list();
+    expect(
+      (
+        await post("import", {
+          bookId,
+          vcard: text,
+          targets,
+          state: reviewed.state,
+          enrichExisting: true,
+        })
+      ).status,
+    ).toBe(409);
+    expect(await list()).toEqual(before);
+    const fresh = await preview(text, targets);
+    expect(fresh.state).not.toBe(reviewed.state);
+    await success(
+      "import",
+      {
+        bookId,
+        vcard: text,
+        targets,
+        state: fresh.state,
+        enrichExisting: true,
+      },
+      importSchema,
+    );
+    expect(
+      (await list()).contacts.find((contact) => contact.id === legacy.id),
+    ).toEqual(fresh.entries[0]?.expectedContact);
+  }, 30_000);
+
+  it("omits projections for new or blocked entries and rejects preview targets outside the source batch", async () => {
+    const text = vcard("new-preview-only@example.test", ["TEL:+33612340005"]);
+    expect((await preview(text)).entries[0]).toMatchObject({
+      action: "create",
+    });
+    expect((await preview(text)).entries[0]?.expectedContact).toBeUndefined();
+    const email = "ambiguous-preview-only@example.test";
+    await create({ name: "First", emails: [email] });
+    await create({ name: "Second", emails: [email] });
+    const blocked = await preview(vcard(email, ["TEL:+33612340006"]));
+    expect(blocked.entries[0]?.action).toBe("blocked");
+    expect(blocked.entries[0]?.expectedContact).toBeUndefined();
+    const before = await list();
+    const legacyPreview = await success(
+      "import/preview",
+      { vcard: text },
+      previewSchema,
+    );
+    expect(legacyPreview.entries.every((entry) => !entry.expectedContact)).toBe(
+      true,
+    );
+    expect(
+      (
+        await post("import/preview", {
+          vcard: text,
+          targets: { "0": "missing" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await post("import/preview", {
+          bookId,
+          vcard: text,
+          targets: { "1": "missing" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(await list()).toEqual(before);
+  }, 30_000);
   it("imports TEL over TCP, returns phones and exports TEL without loss", async () => {
     const email = "tcp-tel@example.test";
     const result = await importCard(

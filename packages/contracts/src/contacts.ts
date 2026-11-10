@@ -1,4 +1,4 @@
-import { oc } from "@orpc/contract";
+import { oc, type InferContractRouterInputs } from "@orpc/contract";
 import { z } from "zod";
 import { IdSchema } from "./mail.ts";
 import {
@@ -200,6 +200,7 @@ const previewEntry = z.object({
   contact: ContactContentSchema.nullable(),
   duplicate: z.boolean(),
   warnings: z.array(z.string()),
+  expectedContact: ContactSchema.optional(),
   ...ContactImportPreviewMetadataSchema.shape,
 });
 /** Native ACLs can change independently of contact state; observation is not a lock. */
@@ -280,11 +281,18 @@ export const contactsContract = {
     .output(z.object({ success: z.literal(true) })),
   previewImport: p
     .route({ method: "POST", path: "/contacts/import/preview" })
-    .input(account.extend({ vcard, bookId: IdSchema.optional() }))
+    .input(
+      account.extend({
+        vcard,
+        bookId: IdSchema.optional(),
+        targets: ContactImportTargetsSchema.optional(),
+      }),
+    )
     .output(
       z.object({
         entries: z.array(previewEntry),
         capabilities: ContactImportCapabilitiesSchema.optional(),
+        state: state.optional(),
       }),
     ),
   import: p
@@ -324,6 +332,7 @@ export const contactsContract = {
     ),
 };
 export type ContactContent = z.infer<typeof ContactContentSchema>;
+export type ContactsInputs = InferContractRouterInputs<typeof contactsContract>;
 export type Contact = z.infer<typeof ContactSchema>;
 export const contactEmailKey = (email: string) => email.trim().toLowerCase();
 type ParsedContact = Pick<z.infer<typeof previewEntry>, "contact" | "warnings">;
@@ -348,6 +357,11 @@ export interface ContactCodec {
   serialize(contacts: readonly ContactContent[]): string;
   content(card: ContactRecord): ContactContent;
   project(card: ContactRecord): Contact;
+  /** Optional native-provider projection; absence must not enable import enrichment. */
+  projectImport?(
+    card: ContactRecord,
+    original: ContactRecord,
+  ): Contact | undefined;
   create(contact: ContactContent, bookId: string): object;
   patch(card: ContactRecord, contact: ContactContent): Record<string, unknown>;
   warnings(card: ContactRecord): string[];

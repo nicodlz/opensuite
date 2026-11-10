@@ -144,7 +144,9 @@ class ImportFields {
       "organizations",
       {
         name: name ?? "",
-        units: units.map((unitName) => ({ name: unitName })),
+        ...(units.length
+          ? { units: units.map((unitName) => ({ name: unitName })) }
+          : {}),
       },
       property,
       "name",

@@ -3,6 +3,7 @@ import type {
   ContactContent,
   ContactRecord,
 } from "@opensuite/contracts";
+import { ContactSchema } from "@opensuite/contracts";
 import { z } from "zod";
 export type ContactImportPlan = {
   create: Record<string, object>;
@@ -29,6 +30,89 @@ export const emptyImportPlan = (): ContactImportPlan => ({
   failed: [],
   preview: [],
 });
+
+const patchObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** Apply only JMAP object paths. Never traverse inherited members or create parents. */
+function projectedNativeCard(
+  card: ContactRecord,
+  patch: Record<string, unknown>,
+) {
+  const result = structuredClone(card);
+  const paths = new Set(Object.keys(patch));
+  for (const path of paths) {
+    let ancestor = path;
+    while (ancestor.includes("/")) {
+      ancestor = ancestor.slice(0, ancestor.lastIndexOf("/"));
+      if (paths.has(ancestor)) return undefined;
+    }
+  }
+  for (const [pointer, value] of Object.entries(patch)) {
+    if (!pointer || /~(?![01])/.test(pointer)) return undefined;
+    const parts = pointer
+      .split("/")
+      .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+    let target: Record<string, unknown> = result;
+    for (const part of parts.slice(0, -1)) {
+      if (!Object.hasOwn(target, part)) return undefined;
+      const child = target[part];
+      if (!patchObject(child)) return undefined;
+      target = child;
+    }
+    const key = parts.at(-1);
+    if (key === undefined) return undefined;
+    if (value === null) delete target[key];
+    else
+      Object.defineProperty(target, key, {
+        value: structuredClone(value),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+  }
+  return result;
+}
+
+/** Every contributing entry receives the final batch result, after native email rekeying. */
+export function attachExpectedContacts(
+  plan: ContactImportPlan,
+  codec: ContactCodec,
+  stored: ContactRecord[],
+) {
+  const originals = new Map(stored.map((card) => [card.id, card]));
+  const projected = new Map<string, ReturnType<ContactCodec["project"]>>();
+  for (const [id, card] of originals) {
+    if (
+      !plan.preview.some(
+        (entry) =>
+          entry.existingId === id &&
+          ["enrich", "unchanged"].includes(entry.action ?? ""),
+      )
+    )
+      continue;
+    try {
+      const native = projectedNativeCard(card, plan.update[id] ?? {});
+      if (!native) continue;
+      const projection = plan.update[id]
+        ? codec.projectImport?.(native, card)
+        : codec.project(native);
+      const parsed = ContactSchema.safeParse(projection);
+      if (parsed.success && parsed.data.id === id)
+        projected.set(id, parsed.data);
+    } catch {
+      // A projection that cannot be represented must not enable client opt-in.
+    }
+  }
+  plan.preview = plan.preview.map((entry) => {
+    const expectedContact = entry.existingId && projected.get(entry.existingId);
+    if (expectedContact && ["enrich", "unchanged"].includes(entry.action ?? ""))
+      return { ...entry, expectedContact };
+    return entry.action === "enrich" && entry.existingId
+      ? { ...entry, reason: entry.reason ?? "projection_unavailable" }
+      : entry;
+  });
+}
 export const exportContactCards = (
   codec: ContactCodec,
   cards: ContactRecord[],

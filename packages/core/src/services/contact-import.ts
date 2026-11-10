@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import {
   blockImportEntry,
+  attachExpectedContacts,
   copyImportParameters,
   emptyImportPlan,
   previewImportEntry,
@@ -392,5 +393,6 @@ export function planContactImport(
   }
   plan.create = Object.fromEntries(create);
   plan.update = Object.fromEntries(update);
+  attachExpectedContacts(plan, codec, stored);
   return plan;
 }

@@ -2,9 +2,11 @@ import {
   contactEmailKey,
   contactHasNativeLayout,
   type ContactContent,
+  type Contact,
   type ContactCodec,
   type ContactRecord,
 } from "@opensuite/contracts";
+import { isDeepStrictEqual } from "node:util";
 
 export type ParsedCard = { contact: ContactContent | null; warnings: string[] };
 class ContactImportLimitError extends Error {}
@@ -98,6 +100,158 @@ const project = (card: ContactRecord) => ({
     .map(([id]) => id),
 });
 
+const projectedMaps = [
+  "phones",
+  "addresses",
+  "organizations",
+  "titles",
+  "notes",
+  "links",
+  "nicknames",
+  "anniversaries",
+  "emailDetails",
+] as const;
+const defaultConversionNames: Record<string, string[]> = {
+  phones: ["tel"],
+  addresses: ["adr"],
+  organizations: ["org"],
+  titles: ["title", "role"],
+  notes: ["note"],
+  links: ["url"],
+  nicknames: ["nickname"],
+  anniversaries: ["bday", "anniversary", "deathdate"],
+  emails: ["email"],
+};
+const projectionObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const projectedPhoneTypes: Record<string, string> = {
+  cell: "mobile",
+  fax: "fax",
+  "main-number": "main-number",
+  pager: "pager",
+  text: "text",
+  textphone: "textphone",
+  video: "video",
+  voice: "voice",
+};
+function representedType(
+  field: string,
+  entry: Record<string, unknown>,
+  value: unknown,
+) {
+  const types = Array.isArray(value) ? value : [value];
+  return types.every((type) => {
+    if (typeof type !== "string") return false;
+    const key = type.toLowerCase();
+    const feature = field === "phones" ? projectedPhoneTypes[key] : undefined;
+    return feature
+      ? object(entry["features"])[feature] === true
+      : object(entry["contexts"])[
+          key === "home" ? "private" : key === "cell" ? "mobile" : key
+        ] === true;
+  });
+}
+function projectConversion(contact: Contact, pointer: string, value: unknown) {
+  const metadata = object(value);
+  const [field = "", encodedId = ""] = pointer.replace(/^\//, "").split("/");
+  if (!Object.hasOwn(defaultConversionNames, field)) return undefined;
+  const id = encodedId.replaceAll("~1", "/").replaceAll("~0", "~");
+  const entry = object(
+    object(object(contact)[field === "emails" ? "emailDetails" : field])[id],
+  );
+  const parameters = { ...object(metadata["parameters"]) };
+  if (Object.hasOwn(parameters, "type")) {
+    if (!representedType(field, entry, parameters["type"])) return undefined;
+    delete parameters["type"];
+  }
+  if (
+    Object.keys(parameters).some(
+      (key) =>
+        !key.startsWith("x-") &&
+        key !== "group" &&
+        !(key === "language" && field === "notes"),
+    )
+  )
+    return undefined;
+  if (
+    Object.keys(parameters).some((key) => typeof parameters[key] !== "string")
+  )
+    return undefined;
+  const name = metadata["name"];
+  if (
+    name !== undefined &&
+    (typeof name !== "string" ||
+      !defaultConversionNames[field]?.includes(name.toLowerCase()))
+  )
+    return undefined;
+  return Object.keys(parameters).length ? { parameters } : null;
+}
+/** Model only established native normalizations; unknown conversions must not enable client opt-in. */
+function trimEmptyProjectionMaps(result: Contact) {
+  for (const field of projectedMaps)
+    for (const entry of Object.values(object(result[field]))) {
+      if (!projectionObject(entry)) continue;
+      for (const key of ["contexts", "features"])
+        if (
+          projectionObject(entry[key]) &&
+          Object.keys(entry[key]).length === 0
+        )
+          delete entry[key];
+      if (
+        field === "organizations" &&
+        Array.isArray(entry["units"]) &&
+        !entry["units"].length
+      )
+        delete entry["units"];
+    }
+}
+function projectConversionMetadata(result: Contact, original: Contact) {
+  if (result.vCard) {
+    const metadata = new Map<string, unknown>();
+    const previous = object(original.vCard?.["convertedProperties"]);
+    for (const [pointer, value] of Object.entries(
+      object(result.vCard["convertedProperties"]),
+    )) {
+      const projected = isDeepStrictEqual(previous[pointer], value)
+        ? value
+        : projectConversion(result, pointer, value);
+      if (projected === undefined) return false;
+      if (projected !== null)
+        metadata.set(pointer.replace(/^\//, ""), projected);
+    }
+    if (metadata.size)
+      result.vCard["convertedProperties"] = Object.fromEntries(metadata);
+    else delete result.vCard["convertedProperties"];
+    if (
+      Array.isArray(result.vCard["properties"]) &&
+      !result.vCard["properties"].length
+    )
+      delete result.vCard["properties"];
+    if (!Object.keys(result.vCard).length) delete result.vCard;
+  }
+  return true;
+}
+function canonicalContactProjection(
+  contact: Contact,
+  original: Contact,
+): Contact | undefined {
+  const result = structuredClone(contact);
+  trimEmptyProjectionMaps(result);
+  if (!projectConversionMetadata(result, original)) return undefined;
+  return result;
+}
+function projectImport(card: ContactRecord, original: ContactRecord) {
+  if (!isDeepStrictEqual(card["addresses"], original["addresses"]))
+    return undefined;
+  const titles = Object.values(object(card["titles"])).map(object);
+  if (
+    Object.keys(object(card["organizations"])).length &&
+    titles.some((title) => title["kind"] === "role" && !title["organizationId"])
+  )
+    return undefined;
+  return canonicalContactProjection(project(card), project(original));
+}
+
 const phoneKey = (name: string, number: string) => {
   const normalized = name.trim().replace(/\s+/g, " ").toLowerCase();
   const digits = number.replace(/\D/g, "");
@@ -163,6 +317,7 @@ export const contactVcardCodec = {
   prepareImport: prepareContactImport,
   content,
   project,
+  projectImport,
   parse: (input: string) => {
     try {
       return { ok: true, cards: parseCards(input) };

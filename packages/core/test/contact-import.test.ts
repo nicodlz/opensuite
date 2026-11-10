@@ -71,6 +71,43 @@ const update = (result: ReturnType<typeof plan>, id = "legacy") => {
 };
 
 describe("non-destructive contact import enrichment", () => {
+  it.each([
+    { "__proto__/esunoProjectionPolluted": true },
+    { phones: {}, "phones/import0": { number: "+33612345678" } },
+    {
+      phones: {},
+      "phones-extra": true,
+      "phones/import0": { number: "+33612345678" },
+    },
+    { "phones/~2invalid": { number: "+33612345678" } },
+  ])(
+    "does not project invalid native patches or traverse an inherited member: %j",
+    (patch) => {
+      const record = stored();
+      let projected = 0;
+      const guardedCodec = {
+        ...codec,
+        patch: () => patch,
+        projectImport: () => {
+          projected++;
+          return codec.project(record);
+        },
+      };
+      const result = planContactImport(
+        guardedCodec,
+        [entry(content({ phones: { mobile: { number: "+33612345678" } } }))],
+        [record],
+        "personal",
+      );
+      expect(result.preview[0]?.expectedContact).toBeUndefined();
+      expect(result.preview[0]?.reason).toBe("projection_unavailable");
+      expect(projected).toBe(0);
+      expect(Object.hasOwn(Object.prototype, "esunoProjectionPolluted")).toBe(
+        false,
+      );
+      expect(record).toEqual(stored());
+    },
+  );
   it("adds a telephone to a historical name/email contact and preserves its identity and edited name", () => {
     const record = stored();
     const incoming = content({

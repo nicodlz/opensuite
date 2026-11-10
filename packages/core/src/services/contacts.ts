@@ -1,6 +1,6 @@
 import {
   contactEmailKey,
-  type ContactContent,
+  type ContactsInputs,
   type ContactRecord,
   type ContactCodec,
 } from "@opensuite/contracts";
@@ -17,9 +17,7 @@ import {
 const contactsCapability = "urn:ietf:params:jmap:contacts";
 const mailCapability = "urn:ietf:params:jmap:mail";
 export type ContactsDependencies = Parameters<typeof createJmapAccess>[0];
-type Connection = Awaited<
-  ReturnType<ReturnType<typeof createJmapAccess>["connect"]>
->;
+type Connection = Awaited<ReturnType<ContactsAccess["connect"]>>;
 
 class ContactsAccess {
   readonly #run: ReturnType<typeof createJmapAccess>["run"];
@@ -171,7 +169,7 @@ class ContactsCore {
   create(
     actor: Actor,
     accountId: string,
-    input: { bookId: string; contact: ContactContent; state: string },
+    input: Omit<ContactsInputs["create"], "accountId">,
   ) {
     return this.access.run(actor, async () => {
       const c = await this.access.writeConnection(
@@ -190,7 +188,7 @@ class ContactsCore {
   update(
     actor: Actor,
     accountId: string,
-    input: { contactId: string; contact: ContactContent; state: string },
+    input: Omit<ContactsInputs["update"], "accountId">,
   ) {
     return this.access.run(actor, async () => {
       const { connection: c, card } = await this.access.item(
@@ -311,22 +309,35 @@ class ContactTransfers {
   async snapshot(c: Connection, text: string) {
     const parsed = this.codec.parse(text);
     if (!parsed.ok) return fail("validation");
+    const before = (await this.access.get(c, [])).state;
     const stored = value(await c.client.contacts.allCards(c.session, c.id));
-    return { parsed: parsed.cards, stored };
+    const state = (await this.access.get(c, [])).state;
+    if (before !== state) return fail("conflict");
+    return { parsed: parsed.cards, stored, state };
   }
   previewImport(
     actor: Actor,
     accountId: string,
-    input: { vcard: string; bookId?: string | undefined },
+    input: Omit<ContactsInputs["previewImport"], "accountId">,
   ) {
     return this.access.run(actor, async () => {
       const c = await this.access.connect(actor, accountId);
+      if (input.targets && !input.bookId) return fail("validation");
       if (input.bookId) await this.access.writable(c, input.bookId);
-      const { parsed, stored } = await this.snapshot(c, input.vcard);
+      const { parsed, stored, state } = await this.snapshot(c, input.vcard);
+      if (!importTargetsValid(parsed.length, input.targets))
+        return fail("validation");
       return {
         entries: input.bookId
-          ? planContactImport(this.codec, parsed, stored, input.bookId).preview
+          ? planContactImport(
+              this.codec,
+              parsed,
+              stored,
+              input.bookId,
+              input.targets,
+            ).preview
           : this.codec.preview(parsed, stored),
+        state,
         ...(this.codec.capabilities
           ? { capabilities: this.codec.capabilities }
           : {}),
@@ -336,13 +347,7 @@ class ContactTransfers {
   import(
     actor: Actor,
     accountId: string,
-    input: {
-      bookId: string;
-      vcard: string;
-      state: string;
-      targets?: Record<string, string> | undefined;
-      enrichExisting?: boolean | undefined;
-    },
+    input: Omit<ContactsInputs["import"], "accountId">,
   ) {
     return this.access.run(actor, async () => {
       const c = await this.access.writeConnection(
@@ -350,9 +355,8 @@ class ContactTransfers {
         accountId,
         input.bookId,
       );
-      const { parsed, stored } = await this.snapshot(c, input.vcard);
-      if ((await this.access.get(c, [])).state !== input.state)
-        return fail("conflict");
+      const { parsed, stored, state } = await this.snapshot(c, input.vcard);
+      if (state !== input.state) return fail("conflict");
       if (!importTargetsValid(parsed.length, input.targets))
         return fail("validation");
       const plan = planContactImport(

@@ -176,105 +176,125 @@ it("limits concurrent contacts work per actor without blocking another actor", a
   ]);
 });
 
-it("reports a partially accepted import rather than hiding created contacts", async () => {
-  const { createContactsService } = await import("../src/services/contacts.ts");
-  const { JmapClient, JmapCapability } = await import("@opensuite/jmap");
-  const { ok } = await import("neverthrow");
-  const origin = "https://mail.example.test";
-  let sets = 0;
-  const fake: typeof fetch = (_url, init) => {
-    if (init?.method !== "POST")
+it.each([
+  { operation: "import" as const, changedDuringRead: false },
+  { operation: "import" as const, changedDuringRead: true },
+  { operation: "previewImport" as const, changedDuringRead: true },
+])(
+  "guards the import snapshot and reports partial writes: $operation / changed=$changedDuringRead",
+  async ({ operation, changedDuringRead }) => {
+    const { createContactsService } =
+      await import("../src/services/contacts.ts");
+    const { JmapClient, JmapCapability } = await import("@opensuite/jmap");
+    const { ok } = await import("neverthrow");
+    const origin = "https://mail.example.test";
+    let sets = 0;
+    let contactState = "s";
+    const fake: typeof fetch = (_url, init) => {
+      if (init?.method !== "POST")
+        return Promise.resolve(
+          Response.json({
+            capabilities: { [JmapCapability.contacts]: {} },
+            accounts: {
+              a: {
+                name: "Alice",
+                isPersonal: true,
+                isReadOnly: false,
+                accountCapabilities: { [JmapCapability.contacts]: {} },
+              },
+            },
+            primaryAccounts: { [JmapCapability.contacts]: "a" },
+            username: "alice",
+            apiUrl: `${origin}/jmap`,
+            downloadUrl: `${origin}/download`,
+            uploadUrl: `${origin}/upload`,
+            state: "s",
+          }),
+        );
+      const data = z
+        .object({
+          methodCalls: z.array(z.tuple([z.string(), z.unknown(), z.string()])),
+        })
+        .parse(JSON.parse(typeof init.body === "string" ? init.body : "{}"));
+      const method = data.methodCalls[0]?.[0];
+      if (method === "ContactCard/query" && changedDuringRead)
+        contactState = "changed";
+      const replies: Record<string, object> = {
+        "AddressBook/get": {
+          accountId: "a",
+          state: "books",
+          list: [
+            {
+              id: "book",
+              name: "Book",
+              isDefault: true,
+              myRights: { mayRead: true, mayWrite: true, mayDelete: true },
+            },
+          ],
+          notFound: [],
+        },
+        "ContactCard/query": {
+          accountId: "a",
+          queryState: "q",
+          canCalculateChanges: false,
+          position: 0,
+          ids: [],
+        },
+        "ContactCard/get": {
+          accountId: "a",
+          state: contactState,
+          list: [],
+          notFound: [],
+        },
+        "ContactCard/set": {
+          accountId: "a",
+          newState: "next",
+          created: { item0: { id: "created" } },
+          notCreated: { item1: { type: "invalidProperties" } },
+        },
+      };
+      if (method === "ContactCard/set") sets++;
       return Promise.resolve(
         Response.json({
-          capabilities: { [JmapCapability.contacts]: {} },
-          accounts: {
-            a: {
-              name: "Alice",
-              isPersonal: true,
-              isReadOnly: false,
-              accountCapabilities: { [JmapCapability.contacts]: {} },
-            },
-          },
-          primaryAccounts: { [JmapCapability.contacts]: "a" },
-          username: "alice",
-          apiUrl: `${origin}/jmap`,
-          downloadUrl: `${origin}/download`,
-          uploadUrl: `${origin}/upload`,
-          state: "s",
+          methodResponses: [[method, replies[method ?? ""], "0"]],
+          sessionState: "s",
         }),
       );
-    const data = z
-      .object({
-        methodCalls: z.array(z.tuple([z.string(), z.unknown(), z.string()])),
-      })
-      .parse(JSON.parse(typeof init.body === "string" ? init.body : "{}"));
-    const method = data.methodCalls[0]?.[0];
-    const replies: Record<string, object> = {
-      "AddressBook/get": {
-        accountId: "a",
-        state: "books",
-        list: [
-          {
-            id: "book",
-            name: "Book",
-            isDefault: true,
-            myRights: { mayRead: true, mayWrite: true, mayDelete: true },
-          },
-        ],
-        notFound: [],
-      },
-      "ContactCard/query": {
-        accountId: "a",
-        queryState: "q",
-        canCalculateChanges: false,
-        position: 0,
-        ids: [],
-      },
-      "ContactCard/get": { accountId: "a", state: "s", list: [], notFound: [] },
-      "ContactCard/set": {
-        accountId: "a",
-        newState: "next",
-        created: { item0: { id: "created" } },
-        notCreated: { item1: { type: "invalidProperties" } },
-      },
     };
-    if (method === "ContactCard/set") sets++;
-    return Promise.resolve(
-      Response.json({
-        methodResponses: [[method, replies[method ?? ""], "0"]],
-        sessionState: "s",
-      }),
+    const service = createContactsService({
+      codec: contactVcardCodec,
+      origin,
+      store: {
+        getForOwner: () =>
+          Promise.resolve(
+            ok({
+              accountId: "a",
+              address: "alice@example.test",
+              secret: "secret",
+            }),
+          ),
+      },
+      client: () =>
+        new JmapClient(origin, { authorization: "test", fetch: fake }),
+    });
+    const result = await service[operation](
+      { id: "alice", email: "alice@example.test", role: "user" },
+      "default",
+      { bookId: "book", state: "s", vcard: testCard("one") + testCard("two") },
     );
-  };
-  const service = createContactsService({
-    codec: contactVcardCodec,
-    origin,
-    store: {
-      getForOwner: () =>
-        Promise.resolve(
-          ok({
-            accountId: "a",
-            address: "alice@example.test",
-            secret: "secret",
-          }),
-        ),
-    },
-    client: () =>
-      new JmapClient(origin, { authorization: "test", fetch: fake }),
-  });
-  const result = await service.import(
-    { id: "alice", email: "alice@example.test", role: "user" },
-    "default",
-    { bookId: "book", state: "s", vcard: testCard("one") + testCard("two") },
-  );
-  expect(result.isOk()).toBe(true);
-  expect(result.isOk() ? result.value : undefined).toEqual({
-    imported: 1,
-    skipped: 0,
-    failed: [{ index: 1, reason: "invalidProperties" }],
-  });
-  expect(sets).toBe(1);
-});
+    expect(result.isOk()).toBe(!changedDuringRead);
+    expect(result.isOk() ? result.value : result.error).toEqual(
+      changedDuringRead
+        ? { kind: "conflict" }
+        : {
+            imported: 1,
+            skipped: 0,
+            failed: [{ index: 1, reason: "invalidProperties" }],
+          },
+    );
+    expect(sets).toBe(changedDuringRead ? 0 : 1);
+  },
+);
 
 it("does not synthesize recent recipients when the sent-mail source fails", async () => {
   const { createContactsService } = await import("../src/services/contacts.ts");
