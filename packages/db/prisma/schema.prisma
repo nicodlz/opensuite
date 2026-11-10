@@ -140,6 +140,7 @@ model TwoFactor {
 model MailboxLink {
   userId       String   @id
   user         User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  bindingId    String   @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   accountId    String   @unique
   address      String   @unique
   credentialId String

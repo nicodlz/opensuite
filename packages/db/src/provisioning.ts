@@ -1,4 +1,5 @@
 import { err, errAsync, ok, ResultAsync } from "neverthrow";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { createSecretBox } from "./secrets.ts";
 import type { PrismaClient } from "./generated/index.js";
@@ -234,15 +235,25 @@ export const createProvisioningStore = (db: PrismaClient, key: unknown) => {
             data: { state: "active" },
           });
           if (updated.count !== 1) throw new Error("mailbox state unavailable");
+          const previous = await tx.mailboxLink.findUnique({
+            where: { userId },
+            select: { accountId: true, bindingId: true },
+          });
+          const bindingId =
+            previous?.accountId === parsed.data.accountId
+              ? previous.bindingId
+              : randomUUID();
           await tx.mailboxLink.upsert({
             where: { userId },
             create: {
               userId,
+              bindingId,
               ...parsed.data,
               credentialId: parsedCredential.data.id,
               secret: encrypted.value,
             },
             update: {
+              bindingId,
               ...parsed.data,
               credentialId: parsedCredential.data.id,
               secret: encrypted.value,

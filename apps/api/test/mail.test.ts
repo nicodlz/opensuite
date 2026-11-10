@@ -3,10 +3,44 @@ import { createMailService } from "@opensuite/core/services/mail";
 import { JmapClient } from "@opensuite/jmap";
 import { err, ok } from "neverthrow";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { buildServer } from "../src/server.ts";
 
 const origin = "https://mail.example.test";
+const mailboxBindingId = "70f646ff-b254-4789-97bf-2e6640a26718";
 const fakeFetch: typeof fetch = (url, init) => {
+  if (
+    init?.method === "POST" &&
+    typeof init.body === "string" &&
+    (url instanceof Request ? url.url : url.toString()).endsWith("/jmap")
+  ) {
+    const request = z
+      .object({
+        methodCalls: z.array(z.tuple([z.string(), z.unknown(), z.string()])),
+      })
+      .parse(JSON.parse(init.body));
+    const call = request.methodCalls[0];
+    if (call?.[0] === "Identity/get")
+      return Promise.resolve(
+        Response.json({
+          methodResponses: [
+            [
+              "Identity/get",
+              {
+                accountId: "jmap",
+                state: "s",
+                list: [
+                  { id: "owner", name: "Owner", email: "owner@example.test" },
+                ],
+                notFound: [],
+              },
+              call[2],
+            ],
+          ],
+          sessionState: "s",
+        }),
+      );
+  }
   if (init?.method === "POST")
     return Promise.resolve(
       Response.json({
@@ -59,6 +93,7 @@ const mail = createMailService({
         userId === "owner" && accountId === "default"
           ? ok({
               accountId: "owned",
+              bindingId: mailboxBindingId,
               address: "owner@example.test",
               secret: "private-password",
             })
@@ -95,6 +130,45 @@ const start = () =>
   });
 const headers = { origin: "https://suite.example.test", cookie: "owner" };
 describe("mail API session authorization", () => {
+  it("returns linkage metadata only for the authenticated mailbox owner", async () => {
+    const app = await start();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mail/identity",
+        headers,
+        payload: { accountId: "default" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        mailboxBindingId,
+        address: { email: "owner@example.test" },
+      });
+      expect(response.body).not.toContain("private-password");
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/mail/identity",
+            headers: { origin: headers.origin },
+            payload: { accountId: "default" },
+          })
+        ).statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/mail/identity",
+            headers: { ...headers, cookie: "other" },
+            payload: { accountId: "default" },
+          })
+        ).statusCode,
+      ).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
   it("requires a session and enforces account ownership without exposing credentials", async () => {
     const app = await start();
     try {

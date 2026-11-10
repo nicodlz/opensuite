@@ -310,6 +310,7 @@ export function createMailService(dependencies: {
           (item) => item.email.toLowerCase() === c.address.toLowerCase(),
         );
         return {
+          mailboxBindingId: c.mailboxBindingId ?? null,
           address: found
             ? {
                 email: found.email,

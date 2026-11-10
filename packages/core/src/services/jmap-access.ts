@@ -22,7 +22,12 @@ export interface MailCredentialStore {
     accountId: string,
   ): PromiseLike<
     Result<
-      { accountId: string; address: string; secret: string },
+      {
+        accountId: string;
+        bindingId?: string | undefined;
+        address: string;
+        secret: string;
+      },
       { kind: string }
     >
   >;
@@ -135,6 +140,7 @@ export function createJmapAccess(dependencies: {
         JSON.stringify([
           actor.id,
           credential.value.accountId,
+          credential.value.bindingId ?? null,
           credential.value.address,
           credential.value.secret,
         ]),
@@ -170,6 +176,7 @@ export function createJmapAccess(dependencies: {
       session,
       id,
       address: credential.value.address,
+      mailboxBindingId: credential.value.bindingId,
       owner: actor.id,
     };
   };

@@ -196,7 +196,12 @@ export const mailContract = {
   identity: procedure
     .route({ method: "POST", path: "/mail/identity" })
     .input(AccountSchema)
-    .output(z.object({ address: AddressSchema })),
+    .output(
+      z.object({
+        address: AddressSchema,
+        mailboxBindingId: z.uuid().nullable().optional(),
+      }),
+    ),
   mailboxes: procedure
     .route({ method: "POST", path: "/mail/mailboxes" })
     .input(AccountSchema)

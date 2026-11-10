@@ -75,6 +75,7 @@ export const createMailboxStore = (client: PrismaClient, key: unknown) => {
           .decrypt(row.secret, { userId: row.userId, id: row.accountId })
           .map((secret) => ({
             accountId: row.accountId,
+            bindingId: row.bindingId,
             address: row.address,
             secret,
           }));
