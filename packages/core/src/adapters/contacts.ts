@@ -1,8 +1,6 @@
-import ICAL from "ical.js";
-import { z } from "zod";
 import {
-  ContactContentSchema,
   contactEmailKey,
+  contactHasNativeLayout,
   type ContactContent,
   type ContactCodec,
   type ContactRecord,
@@ -15,41 +13,11 @@ const invalidCard = (): ParsedCard => ({
   warnings: ["Invalid vCard data"],
 });
 
-const parseCard = (source: string): ParsedCard => {
-  try {
-    const component = ICAL.Component.fromString(source);
-    const versions = component.getAllProperties("version");
-    const names = component.getAllProperties("fn");
-    const parsed = ContactContentSchema.safeParse({
-      name: names[0]?.getFirstValue(),
-      emails: component.getAllProperties("email").map((p) => p.getFirstValue()),
-    });
-    if (
-      component.name !== "vcard" ||
-      versions.length !== 1 ||
-      names.length !== 1 ||
-      !["3.0", "4.0"].includes(String(versions[0]?.getFirstValue())) ||
-      !parsed.success
-    )
-      return { contact: null, warnings: ["Invalid or unsupported vCard"] };
-    const warnings = new Set<string>();
-    for (const property of component.getAllProperties()) {
-      if (!["version", "fn", "email"].includes(property.name))
-        warnings.add(`Property ${property.name.toUpperCase()} is not retained`);
-      if (
-        Object.keys(
-          z.record(z.string(), z.unknown()).catch({}).parse(property.jCal[1]),
-        ).length > 0
-      )
-        warnings.add(
-          `Parameters on ${property.name.toUpperCase()} are not retained`,
-        );
-    }
-    return { contact: parsed.data, warnings: [...warnings] };
-  } catch {
-    return { contact: null, warnings: ["Invalid vCard"] };
-  }
-};
+import { writeContactCard, importedNativeFields } from "./contact-vcard.ts";
+import { contactFields, object, parseContactCard } from "./contact-fields.ts";
+import { contactEmails, updateContactPatch } from "./contact-patch.ts";
+import { prepareContactImport } from "./contact-import-fields.ts";
+const parseCard = parseContactCard;
 
 // Only framing is handled here; property parsing, escaping and folding are delegated to ical.js.
 export function parseCards(input: string): ParsedCard[] {
@@ -81,133 +49,44 @@ export function parseCards(input: string): ParsedCard[] {
   return cards;
 }
 export function serializeCards(contacts: readonly ContactContent[]): string {
-  return (
-    contacts
-      .map((contact) => {
-        const card = new ICAL.Component("vcard");
-        card.addPropertyWithValue("version", "4.0");
-        card.addPropertyWithValue("fn", contact.name);
-        for (const email of contact.emails)
-          card.addPropertyWithValue("email", email);
-        return card.toString();
-      })
-      .join("\r\n") + "\r\n"
-  );
+  return contacts.map(writeContactCard).join("\r\n") + "\r\n";
 }
 
 const cardFor = (contact: ContactContent, bookId: string) => ({
   "@type": "Card",
-  name: { full: contact.name },
-  emails: Object.fromEntries(
-    contact.emails.map((address, i) => [`e${String(i)}`, { address }]),
-  ),
+  ...importedNativeFields(contact),
+  name: { ...contact.nameDetails, full: contact.name },
+  emails: contactEmails(contact),
   addressBookIds: { [bookId]: true },
 });
-
-const pathKey = (key: string) =>
-  key.replaceAll("~", "~0").replaceAll("/", "~1");
-
-const groupedEmailKeys = (
-  emails: NonNullable<ContactRecord["emails"]>,
-  used: Set<string>,
-  normalize: (address: string) => string,
-) => {
-  const groups = new Map<string, string[]>();
-  for (const [key, email] of Object.entries(emails)) {
-    if (used.has(key)) continue;
-    const address = normalize(email.address);
-    const group = groups.get(address) ?? [];
-    group.push(key);
-    groups.set(address, group);
-  }
-  return groups;
-};
-const matchedEmailKeys = (
-  emails: NonNullable<ContactRecord["emails"]>,
-  addresses: string[],
-) => {
-  const used = new Set<string>();
-  const matched = new Map<number, string>();
-  const exact = groupedEmailKeys(emails, used, (address) => address);
-  for (const [index, address] of addresses.entries()) {
-    const key = exact.get(address)?.shift();
-    if (key !== undefined) {
-      matched.set(index, key);
-      used.add(key);
-    }
-  }
-  const remaining = groupedEmailKeys(emails, used, contactEmailKey);
-  const wanted = new Map<string, number>();
-  for (const [index, address] of addresses.entries()) {
-    if (matched.has(index)) continue;
-    const normalized = contactEmailKey(address);
-    wanted.set(normalized, (wanted.get(normalized) ?? 0) + 1);
-  }
-  for (const [index, address] of addresses.entries()) {
-    if (matched.has(index)) continue;
-    const normalized = contactEmailKey(address);
-    const keys = remaining.get(normalized);
-    if (
-      keys?.length === 1 &&
-      wanted.get(normalized) === 1 &&
-      keys[0] !== undefined
-    )
-      matched.set(index, keys[0]);
-  }
-  return matched;
-};
-
-const updatePatch = (card: ContactRecord, contact: ContactContent) => {
-  const existing = card.emails ?? {};
-  const keys = Object.keys(existing);
-  const existingKeys = new Set(keys);
-  const matches = matchedEmailKeys(existing, contact.emails);
-  const patch: Record<string, unknown> =
-    card.name === null || card.name === undefined
-      ? { name: { full: contact.name } }
-      : { "name/full": contact.name };
-  const kept = new Set<string>();
-  const added: Record<string, { address: string }> = {};
-  for (const [i, address] of contact.emails.entries()) {
-    const key = matches.get(i);
-    if (key !== undefined) {
-      kept.add(key);
-      if (existing[key]?.address !== address)
-        patch[`emails/${pathKey(key)}/address`] = address;
-    } else {
-      let generated = `opensuite${String(i)}`;
-      while (existingKeys.has(generated) || generated in added)
-        generated += "x";
-      added[generated] = { address };
-    }
-  }
-  if (keys.length === 0 && Object.keys(added).length) patch["emails"] = added;
-  else
-    for (const [key, email] of Object.entries(added))
-      patch[`emails/${pathKey(key)}`] = email;
-  for (const key of keys)
-    if (!kept.has(key)) patch[`emails/${pathKey(key)}`] = null;
-  return patch;
-};
 
 const lossWarnings = (card: ContactRecord) => {
   const extras = Object.keys(card).filter(
     (key) =>
-      !["@type", "version", "id", "name", "emails", "addressBookIds"].includes(
-        key,
-      ),
+      ![
+        "@type",
+        "version",
+        "id",
+        "uid",
+        "name",
+        "emails",
+        "addressBookIds",
+        "phones",
+        "addresses",
+        "organizations",
+        "titles",
+        "notes",
+        "links",
+        "nicknames",
+        "anniversaries",
+        "vCard",
+      ].includes(key),
   );
-  if (
-    Object.keys(card.name ?? {}).some((key) => key !== "full") ||
-    Object.values(card.emails ?? {}).some((email) =>
-      Object.keys(email).some((key) => key !== "address"),
-    )
-  )
-    extras.push("contact metadata");
   return extras.length ? [`${card.id}: ${extras.join(", ")} not retained`] : [];
 };
 
 const content = (card: ContactRecord): ContactContent => ({
+  ...contactFields(card),
   name: card.name?.full ?? "",
   emails: Object.values(card.emails ?? {}).map((email) => email.address),
 });
@@ -219,28 +98,57 @@ const project = (card: ContactRecord) => ({
     .map(([id]) => id),
 });
 
+const phoneKey = (name: string, number: string) => {
+  const normalized = name.trim().replace(/\s+/g, " ").toLowerCase();
+  const digits = number.replace(/\D/g, "");
+  return normalized && digits.length >= 7
+    ? JSON.stringify([normalized, digits])
+    : "";
+};
+
 const preview = (parsed: ParsedCard[], stored: ContactRecord[]) => {
   const existing = new Set(
     stored.flatMap((card) =>
       Object.values(card.emails ?? {}).map((e) => contactEmailKey(e.address)),
     ),
   );
-  const namesWithoutEmail = new Set(
+  const existingPhones = new Set(
     stored
-      .filter((card) => !Object.keys(card.emails ?? {}).length)
-      .map((card) => contactEmailKey(card.name?.full ?? "")),
+      .flatMap((card) =>
+        Object.values(object(card["phones"]))
+          .map(object)
+          .map((phone) =>
+            phoneKey(
+              card.name?.full ?? "",
+              typeof phone["number"] === "string" ? phone["number"] : "",
+            ),
+          ),
+      )
+      .filter(Boolean),
   );
   return parsed.map((entry, index) => {
+    if (entry.contact && !contactHasNativeLayout(entry.contact))
+      return {
+        index,
+        contact: null,
+        duplicate: false,
+        warnings: [
+          ...entry.warnings,
+          "This server cannot preserve a literal semicolon in postal separators; import blocked",
+        ],
+      };
     const keys = entry.contact?.emails.map(contactEmailKey) ?? [];
     const duplicate =
       keys.some((key) => existing.has(key)) ||
-      new Set(keys).size !== keys.length ||
-      (entry.contact !== null &&
-        keys.length === 0 &&
-        namesWithoutEmail.has(contactEmailKey(entry.contact.name)));
+      Object.values(entry.contact?.phones ?? {}).some((phone) => {
+        const key = phoneKey(entry.contact?.name ?? "", phone.number);
+        return existingPhones.has(key);
+      });
     for (const key of keys) existing.add(key);
-    if (entry.contact !== null && keys.length === 0)
-      namesWithoutEmail.add(contactEmailKey(entry.contact.name));
+    for (const phone of Object.values(entry.contact?.phones ?? {})) {
+      const key = phoneKey(entry.contact?.name ?? "", phone.number);
+      if (key) existingPhones.add(key);
+    }
     return {
       contact: entry.contact,
       warnings: entry.warnings,
@@ -251,6 +159,8 @@ const preview = (parsed: ParsedCard[], stored: ContactRecord[]) => {
 };
 
 export const contactVcardCodec = {
+  capabilities: { phones: true, addresses: true, importEnrichment: true },
+  prepareImport: prepareContactImport,
   content,
   project,
   parse: (input: string) => {
@@ -264,7 +174,7 @@ export const contactVcardCodec = {
   },
   serialize: serializeCards,
   create: cardFor,
-  patch: updatePatch,
+  patch: updateContactPatch,
   warnings: lossWarnings,
   preview,
 } satisfies ContactCodec;

@@ -6,14 +6,14 @@ import {
 } from "@opensuite/contracts";
 import { err } from "neverthrow";
 import type { Actor } from "./accounts.ts";
+import { createJmapAccess, fail, value } from "./jmap-access.ts";
+import { planContactImport, importTargetsValid } from "./contact-import.ts";
 import {
-  createJmapAccess,
-  fail,
-  value,
-  type AccessFailureKind,
-} from "./jmap-access.ts";
+  exportContactCards,
+  importMutation,
+  importSummary,
+} from "./contact-import-result.ts";
 
-export type ContactsFailure = { kind: AccessFailureKind };
 const contactsCapability = "urn:ietf:params:jmap:contacts";
 const mailCapability = "urn:ietf:params:jmap:mail";
 export type ContactsDependencies = Parameters<typeof createJmapAccess>[0];
@@ -55,11 +55,11 @@ class ContactsAccess {
     return c;
   }
   async books(c: Connection) {
-    return value(await c.client.contacts.addressBooks(c.session, c.id)).list;
+    return value(await c.client.contacts.addressBooks(c.session, c.id));
   }
   async writable(c: Connection, bookId: string) {
     const book =
-      (await this.books(c)).find((item) => item.id === bookId) ??
+      (await this.books(c)).list.find((item) => item.id === bookId) ??
       fail("not_found");
     if (!book.myRights.mayWrite) fail("forbidden");
   }
@@ -82,7 +82,7 @@ class ContactsAccess {
     right: "mayWrite" | "mayDelete",
   ) {
     if (
-      !(await this.books(c)).some(
+      !(await this.books(c)).list.some(
         (book) => card.addressBookIds[book.id] && book.myRights[right],
       )
     )
@@ -120,14 +120,22 @@ class ContactsCore {
   books(actor: Actor, accountId: string) {
     return this.access.run(actor, async () => {
       const c = await this.access.connect(actor, accountId);
+      const snapshot = await this.access.books(c);
+      const observedAt = new Date().toISOString();
       return {
-        books: (await this.access.books(c)).map((book) => ({
+        books: snapshot.list.map((book) => ({
           id: book.id,
           name: book.name,
           isDefault: book.isDefault,
           mayRead: book.myRights.mayRead,
           mayWrite: book.myRights.mayWrite,
           mayDelete: book.myRights.mayDelete,
+          privacy: c.client.contacts.privacyOf(
+            book,
+            c.session.accounts[c.id]?.isPersonal,
+            snapshot.state,
+            observedAt,
+          ),
         })),
       };
     });
@@ -300,24 +308,41 @@ class ContactTransfers {
     this.access = access;
     this.codec = codec;
   }
-  async preview(c: Connection, text: string) {
+  async snapshot(c: Connection, text: string) {
     const parsed = this.codec.parse(text);
     if (!parsed.ok) return fail("validation");
     const stored = value(await c.client.contacts.allCards(c.session, c.id));
-    return this.codec.preview(parsed.cards, stored);
+    return { parsed: parsed.cards, stored };
   }
-  previewImport(actor: Actor, accountId: string, input: { vcard: string }) {
-    return this.access.run(actor, async () => ({
-      entries: await this.preview(
-        await this.access.connect(actor, accountId),
-        input.vcard,
-      ),
-    }));
+  previewImport(
+    actor: Actor,
+    accountId: string,
+    input: { vcard: string; bookId?: string | undefined },
+  ) {
+    return this.access.run(actor, async () => {
+      const c = await this.access.connect(actor, accountId);
+      if (input.bookId) await this.access.writable(c, input.bookId);
+      const { parsed, stored } = await this.snapshot(c, input.vcard);
+      return {
+        entries: input.bookId
+          ? planContactImport(this.codec, parsed, stored, input.bookId).preview
+          : this.codec.preview(parsed, stored),
+        ...(this.codec.capabilities
+          ? { capabilities: this.codec.capabilities }
+          : {}),
+      };
+    });
   }
   import(
     actor: Actor,
     accountId: string,
-    input: { bookId: string; vcard: string; state: string },
+    input: {
+      bookId: string;
+      vcard: string;
+      state: string;
+      targets?: Record<string, string> | undefined;
+      enrichExisting?: boolean | undefined;
+    },
   ) {
     return this.access.run(actor, async () => {
       const c = await this.access.writeConnection(
@@ -325,53 +350,32 @@ class ContactTransfers {
         accountId,
         input.bookId,
       );
-      const entries = await this.preview(c, input.vcard);
-      const valid = entries.filter(
-        (entry) => entry.contact !== null && !entry.duplicate,
+      const { parsed, stored } = await this.snapshot(c, input.vcard);
+      if ((await this.access.get(c, [])).state !== input.state)
+        return fail("conflict");
+      if (!importTargetsValid(parsed.length, input.targets))
+        return fail("validation");
+      const plan = planContactImport(
+        this.codec,
+        parsed,
+        stored,
+        input.bookId,
+        input.targets,
+        input.enrichExisting === true,
       );
-      const current = await this.access.get(c, []);
-      if (current.state !== input.state) return fail("conflict");
-      if (!valid.length) return { imported: 0, skipped: entries.length };
-      const create = Object.fromEntries(
-        valid.map((entry, index) => [
-          `item${String(index)}`,
-          this.codec.create(entry.contact ?? fail("unavailable"), input.bookId),
-        ]),
-      );
+      const mutation = importMutation(plan, input.state);
+      if (!mutation) return importSummary(plan, {});
       const result = value(
-        await c.client.contacts.setContactBatch(c.session, c.id, {
-          ifInState: input.state,
-          create,
-        }),
+        await c.client.contacts.setContactBatch(c.session, c.id, mutation),
       );
-      const failed: { index: number; reason: string }[] = [];
-      let imported = 0;
-      for (const [index, entry] of valid.entries()) {
-        const key = `item${String(index)}`;
-        if (result.created?.[key]?.id) imported++;
-        else
-          failed.push({
-            index: entry.index,
-            reason: result.notCreated?.[key]?.type ?? "unknown",
-          });
-      }
-      return {
-        imported,
-        skipped: entries.length - valid.length,
-        ...(failed.length ? { failed } : {}),
-      };
+      return importSummary(plan, result);
     });
   }
   export(actor: Actor, accountId: string, input: { ids: string[] }) {
     return this.access.run(actor, async () => {
       const c = await this.access.connect(actor, accountId);
       const cards = (await this.access.get(c, [...new Set(input.ids)])).list;
-      return {
-        vcard: this.codec.serialize(
-          cards.map((card) => this.codec.content(card)),
-        ),
-        warnings: cards.flatMap((card) => this.codec.warnings(card)),
-      };
+      return exportContactCards(this.codec, cards);
     });
   }
 }

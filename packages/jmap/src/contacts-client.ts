@@ -20,10 +20,12 @@ const ContactBookSchema = z.object({
   id: z.string(),
   name: z.string(),
   isDefault: z.boolean(),
+  shareWith: z.record(z.string(), z.unknown()).nullish(),
   myRights: z.object({
     mayRead: z.boolean(),
     mayWrite: z.boolean(),
     mayDelete: z.boolean(),
+    mayShare: z.boolean().optional(),
   }),
 });
 const ContactCardSchema = z.looseObject({
@@ -51,11 +53,38 @@ export class ContactsApi {
   constructor(transport: Transport) {
     this.#transport = transport;
   }
+  /** Projects native ACL evidence without promising future confidentiality. */
+  privacyOf(
+    book: z.infer<typeof ContactBookSchema>,
+    isPersonal: boolean | undefined,
+    state: string,
+    observedAt: string,
+  ) {
+    const knownAcl = book.shareWith !== undefined && book.shareWith !== null;
+    const shared = knownAcl && Object.keys(book.shareWith ?? {}).length > 0;
+    const owner = isPersonal === true && book.myRights.mayShare === true;
+    const status: "private" | "shared" | "unknown" = shared
+      ? "shared"
+      : knownAcl && owner
+        ? "private"
+        : "unknown";
+    return {
+      status,
+      assurance: "observed" as const,
+      state,
+      observedAt,
+      sharingAllowed: book.myRights.mayShare ?? null,
+      bccEligible: false as const,
+    };
+  }
   addressBooks(session: Session, accountId: string) {
     return this.#transport.call(
       session.apiUrl,
       "AddressBook/get",
-      { accountId },
+      {
+        accountId,
+        properties: ["id", "name", "isDefault", "myRights", "shareWith"],
+      },
       contactCapabilities,
       GetSchema(ContactBookSchema),
     );
@@ -78,14 +107,54 @@ export class ContactsApi {
       QuerySchema,
     );
   }
-  contactCards(session: Session, accountId: string, ids: readonly string[]) {
-    return this.#transport.call(
+  async contactCards(
+    session: Session,
+    accountId: string,
+    ids: readonly string[],
+  ) {
+    const cards = await this.#transport.call(
       session.apiUrl,
       "ContactCard/get",
       { accountId, ids },
       contactCapabilities,
       GetSchema(ContactCardSchema),
     );
+    if (cards.isErr() || !cards.value.list.length) return cards;
+    // Stalwart omits conversion parameters from an all-properties request.
+    // Read them explicitly, without narrowing away unknown CardDAV fields.
+    const metadata = await this.#transport.call(
+      session.apiUrl,
+      "ContactCard/get",
+      { accountId, ids, properties: ["id", "addressBookIds", "vCard"] },
+      contactCapabilities,
+      GetSchema(ContactCardSchema),
+    );
+    if (metadata.isErr()) return metadata;
+    if (metadata.value.state !== cards.value.state)
+      return err({
+        kind: "method" as const,
+        method: "ContactCard/get",
+        type: "stateMismatch",
+      });
+    const byId = new Map(metadata.value.list.map((card) => [card.id, card]));
+    if (
+      metadata.value.notFound.length ||
+      cards.value.list.some((card) => !byId.has(card.id))
+    )
+      return err({
+        kind: "method" as const,
+        method: "ContactCard/get",
+        type: "notFound",
+      });
+    return ok({
+      ...cards.value,
+      list: cards.value.list.map((card) => {
+        const conversion = byId.get(card.id)?.["vCard"];
+        return conversion === undefined
+          ? card
+          : Object.assign({}, card, { vCard: conversion });
+      }),
+    });
   }
   async suggestionIds(
     session: Session,

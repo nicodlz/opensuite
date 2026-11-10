@@ -10,25 +10,25 @@ const testCard = (name: string) =>
   `BEGIN:VCARD\nVERSION:4.0\nFN:${name}\nEMAIL:${name}@example.test\nEND:VCARD\n`;
 
 describe("vCard conversion", () => {
-  it("handles escaped names, folded lines and multiple cards while reporting properties it cannot retain", () => {
+  it("handles escaped names, folded lines and multiple cards while preserving notes and email metadata", () => {
     const source =
       "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Anne\\,\r\n Example\r\nEMAIL;TYPE=work:anne@example.test\r\nNOTE:Not retained\r\nEND:VCARD\r\nBEGIN:VCARD\r\nVERSION:3.0\r\nFN:Other\r\nEMAIL:other@example.test\r\nEND:VCARD\r\n";
     const parsed = parseCards(source);
     expect(parsed).toHaveLength(2);
-    expect(parsed[0]).toEqual({
-      contact: { name: "Anne,Example", emails: ["anne@example.test"] },
-      warnings: [
-        "Parameters on EMAIL are not retained",
-        "Property NOTE is not retained",
-      ],
+    expect(parsed[0]?.contact).toMatchObject({
+      name: "Anne,Example",
+      emails: ["anne@example.test"],
     });
-    expect(
-      parseCards(
-        serializeCards(
-          parsed.flatMap((entry) => (entry.contact ? [entry.contact] : [])),
-        ),
-      ).map((entry) => entry.contact),
-    ).toEqual(parsed.map((entry) => entry.contact));
+    expect(parsed[0]?.warnings).toEqual([]);
+    const exported = serializeCards(
+      parsed.flatMap((entry) => (entry.contact ? [entry.contact] : [])),
+    );
+    expect(exported).toContain("NOTE:Not retained");
+    expect(exported.toLowerCase()).toContain("type=work");
+    expect(parseCards(exported).map((entry) => entry.contact?.name)).toEqual([
+      "Anne,Example",
+      "Other",
+    ]);
   });
   it("reports malformed and unsupported cards, and rejects excessive input", () => {
     expect(

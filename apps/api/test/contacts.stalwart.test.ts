@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
+import { createRequire } from "node:module";
 import { createReadinessService } from "@opensuite/core";
 import { contactVcardCodec } from "@opensuite/core/adapters/contacts";
 import { createContactsService } from "@opensuite/core/services/contacts";
@@ -9,7 +10,11 @@ import { StalwartAdmin } from "@opensuite/jmap/admin";
 import { err, ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { ContactContentSchema, ContactSchema } from "@opensuite/contracts";
+import {
+  ContactBookPrivacySchema,
+  ContactContentSchema,
+  ContactSchema,
+} from "@opensuite/contracts";
 import { buildServer } from "../src/server.ts";
 
 const run = promisify(execFile);
@@ -54,6 +59,7 @@ const booksSchema = z.object({
         mayRead: z.boolean(),
         mayWrite: z.boolean(),
         mayDelete: z.boolean(),
+        privacy: ContactBookPrivacySchema,
       }),
     )
     .min(1),
@@ -85,6 +91,46 @@ const post = (user: string, path: string, payload: object) =>
     headers: headers(user),
     payload: { accountId: "default", ...payload },
   });
+
+async function changeBookSharing(
+  bookId: string,
+  shareWith: Record<string, object>,
+) {
+  const session = value(await alice.discover());
+  const response = await fetch(session.apiUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`alice@example.test:${aliceSecret}`).toString("base64")}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      using: [JmapCapability.core, JmapCapability.contacts],
+      methodCalls: [
+        [
+          "AddressBook/set",
+          { accountId: aliceId, update: { [bookId]: { shareWith } } },
+          "privacy",
+        ],
+      ],
+    }),
+  });
+  expect(response.status).toBe(200);
+  const result = z
+    .object({
+      methodResponses: z.array(
+        z.tuple([
+          z.string(),
+          z.object({ updated: z.record(z.string(), z.unknown()) }),
+          z.string(),
+        ]),
+      ),
+    })
+    .parse(await response.json());
+  expect(result.methodResponses[0]?.[0]).toBe("AddressBook/set");
+  expect(
+    Object.hasOwn(result.methodResponses[0]?.[1].updated ?? {}, bookId),
+  ).toBe(true);
+}
 
 beforeAll(async () => {
   try {
@@ -179,6 +225,468 @@ afterAll(async () => {
 }, 180_000);
 
 describe("pinned Stalwart Contacts with an inherited-permission app password", () => {
+  it("reports native sharing changes as observations without ever enabling Bcc", async () => {
+    const book = read(await post("alice", "books", {}), booksSchema).books[0];
+    if (!book) throw new Error("Missing test address book");
+    const bob = new JmapClient(base, {
+      authorization: `Basic ${Buffer.from(`bob@example.test:${bobSecret}`).toString("base64")}`,
+      rewriteSessionUrlsToOrigin: base,
+    });
+    const session = value(await bob.discover());
+    const sharee = session.primaryAccounts[JmapCapability.contacts];
+    if (!sharee) throw new Error("Missing test sharee");
+    try {
+      await changeBookSharing(book.id, {
+        [sharee]: {
+          mayRead: true,
+          mayWrite: false,
+          mayDelete: false,
+          mayShare: false,
+        },
+      });
+      const shared = read(
+        await post("alice", "books", {}),
+        booksSchema,
+      ).books.find((item) => item.id === book.id);
+      expect(shared?.privacy).toMatchObject({
+        status: "shared",
+        assurance: "observed",
+        bccEligible: false,
+      });
+      expect(shared?.privacy.state).not.toBe(book.privacy.state);
+    } finally {
+      await changeBookSharing(book.id, {});
+    }
+    const restored = read(
+      await post("alice", "books", {}),
+      booksSchema,
+    ).books.find((item) => item.id === book.id);
+    expect(restored?.privacy).toMatchObject({
+      status: "private",
+      assurance: "observed",
+      bccEligible: false,
+    });
+  });
+  it("retains useful contact fields through API, CardDAV edits and vCard export", async () => {
+    const bookId =
+      read(await post("alice", "books", {}), booksSchema).books[0]?.id ?? "";
+    const initial = read(await post("alice", "list", {}), listSchema);
+    const created = await post("alice", "create", {
+      bookId,
+      state: initial.state,
+      contact: {
+        name: "Marie Dupont",
+        emails: ["fidelity@example.test"],
+        phones: {
+          mobile: {
+            number: "+33612345678",
+            contexts: { private: true },
+            features: { mobile: true },
+            label: "Personnel",
+          },
+        },
+        addresses: {
+          home: {
+            components: [
+              { kind: "number", value: "12" },
+              { kind: "name", value: "rue de l’Église" },
+              { kind: "separator", value: "/" },
+              { kind: "floor", value: "4" },
+              { kind: "apartment", value: "B" },
+              { kind: "locality", value: "Paris" },
+              { kind: "postcode", value: "75001" },
+              { kind: "country", value: "France" },
+            ],
+            contexts: { private: true },
+            defaultSeparator: " ",
+            isOrdered: true,
+            full: "12 rue de l’Église, Paris",
+            label: "Domicile",
+            countryCode: "FR",
+          },
+        },
+        notes: { note: { note: "Note initiale" } },
+        organizations: {
+          company: { name: "Esuno", units: [{ name: "Architecture" }] },
+        },
+        links: { web: { uri: "https://example.test/profile" } },
+        anniversaries: {
+          birth: {
+            kind: "birth",
+            date: { "@type": "PartialDate", year: 1990, month: 4, day: 3 },
+          },
+        },
+        vCard: {
+          properties: [
+            [
+              "x-custom",
+              { "x-parameter": "kept", "x-list": ["one,two", "three"] },
+              "unknown",
+              "Valeur privée",
+            ],
+          ],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const id = read(created, z.object({ id: z.string() })).id;
+    const current = read(await post("alice", "list", {}), listSchema);
+    const contact = current.contacts.find((card) => card.id === id);
+    expect(
+      Object.values(contact?.phones ?? {}).map((phone) => phone.number),
+    ).toContain("+33612345678");
+    expect(JSON.stringify(contact?.addresses)).toContain("rue de l’Église");
+    expect(
+      (
+        await post("alice", "update", {
+          contactId: id,
+          state: current.state,
+          contact: { name: "Marie", emails: ["fidelity@example.test"] },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    const metadataState = read(
+      await post("alice", "list", {}),
+      listSchema,
+    ).state;
+    expect(
+      (
+        await post("alice", "update", {
+          contactId: id,
+          state: metadataState,
+          contact: {
+            name: "Marie",
+            emails: ["fidelity@example.test"],
+            vCard: {
+              convertedProperties: {
+                uid: { parameters: { "x-updated": "kept" } },
+              },
+            },
+          },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    // Use the declared core dependency to exercise the actual CardDAV transport.
+    type Card = { url: string; data?: string; etag?: string };
+    type Dav = {
+      login(): Promise<void>;
+      fetchAddressBooks(): Promise<{ url: string }[]>;
+      fetchVCards(input: { addressBook: { url: string } }): Promise<Card[]>;
+      updateVCard(input: { vCard: Card }): Promise<Response>;
+    };
+    type Constructor = new (options: {
+      serverUrl: string;
+      credentials: { username: string; password: string };
+      authMethod: "Basic";
+      defaultAccountType: "carddav";
+    }) => Dav;
+    const { DAVClient } = z
+      .object({
+        DAVClient: z.custom<Constructor>(
+          (entry) => typeof entry === "function",
+        ),
+      })
+      .parse(
+        createRequire(
+          new URL("../../../packages/core/package.json", import.meta.url),
+        )("tsdav"),
+      );
+    const dav = new DAVClient({
+      serverUrl: base,
+      credentials: { username: "alice@example.test", password: aliceSecret },
+      authMethod: "Basic",
+      defaultAccountType: "carddav",
+    });
+    await dav.login();
+    const cards = (
+      await Promise.all(
+        (await dav.fetchAddressBooks()).map((addressBook) =>
+          dav.fetchVCards({ addressBook }),
+        ),
+      )
+    ).flat();
+    const stored = cards.find((card) =>
+      card.data?.includes("fidelity@example.test"),
+    );
+    expect(stored?.data).toContain("+33612345678");
+    if (!stored?.data) throw new Error("CardDAV card missing");
+    const changed = await dav.updateVCard({
+      vCard: {
+        ...stored,
+        data: stored.data
+          .replace("+33612345678", "+33687654321")
+          .replace("Note initiale", "Note CardDAV"),
+      },
+    });
+    expect(changed.ok).toBe(true);
+    const after = read(
+      await post("alice", "list", {}),
+      listSchema,
+    ).contacts.find((card) => card.id === id);
+    expect(
+      Object.values(after?.phones ?? {}).map((phone) => phone.number),
+    ).toContain("+33687654321");
+    const exported = read(
+      await post("alice", "export", { ids: [id] }),
+      exportSchema,
+    );
+    expect(exported.vcard).toContain("+33687654321");
+    expect(exported.vcard).toContain("Note CardDAV");
+    expect(exported.vcard).toContain("Paris");
+    expect(exported.vcard).toContain("Architecture");
+    expect(exported.vcard).toContain("https://example.test/profile");
+    expect(exported.vcard).toMatch(/BDAY.*1990/);
+    expect(exported.vcard.toLowerCase()).toContain("x-custom");
+    expect(exported.vcard).toContain("Valeur privée");
+    expect(exported.vcard).toContain('X-LIST="one,two","three"');
+    const bobState = read(await post("bob", "list", {}), listSchema).state;
+    const bobBook =
+      read(await post("bob", "books", {}), booksSchema).books[0]?.id ?? "";
+    const roundTrip = await post("bob", "import", {
+      bookId: bobBook,
+      state: bobState,
+      vcard: exported.vcard,
+    });
+    expect(roundTrip.statusCode).toBe(200);
+    expect(roundTrip.json()).toMatchObject({ imported: 1 });
+    const bobContacts = read(await post("bob", "list", {}), listSchema);
+    const copied = bobContacts.contacts.find((card) =>
+      card.emails.includes("fidelity@example.test"),
+    );
+    expect(
+      Object.values(copied?.phones ?? {}).map((phone) => phone.number),
+    ).toContain("+33687654321");
+    expect(Object.values(copied?.phones ?? {})).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: "Personnel" })]),
+    );
+    const copiedAddress = Object.values(copied?.addresses ?? {})[0];
+    expect(copiedAddress).toMatchObject({
+      full: "12 rue de l’Église, Paris",
+      defaultSeparator: " ",
+      label: "Domicile",
+    });
+    expect(copiedAddress?.components).toEqual(
+      expect.arrayContaining([
+        { kind: "number", value: "12" },
+        { kind: "floor", value: "4" },
+        { kind: "apartment", value: "B" },
+        { kind: "separator", value: "/" },
+      ]),
+    );
+    expect(String(copiedAddress?.["countryCode"]).toUpperCase()).toBe("FR");
+    expect(Object.values(copied?.anniversaries ?? {})).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "birth",
+          date: { "@type": "PartialDate", year: 1990, month: 4, day: 3 },
+        }),
+      ]),
+    );
+    expect(JSON.stringify(copied?.addresses)).toContain("Paris");
+    expect(
+      (
+        await post("bob", "delete", {
+          contactId: copied?.id ?? "",
+          state: bobContacts.state,
+        })
+      ).statusCode,
+    ).toBe(200);
+    const latest = read(await post("alice", "list", {}), listSchema);
+    expect(
+      (await post("alice", "delete", { contactId: id, state: latest.state }))
+        .statusCode,
+    ).toBe(200);
+  });
+  it("preserves year-month birthdays and canonical labels through native storage and import", async () => {
+    const bookId =
+      read(await post("alice", "books", {}), booksSchema).books[0]?.id ?? "";
+    const state = read(await post("alice", "list", {}), listSchema).state;
+    const created = await post("alice", "create", {
+      bookId,
+      state,
+      contact: {
+        name: "Month precision",
+        emails: ["month-precision@example.test"],
+        uid: "urn:uuid:00000000-0000-4000-8000-000000000004",
+        phones: { p: { number: "+33123456789", label: "Fresh label" } },
+        anniversaries: {
+          birth: {
+            kind: "birth",
+            date: { "@type": "PartialDate", year: 1990, month: 4, day: 3 },
+          },
+        },
+        vCard: {
+          properties: [
+            ["uid", {}, "text", "stale-uid"],
+            ["x-ablabel", { group: "item1" }, "text", "STALE-LABEL"],
+          ],
+          convertedProperties: {
+            "/phones/p/number": { parameters: { group: "item1" } },
+          },
+        },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const id = read(created, z.object({ id: z.string() })).id;
+    const beforeDateEdit = read(await post("alice", "list", {}), listSchema);
+    expect(
+      (
+        await post("alice", "update", {
+          contactId: id,
+          state: beforeDateEdit.state,
+          contact: {
+            name: "Month precision",
+            emails: ["month-precision@example.test"],
+            anniversaries: {
+              birth: {
+                kind: "birth",
+                date: { "@type": "PartialDate", year: 1990, month: 4 },
+              },
+            },
+          },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const saved = read(
+      await post("alice", "list", {}),
+      listSchema,
+    ).contacts.find((c) => c.id === id);
+    expect(Object.values(saved?.phones ?? {})).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Fresh label" }),
+      ]),
+    );
+    const compatible = ContactContentSchema.safeParse(saved);
+    if (!compatible.success) throw new Error(compatible.error.message);
+    expect(saved?.uid).toBe("urn:uuid:00000000-0000-4000-8000-000000000004");
+    const exportResponse = await post("alice", "export", { ids: [id] });
+    expect(exportResponse.statusCode).toBe(200);
+    const exported = read(exportResponse, exportSchema).vcard;
+    expect(exported).toContain("BDAY:1990-04");
+    expect(exported).not.toContain("stale-uid");
+    expect(exported).not.toContain("STALE-LABEL");
+    const bobState = read(await post("bob", "list", {}), listSchema).state;
+    const bobBook =
+      read(await post("bob", "books", {}), booksSchema).books[0]?.id ?? "";
+    const imported = await post("bob", "import", {
+      bookId: bobBook,
+      state: bobState,
+      vcard: exported,
+    });
+    expect(imported.statusCode).toBe(200);
+    expect(imported.json()).toMatchObject({ imported: 1 });
+    const copied = read(await post("bob", "list", {}), listSchema);
+    const contact = copied.contacts.find((c) =>
+      c.emails.includes("month-precision@example.test"),
+    );
+    expect(contact?.uid).toBe(saved?.uid);
+    expect(Object.values(contact?.anniversaries ?? {})).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          date: { "@type": "PartialDate", year: 1990, month: 4 },
+        }),
+      ]),
+    );
+    expect(
+      (
+        await post("bob", "delete", {
+          contactId: contact?.id ?? "",
+          state: copied.state,
+        })
+      ).statusCode,
+    ).toBe(200);
+    const latest = read(await post("alice", "list", {}), listSchema);
+    expect(
+      (await post("alice", "delete", { contactId: id, state: latest.state }))
+        .statusCode,
+    ).toBe(200);
+  });
+
+  it("blocks unsupported native postal separators before mutations and reports skipped imports", async () => {
+    const bookId =
+      read(await post("alice", "books", {}), booksSchema).books[0]?.id ?? "";
+    const initial = read(await post("alice", "list", {}), listSchema);
+    expect(
+      (
+        await post("alice", "create", {
+          bookId,
+          state: initial.state,
+          contact: {
+            name: "Unsafe group",
+            emails: [],
+            vCard: {
+              properties: [
+                ["x-custom", { group: "item1\nEND:VCARD" }, "text", "value"],
+              ],
+            },
+          },
+        })
+      ).statusCode,
+    ).toBe(400);
+    const contact = ContactContentSchema.parse({
+      name: "Layout guard",
+      emails: ["layout-guard@example.test"],
+      addresses: {
+        a: {
+          defaultSeparator: ";",
+          components: [
+            { kind: "number", value: "12" },
+            { kind: "name", value: "Street" },
+          ],
+        },
+      },
+    });
+    expect(
+      (await post("alice", "create", { bookId, state: initial.state, contact }))
+        .statusCode,
+    ).toBe(400);
+    expect(read(await post("alice", "list", {}), listSchema).state).toBe(
+      initial.state,
+    );
+    const created = await post("alice", "create", {
+      bookId,
+      state: initial.state,
+      contact: { name: "Before", emails: contact.emails },
+    });
+    expect(created.statusCode).toBe(200);
+    const id = read(created, z.object({ id: z.string() })).id;
+    const current = read(await post("alice", "list", {}), listSchema);
+    expect(
+      (
+        await post("alice", "update", {
+          contactId: id,
+          state: current.state,
+          contact,
+        })
+      ).statusCode,
+    ).toBe(400);
+    const vcard = contactVcardCodec.serialize([contact]);
+    const preview = read(
+      await post("alice", "import/preview", { vcard }),
+      previewSchema,
+    ).entries;
+    expect(preview[0]).toMatchObject({
+      contact: null,
+      warnings: [expect.stringContaining("import blocked")],
+    });
+    const imported = await post("alice", "import", {
+      bookId,
+      state: current.state,
+      vcard,
+    });
+    expect(imported.statusCode).toBe(200);
+    expect(imported.json()).toEqual({ imported: 0, skipped: 1 });
+    const latest = read(await post("alice", "list", {}), listSchema);
+    expect(latest.state).toBe(current.state);
+    expect(latest.contacts.find((c) => c.id === id)?.name).toBe("Before");
+    expect(
+      (await post("alice", "delete", { contactId: id, state: latest.state }))
+        .statusCode,
+    ).toBe(200);
+  });
+
   it("discovers JMAP Contacts and supports CRUD, search, conflicts and account isolation through HTTP", async () => {
     // v1.0.1 advertises Contacts and accepts AddressBook/get and ContactCard query/get/set for a provisioned user.
     const session = value(await alice.discover());
@@ -192,6 +700,12 @@ describe("pinned Stalwart Contacts with an inherited-permission app password", (
       mayRead: true,
       mayWrite: true,
       mayDelete: true,
+      privacy: {
+        status: "private",
+        assurance: "observed",
+        sharingAllowed: true,
+        bccEligible: false,
+      },
     });
     const bookId = books[0]?.id ?? "";
     const initial = read(await post("alice", "list", {}), listSchema);
@@ -214,13 +728,22 @@ describe("pinned Stalwart Contacts with an inherited-permission app password", (
         })
       ).statusCode,
     ).toBe(409);
-    const list = read(
-      await post("alice", "list", { query: "ada", limit: 1 }),
-      listSchema,
-    );
-    expect(list.contacts).toMatchObject([
-      { id, name: "Ada", emails: ["ada@example.test", "second@example.test"] },
-    ]);
+    await expect
+      .poll(
+        async () =>
+          read(
+            await post("alice", "list", { query: "ada", limit: 1 }),
+            listSchema,
+          ).contacts,
+        { timeout: 5000 },
+      )
+      .toMatchObject([
+        {
+          id,
+          name: "Ada",
+          emails: ["ada@example.test", "second@example.test"],
+        },
+      ]);
     expect(
       read(await post("bob", "list", { query: "ada" }), listSchema).contacts,
     ).toEqual([]);
@@ -254,7 +777,7 @@ describe("pinned Stalwart Contacts with an inherited-permission app password", (
       .list[0];
     expect(raw?.["notes"]).toEqual({ n: { note: "Keep this" } });
     expect((await post("alice", "export", { ids: [id] })).json()).toMatchObject(
-      { warnings: [expect.stringContaining("notes")] },
+      { warnings: [] },
     );
     const updated = read(await post("alice", "list", {}), listSchema);
     expect(
@@ -443,7 +966,7 @@ describe("pinned Stalwart Contacts with an inherited-permission app password", (
     expect(preview).toHaveLength(4);
     expect(preview[0]).toMatchObject({
       contact: { name: "One, Person" },
-      warnings: [expect.stringContaining("NOTE")],
+      warnings: [],
     });
     expect(preview[1]?.duplicate).toBe(true);
     expect(preview[2]?.contact).toBeNull();
